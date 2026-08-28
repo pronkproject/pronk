@@ -1,0 +1,19 @@
+[package]
+name = "pronk-backend-mock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+pronk-backend-protocol = { path = "../pronk-backend-protocol" }
+pronk-media = { path = "../pronk-media" }
+pronk-systemd = { path = "../pronk-systemd" }
+thiserror.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+
+[lints]
+workspace = true
