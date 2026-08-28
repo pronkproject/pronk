@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.pronkproject.Pronk1
+Exec=@bindir@/pronkd
+SystemdService=pronk.service

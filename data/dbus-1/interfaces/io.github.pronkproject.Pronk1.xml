@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<node name="/io/github/pronkproject/Pronk1">
+  <interface name="io.github.pronkproject.Pronk1.Manager">
+    <method name="GetVersion">
+      <arg name="major" type="q" direction="out"/>
+      <arg name="minor" type="q" direction="out"/>
+      <arg name="features" type="t" direction="out"/>
+    </method>
+    <method name="ListDevices">
+      <arg name="inventory_revision" type="t" direction="out"/>
+      <arg name="devices" type="a(sssuttta(ss))" direction="out"/>
+    </method>
+    <method name="ListDisplays">
+      <arg name="displays" type="a(sssssususuusuquu)" direction="out"/>
+    </method>
+    <method name="AddDisplay">
+      <arg name="device" type="(ssttt)" direction="in"/>
+      <arg name="options" type="(b)" direction="in"/>
+      <arg name="operation" type="o" direction="out"/>
+    </method>
+    <method name="RemoveDisplay">
+      <arg name="display_id" type="s" direction="in"/>
+    </method>
+    <signal name="DeviceAdded">
+      <arg name="inventory_revision" type="t"/>
+      <arg name="device" type="(sssuttta(ss))"/>
+    </signal>
+    <signal name="DeviceChanged">
+      <arg name="inventory_revision" type="t"/>
+      <arg name="device" type="(sssuttta(ss))"/>
+    </signal>
+    <signal name="DeviceRemoved">
+      <arg name="inventory_revision" type="t"/>
+      <arg name="backend_id" type="s"/>
+      <arg name="device_id" type="s"/>
+    </signal>
+    <signal name="DisplayAdded">
+      <arg name="display" type="(sssssususuusuquu)"/>
+    </signal>
+    <signal name="DisplayRemoved">
+      <arg name="display_id" type="s"/>
+    </signal>
+  </interface>
+  <interface name="io.github.pronkproject.Pronk1.Operation">
+    <method name="GetState">
+      <arg name="display_id" type="s" direction="out"/>
+      <arg name="stage" type="u" direction="out"/>
+      <arg name="error_code" type="u" direction="out"/>
+      <arg name="error" type="s" direction="out"/>
+    </method>
+    <method name="Cancel">
+      <arg name="cancelled" type="b" direction="out"/>
+    </method>
+    <signal name="StateChanged">
+      <arg name="state" type="(suus)"/>
+    </signal>
+  </interface>
+  <interface name="io.github.pronkproject.Pronk1.CastDisplay">
+    <method name="GetInfo">
+      <arg name="display_id" type="s" direction="out"/>
+      <arg name="backend_id" type="s" direction="out"/>
+      <arg name="device_id" type="s" direction="out"/>
+      <arg name="display_name" type="s" direction="out"/>
+      <arg name="manufacturer_name" type="s" direction="out"/>
+      <arg name="manufacturer_source" type="u" direction="out"/>
+      <arg name="product_name" type="s" direction="out"/>
+      <arg name="product_source" type="u" direction="out"/>
+      <arg name="pnp_id" type="s" direction="out"/>
+      <arg name="pnp_resolution_source" type="u" direction="out"/>
+      <arg name="connector_id" type="u" direction="out"/>
+      <arg name="connector_name" type="s" direction="out"/>
+      <arg name="output_index" type="u" direction="out"/>
+      <arg name="product_code" type="q" direction="out"/>
+      <arg name="serial" type="u" direction="out"/>
+      <arg name="attachment_state" type="u" direction="out"/>
+    </method>
+    <method name="GetState">
+      <arg name="revision" type="t" direction="out"/>
+      <arg name="device" type="(sssuttta(ss))" direction="out"/>
+      <arg name="attachment_state" type="u" direction="out"/>
+      <arg name="route_state" type="u" direction="out"/>
+      <arg name="routed_mode" type="a(uuuu)" direction="out"/>
+    </method>
+    <method name="Remove">
+    </method>
+    <signal name="Removed">
+    </signal>
+    <signal name="StateChanged">
+      <arg name="state" type="(t(sssuttta(ss))uua(uuuu))"/>
+    </signal>
+  </interface>
+  <interface name="io.github.pronkproject.Pronk1.MediaSession">
+    <method name="GetState">
+      <arg name="revision" type="t" direction="out"/>
+      <arg name="phase" type="u" direction="out"/>
+      <arg name="media_generation" type="t" direction="out"/>
+      <arg name="audio_enabled" type="b" direction="out"/>
+      <arg name="error" type="s" direction="out"/>
+    </method>
+    <signal name="StateChanged">
+      <arg name="state" type="(tutbs)"/>
+    </signal>
+  </interface>
+</node>

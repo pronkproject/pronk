@@ -1,0 +1,42 @@
+[Unit]
+Description=Pronk remote-display session coordinator
+PartOf=graphical-session.target
+After=graphical-session-pre.target
+
+[Service]
+Type=dbus
+BusName=io.github.pronkproject.Pronk1
+ExecStart=@bindir@/pronkd
+Restart=on-failure
+TimeoutStopSec=25s
+RuntimeDirectory=pronk/core
+RuntimeDirectoryMode=0700
+KillMode=control-group
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+# ProtectHome=yes also masks /run/user, including the session bus and private
+# PipeWire endpoints. Hide persistent home roots and ambient PipeWire without
+# masking either classified endpoint: Pronk connects the backend-class socket
+# itself and passes the untouched connected fd to the backend.
+InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+# Pronk needs /dev/dri for non-mutating output discovery before Mutter gives it
+# a restricted grant fd, so PrivateDevices and DevicePolicy=closed are invalid.
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
