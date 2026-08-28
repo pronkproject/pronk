@@ -1,0 +1,20 @@
+[package]
+name = "pronk-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+castkms-sys = { path = "../castkms-sys" }
+nix.workspace = true
+pronk-userns = { path = "../pronk-userns" }
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+unicode-normalization.workspace = true
+
+[lints]
+workspace = true
