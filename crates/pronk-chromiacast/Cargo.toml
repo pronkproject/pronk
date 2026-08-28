@@ -1,0 +1,27 @@
+[package]
+name = "pronk-chromiacast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chromiacast.workspace = true
+futures-util.workspace = true
+pronk-backend-protocol = { path = "../pronk-backend-protocol" }
+pronk-media = { path = "../pronk-media" }
+pronk-systemd = { path = "../pronk-systemd" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zbus.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
