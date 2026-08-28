@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pronk-userns", "crates/castkms-sys", "crates/pronk-core", "crates/pronk-dbus", "crates/pronk-systemd", "crates/pronk-media", "crates/pronk-pipewire", "crates/pronk-backend-protocol", "crates/pronk-backend-host", "crates/pronk-backend-mock", "crates/pronk-chromiacast"]
+members = ["crates/pronk-userns", "crates/castkms-sys", "crates/pronk-core", "crates/pronk-dbus", "crates/pronk-systemd", "crates/pronk-media", "crates/pronk-pipewire", "crates/pronk-backend-protocol", "crates/pronk-backend-host", "crates/pronk-backend-mock", "crates/pronk-chromiacast", "crates/pronk"]
 
 [workspace.package]
 version = "0.1.0"
