@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pronk-userns", "crates/castkms-sys", "crates/pronk-core", "crates/pronk-dbus"]
+members = ["crates/pronk-userns", "crates/castkms-sys", "crates/pronk-core", "crates/pronk-dbus", "crates/pronk-systemd"]
 
 [workspace.package]
 version = "0.1.0"
