@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+cargo=$1
+source_dir=$2
+target_dir=$3
+stamp=$4
+
+CARGO_TARGET_DIR="$target_dir" "$cargo" build \
+  --workspace \
+  --locked \
+  --manifest-path "$source_dir/Cargo.toml"
+
+touch "$stamp"
