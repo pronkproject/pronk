@@ -1,0 +1,119 @@
+#!/bin/sh
+set -eu
+
+busctl=$1
+socket_activate=$2
+mock_backend=$3
+test_service=$4
+pronkctl=$5
+lifecycle_client=$6
+
+public_name_has_owner()
+{
+    "$busctl" --user --no-pager call \
+        org.freedesktop.DBus \
+        /org/freedesktop/DBus \
+        org.freedesktop.DBus \
+        GetNameOwner \
+        s \
+        io.github.pronkproject.Pronk1 \
+        >/dev/null 2>&1
+}
+
+if public_name_has_owner; then
+    echo 'refusing to replace an existing io.github.pronkproject.Pronk1 owner' >&2
+    exit 1
+fi
+
+test_dir=$(mktemp -d)
+socket_path=$test_dir/mock.sock
+listener_pid=
+service_pid=
+
+cleanup() {
+    if [ -n "$service_pid" ]; then
+        kill -TERM "$service_pid" 2>/dev/null || true
+        wait "$service_pid" 2>/dev/null || true
+    fi
+    if [ -n "$listener_pid" ]; then
+        kill -TERM "$listener_pid" 2>/dev/null || true
+        wait "$listener_pid" 2>/dev/null || true
+    fi
+    rm -rf "$test_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+"$socket_activate" \
+    --listen="$socket_path" \
+    --accept \
+    --fdname=pronk-backend-control \
+    --setenv=PRONK_BACKEND_INSTANCE=mock \
+    --setenv=INVOCATION_ID=development \
+    --setenv=PRONK_BACKEND_ALLOW_UNMANAGED_PEER=1 \
+    "$mock_backend" >"$test_dir/listener.log" 2>&1 &
+listener_pid=$!
+
+socket_ready=false
+for _attempt in $(seq 1 100)
+do
+    if [ -S "$socket_path" ]; then
+        socket_ready=true
+        break
+    fi
+    sleep 0.05
+done
+if [ "$socket_ready" != true ]; then
+    echo 'mock activation socket did not appear' >&2
+    exit 1
+fi
+
+"$test_service" "$socket_path" >"$test_dir/service.log" 2>&1 &
+service_pid=$!
+
+name_ready=false
+for _attempt in $(seq 1 100)
+do
+    if public_name_has_owner; then
+        name_ready=true
+        break
+    fi
+    if ! kill -0 "$service_pid" 2>/dev/null; then
+        cat "$test_dir/service.log" >&2
+        exit 1
+    fi
+    sleep 0.05
+done
+if [ "$name_ready" != true ]; then
+    echo 'test service did not acquire the public bus name' >&2
+    cat "$test_dir/service.log" >&2
+    exit 1
+fi
+
+output=$("$pronkctl" list-devices)
+printf '%s\n' "$output" | grep -Fq 'Living Room TV'
+printf '%s\n' "$output" | grep -Fq 'ID: mock:living-room'
+printf '%s\n' "$output" | grep -Fq 'Status: Available'
+
+display_output=$("$pronkctl" list-displays)
+printf '%s\n' "$display_output" | grep -Fq 'No cast displays set up.'
+
+removed_output=$("$pronkctl" remove-display 01234567-89ab-4def-8123-456789abcdef)
+printf '%s\n' "$removed_output" | \
+    grep -Fq 'Removed cast display 01234567-89ab-4def-8123-456789abcdef'
+
+lifecycle_output=$("$lifecycle_client")
+printf '%s\n' "$lifecycle_output"
+if ! printf '%s\n' "$lifecycle_output" | \
+    grep -Eq '^public_add_display_(operation=pass|graphical_session=skip)$'; then
+    echo 'public AddDisplay operation gate returned no result marker' >&2
+    exit 1
+fi
+
+kill -TERM "$service_pid"
+wait "$service_pid"
+service_pid=
+
+echo 'public_list_devices=pass'
+echo 'pronkctl_list_devices=pass'
+echo 'pronkctl_list_displays=pass'
+echo 'pronkctl_remove_display_idempotent=pass'

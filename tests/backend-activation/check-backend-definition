@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 5 ]; then
+    echo "usage: $0 DEFINITION BACKEND_ID RUNTIME_SOCKET SOCKET_UNIT SERVICE_TEMPLATE" >&2
+    exit 2
+fi
+
+definition=$1
+backend_id=$2
+runtime_socket=$3
+socket_unit=$4
+service_template=$5
+
+require_line() {
+    line=$1
+    if ! grep -Fqx "$line" "$definition"; then
+        echo "missing backend registry contract line '$line'" >&2
+        exit 1
+    fi
+}
+
+require_line 'format_version = 1'
+require_line "backend_id = \"$backend_id\""
+require_line "runtime_socket = \"$runtime_socket\""
+require_line "socket_unit = \"$socket_unit\""
+require_line "service_template = \"$service_template\""
+require_line 'protocol_major = 1'
+
+field_count=$(grep -Ec '^[a-z_]+[[:space:]]*=' "$definition")
+if [ "$field_count" -ne 6 ]; then
+    echo "backend registry definition contains unexpected fields" >&2
+    exit 1
+fi
+
+if grep -Eq '(^|[[:space:]])(executable|argument|environment|absolute_socket)[[:space:]]*=' "$definition"; then
+    echo "backend registry definition contains caller-expandable process state" >&2
+    exit 1
+fi

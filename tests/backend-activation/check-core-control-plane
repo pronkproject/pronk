@@ -1,0 +1,123 @@
+#!/bin/sh
+set -eu
+
+systemd_analyze=$1
+unit=$2
+dbus_service=$3
+interface_xml=$4
+daemon_cargo=$5
+expected_bindir=$6
+
+require_unit_line() {
+    line=$1
+    if ! grep -Fqx "$line" "$unit"; then
+        echo "core unit is missing: $line" >&2
+        exit 1
+    fi
+}
+
+require_unit_line 'Type=dbus'
+require_unit_line 'BusName=io.github.pronkproject.Pronk1'
+require_unit_line "ExecStart=$expected_bindir/pronkd"
+require_unit_line 'RuntimeDirectory=pronk/core'
+require_unit_line 'RuntimeDirectoryMode=0700'
+
+for line in \
+    'NoNewPrivileges=yes' \
+    'CapabilityBoundingSet=' \
+    'AmbientCapabilities=' \
+    'LockPersonality=yes' \
+    'MemoryDenyWriteExecute=yes' \
+    'PrivateNetwork=yes' \
+    'PrivateTmp=yes' \
+    'ProtectControlGroups=yes' \
+    'InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0' \
+    'ProtectKernelLogs=yes' \
+    'ProtectKernelModules=yes' \
+    'ProtectKernelTunables=yes' \
+    'ProtectSystem=strict' \
+    'RestrictAddressFamilies=AF_UNIX' \
+    'RestrictNamespaces=yes' \
+    'RestrictRealtime=yes' \
+    'RestrictSUIDSGID=yes' \
+    'SystemCallArchitectures=native' \
+    'SystemCallFilter=@system-service' \
+    'SystemCallErrorNumber=EPERM'
+do
+    require_unit_line "$line"
+done
+
+if grep -Eq '^(DevicePolicy=closed|PrivateDevices=yes)$' "$unit"; then
+    echo 'core unit would prevent CastKMS output discovery' >&2
+    exit 1
+fi
+
+for line in \
+    'Name=io.github.pronkproject.Pronk1' \
+    "Exec=$expected_bindir/pronkd" \
+    'SystemdService=pronk.service'
+do
+    if ! grep -Fqx "$line" "$dbus_service"; then
+        echo "D-Bus activation service is missing: $line" >&2
+        exit 1
+    fi
+done
+
+if [ "$(grep -c '<method name=' "$interface_xml")" -ne 11 ]; then
+    echo 'the public API method set is incomplete or unexpectedly expanded' >&2
+    exit 1
+fi
+for method in GetVersion ListDevices ListDisplays AddDisplay RemoveDisplay GetState Cancel GetInfo Remove
+do
+    if ! grep -Fq "<method name=\"$method\">" "$interface_xml"; then
+        echo "public interface is missing $method" >&2
+        exit 1
+    fi
+done
+if [ "$(grep -c '<method name="GetState">' "$interface_xml")" -ne 3 ]; then
+    echo 'the public API must expose operation, cast-display, and media-session GetState methods' >&2
+    exit 1
+fi
+if ! sed -n \
+    '/interface name="io.github.pronkproject.Pronk1.Operation"/,/<\/interface>/p' \
+    "$interface_xml" | grep -Fq '<signal name="StateChanged">'; then
+    echo 'the operation interface is missing StateChanged' >&2
+    exit 1
+fi
+if ! sed -n \
+    '/interface name="io.github.pronkproject.Pronk1.CastDisplay"/,/<\/interface>/p' \
+    "$interface_xml" | grep -Fq '<signal name="StateChanged">'; then
+    echo 'the cast-display interface is missing StateChanged' >&2
+    exit 1
+fi
+if ! sed -n \
+    '/interface name="io.github.pronkproject.Pronk1.MediaSession"/,/<\/interface>/p' \
+    "$interface_xml" | grep -Fq '<signal name="StateChanged">'; then
+    echo 'the media-session interface is missing StateChanged' >&2
+    exit 1
+fi
+for signal in DeviceAdded DeviceChanged DeviceRemoved DisplayAdded DisplayRemoved StateChanged Removed
+do
+    if ! grep -Fq "<signal name=\"$signal\">" "$interface_xml"; then
+        echo "public interface is missing $signal" >&2
+        exit 1
+    fi
+done
+# Connector identity is intentional read-only display metadata: it was already
+# present in the original structured reply and is useful for diagnostics. It
+# conveys no authority. Keep actual grant and private-media implementation
+# details out of the public control plane.
+if grep -Eqi 'receiver|grant|castkms|edid|pipewire|create.?session|prepare' "$interface_xml"; then
+    echo 'the public control plane leaked authority or implementation detail' >&2
+    exit 1
+fi
+if grep -Eq 'gstreamer|chromecast|miracast|airplay' "$daemon_cargo"; then
+    echo 'the protocol-neutral core gained a protocol/media-stack dependency' >&2
+    exit 1
+fi
+
+test_dir=$(mktemp -d)
+trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
+sed 's|^ExecStart=.*|ExecStart=/bin/true|' "$unit" > "$test_dir/pronk.service"
+SYSTEMD_UNIT_PATH="$test_dir:" \
+    "$systemd_analyze" --user verify pronk.service

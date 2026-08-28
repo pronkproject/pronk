@@ -1,0 +1,80 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 8 ]; then
+    echo "usage: $0 SYSTEMD_ANALYZE SOCKET SERVICE EXEC_DIR UNIT_STEM RUNTIME_SOCKET BINARY NETWORK_MODE" >&2
+    exit 2
+fi
+
+systemd_analyze=$1
+socket_unit=$2
+service_unit=$3
+expected_exec=$4
+unit_stem=$5
+runtime_socket=$6
+binary_name=$7
+network_mode=$8
+
+require_line() {
+    file=$1
+    line=$2
+    if ! grep -Fqx "$line" "$file"; then
+        echo "missing unit contract line '$line' in $file" >&2
+        exit 1
+    fi
+}
+
+require_line "$socket_unit" "ListenStream=%t/$runtime_socket"
+require_line "$socket_unit" 'SocketMode=0600'
+require_line "$socket_unit" 'DirectoryMode=0700'
+require_line "$socket_unit" 'Accept=yes'
+require_line "$socket_unit" 'FileDescriptorName=pronk-backend-control'
+require_line "$socket_unit" 'RemoveOnStop=yes'
+if grep -Fq 'Service=' "$socket_unit"; then
+    echo 'an accepting backend socket must use systemd same-name template activation' >&2
+    exit 1
+fi
+
+require_line "$service_unit" "ExecStart=$expected_exec/$binary_name"
+require_line "$service_unit" 'Environment=PRONK_BACKEND_INSTANCE=%i'
+require_line "$service_unit" 'Environment=PRONK_BACKEND_EXPECTED_PEER_UNIT=pronk.service'
+require_line "$service_unit" 'Type=notify'
+require_line "$service_unit" 'NotifyAccess=main'
+require_line "$service_unit" 'NonBlocking=yes'
+require_line "$service_unit" 'FileDescriptorStoreMax=0'
+require_line "$service_unit" 'NoNewPrivileges=yes'
+require_line "$service_unit" 'CapabilityBoundingSet='
+require_line "$service_unit" 'DevicePolicy=closed'
+require_line "$service_unit" 'InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0 -%t/pipewire-0-pronk-core -%t/pipewire-0-pronk-backend'
+case "$network_mode" in
+    isolated)
+        require_line "$service_unit" 'PrivateNetwork=yes'
+        require_line "$service_unit" 'RestrictAddressFamilies=AF_UNIX'
+        ;;
+    networked)
+        require_line "$service_unit" 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK'
+        if grep -Fqx 'PrivateNetwork=yes' "$service_unit"; then
+            echo 'network device backend unexpectedly has PrivateNetwork=yes' >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "unknown backend network mode $network_mode" >&2
+        exit 2
+        ;;
+esac
+if grep -Fq 'PRONK_BACKEND_ALLOW_UNMANAGED_PEER' "$service_unit"; then
+    echo 'packaged backend service enables the unmanaged-peer test override' >&2
+    exit 1
+fi
+
+test_dir=$(mktemp -d)
+trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
+
+cp "$socket_unit" "$test_dir/$unit_stem.socket"
+sed "s|^ExecStart=.*|ExecStart=/bin/true|" \
+    "$service_unit" > "$test_dir/$unit_stem@.service"
+SYSTEMD_UNIT_PATH="$test_dir:" \
+    "$systemd_analyze" --user verify \
+    "$unit_stem.socket" \
+    "$unit_stem@connection.service"

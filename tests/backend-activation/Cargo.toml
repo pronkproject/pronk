@@ -1,0 +1,74 @@
+[package]
+name = "pronk-backend-activation-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+nix.workspace = true
+pronk = { path = "../../crates/pronk" }
+pronk-backend-host = { path = "../../crates/pronk-backend-host" }
+pronk-backend-protocol = { path = "../../crates/pronk-backend-protocol" }
+pronk-core = { path = "../../crates/pronk-core" }
+pronk-dbus = { path = "../../crates/pronk-dbus" }
+pronk-pipewire = { path = "../../crates/pronk-pipewire" }
+pronk-systemd = { path = "../../crates/pronk-systemd" }
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+zbus.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "pronk-systemd-activation-probe"
+path = "src/probe.rs"
+
+[[bin]]
+name = "pronk-systemd-activation-test"
+path = "src/test.rs"
+
+[[bin]]
+name = "pronk-backend-p2p-test"
+path = "src/p2p_test.rs"
+
+[[bin]]
+name = "pronk-chromiacast-p2p-test"
+path = "src/chromiacast_test.rs"
+
+[[bin]]
+name = "pronk-backend-user-manager-test"
+path = "src/user_manager_test.rs"
+
+[[bin]]
+name = "pronk-public-inventory-test-service"
+path = "src/public_inventory_service.rs"
+
+[[bin]]
+name = "pronk-edid-upstream-test"
+path = "src/edid_test.rs"
+
+[[bin]]
+name = "pronk-output-discovery-test"
+path = "src/output_discovery_test.rs"
+
+[[bin]]
+name = "pronk-caller-identity-test"
+path = "src/caller_identity_test.rs"
+
+[[bin]]
+name = "pronk-public-lifecycle-test-client"
+path = "src/public_lifecycle_client.rs"
+
+[[bin]]
+name = "pronk-pipewire-policy-gate-test"
+path = "src/pipewire_policy_gate_test.rs"
+
+[[bin]]
+name = "pronk-audio-sink-resolver-test"
+path = "src/audio_sink_resolver_test.rs"

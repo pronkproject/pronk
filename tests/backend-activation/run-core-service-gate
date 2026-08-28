@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 7 ]; then
+    echo "usage: $0 PRONKD PRONKCTL MOCK_BACKEND CORE_UNIT SOCKET_UNIT BACKEND_UNIT DBUS_SERVICE" >&2
+    exit 2
+fi
+
+pronkd=$(realpath "$1")
+pronkctl=$(realpath "$2")
+mock_backend=$(realpath "$3")
+core_source=$(realpath "$4")
+socket_source=$(realpath "$5")
+backend_source=$(realpath "$6")
+dbus_source=$(realpath "$7")
+
+runtime_unit_dir=/run/user/$(id -u)/systemd/user
+core_unit=$runtime_unit_dir/pronk.service
+socket_unit=$runtime_unit_dir/pronk-backend-mock.socket
+backend_unit=$runtime_unit_dir/pronk-backend-mock@.service
+registry_parent=/usr/lib/pronk
+registry_dir=$registry_parent/backends.d
+registry_file=$registry_dir/mock.toml
+dbus_file=/usr/share/dbus-1/services/io.github.pronkproject.Pronk1.service
+registry_parent_created=false
+registry_dir_created=false
+
+for target in "$core_unit" "$socket_unit" "$backend_unit" "$registry_file" "$dbus_file"
+do
+    if [ -e "$target" ]; then
+        echo "refusing to replace existing path: $target" >&2
+        exit 1
+    fi
+done
+if systemctl --user --quiet is-active pronk.service || \
+   systemctl --user --quiet is-active pronk-backend-mock.socket; then
+    echo 'refusing to stop an active Pronk core or mock socket' >&2
+    exit 1
+fi
+if busctl --user call \
+    org.freedesktop.DBus /org/freedesktop/DBus \
+    org.freedesktop.DBus NameHasOwner s io.github.pronkproject.Pronk1 | \
+    grep -Fq true; then
+    echo 'refusing to replace an existing io.github.pronkproject.Pronk1 owner' >&2
+    exit 1
+fi
+if [ ! -e "$registry_parent" ]; then
+    registry_parent_created=true
+fi
+if [ ! -e "$registry_dir" ]; then
+    registry_dir_created=true
+fi
+
+reload_bus() {
+    busctl --user call \
+        org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus ReloadConfig >/dev/null 2>&1 || true
+}
+
+cleanup() {
+    systemctl --user stop pronk.service >/dev/null 2>&1 || true
+    systemctl --user stop pronk-backend-mock.socket >/dev/null 2>&1 || true
+    find "$core_unit" "$socket_unit" "$backend_unit" \
+        -maxdepth 0 -type f -delete 2>/dev/null || true
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user reset-failed pronk.service \
+        'pronk-backend-mock@*.service' >/dev/null 2>&1 || true
+    sudo find "$dbus_file" "$registry_file" \
+        -maxdepth 0 -type f -delete 2>/dev/null || true
+    if [ "$registry_dir_created" = true ]; then
+        sudo rmdir "$registry_dir" 2>/dev/null || true
+    fi
+    if [ "$registry_parent_created" = true ]; then
+        sudo rmdir "$registry_parent" 2>/dev/null || true
+    fi
+    reload_bus
+}
+trap cleanup EXIT HUP INT TERM
+
+install -D -m 0644 "$core_source" "$core_unit"
+install -D -m 0644 "$socket_source" "$socket_unit"
+install -D -m 0644 "$backend_source" "$backend_unit"
+sed -i "s|^ExecStart=.*|ExecStart=$pronkd|" "$core_unit"
+sed -i "s|^ExecStart=.*|ExecStart=$mock_backend|" "$backend_unit"
+
+sudo install -d -o root -g root -m 0755 "$registry_dir"
+sudo install -o root -g root -m 0644 \
+    data/backends.d/mock.toml "$registry_file"
+sudo install -D -o root -g root -m 0644 "$dbus_source" "$dbus_file"
+
+systemctl --user daemon-reload
+systemctl --user start pronk-backend-mock.socket
+reload_bus
+
+attempt=0
+output=
+while [ "$attempt" -lt 50 ]
+do
+    output=$("$pronkctl" list-devices)
+    if printf '%s\n' "$output" | grep -Fq 'Living Room TV'; then
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+printf '%s\n' "$output" | grep -Fq 'Living Room TV'
+printf '%s\n' "$output" | grep -Fq 'ID: mock:living-room'
+printf '%s\n' "$output" | grep -Fq 'Status: Available'
+test "$(systemctl --user show --property=ActiveState --value pronk.service)" = active
+test "$(systemctl --user show --property=Type --value pronk.service)" = dbus
+
+systemctl --user stop pronk.service
+if systemctl --user --quiet is-active 'pronk-backend-mock@*.service'; then
+    echo 'backend instance survived core shutdown' >&2
+    exit 1
+fi
+if [ ! -S "/run/user/$(id -u)/pronk/backends/mock.sock" ]; then
+    echo 'stopping the core removed the still-active backend socket' >&2
+    exit 1
+fi
+
+echo 'core_dbus_activation=pass'
+echo 'core_installed_registry=pass'
+echo 'core_public_device_inventory=pass'
+echo 'core_backend_shutdown=pass'
+echo 'core_runtime_directory_isolation=pass'

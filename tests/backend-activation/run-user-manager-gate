@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 4 ]; then
+    echo "usage: $0 MOCK_BACKEND USER_MANAGER_TEST SOCKET_UNIT SERVICE_TEMPLATE" >&2
+    exit 2
+fi
+
+mock_backend=$(realpath "$1")
+user_manager_test=$(realpath "$2")
+socket_source=$(realpath "$3")
+service_source=$(realpath "$4")
+runtime_unit_dir=/run/user/$(id -u)/systemd/user
+socket_unit=$runtime_unit_dir/pronk-backend-mock.socket
+service_unit=$runtime_unit_dir/pronk-backend-mock@.service
+socket_path=/run/user/$(id -u)/pronk/backends/mock.sock
+wrong_unit=
+
+if [ -e "$socket_unit" ] || [ -e "$service_unit" ]; then
+    echo "refusing to replace an existing runtime pronk-backend-mock unit" >&2
+    exit 1
+fi
+if systemctl --user --quiet is-active pronk-backend-mock.socket; then
+    echo "refusing to stop an active pronk-backend-mock.socket" >&2
+    exit 1
+fi
+core_load_state=$(systemctl --user show --property=LoadState --value pronk.service 2>/dev/null || true)
+if [ "$core_load_state" != "not-found" ]; then
+    echo "refusing to shadow existing pronk.service (LoadState=$core_load_state)" >&2
+    exit 1
+fi
+
+cleanup() {
+    systemctl --user stop pronk.service >/dev/null 2>&1 || true
+    if [ -n "$wrong_unit" ]; then
+        systemctl --user stop "$wrong_unit" >/dev/null 2>&1 || true
+    fi
+    systemctl --user stop pronk-backend-mock.socket >/dev/null 2>&1 || true
+    find "$socket_unit" "$service_unit" -maxdepth 0 -type f -delete 2>/dev/null || true
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+}
+trap cleanup EXIT HUP INT TERM
+
+install -D -m 0644 "$socket_source" "$socket_unit"
+install -D -m 0644 "$service_source" "$service_unit"
+sed -i "s|^ExecStart=.*|ExecStart=$mock_backend|" "$service_unit"
+systemctl --user daemon-reload
+systemctl --user start pronk-backend-mock.socket
+wrong_unit=pronk-peer-validation-negative-$$.service
+if systemd-run --user --wait --pipe --collect --quiet \
+    --unit="$wrong_unit" \
+    --property=Type=exec \
+    "$user_manager_test" "$socket_path" >/dev/null 2>&1; then
+    echo "backend accepted a same-UID peer outside pronk.service" >&2
+    exit 1
+fi
+echo 'systemd_wrong_core_peer_rejected=pass'
+
+systemd-run --user --wait --pipe --collect --quiet \
+    --unit=pronk.service \
+    --property=Type=exec \
+    "$user_manager_test" "$socket_path"
+
+if systemctl --user --quiet is-active 'pronk-backend-mock@*.service'; then
+    echo "backend instance remained active after supervisor shutdown" >&2
+    exit 1
+fi
