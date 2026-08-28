@@ -1,0 +1,6 @@
+format_version = 1
+backend_id = "chromiacast"
+runtime_socket = "pronk/backends/chromiacast.sock"
+socket_unit = "pronk-chromiacast.socket"
+service_template = "pronk-chromiacast@.service"
+protocol_major = 1

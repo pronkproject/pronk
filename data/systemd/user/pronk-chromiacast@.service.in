@@ -1,0 +1,41 @@
+[Unit]
+Description=Pronk Google Cast device backend connection
+Requires=pronk-chromiacast.socket
+After=pipewire.service wireplumber.service
+CollectMode=inactive-or-failed
+
+[Service]
+Type=notify
+ExecStart=@libexecdir@/pronk-chromiacast
+Environment=PRONK_BACKEND_INSTANCE=%i
+Environment=PRONK_BACKEND_EXPECTED_PEER_UNIT=pronk.service
+NotifyAccess=main
+NonBlocking=yes
+FileDescriptorStoreMax=0
+Restart=no
+TimeoutStartSec=10s
+TimeoutStopSec=10s
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0 -%t/pipewire-0-pronk-core -%t/pipewire-0-pronk-backend
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+# mdns-sd enumerates interfaces through a read-only NETLINK_ROUTE socket.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
