@@ -1,0 +1,12 @@
+[package]
+name = "castkms-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+nix.workspace = true
+
+[lints]
+workspace = true
