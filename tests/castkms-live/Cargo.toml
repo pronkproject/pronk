@@ -1,0 +1,21 @@
+[package]
+name = "pronk-castkms-live-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+castkms-sys = { path = "../../crates/castkms-sys" }
+nix.workspace = true
+pronk = { path = "../../crates/pronk" }
+pronk-core = { path = "../../crates/pronk-core" }
+pronk-dbus = { path = "../../crates/pronk-dbus" }
+pronk-pipewire = { path = "../../crates/pronk-pipewire" }
+tokio.workspace = true
+tokio-util.workspace = true
+zbus.workspace = true
+
+[lints]
+workspace = true
