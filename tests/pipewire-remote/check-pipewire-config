@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    echo "usage: $0 PW_CONFIG CONFIG" >&2
+    exit 2
+fi
+
+pw_config=$1
+config=$2
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/pronk-pipewire-config.XXXXXX")
+trap 'rm -rf -- "$test_root"' EXIT HUP INT TERM
+
+config_home=$test_root/config
+fragment_dir=$config_home/pipewire/pipewire.conf.d
+mkdir -p "$fragment_dir"
+cp -- "$config" "$fragment_dir/80-pronk-remotes.conf"
+
+protocol=$(
+    XDG_CONFIG_HOME="$config_home" \
+        "$pw_config" -N -r merge module.protocol-native.args
+)
+access=$(
+    XDG_CONFIG_HOME="$config_home" \
+        "$pw_config" -N -r merge module.access.args
+)
+
+require_text() {
+    value=$1
+    expected=$2
+    case $value in
+        *"$expected"*) ;;
+        *)
+            echo "merged PipeWire configuration lacks: $expected" >&2
+            exit 1
+            ;;
+    esac
+}
+
+require_text "$protocol" 'pipewire-0-pronk-core'
+require_text "$protocol" 'pipewire-0-pronk-backend'
+require_text "$protocol" '"pronk.connection": "core"'
+require_text "$protocol" '"pronk.connection": "backend"'
+require_text "$protocol" '"mode": "0600"'
+
+require_text "$access" '"pipewire-0-pronk-core": "pronk-core"'
+require_text "$access" '"pipewire-0-pronk-backend": "pronk-backend"'
+require_text "$access" '"pipewire-0-manager": "unrestricted"'

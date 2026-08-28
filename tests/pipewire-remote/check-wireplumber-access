@@ -1,0 +1,437 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 16 ]; then
+    echo "usage: $0 PIPEWIRE WIREPLUMBER PW_CLI WPCTL TIMEOUT GST_LAUNCH PW_DUMP JQ PIPEWIRE_CONFIG TEST_REMOTES WIREPLUMBER_CONFIG CASTKMS_AUDIO_CONFIG PRIVATE_POLICY_SCRIPT POLICY_MARKER_SCRIPT CAST_AUDIO_DEFAULT_SCRIPT POLICY_GATE_PROBE" >&2
+    exit 2
+fi
+
+pipewire=$1
+wireplumber=$2
+pw_cli=$3
+wpctl=$4
+timeout_program=$5
+gst_launch=$6
+pw_dump=$7
+jq=$8
+pipewire_config=$9
+test_remotes=${10}
+wireplumber_config=${11}
+castkms_audio_config=${12}
+private_policy_script=${13}
+policy_marker_script=${14}
+cast_audio_default_script=${15}
+policy_gate_probe=${16}
+
+wireplumber_version=$(
+    "$wireplumber" --version 2>/dev/null |
+        sed -n 's/^Linked with libwireplumber //p' |
+        head -n 1
+)
+if ! awk -v version="$wireplumber_version" 'BEGIN {
+    split(version, have, ".")
+    split("0.5.15", need, ".")
+    for (i = 1; i <= 3; i++) {
+        if ((have[i] + 0) > (need[i] + 0)) exit 0
+        if ((have[i] + 0) < (need[i] + 0)) exit 1
+    }
+    exit 0
+}'; then
+    echo "WirePlumber $wireplumber_version lacks the 0.5.15 permission-manager API; skipping live policy gate" >&2
+    exit 77
+fi
+
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/pronk-wireplumber-live.XXXXXX")
+pipewire_pid=
+wireplumber_pid=
+producer_pid=
+unknown_producer_pid=
+policy_probe_pid=
+
+cleanup() {
+    for child in "$policy_probe_pid" "$unknown_producer_pid" "$producer_pid" "$wireplumber_pid" "$pipewire_pid"; do
+        if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+            kill "$child" 2>/dev/null || true
+        fi
+    done
+    for child in "$policy_probe_pid" "$unknown_producer_pid" "$producer_pid" "$wireplumber_pid" "$pipewire_pid"; do
+        if [ -n "$child" ]; then
+            wait "$child" 2>/dev/null || true
+        fi
+    done
+    rm -rf -- "$test_root"
+}
+trap cleanup EXIT HUP INT TERM
+
+config_home=$test_root/config
+data_home=$test_root/data
+runtime_dir=$test_root/runtime
+home_dir=$test_root/home
+pipewire_fragments=$config_home/pipewire/pipewire.conf.d
+wireplumber_fragments=$config_home/wireplumber/wireplumber.conf.d
+wireplumber_scripts=$data_home/wireplumber/scripts
+mkdir -p "$pipewire_fragments" "$wireplumber_fragments" \
+    "$wireplumber_scripts" "$runtime_dir" "$home_dir"
+chmod 0700 "$runtime_dir"
+cp -- "$pipewire_config" "$pipewire_fragments/80-pronk-remotes.conf"
+cp -- "$test_remotes" "$pipewire_fragments/90-pronk-policy-test-remotes.conf"
+cp -- "$wireplumber_config" "$wireplumber_fragments/80-pronk-access.conf"
+cp -- "$castkms_audio_config" "$wireplumber_fragments/81-pronk-castkms-audio.conf"
+cp -- "$private_policy_script" "$wireplumber_scripts/pronk-private-policy.lua"
+cp -- "$policy_marker_script" "$wireplumber_scripts/pronk-policy-marker.lua"
+cp -- "$cast_audio_default_script" "$wireplumber_scripts/pronk-cast-audio-default.lua"
+
+run_in_test_session() {
+    XDG_CONFIG_HOME="$config_home" \
+    XDG_DATA_HOME="$data_home" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    PIPEWIRE_RUNTIME_DIR="$runtime_dir" \
+    HOME="$home_dir" \
+        "$@"
+}
+
+env XDG_CONFIG_HOME="$config_home" \
+    XDG_DATA_HOME="$data_home" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    PIPEWIRE_RUNTIME_DIR="$runtime_dir" \
+    HOME="$home_dir" \
+    "$pipewire" -c pipewire.conf \
+    >"$test_root/pipewire.log" 2>&1 &
+pipewire_pid=$!
+
+manager_socket=$runtime_dir/pipewire-0-manager
+for _attempt in $(seq 1 100); do
+    if [ -S "$manager_socket" ]; then
+        break
+    fi
+    if ! kill -0 "$pipewire_pid" 2>/dev/null; then
+        cat "$test_root/pipewire.log" >&2
+        exit 1
+    fi
+    sleep 0.05
+done
+if [ ! -S "$manager_socket" ]; then
+    echo "PipeWire manager endpoint was not created" >&2
+    cat "$test_root/pipewire.log" >&2
+    exit 1
+fi
+
+start_wireplumber() {
+    XDG_CONFIG_HOME="$config_home"
+    XDG_DATA_HOME="$data_home"
+    XDG_RUNTIME_DIR="$runtime_dir"
+    PIPEWIRE_RUNTIME_DIR="$runtime_dir"
+    HOME="$home_dir"
+    export XDG_CONFIG_HOME XDG_DATA_HOME XDG_RUNTIME_DIR PIPEWIRE_RUNTIME_DIR HOME
+    if [ -n "${WIREPLUMBER_CONFIG_DIR-}" ]; then
+        WIREPLUMBER_CONFIG_DIR="$config_home/wireplumber:$WIREPLUMBER_CONFIG_DIR"
+        export WIREPLUMBER_CONFIG_DIR
+    fi
+    if [ -n "${WIREPLUMBER_DATA_DIR-}" ]; then
+        WIREPLUMBER_DATA_DIR="$data_home/wireplumber:$WIREPLUMBER_DATA_DIR"
+        export WIREPLUMBER_DATA_DIR
+    fi
+    exec "$wireplumber" -c wireplumber.conf -p policy
+}
+
+start_wireplumber >"$test_root/wireplumber.log" 2>&1 &
+wireplumber_pid=$!
+
+policy_ready=false
+for _attempt in $(seq 1 120); do
+    if ! kill -0 "$wireplumber_pid" 2>/dev/null; then
+        cat "$test_root/wireplumber.log" >&2
+        exit 1
+    fi
+    if run_in_test_session "$pw_dump" -r pipewire-0-manager 2>/dev/null |
+        "$jq" -e '.[] | select(
+            .type == "PipeWire:Interface:Metadata" and
+            .props["metadata.name"] == "pronk-policy-v1" and
+            any(.metadata[]?; .subject == 0 and .key == "pronk.policy.version" and .value == 1)
+        )' >/dev/null && \
+       run_in_test_session "$timeout_program" 0.2 \
+        "$pw_cli" -r pipewire-0-pronk-core info 0 >/dev/null 2>&1 && \
+       run_in_test_session "$timeout_program" 0.2 \
+        "$pw_cli" -r pipewire-0-pronk-backend info 0 >/dev/null 2>&1; then
+        policy_ready=true
+        break
+    fi
+    sleep 0.05
+done
+if [ "$policy_ready" != true ]; then
+    echo "versioned WirePlumber policy did not become ready" >&2
+    cat "$test_root/wireplumber.log" >&2
+    exit 1
+fi
+
+start_producer() {
+    marker=$1
+    node_name=$2
+    log_file=$3
+    run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-core \
+        "$gst_launch" -q \
+        videotestsrc is-live=true pattern=black ! \
+        video/x-raw,format=BGRx,width=320,height=180,framerate=10/1 ! \
+        pipewiresink mode=provide client-name=PronkPolicyProducer \
+        "stream-properties=props,node.name=$node_name,node.description=PronkPolicyPrivate,media.class=Video/Source,media.role=Screen,api.pronk.private=$marker" \
+        >"$log_file" 2>&1 &
+    started_pid=$!
+}
+
+start_producer v1 pronk.policy.test.private "$test_root/producer.log"
+producer_pid=$started_pid
+start_producer v2 pronk.policy.test.unknown "$test_root/unknown-producer.log"
+unknown_producer_pid=$started_pid
+
+producers_ready=false
+for _attempt in $(seq 1 100); do
+    if ! kill -0 "$producer_pid" 2>/dev/null || \
+       ! kill -0 "$unknown_producer_pid" 2>/dev/null; then
+        cat "$test_root/producer.log" "$test_root/unknown-producer.log" >&2
+        exit 1
+    fi
+    if run_in_test_session "$pw_dump" -r pipewire-0-manager 2>/dev/null |
+        "$jq" -e '([.[] | select(
+            .type == "PipeWire:Interface:Node" and
+            ((.info.props["node.name"] == "pronk.policy.test.private" and
+              .info.props["api.pronk.private"] == "v1") or
+             (.info.props["node.name"] == "pronk.policy.test.unknown" and
+              .info.props["api.pronk.private"] == "v2"))
+        )] | length == 2) and
+        ([.[] | select(
+            .type == "PipeWire:Interface:Node" and
+            ((.info.props["node.name"] == "pronk.policy.test.castkms-audio" and
+              .info.props["api.pronk.castkms.audio-sink"] == "v1") or
+             (.info.props["node.name"] == "pronk.policy.test.unknown-audio" and
+              .info.props["api.pronk.castkms.audio-sink"] == "v2"))
+        )] | length == 2)' >/dev/null; then
+        producers_ready=true
+        break
+    fi
+    sleep 0.05
+done
+if [ "$producers_ready" != true ]; then
+    echo "private policy test producers did not appear" >&2
+    cat "$test_root/producer.log" "$test_root/unknown-producer.log" >&2
+    exit 1
+fi
+
+default_audio_sink_is() {
+    expected=$1
+    run_in_test_session "$pw_dump" -r pipewire-0-manager 2>/dev/null |
+        "$jq" -e --arg expected "$expected" '.[] | select(
+            .type == "PipeWire:Interface:Metadata" and
+            .props["metadata.name"] == "default" and
+            any(.metadata[]?;
+                .subject == 0 and
+                .key == "default.audio.sink" and
+                .value.name == $expected)
+        )' >/dev/null
+}
+
+# An available supported CastKMS route becomes the ephemeral default. Creating
+# unrelated nodes above also verifies that subsequent rescans do not undo the
+# automatic choice merely because the cast sink has low generic priority.
+if ! default_audio_sink_is pronk.policy.test.castkms-audio; then
+    echo "available CastKMS audio sink was not selected by default" >&2
+    run_in_test_session "$pw_dump" -r pipewire-0-manager >&2
+    cat "$test_root/wireplumber.log" >&2
+    exit 1
+fi
+
+# A desktop selection writes default.configured.audio.sink. It must immediately
+# end Pronk's temporary choice and remain authoritative while casting continues.
+unknown_audio_id=$(
+    run_in_test_session "$pw_dump" -r pipewire-0-manager |
+        "$jq" -er '.[] | select(
+            .type == "PipeWire:Interface:Node" and
+            .info.props["node.name"] == "pronk.policy.test.unknown-audio"
+        ) | .id'
+)
+run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-manager \
+    "$wpctl" set-default "$unknown_audio_id"
+manual_default_ready=false
+for _attempt in $(seq 1 40); do
+    if default_audio_sink_is pronk.policy.test.unknown-audio; then
+        manual_default_ready=true
+        break
+    fi
+    sleep 0.05
+done
+if [ "$manual_default_ready" != true ]; then
+    echo "manual audio default did not override Pronk's automatic choice" >&2
+    run_in_test_session "$pw_dump" -r pipewire-0-manager >&2
+    cat "$test_root/wireplumber.log" >&2
+    exit 1
+fi
+
+expect_capture_denied() {
+    remote=$1
+    node_name=$2
+    label=$3
+    set +e
+    run_in_test_session env PIPEWIRE_REMOTE="$remote" \
+        "$timeout_program" 1 \
+        "$gst_launch" -q pipewiresrc target-object="$node_name" num-buffers=2 \
+        stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true ! \
+        video/x-raw ! fakesink \
+        >"$test_root/denied-$label.log" 2>&1
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        echo "$label unexpectedly captured private media" >&2
+        cat "$test_root/denied-$label.log" >&2
+        exit 1
+    fi
+}
+
+expect_capture_denied pipewire-0 pronk.policy.test.private default
+expect_capture_denied pipewire-0-test-restricted pronk.policy.test.private restricted
+expect_capture_denied pipewire-0-test-flatpak pronk.policy.test.private flatpak
+expect_capture_denied pipewire-0-test-portal pronk.policy.test.private portal
+expect_capture_denied pipewire-0-pronk-backend pronk.policy.test.unknown backend-unknown-version
+
+backend_audio_inventory=$test_root/backend-audio-inventory.json
+run_in_test_session "$pw_dump" -r pipewire-0-pronk-backend >"$backend_audio_inventory"
+if ! "$jq" -e '[.[] | select(
+        .type == "PipeWire:Interface:Node" and
+        .info.props["node.name"] == "pronk.policy.test.castkms-audio" and
+        .info.props["api.pronk.castkms.audio-sink"] == "v1" and
+        (.info.props["api.pronk.castkms.output-index"] | tostring) == "1"
+    )] | length == 1' "$backend_audio_inventory" >/dev/null ||
+   "$jq" -e '.[] | select(
+        .type == "PipeWire:Interface:Node" and
+        .info.props["node.name"] == "pronk.policy.test.unknown-audio"
+    )' "$backend_audio_inventory" >/dev/null; then
+    echo "backend audio inventory did not expose only the supported CastKMS sink" >&2
+    exit 1
+fi
+
+# The marker must not turn the sink into private infrastructure: an ordinary
+# desktop client can still select it as a normal playback destination.
+run_in_test_session env PIPEWIRE_REMOTE=pipewire-0 \
+    "$timeout_program" 3 \
+    "$gst_launch" -q audiotestsrc wave=silence num-buffers=8 ! \
+    audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2 ! \
+    pipewiresink target-object=pronk.policy.test.castkms-audio \
+    >"$test_root/default-audio-playback.log" 2>&1 || {
+        cat "$test_root/default-audio-playback.log" >&2
+        exit 1
+    }
+
+# The backend can capture only the supported sink's monitor and cannot fall
+# through to another sink if the exact target is unavailable.
+run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-backend \
+    "$timeout_program" 3 \
+    "$gst_launch" -q pipewiresrc target-object=pronk.policy.test.castkms-audio num-buffers=3 \
+    stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true,stream.capture.sink=true ! \
+    audio/x-raw,rate=48000,channels=2 ! fakesink \
+    >"$test_root/backend-audio-capture.log" 2>&1 || {
+        cat "$test_root/backend-audio-capture.log" >&2
+        cat "$test_root/wireplumber.log" >&2
+        exit 1
+    }
+
+set +e
+run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-backend \
+    "$timeout_program" 1 \
+    "$gst_launch" -q pipewiresrc target-object=pronk.policy.test.unknown-audio num-buffers=2 \
+    stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true,stream.capture.sink=true ! \
+    audio/x-raw ! fakesink \
+    >"$test_root/backend-unknown-audio.log" 2>&1
+unknown_audio_status=$?
+set -e
+if [ "$unknown_audio_status" -eq 0 ]; then
+    echo "backend unexpectedly captured an unknown CastKMS audio marker version" >&2
+    cat "$test_root/backend-unknown-audio.log" >&2
+    exit 1
+fi
+
+for child in "$producer_pid" "$unknown_producer_pid"; do
+    if ! kill -0 "$child" 2>/dev/null; then
+        echo "a denied capture disturbed its producer" >&2
+        cat "$test_root/producer.log" "$test_root/unknown-producer.log" >&2
+        exit 1
+    fi
+done
+
+run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-backend \
+    "$timeout_program" 3 \
+    "$gst_launch" -q pipewiresrc target-object=pronk.policy.test.private num-buffers=3 \
+    stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true ! \
+    video/x-raw ! fakesink \
+    >"$test_root/backend-capture.log" 2>&1 || {
+        cat "$test_root/backend-capture.log" >&2
+        cat "$test_root/wireplumber.log" >&2
+        exit 1
+    }
+
+run_in_test_session "$timeout_program" 10 "$policy_gate_probe" \
+    >"$test_root/policy-probe.log" 2>&1 &
+policy_probe_pid=$!
+probe_ready=false
+for _attempt in $(seq 1 100); do
+    if grep -qx ready "$test_root/policy-probe.log"; then
+        probe_ready=true
+        break
+    fi
+    if ! kill -0 "$policy_probe_pid" 2>/dev/null; then
+        cat "$test_root/policy-probe.log" >&2
+        exit 1
+    fi
+    sleep 0.05
+done
+if [ "$probe_ready" != true ]; then
+    echo "Rust private source did not pass its policy startup gate" >&2
+    cat "$test_root/policy-probe.log" >&2
+    exit 1
+fi
+
+kill "$wireplumber_pid"
+wait "$wireplumber_pid" 2>/dev/null || true
+wireplumber_pid=
+if ! wait "$policy_probe_pid"; then
+    echo "Rust private source did not fail closed after policy loss" >&2
+    cat "$test_root/policy-probe.log" >&2
+    exit 1
+fi
+policy_probe_pid=
+if ! grep -qx 'policy_loss=pass' "$test_root/policy-probe.log"; then
+    echo "Rust private source did not confirm versioned policy loss" >&2
+    cat "$test_root/policy-probe.log" >&2
+    exit 1
+fi
+marker_removed=false
+for _attempt in $(seq 1 100); do
+    if ! run_in_test_session "$pw_dump" -r pipewire-0-manager 2>/dev/null |
+        "$jq" -e '.[] | select(
+            .type == "PipeWire:Interface:Metadata" and
+            .props["metadata.name"] == "pronk-policy-v1"
+        )' >/dev/null; then
+        marker_removed=true
+        break
+    fi
+    sleep 0.05
+done
+if [ "$marker_removed" != true ]; then
+    echo "WirePlumber shutdown left the policy marker alive" >&2
+    exit 1
+fi
+
+set +e
+run_in_test_session "$timeout_program" 5 "$policy_gate_probe" \
+    >"$test_root/policy-startup-denied.log" 2>&1
+startup_status=$?
+set -e
+if [ "$startup_status" -eq 0 ]; then
+    echo "Rust private source started without the versioned policy" >&2
+    cat "$test_root/policy-startup-denied.log" >&2
+    exit 1
+fi
+if [ "$startup_status" -eq 124 ] || \
+   ! grep -Eq 'versioned WirePlumber private-media policy is unavailable|PipeWire startup timed out' \
+    "$test_root/policy-startup-denied.log"; then
+    echo "Rust private source failed for the wrong policy-startup reason" >&2
+    cat "$test_root/policy-startup-denied.log" >&2
+    exit 1
+fi

@@ -1,0 +1,137 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 3 ]; then
+    echo "usage: $0 PIPEWIRE PW_CLI CONFIG" >&2
+    exit 2
+fi
+
+pipewire=$1
+pw_cli=$2
+config=$3
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/pronk-pipewire-live.XXXXXX")
+pipewire_pid=
+core_pid=
+backend_pid=
+
+cleanup() {
+    for child in "$core_pid" "$backend_pid" "$pipewire_pid"; do
+        if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+            kill "$child" 2>/dev/null || true
+        fi
+    done
+    for child in "$core_pid" "$backend_pid" "$pipewire_pid"; do
+        if [ -n "$child" ]; then
+            wait "$child" 2>/dev/null || true
+        fi
+    done
+    rm -rf -- "$test_root"
+}
+trap cleanup EXIT HUP INT TERM
+
+config_home=$test_root/config
+runtime_dir=$test_root/runtime
+home_dir=$test_root/home
+fragment_dir=$config_home/pipewire/pipewire.conf.d
+mkdir -p "$fragment_dir" "$runtime_dir" "$home_dir"
+chmod 0700 "$runtime_dir"
+cp -- "$config" "$fragment_dir/80-pronk-remotes.conf"
+
+run_in_test_session() {
+    XDG_CONFIG_HOME="$config_home" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    PIPEWIRE_RUNTIME_DIR="$runtime_dir" \
+    HOME="$home_dir" \
+        "$@"
+}
+
+env XDG_CONFIG_HOME="$config_home" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    PIPEWIRE_RUNTIME_DIR="$runtime_dir" \
+    HOME="$home_dir" \
+    "$pipewire" -c pipewire.conf \
+    >"$test_root/pipewire.log" 2>&1 &
+pipewire_pid=$!
+
+core_socket=$runtime_dir/pipewire-0-pronk-core
+backend_socket=$runtime_dir/pipewire-0-pronk-backend
+manager_socket=$runtime_dir/pipewire-0-manager
+for _attempt in $(seq 1 100); do
+    if [ -S "$core_socket" ] && [ -S "$backend_socket" ] && [ -S "$manager_socket" ]; then
+        break
+    fi
+    if ! kill -0 "$pipewire_pid" 2>/dev/null; then
+        cat "$test_root/pipewire.log" >&2
+        exit 1
+    fi
+    sleep 0.05
+done
+
+for socket in "$core_socket" "$backend_socket" "$manager_socket"; do
+    if [ ! -S "$socket" ]; then
+        echo "PipeWire did not create $socket" >&2
+        cat "$test_root/pipewire.log" >&2
+        exit 1
+    fi
+done
+if [ "$(stat -c '%a' "$core_socket")" != 600 ] || \
+   [ "$(stat -c '%a' "$backend_socket")" != 600 ]; then
+    echo "Pronk PipeWire endpoints are not mode 0600" >&2
+    exit 1
+fi
+
+# These clients complete enough of the native handshake to create server-side
+# Client objects, then wait because no WirePlumber policy agent is running.
+env XDG_CONFIG_HOME="$config_home" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    PIPEWIRE_RUNTIME_DIR="$runtime_dir" \
+    HOME="$home_dir" \
+    "$pw_cli" -r pipewire-0-pronk-core list-objects Client \
+    >"$test_root/core.log" 2>&1 &
+core_pid=$!
+env XDG_CONFIG_HOME="$config_home" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    PIPEWIRE_RUNTIME_DIR="$runtime_dir" \
+    HOME="$home_dir" \
+    "$pw_cli" -r pipewire-0-pronk-backend list-objects Client \
+    >"$test_root/backend.log" 2>&1 &
+backend_pid=$!
+
+has_classification() {
+    inventory=$1
+    expected_socket=$2
+    expected_access=$3
+    printf '%s\n' "$inventory" | awk \
+        -v expected_socket="$expected_socket" \
+        -v expected_access="$expected_access" '
+        /^[[:space:]]*id [0-9]+,/ { socket_match = 0; access_match = 0 }
+        index($0, "pipewire.sec.socket = \"" expected_socket "\"") {
+            socket_match = 1
+        }
+        index($0, "pipewire.access = \"" expected_access "\"") {
+            access_match = 1
+        }
+        socket_match && access_match { found = 1 }
+        END { exit(found ? 0 : 1) }
+    '
+}
+
+inventory=
+classified=false
+for _attempt in $(seq 1 100); do
+    inventory=$(run_in_test_session \
+        "$pw_cli" -r pipewire-0-manager list-objects Client 2>/dev/null || true)
+    if has_classification "$inventory" pipewire-0-pronk-core pronk-core && \
+       has_classification "$inventory" pipewire-0-pronk-backend pronk-backend; then
+        classified=true
+        break
+    fi
+    sleep 0.05
+done
+
+if [ "$classified" != true ]; then
+    echo "PipeWire did not apply both Pronk access classes" >&2
+    printf '%s\n' "$inventory" >&2
+    cat "$test_root/pipewire.log" >&2
+    exit 1
+fi
