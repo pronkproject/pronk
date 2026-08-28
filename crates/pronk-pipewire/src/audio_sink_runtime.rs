@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 use crate::audio_sink_model::{
     resolve_audio_sink, AudioObjectKind, AudioObjectObservation, AudioSinkResolutionError,
-    CASTKMS_AUDIO_SINK_PROPERTY,
+    CASTKMS_AUDIO_OUTPUT_INDEX_PROPERTY, CASTKMS_AUDIO_SINK_PROPERTY,
 };
 use crate::policy_gate::PolicyGate;
 use crate::{CastKmsAudioSinkRequest, CastKmsAudioSinkTarget, PipeWireRemote};
@@ -96,6 +96,7 @@ fn run(
     let sync_seq = Rc::new(Cell::new(None));
     let bound_sync_started = Rc::new(Cell::new(false));
     let sync_complete = Rc::new(Cell::new(false));
+    let resolved_target = Rc::new(RefCell::new(None));
     let cancelled = Rc::new(Cell::new(false));
     let runtime_error = Rc::new(RefCell::new(None));
 
@@ -112,6 +113,10 @@ fn run(
     let mainloop_for_done = mainloop.clone();
     let core_for_done = core.clone();
     let runtime_error_for_done = runtime_error.clone();
+    let observations_for_done = observations.clone();
+    let gate_for_done = policy_gate.clone();
+    let resolved_target_for_done = resolved_target.clone();
+    let request_for_done = request.clone();
     let runtime_error_for_core = runtime_error.clone();
     let mainloop_for_core = mainloop.clone();
     let _core_listener = core
@@ -120,7 +125,22 @@ fn run(
             if id == CORE_OBJECT_ID && sync_seq_for_done.get() == Some(seq.seq()) {
                 if bound_sync_started_for_done.replace(true) {
                     sync_complete_for_done.set(true);
-                    mainloop_for_done.quit();
+                    if !gate_for_done.borrow().is_open() {
+                        runtime_error_for_done
+                            .borrow_mut()
+                            .get_or_insert(AudioSinkRuntimeError::PolicyUnavailable);
+                        mainloop_for_done.quit();
+                    } else {
+                        finish_resolution_if_ready(
+                            &request_for_done,
+                            &observations_for_done,
+                            &gate_for_done,
+                            &sync_complete_for_done,
+                            &resolved_target_for_done,
+                            &runtime_error_for_done,
+                            &mainloop_for_done,
+                        );
+                    }
                 } else {
                     match core_for_done.sync(0) {
                         Ok(sync) => sync_seq_for_done.set(Some(sync.seq())),
@@ -153,6 +173,9 @@ fn run(
     let gate_for_global = policy_gate.clone();
     let runtime_error_for_global = runtime_error.clone();
     let mainloop_for_global = mainloop.clone();
+    let sync_complete_for_global = sync_complete.clone();
+    let resolved_target_for_global = resolved_target.clone();
+    let request_for_global = request.clone();
     let observations_for_remove = observations.clone();
     let bound_objects_for_remove = bound_objects.clone();
     let gate_for_remove = policy_gate.clone();
@@ -175,6 +198,12 @@ fn run(
             let bound = if global.type_ == pw::types::ObjectType::Device {
                 registry.bind::<pw::device::Device, _>(global).map(|proxy| {
                     let observations = observations_for_global.clone();
+                    let gate = gate_for_global.clone();
+                    let sync_complete = sync_complete_for_global.clone();
+                    let resolved_target = resolved_target_for_global.clone();
+                    let runtime_error = runtime_error_for_global.clone();
+                    let mainloop = mainloop_for_global.clone();
+                    let request = request_for_global.clone();
                     let listener = proxy
                         .add_listener_local()
                         .info(move |info| {
@@ -182,6 +211,15 @@ fn run(
                                 observations.borrow_mut().insert(
                                     info.id(),
                                     observation(info.id(), AudioObjectKind::Device, props),
+                                );
+                                finish_resolution_if_ready(
+                                    &request,
+                                    &observations,
+                                    &gate,
+                                    &sync_complete,
+                                    &resolved_target,
+                                    &runtime_error,
+                                    &mainloop,
                                 );
                             }
                         })
@@ -194,6 +232,12 @@ fn run(
             } else if global.type_ == pw::types::ObjectType::Node {
                 registry.bind::<pw::node::Node, _>(global).map(|proxy| {
                     let observations = observations_for_global.clone();
+                    let gate = gate_for_global.clone();
+                    let sync_complete = sync_complete_for_global.clone();
+                    let resolved_target = resolved_target_for_global.clone();
+                    let runtime_error = runtime_error_for_global.clone();
+                    let mainloop = mainloop_for_global.clone();
+                    let request = request_for_global.clone();
                     let listener = proxy
                         .add_listener_local()
                         .info(move |info| {
@@ -201,6 +245,15 @@ fn run(
                                 observations.borrow_mut().insert(
                                     info.id(),
                                     observation(info.id(), AudioObjectKind::Node, props),
+                                );
+                                finish_resolution_if_ready(
+                                    &request,
+                                    &observations,
+                                    &gate,
+                                    &sync_complete,
+                                    &resolved_target,
+                                    &runtime_error,
+                                    &mainloop,
                                 );
                             }
                         })
@@ -251,11 +304,47 @@ fn run(
             "audio registry synchronization stopped unexpectedly".into(),
         ));
     }
-    if !policy_gate.borrow().is_open() {
-        return Err(AudioSinkRuntimeError::PolicyUnavailable);
+    let resolved = resolved_target.borrow_mut().take().ok_or_else(|| {
+        AudioSinkRuntimeError::PipeWire(
+            "audio registry synchronization stopped before a matching sink appeared".into(),
+        )
+    });
+    resolved
+}
+
+fn finish_resolution_if_ready(
+    request: &CastKmsAudioSinkRequest,
+    observations: &RefCell<HashMap<u32, AudioObjectObservation>>,
+    policy_gate: &RefCell<PolicyGate>,
+    sync_complete: &Cell<bool>,
+    resolved_target: &RefCell<Option<CastKmsAudioSinkTarget>>,
+    runtime_error: &RefCell<Option<AudioSinkRuntimeError>>,
+    mainloop: &pw::main_loop::MainLoopRc,
+) {
+    if !sync_complete.get()
+        || !policy_gate.borrow().is_open()
+        || resolved_target.borrow().is_some()
+        || runtime_error.borrow().is_some()
+    {
+        return;
     }
-    let resolved = resolve_audio_sink(&request, observations.borrow().values().cloned());
-    resolved.map_err(Into::into)
+
+    let result = resolve_audio_sink(request, observations.borrow().values().cloned());
+    match result {
+        Ok(target) => {
+            resolved_target.borrow_mut().replace(target);
+            mainloop.quit();
+        }
+        Err(AudioSinkResolutionError::NotFound { .. }) => {
+            // ALSA devices and their PCM nodes are separate registry objects.
+            // Keep listening until the matching node arrives or the public
+            // resolver timeout cancels this foreign loop.
+        }
+        Err(error) => {
+            runtime_error.borrow_mut().replace(error.into());
+            mainloop.quit();
+        }
+    }
 }
 
 fn copy_property(props: &pw::spa::utils::dict::DictRef, key: &str) -> Option<String> {
@@ -271,14 +360,17 @@ fn observation(
         object_id,
         kind,
         media_class: copy_property(props, "media.class"),
-        alsa_id: copy_property(props, "alsa.id"),
+        // Direct ALSA devices use the canonical api.alsa.card.id property;
+        // ACP also supplies the older PulseAudio-compatible alsa.id spelling.
+        card_id: copy_property(props, "api.alsa.card.id")
+            .or_else(|| copy_property(props, "alsa.id")),
         policy_marker: match kind {
             AudioObjectKind::Device => None,
             AudioObjectKind::Node => copy_property(props, CASTKMS_AUDIO_SINK_PROPERTY),
         },
         device_bus_path: copy_property(props, "device.bus-path"),
         device_id: copy_property(props, "device.id"),
-        alsa_device: copy_property(props, "alsa.device"),
+        output_index: copy_property(props, CASTKMS_AUDIO_OUTPUT_INDEX_PROPERTY),
         pcm_stream: copy_property(props, "api.alsa.pcm.stream"),
         node_name: copy_property(props, "node.name"),
         object_serial: copy_property(props, "object.serial"),

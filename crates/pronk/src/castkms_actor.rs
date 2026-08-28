@@ -19,10 +19,10 @@ use pronk_core::castkms::{
     GrantStateEvidence, MAX_OUTSTANDING_CAPTURE_REQUESTS,
 };
 use pronk_pipewire::{
-    CastKmsAudioSinkRequest, CastKmsAudioSinkResolver, ClassifiedSocketRemoteProvider,
-    PipeWireBufferTransport, VideoBuffer, VideoBufferLayout, VideoDamage, VideoFrame,
-    VideoNodeIdentity, VideoSourceActor, VideoSourceActorError, VideoSourceActorEvent,
-    VideoSourceConfig, VideoSourceGeneration, VideoSyncTimelines,
+    CastKmsAudioSinkRequest, CastKmsAudioSinkResolver, CastKmsAudioSinkTarget,
+    ClassifiedSocketRemoteProvider, PipeWireBufferTransport, VideoBuffer, VideoBufferLayout,
+    VideoDamage, VideoFrame, VideoNodeIdentity, VideoSourceActor, VideoSourceActorError,
+    VideoSourceActorEvent, VideoSourceConfig, VideoSourceGeneration, VideoSyncTimelines,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -943,45 +943,6 @@ async fn start_generation(
         KernelDisplayError::new("start capture generation", "CastKMS grant ID is zero")
     })?;
     require_not_cancelled(cancellation, "start capture generation")?;
-    let audio_sink = if config.audio_profile_id.is_some() {
-        let remote = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                return Err(KernelDisplayError::new(
-                    "resolve connector-bound audio sink",
-                    "operation was cancelled",
-                ));
-            }
-            result = config.producer_remotes.create_producer_remote() => result.map_err(|error| {
-                KernelDisplayError::new(
-                    "connect classified PipeWire audio resolver",
-                    error.to_string(),
-                )
-            })?,
-        };
-        let request = CastKmsAudioSinkRequest {
-            device_path: config.device_path.clone(),
-            output_index: config.output_index,
-        };
-        Some(tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                return Err(KernelDisplayError::new(
-                    "resolve connector-bound audio sink",
-                    "operation was cancelled",
-                ));
-            }
-            result = config.audio_sink_resolver.resolve(request, remote.into_remote()) => {
-                result.map_err(|error| KernelDisplayError::new(
-                    "resolve connector-bound audio sink",
-                    error.to_string(),
-                ))?
-            }
-        })
-    } else {
-        None
-    };
-    require_not_cancelled(cancellation, "start capture generation")?;
     let capabilities = client
         .client()
         .query_capture_capabilities(request.route.target.as_nonzero())
@@ -1005,6 +966,13 @@ async fn start_generation(
         rollback_unpublished(client, stream)?;
         return Err(error);
     }
+    let audio_sink = match resolve_optional_audio_sink(config, cancellation).await {
+        Ok(audio_sink) => audio_sink,
+        Err(error) => {
+            rollback_unpublished(client, stream)?;
+            return Err(error);
+        }
+    };
 
     let buffers = match allocate_pool(client, stream) {
         Ok(buffers) => buffers,
@@ -1100,6 +1068,10 @@ async fn start_generation(
         media_generation,
         caps: raw_video_caps(stream),
     };
+    let audio_profile_id = audio_sink
+        .as_ref()
+        .and(config.audio_profile_id.as_ref())
+        .cloned();
     let audio_target = audio_sink.map(|identity| DeviceMediaTarget {
         kind: DeviceMediaKind::Audio,
         node_name: identity.node_name,
@@ -1117,7 +1089,7 @@ async fn start_generation(
         audio_target,
         configuration: DeviceMediaConfiguration {
             video_profile_id: config.video_profile_id.clone(),
-            audio_profile_id: config.audio_profile_id.clone(),
+            audio_profile_id,
             mode: request.route.mode,
             video_bitrate: config.video_bitrate,
         },
@@ -1142,6 +1114,65 @@ async fn start_generation(
         },
         prepared,
     ))
+}
+
+async fn resolve_optional_audio_sink(
+    config: &CastKmsActorConfig,
+    cancellation: &CancellationToken,
+) -> Result<Option<CastKmsAudioSinkTarget>, KernelDisplayError> {
+    if config.audio_profile_id.is_none() {
+        return Ok(None);
+    }
+
+    let remote = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(KernelDisplayError::new(
+                "resolve connector-bound audio sink",
+                "operation was cancelled",
+            ));
+        }
+        result = config.producer_remotes.create_producer_remote() => result,
+    };
+    let remote = match remote {
+        Ok(remote) => remote,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %config.session_id,
+                output_index = config.output_index,
+                %error,
+                "audio resolver connection failed; continuing with video only"
+            );
+            return Ok(None);
+        }
+    };
+
+    let request = CastKmsAudioSinkRequest {
+        device_path: config.device_path.clone(),
+        output_index: config.output_index,
+    };
+    let resolved = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(KernelDisplayError::new(
+                "resolve connector-bound audio sink",
+                "operation was cancelled",
+            ));
+        }
+        result = config.audio_sink_resolver.resolve(request, remote.into_remote()) => result,
+    };
+    match resolved {
+        Ok(target) => Ok(Some(target)),
+        Err(error) => {
+            tracing::warn!(
+                session_id = %config.session_id,
+                output_index = config.output_index,
+                %error,
+                "audio sink resolution failed; continuing with video only"
+            );
+            Ok(None)
+        }
+    }
 }
 
 fn raw_audio_caps() -> &'static str {
@@ -1780,6 +1811,7 @@ mod tests {
     use super::*;
     use crate::display_state::{MediaState, RouteTarget, RoutedMode};
     use crate::media_session::MediaRoute;
+    use pronk_pipewire::ClassifiedSocketPaths;
 
     fn request() -> MediaStartRequest {
         MediaStartRequest {
@@ -1809,6 +1841,26 @@ mod tests {
         }
     }
 
+    fn config_with_unavailable_audio_socket() -> CastKmsActorConfig {
+        let runtime_dir =
+            std::env::temp_dir().join(format!("pronk-missing-audio-socket-{}", std::process::id()));
+        CastKmsActorConfig {
+            producer_remotes: ClassifiedSocketRemoteProvider::new(
+                ClassifiedSocketPaths::in_runtime_dir(runtime_dir).unwrap(),
+            ),
+            session_id: "audio-soft-failure-test".into(),
+            device_instance: "test-device".into(),
+            node_description: "Test TV".into(),
+            device_path: PathBuf::from("/sys/devices/faux/castkms"),
+            output_index: 0,
+            audio_sink_resolver: CastKmsAudioSinkResolver::default(),
+            video_profile_id: "h264-high".into(),
+            audio_profile_id: Some("opus-stereo".into()),
+            video_bitrate: NonZeroU64::new(8_000_000).unwrap(),
+            device_control: None,
+        }
+    }
+
     #[test]
     fn route_validation_keeps_kernel_and_application_generations_distinct() {
         validate_stream_route(stream(1920), request()).unwrap();
@@ -1827,6 +1879,31 @@ mod tests {
             KernelDisplayEvent::MediaFailed("source disappeared".into())
         );
         let _ = MediaState::Failed;
+    }
+
+    #[tokio::test]
+    async fn unavailable_audio_infrastructure_degrades_to_video_only() {
+        let result = resolve_optional_audio_sink(
+            &config_with_unavailable_audio_socket(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn audio_resolution_cancellation_still_cancels_media_startup() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert!(resolve_optional_audio_sink(
+            &config_with_unavailable_audio_socket(),
+            &cancellation,
+        )
+        .await
+        .is_err());
     }
 
     #[test]

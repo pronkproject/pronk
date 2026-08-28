@@ -12,8 +12,9 @@ use thiserror::Error;
 
 use crate::{CastKmsAudioSinkRequest, CastKmsAudioSinkTarget};
 
-pub(crate) const CASTKMS_ALSA_ID: &str = "CastKMS";
+pub(crate) const CASTKMS_ALSA_ID_PREFIX: &str = "CastKMS";
 pub(crate) const CASTKMS_AUDIO_SINK_PROPERTY: &str = "api.pronk.castkms.audio-sink";
+pub(crate) const CASTKMS_AUDIO_OUTPUT_INDEX_PROPERTY: &str = "api.pronk.castkms.output-index";
 pub(crate) const CASTKMS_AUDIO_POLICY_VERSION: &str = "v1";
 const AUDIO_DEVICE_CLASS: &str = "Audio/Device";
 const AUDIO_SINK_CLASS: &str = "Audio/Sink";
@@ -30,11 +31,11 @@ pub(crate) struct AudioObjectObservation {
     pub object_id: u32,
     pub kind: AudioObjectKind,
     pub media_class: Option<String>,
-    pub alsa_id: Option<String>,
+    pub card_id: Option<String>,
     pub policy_marker: Option<String>,
     pub device_bus_path: Option<String>,
     pub device_id: Option<String>,
-    pub alsa_device: Option<String>,
+    pub output_index: Option<String>,
     pub pcm_stream: Option<String>,
     pub node_name: Option<String>,
     pub object_serial: Option<String>,
@@ -72,7 +73,10 @@ pub(crate) fn resolve_audio_sink(
         .filter(|observation| observation.kind == AudioObjectKind::Device)
     {
         if observation.media_class.as_deref() != Some(AUDIO_DEVICE_CLASS)
-            || observation.alsa_id.as_deref() != Some(CASTKMS_ALSA_ID)
+            || !observation
+                .card_id
+                .as_deref()
+                .is_some_and(is_castkms_card_id)
         {
             continue;
         }
@@ -81,12 +85,19 @@ pub(crate) fn resolve_audio_sink(
             object_id: observation.object_id,
             property: "device.bus-path",
         })?;
-        devices.insert(observation.object_id, parent);
+        let output_index = parse_u32(
+            observation,
+            CASTKMS_AUDIO_OUTPUT_INDEX_PROPERTY,
+            &observation.output_index,
+        )?;
+        devices.insert(observation.object_id, (parent, output_index));
     }
 
     let matching_devices: Vec<_> = devices
         .iter()
-        .filter_map(|(id, path)| (path == &request.device_path).then_some(*id))
+        .filter_map(|(id, (path, output_index))| {
+            (path == &request.device_path && *output_index == request.output_index).then_some(*id)
+        })
         .collect();
     let device_id = match matching_devices.as_slice() {
         [device_id] => *device_id,
@@ -103,10 +114,14 @@ pub(crate) fn resolve_audio_sink(
             continue;
         }
         require_property(observation, "media.class", AUDIO_SINK_CLASS)?;
-        require_property(observation, "alsa.id", CASTKMS_ALSA_ID)?;
+        require_castkms_card_id(observation)?;
         require_property(observation, "api.alsa.pcm.stream", PLAYBACK_STREAM)?;
         let observed_device_id = parse_u32(observation, "device.id", &observation.device_id)?;
-        let output_index = parse_u32(observation, "alsa.device", &observation.alsa_device)?;
+        let output_index = parse_u32(
+            observation,
+            CASTKMS_AUDIO_OUTPUT_INDEX_PROPERTY,
+            &observation.output_index,
+        )?;
         let node_name = required(observation, "node.name", &observation.node_name)?;
         if node_name.is_empty() || node_name.contains('\0') {
             return Err(AudioSinkResolutionError::Malformed {
@@ -149,7 +164,6 @@ fn require_property(
 ) -> Result<(), AudioSinkResolutionError> {
     let actual = match property {
         "media.class" => observation.media_class.as_deref(),
-        "alsa.id" => observation.alsa_id.as_deref(),
         "api.alsa.pcm.stream" => observation.pcm_stream.as_deref(),
         _ => unreachable!("all exact properties are enumerated"),
     };
@@ -160,6 +174,29 @@ fn require_property(
         });
     }
     Ok(())
+}
+
+fn require_castkms_card_id(
+    observation: &AudioObjectObservation,
+) -> Result<(), AudioSinkResolutionError> {
+    if !observation
+        .card_id
+        .as_deref()
+        .is_some_and(is_castkms_card_id)
+    {
+        return Err(AudioSinkResolutionError::Malformed {
+            object_id: observation.object_id,
+            property: "api.alsa.card.id",
+        });
+    }
+    Ok(())
+}
+
+fn is_castkms_card_id(value: &str) -> bool {
+    value
+        .strip_prefix(CASTKMS_ALSA_ID_PREFIX)
+        .and_then(|suffix| suffix.bytes().next())
+        .is_some_and(|first| first.is_ascii_digit())
 }
 
 fn required<'a>(
@@ -250,16 +287,16 @@ mod tests {
         }
     }
 
-    fn device(id: u32, path: &str) -> AudioObjectObservation {
+    fn device(id: u32, path: &str, output_index: u32) -> AudioObjectObservation {
         AudioObjectObservation {
             object_id: id,
             kind: AudioObjectKind::Device,
             media_class: Some(AUDIO_DEVICE_CLASS.into()),
-            alsa_id: Some(CASTKMS_ALSA_ID.into()),
+            card_id: Some("CastKMS1".into()),
             policy_marker: Some(CASTKMS_AUDIO_POLICY_VERSION.into()),
             device_bus_path: Some(path.into()),
             device_id: None,
-            alsa_device: None,
+            output_index: Some(output_index.to_string()),
             pcm_stream: None,
             node_name: None,
             object_serial: None,
@@ -271,11 +308,11 @@ mod tests {
             object_id: id,
             kind: AudioObjectKind::Node,
             media_class: Some(AUDIO_SINK_CLASS.into()),
-            alsa_id: Some(CASTKMS_ALSA_ID.into()),
+            card_id: Some(format!("CastKMS{output_index}")),
             policy_marker: Some(CASTKMS_AUDIO_POLICY_VERSION.into()),
             device_bus_path: None,
             device_id: Some(device_id.to_string()),
-            alsa_device: Some(output_index.to_string()),
+            output_index: Some(output_index.to_string()),
             pcm_stream: Some(PLAYBACK_STREAM.into()),
             node_name: Some(format!("alsa_output.castkms.{output_index}")),
             object_serial: Some((1_000 + u64::from(id)).to_string()),
@@ -294,10 +331,12 @@ mod tests {
         let resolved = resolve_audio_sink(
             &request(),
             [
-                device(51, "/sys/devices/faux/castkms/sound/card0"),
+                device(51, "/sys/devices/faux/castkms/sound/card0", 1),
                 sink(53, 51, 0),
                 matching_sink,
-                device(60, "/sys/devices/pci0000:00/other/sound/card1"),
+                device(54, "/sys/devices/faux/castkms/sound/card1", 0),
+                sink(55, 54, 0),
+                device(60, "/sys/devices/pci0000:00/other/sound/card2", 1),
                 sink(61, 60, 1),
             ],
         )
@@ -312,7 +351,7 @@ mod tests {
         assert!(resolve_audio_sink(
             &request(),
             [
-                device(51, "/sys/devices/faux/castkms/sound/card0"),
+                device(51, "/sys/devices/faux/castkms/sound/card0", 1),
                 sink(52, 51, 1),
                 impostor,
             ],
@@ -323,7 +362,7 @@ mod tests {
     #[test]
     fn rejects_ambiguity_and_malformed_marked_objects() {
         let observations = [
-            device(51, "/sys/devices/faux/castkms/sound/card0"),
+            device(51, "/sys/devices/faux/castkms/sound/card0", 1),
             sink(52, 51, 1),
             sink(53, 51, 1),
         ];
@@ -338,7 +377,7 @@ mod tests {
             resolve_audio_sink(
                 &request(),
                 [
-                    device(51, "/sys/devices/faux/castkms/sound/card0"),
+                    device(51, "/sys/devices/faux/castkms/sound/card0", 1),
                     malformed,
                 ],
             ),
