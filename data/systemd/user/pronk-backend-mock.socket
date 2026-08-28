@@ -1,0 +1,16 @@
+[Unit]
+Description=Pronk deterministic device backend activation socket
+
+[Socket]
+ListenStream=%t/pronk/backends/mock.sock
+SocketMode=0600
+DirectoryMode=0700
+Accept=yes
+FileDescriptorName=pronk-backend-control
+RemoveOnStop=yes
+MaxConnections=4
+TriggerLimitIntervalSec=10s
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=sockets.target

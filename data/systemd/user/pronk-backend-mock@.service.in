@@ -1,0 +1,41 @@
+[Unit]
+Description=Pronk deterministic device backend connection
+CollectMode=inactive-or-failed
+
+[Service]
+Type=notify
+ExecStart=@libexecdir@/pronk-backend-mock
+Environment=PRONK_BACKEND_INSTANCE=%i
+Environment=PRONK_BACKEND_EXPECTED_PEER_UNIT=pronk.service
+NotifyAccess=main
+NonBlocking=yes
+FileDescriptorStoreMax=0
+TimeoutStartSec=10s
+TimeoutStopSec=5s
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+# ProtectHome=yes also masks /run/user, including the user manager's
+# NOTIFY_SOCKET. Hide the persistent home roots without hiding that runtime
+# control socket.
+InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0 -%t/pipewire-0-pronk-core -%t/pipewire-0-pronk-backend
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
