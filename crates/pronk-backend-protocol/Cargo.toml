@@ -1,0 +1,18 @@
+[package]
+name = "pronk-backend-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+nix.workspace = true
+serde.workspace = true
+serde_repr.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+zvariant.workspace = true
+
+[lints]
+workspace = true
