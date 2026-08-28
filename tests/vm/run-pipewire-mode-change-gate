@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -lt 6 || test "$#" -gt 8; then
+	printf 'usage: %s BINARY CONSUMER DEVICE SESSION CONNECTOR-ID CRTC-ID [LOCAL-CONNECTOR [CAST-CONNECTOR]]\n' "$0" >&2
+	exit 2
+fi
+
+binary=$1
+consumer=$2
+device=$3
+session_id=$4
+connector_id=$5
+crtc_id=$6
+local_connector=${7:-Virtual-1}
+cast_connector=${8:-Virtual-2}
+local_mode=${PRONK_VM_LOCAL_MODE:-1280x800@74.994}
+unit="pronk-pipewire-mode-change-$PPID-$$"
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+temporary_directory=$(mktemp -d --tmpdir pronk-pipewire-mode-gate.XXXXXX)
+old_consumer_output="$temporary_directory/old-consumer.log"
+new_consumer_output="$temporary_directory/new-consumer.log"
+old_consumer_pid=
+
+unit_output() {
+	journalctl --user -u "$unit.service" --no-pager -o cat
+}
+
+stop_unit() {
+	systemctl --user kill --kill-whom=main --signal=SIGTERM \
+		"$unit.service" 2>/dev/null || true
+}
+
+cleanup() {
+	if test -n "$old_consumer_pid"; then
+		kill "$old_consumer_pid" 2>/dev/null || true
+		wait "$old_consumer_pid" 2>/dev/null || true
+	fi
+	stop_unit
+	rm -f -- "$old_consumer_output" "$new_consumer_output"
+	rmdir -- "$temporary_directory" 2>/dev/null || true
+}
+
+fail_with_logs() {
+	unit_output >&2 || true
+	if test -f "$old_consumer_output"; then
+		printf '%s\n' '--- old-mode PipeWire consumer ---' >&2
+		cat "$old_consumer_output" >&2
+	fi
+	if test -f "$new_consumer_output"; then
+		printf '%s\n' '--- replacement-mode PipeWire consumer ---' >&2
+		cat "$new_consumer_output" >&2
+	fi
+	exit 1
+}
+
+wait_for_marker() {
+	marker_name=$1
+	for _attempt in $(seq 1 300); do
+		marker=$(unit_output | sed -n "s/^\($marker_name=.*\)$/\1/p" | tail -n 1)
+		if test -n "$marker"; then
+			printf '%s\n' "$marker"
+			return 0
+		fi
+		if ! systemctl --user is-active --quiet "$unit.service"; then
+			return 1
+		fi
+		sleep 0.1
+	done
+	return 1
+}
+
+trap cleanup EXIT INT TERM
+
+if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
+	printf 'login session %s is not active\n' "$session_id" >&2
+	exit 1
+fi
+
+"$gate_directory/ensure-mutter-display-on"
+
+systemd-run --user --unit="$unit" --collect --property=Type=exec \
+	--setenv=PRONK_VM_PIPEWIRE_MODE_CHANGE_GATE=signal-classified-core -- \
+	"$binary" "$device" "$session_id" "$connector_id" "$crtc_id"
+
+old_marker=$(wait_for_marker pipewire_mode_old_source_ready) || fail_with_logs
+old_identity=${old_marker#pipewire_mode_old_source_ready=}
+old_node_name=${old_identity%%:*}
+old_numbers=${old_identity#*:}
+old_object_id=${old_numbers%%:*}
+old_object_serial=${old_numbers#*:}
+case "$old_node_name:$old_object_id:$old_object_serial" in
+	*:*[!0-9]*:*|*:*:*[!0-9]*|:*:*|*::*)
+		printf 'invalid old PipeWire identity: %s\n' "$old_identity" >&2
+		fail_with_logs
+		;;
+esac
+
+"$consumer" --node-name "$old_node_name" --frames 15 --timeout 20 \
+	--wait-for-disconnect >"$old_consumer_output" 2>&1 &
+old_consumer_pid=$!
+old_frames_ready=
+for _attempt in $(seq 1 200); do
+	if grep -Fxq 'frames_target_reached=15' "$old_consumer_output"; then
+		old_frames_ready=1
+		break
+	fi
+	if ! kill -0 "$old_consumer_pid" 2>/dev/null || \
+			! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_logs
+	fi
+	sleep 0.1
+done
+if test -z "$old_frames_ready"; then
+	fail_with_logs
+fi
+
+trigger=$(wait_for_marker pipewire_mode_change_trigger_ready) || fail_with_logs
+old_mode=${trigger#pipewire_mode_change_trigger_ready=}
+old_mode=${old_mode%@generation-*}
+case "$old_mode" in
+	1920x1080)
+		replacement_mode=3840x2160@60.000
+		;;
+	3840x2160)
+		replacement_mode=1920x1080@60.000
+		;;
+	*)
+		printf 'unsupported old CastKMS VM mode: %s\n' "$old_mode" >&2
+		fail_with_logs
+		;;
+esac
+
+gdctl set \
+	--logical-monitor --monitor "$local_connector" --mode "$local_mode" \
+		--primary --scale 1 --x 0 --y 0 \
+	--logical-monitor --monitor "$cast_connector" --mode "$replacement_mode" \
+		--scale 1 --right-of "$local_connector"
+
+replacement_size=${replacement_mode%@*}
+mode_committed=
+for _attempt in $(seq 1 100); do
+	if modetest -a -M castkms -p 2>/dev/null | awk \
+			-v crtc="$crtc_id" -v size="($replacement_size)" '
+		$1 == crtc && $4 == size { found = 1 }
+		END { exit !found }
+	'; then
+		mode_committed=1
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_logs
+	fi
+	sleep 0.05
+done
+if test -z "$mode_committed"; then
+	printf 'Mutter did not commit CastKMS mode %s on CRTC %s\n' \
+		"$replacement_size" "$crtc_id" >&2
+	fail_with_logs
+fi
+systemctl --user kill --kill-whom=main --signal=SIGUSR1 "$unit.service"
+
+new_marker=$(wait_for_marker pipewire_mode_new_source_ready) || fail_with_logs
+if ! wait "$old_consumer_pid"; then
+	old_consumer_pid=
+	fail_with_logs
+fi
+old_consumer_pid=
+new_identity=${new_marker#pipewire_mode_new_source_ready=}
+new_node_name=${new_identity%%:*}
+new_numbers=${new_identity#*:}
+new_object_id=${new_numbers%%:*}
+new_object_serial=${new_numbers#*:}
+case "$new_node_name:$new_object_id:$new_object_serial" in
+	*:*[!0-9]*:*|*:*:*[!0-9]*|:*:*|*::*)
+		printf 'invalid replacement PipeWire identity: %s\n' "$new_identity" >&2
+		fail_with_logs
+		;;
+esac
+if test "$new_node_name" = "$old_node_name" || \
+		test "$new_object_serial" = "$old_object_serial"; then
+	printf 'replacement PipeWire identity reused the old generation: %s -> %s\n' \
+		"$old_identity" "$new_identity" >&2
+	fail_with_logs
+fi
+
+if ! "$consumer" --node-name "$new_node_name" \
+		--frames 15 --timeout 15 >"$new_consumer_output" 2>&1; then
+	fail_with_logs
+fi
+
+for _attempt in $(seq 1 300); do
+	if unit_output | grep -Fxq 'holder_drop_releases_grant=pass'; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		break
+	fi
+	sleep 0.1
+done
+
+output=$(unit_output)
+old_consumer_log=$(cat "$old_consumer_output")
+new_consumer_log=$(cat "$new_consumer_output")
+for consumer_log in "$old_consumer_log" "$new_consumer_log"; do
+	for required in \
+		'pw_connected=1' \
+		'frames_received=15' \
+		'header_metadata=1' \
+		'damage_metadata=1' \
+		'sync_timeline_metadata=1' \
+		'dma_buf_layout=1' \
+		'pw_pronk_consumer=pass'; do
+		if ! grep -Fxq "$required" <<<"$consumer_log"; then
+			fail_with_logs
+		fi
+	done
+done
+if ! grep -Fxq 'source_disconnected=1' <<<"$old_consumer_log"; then
+	fail_with_logs
+fi
+for required in \
+	'pipewire_producer_remote=classified-core' \
+	'pipewire_mode_old_frames=15' \
+	'pipewire_mode_new_frames=15' \
+	'pipewire_mode_synchronous_estale=pass' \
+	'pipewire_mode_old_pool_cleanup=pass' \
+	'pipewire_mode_new_pool_cleanup=pass' \
+	'pipewire_mode_object_serial_changed=pass' \
+	'pipewire_mode_actor_recreation=pass' \
+	'holder_drop_releases_grant=pass'; do
+	if ! grep -Fxq "$required" <<<"$output"; then
+		fail_with_logs
+	fi
+done
+if ! grep -Fxq "pipewire_mode_old_node_name=$old_node_name" <<<"$output" || \
+		! grep -Fxq "pipewire_mode_old_object_serial=$old_object_serial" <<<"$output" || \
+		! grep -Fxq "pipewire_mode_new_node_name=$new_node_name" <<<"$output" || \
+		! grep -Fxq "pipewire_mode_new_object_serial=$new_object_serial" <<<"$output"; then
+	fail_with_logs
+fi
+if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
+	printf 'login session %s became inactive\n' "$session_id" >&2
+	fail_with_logs
+fi
+
+trap - EXIT INT TERM
+rm -f -- "$old_consumer_output" "$new_consumer_output"
+rmdir -- "$temporary_directory"
+printf '%s\n' "$old_consumer_log"
+printf '%s\n' "$new_consumer_log"
+printf '%s\n' "$output"

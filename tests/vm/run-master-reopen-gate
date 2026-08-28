@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -ne 5; then
+	printf 'usage: %s BINARY DEVICE SESSION CONNECTOR-ID CRTC-ID\n' "$0" >&2
+	exit 2
+fi
+
+binary=$1
+device=$2
+session_id=$3
+connector_id=$4
+crtc_id=$5
+unit="pronk-master-reopen-$PPID-$$"
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+unit_output() {
+	journalctl --user -u "$unit.service" --no-pager -o cat
+}
+
+stop_unit() {
+	systemctl --user kill --kill-whom=main --signal=SIGTERM \
+		"$unit.service" 2>/dev/null || true
+}
+
+fail_with_log() {
+	unit_output >&2 || true
+	exit 1
+}
+
+trap stop_unit EXIT INT TERM
+
+if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
+	printf 'login session %s is not active\n' "$session_id" >&2
+	exit 1
+fi
+
+"$gate_directory/ensure-mutter-display-on"
+
+systemd-run --user --unit="$unit" --collect --property=Type=exec \
+	--setenv=PRONK_VM_MASTER_REOPEN_GATE=detach-reattach -- \
+	"$binary" "$device" "$session_id" "$connector_id" "$crtc_id"
+
+for _attempt in $(seq 1 600); do
+	if unit_output | grep -Fxq 'master_reopen_restart=pass'; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.1
+done
+
+output=$(unit_output)
+for required in \
+	'master_reopen_no_master=pass' \
+	'master_reopen_foreign_content=pass' \
+	'master_reopen_kernel_stream_invalidated=pass' \
+	'master_reopen_queued_buffer_drain=pass' \
+	'master_reopen_old_pool_cleanup=pass' \
+	'master_reopen_same_grant=pass' \
+	'master_reopen_replacement_capture=pass' \
+	'master_reopen_restart=pass' \
+	'holder_drop_releases_grant=pass'; do
+	if ! grep -Fxq "$required" <<<"$output"; then
+		printf '%s\n' "$output" >&2
+		exit 1
+	fi
+done
+if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
+	printf '%s\n' "$output" >&2
+	printf 'login session %s became inactive\n' "$session_id" >&2
+	exit 1
+fi
+
+trap - EXIT INT TERM
+printf '%s\n' "$output"

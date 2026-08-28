@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -ne 0; then
+	printf 'usage: %s\n' "$0" >&2
+	exit 2
+fi
+
+display_config=org.gnome.Mutter.DisplayConfig
+display_config_path=/org/gnome/Mutter/DisplayConfig
+properties=org.freedesktop.DBus.Properties
+
+if ! command -v gdbus >/dev/null; then
+	printf '%s\n' 'required command is unavailable: gdbus' >&2
+	exit 1
+fi
+
+read_power_mode() {
+	local mode reply
+
+	if ! reply=$(gdbus call --session --timeout 5 \
+		--dest "$display_config" \
+		--object-path "$display_config_path" \
+		--method "$properties.Get" \
+		"$display_config" PowerSaveMode); then
+		printf '%s\n' 'could not read Mutter display power state' >&2
+		return 1
+	fi
+
+	mode=${reply#*<}
+	mode=${mode%%>*}
+	case "$mode" in
+		-1 | 0 | 1 | 2 | 3)
+			printf '%s\n' "$mode"
+			;;
+		*)
+			printf 'unexpected Mutter PowerSaveMode reply: %s\n' "$reply" >&2
+			return 1
+			;;
+	esac
+}
+
+initial_mode=$(read_power_mode)
+if test "$initial_mode" = 0; then
+	printf '%s\n' 'mutter_display_power=already-on'
+	exit 0
+fi
+
+if ! gdbus call --session --timeout 5 \
+	--dest "$display_config" \
+	--object-path "$display_config_path" \
+	--method "$properties.Set" \
+	"$display_config" PowerSaveMode '<0>' >/dev/null; then
+	printf 'could not wake Mutter from display power mode %s\n' "$initial_mode" >&2
+	exit 1
+fi
+
+current_mode=$(read_power_mode)
+if test "$current_mode" != 0; then
+	printf 'Mutter remained in display power mode %s after wake request\n' \
+		"$current_mode" >&2
+	exit 1
+fi
+
+printf 'mutter_display_power=woke-from-%s\n' "$initial_mode"

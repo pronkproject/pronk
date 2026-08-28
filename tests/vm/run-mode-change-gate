@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -lt 5 || test "$#" -gt 7; then
+	printf 'usage: %s BINARY DEVICE SESSION CONNECTOR-ID CRTC-ID [LOCAL-CONNECTOR [CAST-CONNECTOR]]\n' "$0" >&2
+	exit 2
+fi
+
+binary=$1
+device=$2
+session_id=$3
+connector_id=$4
+crtc_id=$5
+local_connector=${6:-Virtual-1}
+cast_connector=${7:-Virtual-2}
+local_mode=${PRONK_VM_LOCAL_MODE:-1280x800@74.994}
+unit="pronk-mode-change-$PPID-$$"
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+unit_output() {
+	journalctl --user -u "$unit.service" --no-pager -o cat
+}
+
+stop_unit() {
+	systemctl --user kill --kill-whom=main --signal=SIGTERM \
+		"$unit.service" 2>/dev/null || true
+}
+
+fail_with_log() {
+	unit_output >&2 || true
+	exit 1
+}
+
+trap stop_unit EXIT INT TERM
+
+"$gate_directory/ensure-mutter-display-on"
+
+systemd-run --user --unit="$unit" --collect --property=Type=exec \
+	--setenv=PRONK_VM_MODE_CHANGE_GATE=signal -- \
+	"$binary" "$device" "$session_id" "$connector_id" "$crtc_id"
+
+marker=
+for _attempt in $(seq 1 200); do
+	marker=$(unit_output | sed -n 's/^\(mode_change_trigger_ready=.*\)$/\1/p' | tail -n 1)
+	if test -n "$marker"; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.1
+done
+if test -z "$marker"; then
+	fail_with_log
+fi
+
+old_mode=${marker#mode_change_trigger_ready=}
+old_mode=${old_mode%@generation-*}
+case "$old_mode" in
+	1920x1080)
+		replacement_mode=3840x2160@60.000
+		;;
+	3840x2160)
+		replacement_mode=1920x1080@60.000
+		;;
+	*)
+		printf 'unsupported old CastKMS VM mode: %s\n' "$old_mode" >&2
+		fail_with_log
+		;;
+esac
+
+gdctl set \
+	--logical-monitor --monitor "$local_connector" --mode "$local_mode" \
+		--primary --scale 1 --x 0 --y 0 \
+	--logical-monitor --monitor "$cast_connector" --mode "$replacement_mode" \
+		--scale 1 --right-of "$local_connector"
+
+replacement_size=${replacement_mode%@*}
+mode_committed=
+for _attempt in $(seq 1 100); do
+	if modetest -a -M castkms -p 2>/dev/null | awk \
+			-v crtc="$crtc_id" -v size="($replacement_size)" '
+		$1 == crtc && $4 == size { found = 1 }
+		END { exit !found }
+	'; then
+		mode_committed=1
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.05
+done
+if test -z "$mode_committed"; then
+	printf 'Mutter did not commit CastKMS mode %s on CRTC %s\n' \
+		"$replacement_size" "$crtc_id" >&2
+	fail_with_log
+fi
+systemctl --user kill --kill-whom=main --signal=SIGUSR1 "$unit.service"
+
+for _attempt in $(seq 1 600); do
+	if unit_output | grep -Fxq 'holder_drop_releases_grant=pass'; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.1
+done
+
+output=$(unit_output)
+for required in \
+	'synchronous_estale_detection=pass' \
+	'mode_change_old_pool_cleanup=pass' \
+	'mode_change_same_grant=pass' \
+	'mode_change_replacement_capture=pass' \
+	'mode_change_restart=pass' \
+	'holder_drop_releases_grant=pass'; do
+	if ! grep -Fxq "$required" <<<"$output"; then
+		printf '%s\n' "$output" >&2
+		exit 1
+	fi
+done
+
+trap - EXIT INT TERM
+printf '%s\n' "$output"

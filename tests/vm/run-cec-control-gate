@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+mode=${PRONK_VM_CEC_GATE:-}
+case "$mode" in
+	mock)
+		if test "$#" -ne 0; then
+			printf 'usage: PRONK_VM_CEC_GATE=mock %s\n' "$0" >&2
+			exit 2
+		fi
+		device=mock:living-room
+		backend_socket=pronk-backend-mock.socket
+		default_first_cast_mode=1280x720@60.000
+		default_cast_primary=true
+		;;
+	real-device)
+		if test "$#" -ne 1; then
+			printf 'usage: PRONK_VM_CEC_GATE=real-device %s chromiacast:DEVICE-ID\n' "$0" >&2
+			exit 2
+		fi
+		device=$1
+		case "$device" in
+			chromiacast:*) ;;
+			*)
+				printf 'the real CEC gate requires an exact chromiacast Device ID, got: %s\n' \
+					"$device" >&2
+				exit 2
+				;;
+		esac
+		backend_socket=pronk-chromiacast.socket
+		default_first_cast_mode=1280x720@60.000
+		default_cast_primary=false
+		;;
+	*)
+		printf '%s\n' 'PRONK_VM_CEC_GATE must be mock or real-device' >&2
+		exit 2
+		;;
+esac
+
+if ! systemd-detect-virt --vm --quiet; then
+	printf '%s\n' 'the CEC live gate must run inside a virtual machine' >&2
+	exit 1
+fi
+
+pronkctl=${PRONKCTL:-/usr/bin/pronkctl}
+cec_ctl=${CEC_CTL:-/usr/bin/cec-ctl}
+cec_device=${PRONK_VM_CEC_DEVICE:-/dev/cec0}
+gdctl=${GDCTL:-/usr/bin/gdctl}
+local_connector=${PRONK_VM_LOCAL_CONNECTOR:-Virtual-1}
+local_mode=${PRONK_VM_LOCAL_MODE:-1280x800@74.994}
+first_cast_mode=${PRONK_VM_CEC_FIRST_MODE:-$default_first_cast_mode}
+second_cast_mode=${PRONK_VM_CEC_SECOND_MODE:-1920x1080@60.000}
+cast_primary=${PRONK_VM_CEC_CAST_PRIMARY:-$default_cast_primary}
+core_unit=pronk.service
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+display_id=
+cast_connector=
+initial_cursor=
+gate_started=false
+
+require_command() {
+	command -v "$1" >/dev/null || {
+		printf 'required command is unavailable: %s\n' "$1" >&2
+		exit 1
+	}
+}
+
+journal_cursor() {
+	journalctl --user --no-pager -n 0 --show-cursor |
+		sed -n 's/^-- cursor: //p' |
+		tail -n 1
+}
+
+snapshot() {
+	"$pronkctl" list-displays
+}
+
+fail_with_diagnostics() {
+	local status=$?
+	trap - ERR
+	printf '%s\n' '--- pronkctl list-devices ---' >&2
+	"$pronkctl" list-devices >&2 || true
+	printf '%s\n' '--- pronkctl list-displays ---' >&2
+	snapshot >&2 || true
+	printf '%s\n' '--- CEC adapter ---' >&2
+	"$cec_ctl" -d "$cec_device" -L -x >&2 || true
+	printf '%s\n' '--- Pronk CEC services ---' >&2
+	if test -n "$initial_cursor"; then
+		journalctl --user --no-pager -o short-monotonic \
+			-u "$core_unit" -u 'pronk-backend-mock@*.service' \
+			-u 'pronk-chromiacast@*.service' \
+			--after-cursor="$initial_cursor" >&2 || true
+	else
+		journalctl --user --no-pager -o short-monotonic -n 300 \
+			-u "$core_unit" -u 'pronk-backend-mock@*.service' \
+			-u 'pronk-chromiacast@*.service' >&2 || true
+	fi
+	printf '%s\n' '--- CastKMS kernel messages ---' >&2
+	sudo journalctl -k -b --no-pager -o short-monotonic -n 80 >&2 || true
+	exit "$status"
+}
+
+cleanup() {
+	local status=$?
+	trap - EXIT ERR INT TERM
+	if test -n "$display_id"; then
+		timeout 25 "$pronkctl" remove-display "$display_id" >/dev/null 2>&1 || true
+	fi
+	if test "$gate_started" = true; then
+		systemctl --user stop "$core_unit" "$backend_socket" >/dev/null 2>&1 || true
+		systemctl --user reset-failed "$core_unit" \
+			'pronk-backend-mock@*.service' \
+			'pronk-chromiacast@*.service' >/dev/null 2>&1 || true
+	fi
+	exit "$status"
+}
+
+wait_for_device() {
+	local _attempt inventory
+	for _attempt in $(seq 1 120); do
+		inventory=$("$pronkctl" list-devices)
+		if grep -Fq "  ID: $device" <<<"$inventory" &&
+		   grep -Fq '  Status: Available' <<<"$inventory"; then
+			return 0
+		fi
+		sleep 0.25
+	done
+	printf 'Device did not become available: %s\n' "$device" >&2
+	return 1
+}
+
+assert_cec_identity() {
+	local info
+	info=$("$cec_ctl" -d "$cec_device" -L -x)
+	printf '%s\n' "$info"
+	grep -Fq 'Physical Address           : 1.0.0.0' <<<"$info"
+	grep -Fq 'Logical Address Mask       : 0x0010' <<<"$info"
+	grep -Fq 'Logical Address          : 4 (Playback Device 1)' <<<"$info"
+	grep -Eq "DRM Connector Info +: card [0-9]+, connector ${connector_id}$" <<<"$info"
+}
+
+configure_cec_identity() {
+	local _attempt output=
+	for _attempt in $(seq 1 80); do
+		if output=$(timeout 2 "$cec_ctl" -d "$cec_device" \
+			--playback --osd-name Pronk 2>&1); then
+			return 0
+		fi
+		sleep 0.25
+	done
+	printf '%s\n' 'CEC transport did not become available after authorization' >&2
+	printf '%s\n' "$output" >&2
+	return 1
+}
+
+transmit_volume_pair() {
+	local direction output ok_count
+	direction=$1
+	output=$(timeout 8 "$cec_ctl" -d "$cec_device" --to 5 --verbose --show-raw \
+		--user-control-pressed "ui-cmd=volume-$direction" \
+		--user-control-released)
+	printf '%s\n' "$output"
+	ok_count=$(grep -Fc 'Tx, OK' <<<"$output")
+	if test "$ok_count" -ne 2; then
+		printf 'expected two successful CEC completions, got %s\n' "$ok_count" >&2
+		return 1
+	fi
+	if grep -Eq 'Not Acknowledged|Tx, Error|Timed Out' <<<"$output"; then
+		printf '%s\n' 'CEC control reported a terminal transmit failure' >&2
+		return 1
+	fi
+}
+
+disable_cast_route() {
+	local _attempt output
+	"$gdctl" set \
+		--logical-monitor --monitor "$local_connector" --mode "$local_mode" \
+			--primary --scale 1 --x 0 --y 0
+	for _attempt in $(seq 1 80); do
+		output=$(snapshot)
+		if grep -Fq 'Route: Disabled' <<<"$output"; then
+			return 0
+		fi
+		sleep 0.25
+	done
+	printf '%s\n' 'CastKMS route did not become disabled' >&2
+	return 1
+}
+
+apply_cast_mode() {
+	local mode=$1 expected_size expected_refresh _attempt output
+	local -a topology
+	expected_size=${mode%@*}
+	expected_refresh=${mode#*@}
+	if test "$cast_primary" = true; then
+		# Mutter may restore an attached monitor into a cached logical layout
+		# without committing a DRM route. Changing the primary monitor makes
+		# this request observably different and forces the mock fixture through
+		# the real CastKMS modeset path.
+		topology=(
+			--logical-monitor --monitor "$cast_connector" --mode "$mode"
+				--primary --scale 1 --x 0 --y 0
+			--logical-monitor --monitor "$local_connector" --mode "$local_mode"
+				--scale 1 --right-of "$cast_connector"
+		)
+	else
+		topology=(
+			--logical-monitor --monitor "$local_connector" --mode "$local_mode"
+				--primary --scale 1 --x 0 --y 0
+			--logical-monitor --monitor "$cast_connector" --mode "$mode"
+				--scale 1 --right-of "$local_connector"
+		)
+	fi
+	"$gdctl" set "${topology[@]}"
+	for _attempt in $(seq 1 80); do
+		output=$(snapshot)
+		if grep -Fq "Route: Active ($expected_size @ $expected_refresh Hz)" <<<"$output"; then
+			return 0
+		fi
+		sleep 0.25
+	done
+	printf 'CastKMS route did not reach requested mode %s\n' "$mode" >&2
+	return 1
+}
+
+trap fail_with_diagnostics ERR
+trap cleanup EXIT INT TERM
+
+for command in "$pronkctl" "$cec_ctl" "$gdctl" busctl journalctl systemctl \
+	systemd-detect-virt timeout; do
+	require_command "$command"
+done
+case "$cast_primary" in
+	true | false) ;;
+	*)
+		printf 'PRONK_VM_CEC_CAST_PRIMARY must be true or false, got: %s\n' \
+			"$cast_primary" >&2
+		exit 2
+		;;
+esac
+if test ! -e "$cec_device"; then
+	printf 'CEC adapter does not exist: %s\n' "$cec_device" >&2
+	exit 1
+fi
+if test ! -r /sys/module/castkms/parameters/enable_cec ||
+	   test "$(< /sys/module/castkms/parameters/enable_cec)" != Y; then
+	printf '%s\n' 'CastKMS is not loaded with enable_cec=1' >&2
+	exit 1
+fi
+if ! systemctl --user is-active --quiet graphical-session.target; then
+	printf '%s\n' 'the VM has no active graphical user session' >&2
+	exit 1
+fi
+if systemctl --user is-active --quiet "$core_unit" ||
+	   systemctl --user is-active --quiet "$backend_socket"; then
+	printf '%s\n' 'refusing to reuse an active Pronk core or selected backend socket' >&2
+	exit 1
+fi
+if busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
+	org.freedesktop.DBus NameHasOwner s io.github.pronkproject.Pronk1 |
+	grep -Fq true; then
+	printf '%s\n' 'refusing to reuse an existing io.github.pronkproject.Pronk1 owner' >&2
+	exit 1
+fi
+
+"$gate_directory/ensure-mutter-display-on"
+
+initial_cursor=$(journal_cursor)
+systemctl --user start "$backend_socket"
+gate_started=true
+wait_for_device
+
+add_output=$("$pronkctl" add-display --device "$device" --no-audio)
+printf '%s\n' "$add_output"
+display_id=$(sed -n 's/^Added cast display //p' <<<"$add_output" | tail -n 1)
+if test -z "$display_id"; then
+	printf '%s\n' 'pronkctl did not report the added display ID' >&2
+	false
+fi
+display_snapshot=$(snapshot)
+printf '%s\n' "$display_snapshot"
+cast_connector=$(sed -n 's/^  Output: \([^ ]*\) .*/\1/p' <<<"$display_snapshot")
+connector_id=$(sed -n 's/.*(connector \([0-9][0-9]*\), slot.*/\1/p' <<<"$display_snapshot")
+if test -z "$cast_connector" || test -z "$connector_id"; then
+	printf '%s\n' 'could not resolve the attached CastKMS connector identity' >&2
+	false
+fi
+
+configure_cec_identity
+assert_cec_identity
+transmit_volume_pair up
+transmit_volume_pair down
+printf '%s\n' 'cec_kernel_to_device_control=pass'
+
+disable_cast_route
+assert_cec_identity
+apply_cast_mode "$first_cast_mode"
+assert_cec_identity
+transmit_volume_pair up
+transmit_volume_pair down
+disable_cast_route
+assert_cec_identity
+apply_cast_mode "$second_cast_mode"
+assert_cec_identity
+transmit_volume_pair up
+transmit_volume_pair down
+printf '%s\n' 'cec_control_survives_mode_changes=pass'
+
+"$pronkctl" remove-display "$display_id"
+display_id=
+detached_info=$("$cec_ctl" -d "$cec_device" -L -x)
+printf '%s\n' "$detached_info"
+grep -Fq 'Physical Address           : f.f.f.f' <<<"$detached_info"
+grep -Fq 'Logical Address Mask       : 0x0000' <<<"$detached_info"
+grep -Fq 'Logical Address          : Not Allocated' <<<"$detached_info"
+printf '%s\n' 'cec_detach_lifetime=pass'
+if test "$mode" = mock; then
+	printf '%s\n' 'cec_mock_backend_completion=pass'
+else
+	printf '%s\n' 'cec_chromiacast_completion=pass'
+fi

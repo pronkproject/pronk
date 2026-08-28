@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -ne 6; then
+	printf 'usage: %s BINARY CONSUMER DEVICE SESSION CONNECTOR-ID CRTC-ID\n' "$0" >&2
+	exit 2
+fi
+
+binary=$1
+consumer=$2
+device=$3
+session_id=$4
+connector_id=$5
+crtc_id=$6
+unit="pronk-pipewire-source-$PPID-$$"
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+temporary_directory=$(mktemp -d --tmpdir pronk-pipewire-gate.XXXXXX)
+consumer_output="$temporary_directory/consumer.log"
+
+unit_output() {
+	journalctl --user -u "$unit.service" --no-pager -o cat
+}
+
+stop_unit() {
+	systemctl --user kill --kill-whom=main --signal=SIGTERM \
+		"$unit.service" 2>/dev/null || true
+}
+
+cleanup() {
+	stop_unit
+	rm -f -- "$consumer_output"
+	rmdir -- "$temporary_directory" 2>/dev/null || true
+}
+
+fail_with_logs() {
+	unit_output >&2 || true
+	if test -f "$consumer_output"; then
+		printf '%s\n' '--- PipeWire consumer ---' >&2
+		cat "$consumer_output" >&2
+	fi
+	exit 1
+}
+
+trap cleanup EXIT INT TERM
+
+if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
+	printf 'login session %s is not active\n' "$session_id" >&2
+	exit 1
+fi
+
+"$gate_directory/ensure-mutter-display-on"
+
+systemd-run --user --unit="$unit" --collect --property=Type=exec \
+	--setenv=PRONK_VM_PIPEWIRE_GATE=classified-core -- \
+	"$binary" "$device" "$session_id" "$connector_id" "$crtc_id"
+
+marker=
+for _attempt in $(seq 1 200); do
+	marker=$(unit_output | sed -n 's/^\(pipewire_source_ready=.*\)$/\1/p' | tail -n 1)
+	if test -n "$marker"; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_logs
+	fi
+	sleep 0.1
+done
+if test -z "$marker"; then
+	fail_with_logs
+fi
+
+identity=${marker#pipewire_source_ready=}
+node_name=${identity%%:*}
+identity_numbers=${identity#*:}
+object_id=${identity_numbers%%:*}
+object_serial=${identity_numbers#*:}
+case "$node_name:$object_id:$object_serial" in
+	*:*[!0-9]*:*|*:*:*[!0-9]*|:*:*|*::*)
+		printf 'invalid PipeWire source identity: %s\n' "$identity" >&2
+		fail_with_logs
+		;;
+esac
+
+if ! "$consumer" --node-name "$node_name" --frames 30 --timeout 15 \
+		>"$consumer_output" 2>&1; then
+	fail_with_logs
+fi
+
+for _attempt in $(seq 1 200); do
+	if unit_output | grep -Fxq 'holder_drop_releases_grant=pass'; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		break
+	fi
+	sleep 0.1
+done
+
+output=$(unit_output)
+consumer_log=$(cat "$consumer_output")
+for required in \
+	'pw_connected=1' \
+	'frames_received=30' \
+	'header_metadata=1' \
+	'damage_metadata=1' \
+	'sync_timeline_metadata=1' \
+	'dma_buf_layout=1' \
+	'pw_pronk_consumer=pass'; do
+	if ! grep -Fxq "$required" <<<"$consumer_log"; then
+		fail_with_logs
+	fi
+done
+for required in \
+	'pipewire_producer_remote=classified-core' \
+	'pipewire_frames_produced=30' \
+	'pipewire_transport=sync-timeline' \
+	'pipewire_caller_owned_pool=pass' \
+	'pipewire_exact_node_identity=pass' \
+	'pipewire_dma_buf_metadata=pass' \
+	'pipewire_downstream_release=pass' \
+	'pipewire_video_source=pass' \
+	'holder_drop_releases_grant=pass'; do
+	if ! grep -Fxq "$required" <<<"$output"; then
+		fail_with_logs
+	fi
+done
+if ! grep -Fxq "pipewire_node_name=$node_name" <<<"$output" ||
+	   ! grep -Fxq "pipewire_object_id=$object_id" <<<"$output" ||
+	   ! grep -Fxq "pipewire_object_serial=$object_serial" <<<"$output"; then
+	fail_with_logs
+fi
+if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
+	printf 'login session %s became inactive\n' "$session_id" >&2
+	fail_with_logs
+fi
+
+trap - EXIT INT TERM
+rm -f -- "$consumer_output"
+rmdir -- "$temporary_directory"
+printf '%s\n' "$consumer_log"
+printf '%s\n' "$output"

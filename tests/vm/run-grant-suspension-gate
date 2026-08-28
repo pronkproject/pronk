@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -lt 5 || test "$#" -gt 7; then
+	printf 'usage: %s BINARY DEVICE SESSION CONNECTOR-ID CRTC-ID [LOCAL-CONNECTOR [CAST-CONNECTOR]]\n' "$0" >&2
+	exit 2
+fi
+
+binary=$1
+device=$2
+session_id=$3
+connector_id=$4
+crtc_id=$5
+local_connector=${6:-Virtual-1}
+cast_connector=${7:-Virtual-2}
+local_mode=${PRONK_VM_LOCAL_MODE:-1280x800@74.994}
+unit="pronk-grant-suspension-$PPID-$$"
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+unit_output() {
+	journalctl --user -u "$unit.service" --no-pager -o cat
+}
+
+stop_unit() {
+	systemctl --user kill --kill-whom=main --signal=SIGTERM \
+		"$unit.service" 2>/dev/null || true
+}
+
+fail_with_log() {
+	unit_output >&2 || true
+	exit 1
+}
+
+trap stop_unit EXIT INT TERM
+
+"$gate_directory/ensure-mutter-display-on"
+
+systemd-run --user --unit="$unit" --collect --property=Type=exec \
+	--setenv=PRONK_VM_GRANT_SUSPENSION_GATE=output-disable -- \
+	"$binary" "$device" "$session_id" "$connector_id" "$crtc_id"
+
+marker=
+for _attempt in $(seq 1 200); do
+	marker=$(unit_output | sed -n 's/^\(grant_suspension_trigger_ready=.*\)$/\1/p' | tail -n 1)
+	if test -n "$marker"; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.1
+done
+if test -z "$marker"; then
+	fail_with_log
+fi
+
+old_mode=${marker#grant_suspension_trigger_ready=}
+old_size=${old_mode%@generation-*}
+case "$old_size" in
+	[0-9]*x[0-9]*) ;;
+	*)
+		printf 'invalid old CastKMS VM mode: %s\n' "$old_size" >&2
+		fail_with_log
+		;;
+esac
+
+gdctl set \
+	--logical-monitor --monitor "$local_connector" --mode "$local_mode" \
+		--primary --scale 1 --x 0 --y 0
+
+crtc_disabled=
+for _attempt in $(seq 1 100); do
+	if modetest -a -M castkms -p 2>/dev/null | awk \
+		-v crtc="$crtc_id" '$1 == crtc && $4 == "(0x0)" { found = 1 } END { exit !found }'; then
+		crtc_disabled=1
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.05
+done
+if test -z "$crtc_disabled"; then
+	printf 'Mutter did not disable CastKMS CRTC %s\n' "$crtc_id" >&2
+	fail_with_log
+fi
+
+resume_marker=
+for _attempt in $(seq 1 200); do
+	resume_marker=$(unit_output | sed -n 's/^\(grant_resume_trigger_ready=.*\)$/\1/p' | tail -n 1)
+	if test -n "$resume_marker"; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.1
+done
+if test -z "$resume_marker"; then
+	fail_with_log
+fi
+
+gdctl set \
+	--logical-monitor --monitor "$local_connector" --mode "$local_mode" \
+		--primary --scale 1 --x 0 --y 0 \
+	--logical-monitor --monitor "$cast_connector" --mode "$old_size@60.000" \
+		--scale 1 --right-of "$local_connector"
+
+crtc_reenabled=
+for _attempt in $(seq 1 100); do
+	if modetest -a -M castkms -p 2>/dev/null | awk \
+		-v crtc="$crtc_id" -v size="($old_size)" \
+		'$1 == crtc && $4 == size { found = 1 } END { exit !found }'; then
+		crtc_reenabled=1
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.05
+done
+if test -z "$crtc_reenabled"; then
+	printf 'Mutter did not restore CastKMS mode %s on CRTC %s\n' \
+		"$old_size" "$crtc_id" >&2
+	fail_with_log
+fi
+
+for _attempt in $(seq 1 600); do
+	if unit_output | grep -Fxq 'grant_suspension_restart=pass'; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_log
+	fi
+	sleep 0.1
+done
+
+output=$(unit_output)
+for required in \
+	'grant_state_event_semantics=pass' \
+	'grant_suspension_old_pool_cleanup=pass' \
+	'grant_suspension_same_grant=pass' \
+	'grant_suspension_replacement_capture=pass' \
+	'grant_suspension_restart=pass' \
+	'holder_drop_releases_grant=pass'; do
+	if ! grep -Fxq "$required" <<<"$output"; then
+		printf '%s\n' "$output" >&2
+		exit 1
+	fi
+done
+
+trap - EXIT INT TERM
+printf '%s\n' "$output"

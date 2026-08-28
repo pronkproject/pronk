@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -ne 1; then
+	printf 'usage: PRONK_VM_WHOLE_DAEMON_GATE=real-device [PRONK_VM_AUDIO=true] %s BACKEND-ID:DEVICE-ID\n' "$0" >&2
+	exit 2
+fi
+if test "${PRONK_VM_WHOLE_DAEMON_GATE:-}" != real-device; then
+	printf '%s\n' 'refusing to contact a real Device without PRONK_VM_WHOLE_DAEMON_GATE=real-device' >&2
+	exit 2
+fi
+if ! systemd-detect-virt --vm --quiet; then
+	printf '%s\n' 'the whole-daemon live gate must run inside a virtual machine' >&2
+	exit 1
+fi
+
+device=$1
+pronkctl=${PRONKCTL:-/usr/bin/pronkctl}
+pw_cli=${PW_CLI:-/usr/bin/pw-cli}
+gdctl=${GDCTL:-/usr/bin/gdctl}
+local_connector=${PRONK_VM_LOCAL_CONNECTOR:-Virtual-1}
+local_mode=${PRONK_VM_LOCAL_MODE:-1280x800@74.994}
+cast_mode=${PRONK_VM_CAST_MODE:-1920x1080@60.000}
+route_prime_mode=${PRONK_VM_ROUTE_PRIME_MODE:-1280x720@60.000}
+cast_primary=${PRONK_VM_CAST_PRIMARY:-false}
+visible_hold_seconds=${PRONK_VM_VISIBLE_HOLD_SECONDS:-0}
+audio=${PRONK_VM_AUDIO:-false}
+core_unit=pronk.service
+socket_unit=pronk-chromiacast.socket
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+display_id=
+cast_connector=
+initial_cursor=
+gate_started=false
+
+case "$device" in
+	chromiacast:*) ;;
+	*)
+		printf 'the live media gate requires an exact chromiacast Device ID, got: %s\n' "$device" >&2
+		exit 2
+		;;
+esac
+case "$cast_primary" in
+	true|false) ;;
+	*)
+		printf 'PRONK_VM_CAST_PRIMARY must be true or false, got: %s\n' \
+			"$cast_primary" >&2
+		exit 2
+		;;
+esac
+case "$audio" in
+	true|false) ;;
+	*)
+		printf 'PRONK_VM_AUDIO must be true or false, got: %s\n' "$audio" >&2
+		exit 2
+		;;
+esac
+case "$visible_hold_seconds" in
+	''|*[!0-9]*)
+		printf 'PRONK_VM_VISIBLE_HOLD_SECONDS must be a nonnegative integer, got: %s\n' \
+			"$visible_hold_seconds" >&2
+		exit 2
+		;;
+esac
+if test "$visible_hold_seconds" -gt 900; then
+	printf '%s\n' 'PRONK_VM_VISIBLE_HOLD_SECONDS may not exceed 900' >&2
+	exit 2
+fi
+
+require_command() {
+	command -v "$1" >/dev/null || {
+		printf 'required command is unavailable: %s\n' "$1" >&2
+		exit 1
+	}
+}
+
+journal_cursor() {
+	journalctl --user --no-pager -n 0 --show-cursor |
+		sed -n 's/^-- cursor: //p' |
+		tail -n 1
+}
+
+core_log_since() {
+	journalctl --user --no-pager -o cat -u "$core_unit" \
+		--after-cursor="$1" 2>/dev/null || true
+}
+
+backend_logs() {
+	local cursor=${1:-}
+	if test -n "$cursor"; then
+		journalctl --user --no-pager -o short-monotonic \
+			-u 'pronk-chromiacast@*.service' \
+			--after-cursor="$cursor" 2>/dev/null || true
+	else
+		journalctl --user --no-pager -o short-monotonic \
+			-u 'pronk-chromiacast@*.service' -n 300 2>/dev/null || true
+	fi
+}
+
+snapshot() {
+	"$pronkctl" list-displays
+}
+
+assert_attachment_retained() {
+	local output
+	output=$(snapshot) || return 1
+	grep -Fq "  ID: $display_id" <<<"$output" &&
+		grep -Fq '  Attachment: Attached' <<<"$output"
+}
+
+assert_active_route() {
+	local output
+	output=$(snapshot) || return 1
+	grep -Fq "  ID: $display_id" <<<"$output" &&
+		grep -Fq '  Attachment: Attached' <<<"$output" &&
+		grep -Fq '  Route: Active ' <<<"$output"
+}
+
+has_media_state() {
+	test "$#" -eq 2
+	test "$(current_media_state)" = "$2"
+}
+
+has_recovery_state() {
+	local cursor=$1
+	core_log_since "$cursor" |
+		grep -F 'event="cast_display_state"' |
+		grep -F "display_id=$display_id" |
+		grep -Eq 'media=(Failed|Reconnecting|StartingCapture|StartingMedia)'
+}
+
+latest_media_state() {
+	test "$#" -eq 1
+	current_media_state
+}
+
+current_media_state() {
+	snapshot | awk -v display_id="$display_id" '
+		$1 == "ID:" { selected = ($2 == display_id) }
+		selected && $1 == "Media:" { print $2; exit }
+	'
+}
+
+wait_for_active_route() {
+	local _attempt
+	for _attempt in $(seq 1 240); do
+		if assert_active_route; then
+			return 0
+		fi
+		sleep 0.25
+	done
+	return 1
+}
+
+display_connector() {
+	snapshot | awk -v display_id="$display_id" '
+		$1 == "ID:" { selected = ($2 == display_id) }
+		selected && $1 == "Output:" { print $2; exit }
+	'
+}
+
+configure_compositor_route() {
+	local _attempt
+	cast_connector=$(display_connector)
+	if test -z "$cast_connector"; then
+		printf '%s\n' 'the added display has no CastKMS connector name' >&2
+		return 1
+	fi
+	for _attempt in $(seq 1 120); do
+		if "$gdctl" show 2>/dev/null |
+			grep -Fq "Monitor $cast_connector "; then
+			break
+		fi
+		sleep 0.25
+	done
+	if ! "$gdctl" show 2>/dev/null |
+		grep -Fq "Monitor $cast_connector "; then
+		printf 'Mutter did not enumerate CastKMS monitor %s\n' \
+			"$cast_connector" >&2
+		return 1
+	fi
+	apply_compositor_route "$cast_mode"
+	# Mutter may restore a saved logical layout without committing it when the
+	# connector was detached underneath that layout. Pronk correctly continues
+	# to report Route: Disabled because the kernel CRTC is still inactive. Give
+	# the ordinary route a short chance, then force a distinct mode and restore
+	# the requested mode so the live gate observes a real modeset.
+	for _attempt in $(seq 1 20); do
+		if assert_active_route; then
+			return 0
+		fi
+		sleep 0.25
+	done
+	if test "$route_prime_mode" = "$cast_mode"; then
+		printf 'Mutter cached %s without activating it and no distinct prime mode was configured\n' \
+			"$cast_mode" >&2
+		return 1
+	fi
+	printf 'priming cached compositor route through %s before restoring %s\n' \
+		"$route_prime_mode" "$cast_mode"
+	apply_compositor_route "$route_prime_mode"
+	apply_compositor_route "$cast_mode"
+}
+
+apply_compositor_route() {
+	local mode=$1
+	if test "$cast_primary" = true; then
+		"$gdctl" set \
+			--logical-monitor --monitor "$local_connector" --mode "$local_mode" \
+				--scale 1 --x 0 --y 0 \
+			--logical-monitor --monitor "$cast_connector" --mode "$mode" \
+				--primary --scale 1 --right-of "$local_connector"
+	else
+		"$gdctl" set \
+			--logical-monitor --monitor "$local_connector" --mode "$local_mode" \
+				--primary --scale 1 --x 0 --y 0 \
+			--logical-monitor --monitor "$cast_connector" --mode "$mode" \
+				--scale 1 --right-of "$local_connector"
+	fi
+}
+
+wait_for_initial_running() {
+	local cursor=$1
+	local _attempt
+	for _attempt in $(seq 1 360); do
+		assert_attachment_retained || return 1
+		if has_media_state "$cursor" Running; then
+			return 0
+		fi
+		if ! systemctl --user is-active --quiet "$core_unit"; then
+			return 1
+		fi
+		sleep 0.25
+	done
+	return 1
+}
+
+assert_initial_running_stays_stable() {
+	local cursor=$1
+	local _attempt
+	# The sender's post-acknowledgement watchdog expires after five seconds.
+	# Staying Running beyond it proves that receiver feedback continued after
+	# the frame that admitted StartMedia.
+	for _attempt in $(seq 1 24); do
+		assert_attachment_retained || return 1
+		test "$(latest_media_state "$cursor")" = Running || return 1
+		systemctl --user is-active --quiet "$core_unit" || return 1
+		sleep 0.25
+	done
+}
+
+wait_for_recovery() {
+	local cursor=$1
+	local _attempt saw_transition=false
+	for _attempt in $(seq 1 480); do
+		assert_attachment_retained || return 1
+		if test "$saw_transition" = false && has_recovery_state "$cursor"; then
+			saw_transition=true
+		fi
+		if test "$saw_transition" = true &&
+		   test "$(latest_media_state "$cursor")" = Running; then
+			return 0
+		fi
+		if ! systemctl --user is-active --quiet "$core_unit"; then
+			return 1
+		fi
+		sleep 0.25
+	done
+	return 1
+}
+
+wait_for_policy() {
+	local _attempt
+	for _attempt in $(seq 1 240); do
+		if timeout 1 "$pw_cli" -r pipewire-0-pronk-core ls Metadata 2>/dev/null |
+			grep -Fq 'metadata.name = "pronk-policy-v1"'; then
+			return 0
+		fi
+		if ! systemctl --user is-active --quiet pipewire.service ||
+		   ! systemctl --user is-active --quiet wireplumber.service; then
+			sleep 0.25
+			continue
+		fi
+		sleep 0.25
+	done
+	return 1
+}
+
+active_backend_unit() {
+	systemctl --user list-units --no-legend --plain --state=running \
+		'pronk-chromiacast@*.service' |
+		awk 'NR == 1 { print $1 }'
+}
+
+wait_for_backend_replacement() {
+	local previous=$1
+	local _attempt replacement
+	for _attempt in $(seq 1 120); do
+		replacement=$(active_backend_unit)
+		if test -n "$replacement" && test "$replacement" != "$previous"; then
+			printf '%s\n' "$replacement"
+			return 0
+		fi
+		sleep 0.25
+	done
+	return 1
+}
+
+fail_with_diagnostics() {
+	local status=$?
+	trap - ERR
+	printf '%s\n' '--- pronkctl list-devices ---' >&2
+	"$pronkctl" list-devices >&2 || true
+	printf '%s\n' '--- pronkctl list-displays ---' >&2
+	snapshot >&2 || true
+	printf '%s\n' '--- pronk.service ---' >&2
+	if test -n "$initial_cursor"; then
+		core_log_since "$initial_cursor" >&2
+	else
+		journalctl --user --no-pager -o short-monotonic -u "$core_unit" >&2 || true
+	fi
+	printf '%s\n' '--- pronk-chromiacast instances ---' >&2
+	backend_logs "$initial_cursor" >&2
+	printf '%s\n' '--- pipewire and wireplumber ---' >&2
+	if test -n "$initial_cursor"; then
+		journalctl --user --no-pager -o short-monotonic \
+			-u pipewire.service -u wireplumber.service \
+			--after-cursor="$initial_cursor" >&2 || true
+	else
+		journalctl --user --no-pager -o short-monotonic \
+			-u pipewire.service -u wireplumber.service -n 300 >&2 || true
+	fi
+	printf '%s\n' '--- CastKMS kernel messages ---' >&2
+	sudo journalctl -k -b --no-pager -o short-monotonic -n 300 >&2 || true
+	exit "$status"
+}
+
+cleanup() {
+	local status=$?
+	trap - EXIT ERR INT TERM
+	if test -n "$display_id"; then
+		timeout 25 "$pronkctl" remove-display "$display_id" >/dev/null 2>&1 || true
+	fi
+	if test "$gate_started" = true; then
+		systemctl --user stop "$core_unit" >/dev/null 2>&1 || true
+		systemctl --user stop "$socket_unit" >/dev/null 2>&1 || true
+		systemctl --user reset-failed "$core_unit" \
+			'pronk-chromiacast@*.service' >/dev/null 2>&1 || true
+	fi
+	exit "$status"
+}
+
+trap fail_with_diagnostics ERR
+trap cleanup EXIT INT TERM
+
+for command in "$pronkctl" "$pw_cli" "$gdctl" journalctl systemctl systemd-detect-virt timeout; do
+	require_command "$command"
+done
+for path in \
+	/usr/bin/pronkd \
+	/usr/libexec/pronk/pronk-chromiacast \
+	/usr/lib/pronk/backends.d/chromiacast.toml; do
+	if test ! -e "$path"; then
+		printf 'production payload is not installed: %s\n' "$path" >&2
+		exit 1
+	fi
+done
+if test ! -d /sys/module/castkms; then
+	printf '%s\n' 'CastKMS is not loaded in the VM' >&2
+	exit 1
+fi
+if ! systemctl --user is-active --quiet graphical-session.target; then
+	printf '%s\n' 'the VM has no active graphical user session' >&2
+	exit 1
+fi
+if systemctl --user is-active --quiet "$core_unit" ||
+	   systemctl --user is-active --quiet "$socket_unit"; then
+	printf '%s\n' 'refusing to reuse an active Pronk core or Chromiacast socket' >&2
+	exit 1
+fi
+if busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
+	org.freedesktop.DBus NameHasOwner s io.github.pronkproject.Pronk1 |
+	grep -Fq true; then
+	printf '%s\n' 'refusing to reuse an existing io.github.pronkproject.Pronk1 owner' >&2
+	exit 1
+fi
+
+"$gate_directory/ensure-mutter-display-on"
+
+initial_cursor=$(journal_cursor)
+systemctl --user start pipewire.service wireplumber.service
+if ! wait_for_policy; then
+	printf '%s\n' 'the production WirePlumber policy marker did not appear' >&2
+	false
+fi
+systemctl --user start "$socket_unit"
+gate_started=true
+
+inventory=
+for _attempt in $(seq 1 120); do
+	inventory=$("$pronkctl" list-devices)
+	if grep -Fq "  ID: $device" <<<"$inventory" &&
+	   grep -Fq '  Status: Available' <<<"$inventory"; then
+		break
+	fi
+	sleep 0.25
+done
+if ! grep -Fq "  ID: $device" <<<"$inventory"; then
+	printf 'Device did not appear in inventory: %s\n' "$device" >&2
+	false
+fi
+
+add_arguments=(add-display --device "$device")
+if test "$audio" = false; then
+	add_arguments+=(--no-audio)
+fi
+add_output=$("$pronkctl" "${add_arguments[@]}")
+printf '%s\n' "$add_output"
+display_id=$(sed -n 's/^Added cast display //p' <<<"$add_output" | tail -n 1)
+if test -z "$display_id"; then
+	printf '%s\n' 'pronkctl did not report the added display ID' >&2
+	false
+fi
+if ! configure_compositor_route; then
+	printf '%s\n' 'could not activate the CastKMS output through Mutter' >&2
+	false
+fi
+if ! wait_for_active_route; then
+	printf '%s\n' 'the attached CastKMS output did not acquire an active compositor route' >&2
+	false
+fi
+if ! wait_for_initial_running "$initial_cursor"; then
+	printf '%s\n' 'the initial media generation did not reach Running' >&2
+	false
+fi
+if ! assert_initial_running_stays_stable "$initial_cursor"; then
+	printf '%s\n' 'the initial media generation did not remain Running beyond the receiver-feedback watchdog' >&2
+	false
+fi
+printf '%s\n' 'whole_daemon_initial_transport=pass'
+printf '%s\n' 'whole_daemon_initial_running_stable=pass'
+if test "$visible_hold_seconds" -gt 0; then
+	printf 'whole_daemon_visible_hold=begin seconds=%s\n' "$visible_hold_seconds"
+	sleep "$visible_hold_seconds"
+	printf '%s\n' 'whole_daemon_visible_hold=end'
+fi
+
+backend_before=$(active_backend_unit)
+if test -z "$backend_before"; then
+	printf '%s\n' 'no active pronk-chromiacast service instance was found' >&2
+	false
+fi
+backend_cursor=$(journal_cursor)
+systemctl --user kill --kill-whom=main --signal=SIGKILL "$backend_before"
+backend_after=$(wait_for_backend_replacement "$backend_before" || true)
+if test -z "$backend_after"; then
+	printf '%s\n' 'the backend was not replaced by a fresh socket-activated instance' >&2
+	false
+fi
+if ! wait_for_recovery "$backend_cursor"; then
+	printf '%s\n' 'media did not recover after the backend process was killed' >&2
+	false
+fi
+printf '%s\n' 'whole_daemon_backend_recovery=pass'
+printf '%s\n' 'whole_daemon_attachment_retained_across_backend_restart=pass'
+
+pipewire_cursor=$(journal_cursor)
+systemctl --user restart pipewire.service
+systemctl --user start wireplumber.service
+if ! wait_for_policy; then
+	printf '%s\n' 'the production policy marker did not return after PipeWire restart' >&2
+	false
+fi
+if ! wait_for_recovery "$pipewire_cursor"; then
+	printf '%s\n' 'media did not recover after PipeWire was restarted' >&2
+	false
+fi
+printf '%s\n' 'whole_daemon_pipewire_recovery=pass'
+printf '%s\n' 'whole_daemon_attachment_retained_across_pipewire_restart=pass'
+
+"$pronkctl" remove-display "$display_id"
+display_id=
+printf '%s\n' 'whole_daemon_orderly_remove=pass'
+if test "$audio" = true; then
+	printf '%s\n' 'whole_daemon_castkms_to_device_av=pass'
+else
+	printf '%s\n' 'whole_daemon_castkms_to_device_video=pass'
+fi

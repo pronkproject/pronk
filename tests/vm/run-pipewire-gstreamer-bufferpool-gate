@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -ne 6; then
+	printf 'usage: %s PRODUCER GST-LAUNCH DEVICE SESSION CONNECTOR-ID CRTC-ID\n' "$0" >&2
+	exit 2
+fi
+
+producer=$1
+gst_launch=$2
+device=$3
+session_id=$4
+connector_id=$5
+crtc_id=$6
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+if ! test -x "$producer"; then
+	printf 'producer is not executable: %s\n' "$producer" >&2
+	exit 2
+fi
+if ! test -x "$gst_launch"; then
+	printf 'gst-launch is not executable: %s\n' "$gst_launch" >&2
+	exit 2
+fi
+
+unit="pronk-gstreamer-bufferpool-$PPID-$$"
+temporary_directory=$(mktemp -d --tmpdir pronk-gstreamer-bufferpool.XXXXXX)
+gst_output="$temporary_directory/gstreamer.log"
+gst_debug="$temporary_directory/gstreamer-debug.log"
+
+unit_output() {
+	journalctl --user -u "$unit.service" --no-pager -o cat
+}
+
+stop_unit() {
+	systemctl --user kill --kill-whom=main --signal=SIGTERM \
+		"$unit.service" 2>/dev/null || true
+}
+
+cleanup() {
+	stop_unit
+	unlink -- "$gst_output" "$gst_debug" 2>/dev/null || true
+	rmdir -- "$temporary_directory" 2>/dev/null || true
+}
+
+fail_with_logs() {
+	unit_output >&2 || true
+	if test -f "$gst_output"; then
+		printf '%s\n' '--- GStreamer pipeline ---' >&2
+		cat "$gst_output" >&2
+	fi
+	if test -f "$gst_debug"; then
+		printf '%s\n' '--- GStreamer PipeWire debug ---' >&2
+		grep -E 'wrap data|recycle buffer|ERROR|WARN' "$gst_debug" >&2 || true
+	fi
+	exit 1
+}
+
+trap cleanup EXIT INT TERM
+
+if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
+	printf 'login session %s is not active\n' "$session_id" >&2
+	exit 1
+fi
+for remote in pipewire-0-pronk-core pipewire-0-pronk-backend; do
+	if ! test -S "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is unset}/$remote"; then
+		printf 'classified PipeWire endpoint %s is unavailable\n' "$remote" >&2
+		exit 1
+	fi
+done
+
+"$gate_directory/ensure-mutter-display-on"
+
+systemd-run --user --unit="$unit" --collect --property=Type=exec \
+	--setenv=PRONK_VM_PIPEWIRE_GATE=classified-core -- \
+	"$producer" "$device" "$session_id" "$connector_id" "$crtc_id"
+
+marker=
+for _attempt in $(seq 1 200); do
+	marker=$(unit_output | sed -n 's/^\(pipewire_source_ready=.*\)$/\1/p' | tail -n 1)
+	if test -n "$marker"; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_logs
+	fi
+	sleep 0.05
+done
+if test -z "$marker"; then
+	fail_with_logs
+fi
+
+identity=${marker#pipewire_source_ready=}
+node_name=${identity%%:*}
+identity_numbers=${identity#*:}
+object_id=${identity_numbers%%:*}
+object_serial=${identity_numbers#*:}
+case "$node_name:$object_id:$object_serial" in
+	*:*[!0-9]*:*|*:*:*[!0-9]*|:*:*|*::*)
+		printf 'invalid PipeWire source identity: %s\n' "$identity" >&2
+		fail_with_logs
+		;;
+esac
+
+visible=false
+for _attempt in $(seq 1 100); do
+	if PIPEWIRE_REMOTE=pipewire-0-pronk-backend pw-dump |
+		jq -e --arg node_name "$node_name" \
+			--arg object_id "$object_id" \
+			--arg object_serial "$object_serial" \
+		'.[] | select(
+			(.id | tostring) == $object_id and
+			(.info.props["node.name"] == $node_name) and
+			(.info.props["object.serial"] | tostring) == $object_serial
+		)' \
+		>/dev/null; then
+		visible=true
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		fail_with_logs
+	fi
+	sleep 0.02
+done
+if test "$visible" != true; then
+	printf 'backend PipeWire role did not observe %s\n' "$node_name" >&2
+	fail_with_logs
+fi
+
+set +e
+timeout 45 env \
+	PIPEWIRE_REMOTE=pipewire-0-pronk-backend \
+	GST_DEBUG_NO_COLOR=1 \
+	GST_DEBUG='pipewirepool:7,pipewiresrc:7' \
+	GST_DEBUG_FILE="$gst_debug" \
+	"$gst_launch" -e -v \
+	pipewiresrc target-object="$object_serial" autoconnect=true \
+		use-bufferpool=true client-name=pronk-bufferpool-gate num-buffers=30 \
+	'!' video/x-raw,format=BGRx \
+	'!' queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream \
+	'!' videoconvert \
+	'!' video/x-raw,format=I420 \
+	'!' x264enc tune=zerolatency speed-preset=ultrafast bitrate=8000 \
+		key-int-max=60 bframes=0 byte-stream=true aud=true sliced-threads=true \
+	'!' h264parse config-interval=-1 disable-passthrough=true \
+	'!' video/x-h264,stream-format=byte-stream,alignment=au \
+	'!' fakesink sync=false \
+	>"$gst_output" 2>&1
+pipeline_status=$?
+set -e
+if test "$pipeline_status" -ne 0; then
+	printf 'GStreamer pipeline exited with status %s\n' "$pipeline_status" >&2
+	fail_with_logs
+fi
+
+for _attempt in $(seq 1 200); do
+	if unit_output | grep -Fxq 'holder_drop_releases_grant=pass'; then
+		break
+	fi
+	if ! systemctl --user is-active --quiet "$unit.service"; then
+		break
+	fi
+	sleep 0.05
+done
+
+producer_log=$(unit_output)
+wrapped_dma_bufs=$(grep -c 'wrap data (DmaBuf ' "$gst_debug" || true)
+recycled_buffers=$(grep -c 'recycle buffer' "$gst_debug" || true)
+if test "$wrapped_dma_bufs" -ne 4 || test "$recycled_buffers" -lt 30; then
+	printf 'unexpected DMA-BUF wrapping/recycling: %s/%s\n' \
+		"$wrapped_dma_bufs" "$recycled_buffers" >&2
+	fail_with_logs
+fi
+for required in \
+	'Got EOS from element "pipeline0".' \
+	'video/x-h264' \
+	'profile=(string)constrained-baseline'; do
+	if ! grep -Fq "$required" "$gst_output"; then
+		fail_with_logs
+	fi
+done
+for required in \
+	'pipewire_producer_remote=classified-core' \
+	'pipewire_frames_produced=30' \
+	'pipewire_transport=waited' \
+	'pipewire_caller_owned_pool=pass' \
+	'pipewire_exact_node_identity=pass' \
+	'pipewire_dma_buf_metadata=pass' \
+	'pipewire_downstream_release=pass' \
+	'pipewire_video_source=pass' \
+	'holder_drop_releases_grant=pass'; do
+	if ! grep -Fxq "$required" <<<"$producer_log"; then
+		fail_with_logs
+	fi
+done
+if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
+	printf 'login session %s became inactive\n' "$session_id" >&2
+	fail_with_logs
+fi
+
+trap - EXIT INT TERM
+cleanup
+printf 'gstreamer_dma_bufs=%s\n' "$wrapped_dma_bufs"
+printf 'gstreamer_recycled_buffers=%s\n' "$recycled_buffers"
+printf '%s\n' 'gstreamer_bufferpool=pass'
+printf '%s\n' 'gstreamer_h264_encode=pass'
+printf '%s\n' "$producer_log"
