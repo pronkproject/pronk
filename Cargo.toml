@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pronk-userns", "crates/castkms-sys", "crates/pronk-core", "crates/pronk-dbus", "crates/pronk-systemd"]
+members = ["crates/pronk-userns", "crates/castkms-sys", "crates/pronk-core", "crates/pronk-dbus", "crates/pronk-systemd", "crates/pronk-media"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ chromiacast = { version = "0.2.0", features = ["discovery"] }
 futures-util = "0.3"
 gstreamer = { version = "=0.23.7", features = ["v1_20"] }
 gstreamer-app = { version = "=0.23.5", features = ["v1_20"] }
+gstreamer-base = { version = "=0.23.6", features = ["v1_20"] }
 gstreamer-video = { version = "=0.23.5", features = ["v1_20"] }
 nix = { version = "=0.29.0", features = ["event", "fs", "ioctl", "process", "signal", "socket", "uio", "user"] }
 pipewire = { version = "=0.10.1", features = ["v1_2_0"] }
