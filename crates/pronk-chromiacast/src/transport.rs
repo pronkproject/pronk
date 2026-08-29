@@ -96,6 +96,20 @@ pub(crate) trait AudioSenderPort: Debug + Send + 'static {
 
 #[async_trait]
 pub(crate) trait VideoSenderPort: Debug + Send + 'static {
+    fn supports_target_playout_delay_updates(&self) -> bool {
+        false
+    }
+    fn maximum_target_playout_delay(&self) -> Option<Duration> {
+        None
+    }
+    async fn set_target_playout_delay(
+        &mut self,
+        _delay: Duration,
+    ) -> Result<(), VideoTransportError> {
+        Err(VideoTransportError::new(
+            "video transport does not support target playout-delay updates",
+        ))
+    }
     async fn send(
         &mut self,
         access_unit: EncodedVideoAccessUnit,
