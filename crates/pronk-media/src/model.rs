@@ -12,6 +12,7 @@ pub const MAX_ENCODED_OUTPUT_CAPACITY: usize = 64;
 pub const OPUS_SAMPLE_RATE: u32 = 48_000;
 pub const OPUS_CHANNELS: u32 = 2;
 pub const OPUS_BITRATE: u32 = 128_000;
+pub const OPUS_FRAME_DURATION: Duration = Duration::from_millis(20);
 
 #[derive(Debug)]
 pub struct PipeWireVideoInput {

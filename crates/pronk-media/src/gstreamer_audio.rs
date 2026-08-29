@@ -10,11 +10,10 @@ use gstreamer_app as gst_app;
 use crate::gstreamer_graph::validate_remote_socket;
 use crate::model::{
     parse_audio_caps, MediaGraphError, PipeWireAudioInput, MAX_ENCODED_AUDIO_PACKET_BYTES,
-    OPUS_BITRATE, OPUS_CHANNELS, OPUS_SAMPLE_RATE,
+    OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
 };
 
 const RAW_AUDIO_QUEUE_BUFFERS: u32 = 8;
-const OPUS_FRAME_DURATION: Duration = Duration::from_millis(20);
 // opusenc reports its restricted-low-delay lookahead as clipping on the first
 // encoded packet. The packet still contains one configured 20 ms Opus frame,
 // but its effective GStreamer timeline duration is shorter by 2.5 ms.
