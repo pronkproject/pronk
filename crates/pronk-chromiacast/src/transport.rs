@@ -44,6 +44,8 @@ pub(crate) struct VideoTransportPressure {
     pub in_flight_media_duration: Duration,
     pub max_acceptable_in_flight_duration: Duration,
     pub current_rtt: Option<Duration>,
+    pub receiver_playout_delay: Option<Duration>,
+    pub nack_count: u64,
     pub frames_dropped_or_skipped: u64,
     pub fraction_lost: Option<u8>,
 }

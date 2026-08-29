@@ -282,10 +282,41 @@ fn project_sender_event(
             snapshot.key_frame_requests = snapshot.key_frame_requests.saturating_add(1);
         }),
         SenderEvent::StatisticsUpdated(statistics) => {
-            let acknowledged_audio_packets =
-                statistics.audio.as_ref().map(|audio| audio.frames_acked);
+            let audio = statistics.audio;
+            let acknowledged_audio_packets = audio.as_ref().map(|audio| audio.frames_acked);
             let video = statistics.video;
             if let Some(video) = video.as_ref() {
+                tracing::debug!(
+                    acknowledged_frames = video.frames_acked,
+                    in_flight_frames = video.in_flight_frames,
+                    in_flight_media_milliseconds = video.in_flight_media_duration.as_millis(),
+                    acceptable_in_flight_milliseconds =
+                        video.max_acceptable_in_flight_duration.as_millis(),
+                    rtt_milliseconds = ?video.current_rtt.map(|duration| duration.as_millis()),
+                    video_playout_delay_milliseconds =
+                        ?video.receiver_playout_delay.map(|duration| duration.as_millis()),
+                    audio_playout_delay_milliseconds = ?audio
+                        .as_ref()
+                        .and_then(|audio| audio.receiver_playout_delay)
+                        .map(|duration| duration.as_millis()),
+                    packets_sent = video.packets_sent,
+                    packets_retransmitted = video.packets_retransmitted,
+                    frames_dropped_or_skipped = video.frames_dropped_or_skipped,
+                    nack_count = video.nack_count,
+                    fraction_lost = ?video.fraction_lost,
+                    jitter_ticks = ?video.jitter,
+                    "received Cast transport statistics"
+                );
+                // A target applies to the synchronized session, so video
+                // feedback alone must not confirm it while audio is still on
+                // the previous value.
+                let receiver_playout_delay = match audio.as_ref() {
+                    None => video.receiver_playout_delay,
+                    Some(audio) if audio.receiver_playout_delay == video.receiver_playout_delay => {
+                        video.receiver_playout_delay
+                    }
+                    Some(_) => None,
+                };
                 feedback.send_modify(|snapshot| {
                     snapshot.revision = snapshot.revision.saturating_add(1);
                     snapshot.acknowledged_frames = video.frames_acked;
@@ -297,6 +328,8 @@ fn project_sender_event(
                         in_flight_media_duration: video.in_flight_media_duration,
                         max_acceptable_in_flight_duration: video.max_acceptable_in_flight_duration,
                         current_rtt: video.current_rtt,
+                        receiver_playout_delay,
+                        nack_count: video.nack_count,
                         frames_dropped_or_skipped: video.frames_dropped_or_skipped,
                         fraction_lost: video.fraction_lost,
                     });
@@ -495,7 +528,9 @@ mod tests {
     use std::num::NonZeroU64;
     use std::time::{Duration, Instant};
 
-    use chromiacast::{Answer, FrameId, SenderEvent, StreamType};
+    use chromiacast::{
+        Answer, FrameId, SenderEvent, SessionStatistics, StreamStatistics, StreamType,
+    };
     use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, VideoFrameDependency};
 
     use super::{
@@ -662,6 +697,43 @@ mod tests {
         let expected = VideoTransportError::new("Cast receiver stopped acknowledging media");
         assert_eq!(terminal.borrow().as_ref(), Some(&expected));
         assert_eq!(feedback.borrow().terminal_error.as_ref(), Some(&expected));
+    }
+
+    #[test]
+    fn audio_and_video_must_confirm_the_same_playout_delay() {
+        let (terminal, _terminal_rx) = tokio::sync::watch::channel(None);
+        let (feedback, projected) =
+            tokio::sync::watch::channel(VideoTransportFeedbackSnapshot::default());
+        let mut audio = StreamStatistics::default();
+        audio.receiver_playout_delay = Some(Duration::from_millis(33));
+        let mut video = StreamStatistics::default();
+        video.receiver_playout_delay = Some(Duration::from_millis(66));
+        let mut statistics = SessionStatistics::default();
+        statistics.audio = Some(audio);
+        statistics.video = Some(video.clone());
+
+        assert!(project_sender_event(
+            SenderEvent::StatisticsUpdated(Box::new(statistics)),
+            &terminal,
+            &feedback,
+        ));
+        assert_eq!(
+            projected.borrow().pressure.unwrap().receiver_playout_delay,
+            None
+        );
+
+        let mut statistics = SessionStatistics::default();
+        statistics.audio = Some(video.clone());
+        statistics.video = Some(video);
+        assert!(project_sender_event(
+            SenderEvent::StatisticsUpdated(Box::new(statistics)),
+            &terminal,
+            &feedback,
+        ));
+        assert_eq!(
+            projected.borrow().pressure.unwrap().receiver_playout_delay,
+            Some(Duration::from_millis(66))
+        );
     }
 
     #[tokio::test]

@@ -367,6 +367,8 @@ impl VideoSenderPort for FixtureVideoSender {
                     in_flight_media_duration: Duration::from_millis(250),
                     max_acceptable_in_flight_duration: Duration::from_millis(100),
                     current_rtt: Some(Duration::from_millis(80)),
+                    receiver_playout_delay: None,
+                    nack_count: 0,
                     frames_dropped_or_skipped: 1,
                     fraction_lost: Some(32),
                 });
