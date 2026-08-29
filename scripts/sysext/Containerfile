@@ -1,0 +1,49 @@
+ARG FEDORA_VERSION
+FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
+
+ARG KERNEL_DEVEL_NEVRA
+ARG KERNEL_DEVEL_URL
+
+RUN dnf -y install dnf5-plugins && \
+    dnf -y builddep mutter gnome-control-center wireplumber && \
+    dnf -y install \
+        ShellCheck \
+        cargo \
+        cpio \
+        elfutils-libelf-devel \
+        findutils \
+        gcc \
+        gcc-c++ \
+        git \
+        gstreamer1-devel \
+        gstreamer1-plugins-base-devel \
+        libdrm-devel \
+        make \
+        meson \
+        ninja-build \
+        openssl \
+        pipewire-devel \
+        pkgconf-pkg-config \
+        rpm-build \
+        rust \
+        systemd-devel && \
+    (dnf -y install "kernel-devel-${KERNEL_DEVEL_NEVRA}" || \
+     dnf -y install "${KERNEL_DEVEL_URL}") && \
+    dnf clean all
+
+# Keep this small, frequently adjusted tool set in its own layer so adding a
+# source-tree build prerequisite does not invalidate the expensive builddep
+# layer above.
+RUN dnf -y install \
+      clang \
+      clippy \
+      dbus-daemon \
+      dwarves \
+      edid-decode \
+      gstreamer1-plugins-bad-free \
+      jq \
+      pipewire-gstreamer \
+      pipewire-utils \
+      ripgrep \
+      rustfmt && \
+    dnf clean all

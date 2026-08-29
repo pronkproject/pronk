@@ -8,9 +8,17 @@ use serde_json::Value;
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn pass_gstreamer_diagnostic_environment(command: &mut Command) {
-    // Socket activation needs opt-in diagnostics in the backend's explicit
-    // environment, just as a real systemd service would.
-    for variable in ["GST_DEBUG", "GST_DEBUG_NO_COLOR", "GST_DEBUG_FILE"] {
+    // Socket activation needs opt-in diagnostics and staged-runtime search
+    // paths in the backend's explicit environment, just as a real systemd
+    // service would. Installed runtimes resolve these libraries from /usr.
+    for variable in [
+        "GST_DEBUG",
+        "GST_DEBUG_NO_COLOR",
+        "GST_DEBUG_FILE",
+        "GST_PLUGIN_PATH",
+        "GST_PLUGIN_PATH_1_0",
+        "LD_LIBRARY_PATH",
+    ] {
         if std::env::var_os(variable).is_some() {
             command.arg(format!("--setenv={variable}"));
         }

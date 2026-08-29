@@ -1,0 +1,1215 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+set -euo pipefail
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+project_root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
+source_root=$(CDPATH='' cd -- "$project_root/../.." && pwd -P)
+
+castkms_source=${PRONK_CASTKMS_SOURCE:-$project_root/../castkms}
+mutter_repository=$source_root/gnome/mutter
+mutter_source=${PRONK_MUTTER_SOURCE:-$mutter_repository}
+control_center_source=${PRONK_CONTROL_CENTER_SOURCE:-$source_root/gnome/gnome-control-center}
+wireplumber_source=${PRONK_WIREPLUMBER_SOURCE:-$source_root/pkgs/wireplumber}
+
+state_base=${XDG_STATE_HOME:-$HOME/.local/state}
+data_base=${XDG_DATA_HOME:-$HOME/.local/share}
+state_dir=${PRONK_SYSEXT_STATE_DIR:-$state_base/pronk-sysext}
+podman_root=${PRONK_SYSEXT_PODMAN_ROOT:-$data_base/pronk-sysext/podman-root}
+podman_runroot=${PRONK_SYSEXT_PODMAN_RUNROOT:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/pronk-sysext/podman-runroot}
+extension_store=${PRONK_SYSEXT_STORE:-/var/lib/pronk-sysext}
+signing_dir=${PRONK_MODULE_SIGNING_DIR:-/var/lib/castkms-module-signing}
+signing_key=${PRONK_MODULE_SIGNING_KEY:-$signing_dir/private-key.pem}
+signing_certificate=${PRONK_MODULE_SIGNING_CERTIFICATE:-$signing_dir/public-key.der}
+sign_file=${PRONK_MODULE_SIGN_FILE:-$signing_dir/sign-file}
+
+run_tests=false
+rebuild_builder=false
+temporary_stage=
+pending_installed_image=
+
+cleanup_temporary_stage()
+{
+	[[ -n $temporary_stage && -d $temporary_stage ]] || return 0
+	case $temporary_stage in
+	"$state_dir"/.stage.*)
+		rm -rf --one-file-system -- "$temporary_stage"
+		;;
+	*)
+		printf 'warning: refusing to remove unexpected temporary stage: %s\n' \
+			"$temporary_stage" >&2
+		;;
+	esac
+}
+
+cleanup_pending_installed_image()
+{
+	[[ -n $pending_installed_image ]] || return 0
+	case $pending_installed_image in
+	"$extension_store"/images/.pending.*)
+		sudo rm -rf --one-file-system -- "$pending_installed_image" || \
+			printf 'warning: could not remove pending image: %s\n' \
+				"$pending_installed_image" >&2
+		;;
+	*)
+		printf 'warning: refusing to remove unexpected pending image: %s\n' \
+			"$pending_installed_image" >&2
+		;;
+	esac
+}
+
+cleanup_on_exit()
+{
+	local status=$?
+
+	cleanup_temporary_stage
+	cleanup_pending_installed_image
+	return "$status"
+}
+
+trap cleanup_on_exit EXIT
+
+log()
+{
+	printf '==> %s\n' "$*"
+}
+
+die()
+{
+	printf 'error: %s\n' "$*" >&2
+	exit 1
+}
+
+usage()
+{
+	cat <<EOF
+Usage: scripts/pronk-dev-sysext [OPTIONS] COMMAND
+
+Build and deploy the complete Pronk development stack as a systemd system
+extension. Source builds happen in a dedicated rootless Podman image; only
+runtime files are installed on the host.
+
+Commands:
+  prepare   Create or update the persistent build image
+  build     Build all components into a local extension staging directory
+  install   Publish the staged extension for activation at the next boot
+  deploy    Run prepare, build, and install
+  activate  Merge an installed extension without rebooting when safe
+  status    Show compatibility, merge, module, and service state
+  check     Check the deployment scripts without changing the system
+
+Options:
+  --run-tests        Run source-tree test gates while building
+  --rebuild-builder  Rebuild the Podman image even if it already exists
+  -h, --help         Show this help
+
+Source locations can be overridden with PRONK_CASTKMS_SOURCE,
+PRONK_MUTTER_SOURCE, PRONK_CONTROL_CENTER_SOURCE, and
+PRONK_WIREPLUMBER_SOURCE.
+EOF
+}
+
+strip_quotes()
+{
+	local value=$1
+	case $value in
+	\"*\") value=${value#\"}; value=${value%\"} ;;
+	\'*) value=${value#\'}; value=${value%\'} ;;
+	esac
+	printf '%s\n' "$value"
+}
+
+read_value()
+{
+	local file=$1
+	local key=$2
+	local line
+
+	while IFS= read -r line || [[ -n $line ]]; do
+		case $line in
+		"$key="*)
+			strip_quotes "${line#*=}"
+			return 0
+			;;
+		esac
+	done < "$file"
+
+	return 1
+}
+
+require_command()
+{
+	command -v "$1" >/dev/null 2>&1 || die "required command is missing: $1"
+}
+
+require_source_tree()
+{
+	local name=$1
+	local path=$2
+
+	[[ -d $path ]] || die "$name source tree is missing: $path"
+}
+
+host_id()
+{
+	if [[ -n ${PRONK_HOST_ID:-} ]]; then
+		printf '%s\n' "$PRONK_HOST_ID"
+	else
+		read_value /usr/lib/os-release ID
+	fi
+}
+
+host_version_id()
+{
+	if [[ -n ${PRONK_HOST_VERSION_ID:-} ]]; then
+		printf '%s\n' "$PRONK_HOST_VERSION_ID"
+	else
+		read_value /usr/lib/os-release VERSION_ID
+	fi
+}
+
+host_ostree_version()
+{
+	if [[ -n ${PRONK_HOST_OSTREE_VERSION:-} ]]; then
+		printf '%s\n' "$PRONK_HOST_OSTREE_VERSION"
+	else
+		read_value /usr/lib/os-release OSTREE_VERSION
+	fi
+}
+
+kernel_release()
+{
+	printf '%s\n' "${PRONK_HOST_KERNEL_RELEASE:-$(uname -r)}"
+}
+
+safe_component()
+{
+	local value=$1
+	[[ $value =~ ^[A-Za-z0-9._-]+$ ]] || die "unsafe path component: $value"
+}
+
+ensure_state_directories()
+{
+	case $state_dir in
+	/|"$HOME"|"")
+		die "refusing unsafe state directory: $state_dir"
+		;;
+	esac
+	mkdir -p -- \
+		"$state_dir/builds" \
+		"$state_dir/cargo" \
+		"$state_dir/sources" \
+		"$podman_root" \
+		"$podman_runroot"
+}
+
+jobs()
+{
+	local processors
+	local memory_kib
+	local memory_jobs
+	local selected
+
+	if [[ -n ${PRONK_BUILD_JOBS:-} ]]; then
+		[[ $PRONK_BUILD_JOBS =~ ^[1-9][0-9]*$ ]] || die 'PRONK_BUILD_JOBS must be a positive integer'
+		printf '%s\n' "$PRONK_BUILD_JOBS"
+		return
+	fi
+
+	processors=$(nproc)
+	memory_kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+	memory_jobs=$((memory_kib / 2097152))
+	((memory_jobs > 0)) || memory_jobs=1
+	selected=$processors
+	((selected <= memory_jobs)) || selected=$memory_jobs
+	((selected <= 8)) || selected=8
+	printf '%s\n' "$selected"
+}
+
+podman_cmd()
+{
+	podman --root "$podman_root" --runroot "$podman_runroot" "$@"
+}
+
+kernel_package_fields()
+{
+	rpm -q --qf '%{VERSION} %{RELEASE} %{ARCH}\n' "kernel-core-$(kernel_release)"
+}
+
+builder_image()
+{
+	local definition_hash
+	definition_hash=$(sha256sum "$script_dir/sysext/Containerfile")
+	definition_hash=${definition_hash%% *}
+	printf 'localhost/pronk-sysext-builder:f%s-%s-%s\n' \
+		"$(host_version_id)" "$(kernel_release)" "${definition_hash:0:12}"
+}
+
+builder_exists()
+{
+	podman_cmd image exists "$(builder_image)"
+}
+
+builder_identity()
+{
+	podman_cmd image inspect --format '{{.Id}}' "$(builder_image)"
+}
+
+worktree_for_branch()
+{
+	local repository=$1
+	local branch=$2
+	local field
+	local worktree=
+
+	while IFS= read -r -d '' field; do
+		case $field in
+		worktree\ *)
+			worktree=${field#worktree }
+			;;
+		"branch refs/heads/$branch")
+			printf '%s\n' "$worktree"
+			return 0
+			;;
+		esac
+	done < <(git -C "$repository" worktree list --porcelain -z)
+
+	return 1
+}
+
+select_mutter_source()
+{
+	local runtime_branch
+	local runtime_worktree
+
+	if [[ -n ${PRONK_MUTTER_SOURCE:-} ]]; then
+		require_source_tree Mutter "$mutter_source"
+		return
+	fi
+
+	require_source_tree 'Mutter repository' "$mutter_repository"
+	runtime_branch="pronk-f$(host_version_id)-runtime"
+	if ! git -C "$mutter_repository" show-ref --verify --quiet \
+		"refs/heads/$runtime_branch"; then
+		log "No $runtime_branch branch exists; using $mutter_repository"
+		return
+	fi
+
+	if runtime_worktree=$(worktree_for_branch "$mutter_repository" "$runtime_branch"); then
+		[[ -d $runtime_worktree ]] || \
+			die "the registered $runtime_branch worktree is missing: $runtime_worktree"
+	else
+		runtime_worktree="$state_dir/sources/mutter-f$(host_version_id)"
+		[[ ! -e $runtime_worktree ]] || \
+			die "the managed Mutter path is not a registered worktree: $runtime_worktree"
+		log "Creating the managed $runtime_branch worktree"
+		git -C "$mutter_repository" worktree add "$runtime_worktree" "$runtime_branch"
+	fi
+
+	mutter_source=$runtime_worktree
+	log "Using Mutter runtime worktree: $mutter_source"
+}
+
+prepare_builder()
+{
+	local kernel_version
+	local kernel_package_release
+	local kernel_arch
+	local kernel_nevra
+	local kernel_url
+	local image
+
+	require_command podman
+	require_command rpm
+	ensure_state_directories
+
+	read -r kernel_version kernel_package_release kernel_arch < <(kernel_package_fields)
+	kernel_nevra="$kernel_version-$kernel_package_release.$kernel_arch"
+	kernel_url="https://kojipkgs.fedoraproject.org/packages/kernel/$kernel_version/$kernel_package_release/$kernel_arch/kernel-devel-$kernel_nevra.rpm"
+	image=$(builder_image)
+
+	if builder_exists && ! $rebuild_builder; then
+		log "Build image is ready: $image"
+	else
+		log "Building persistent Fedora $(host_version_id) toolchain image"
+		podman_cmd build \
+			--build-arg "FEDORA_VERSION=$(host_version_id)" \
+			--build-arg "KERNEL_DEVEL_NEVRA=$kernel_nevra" \
+			--build-arg "KERNEL_DEVEL_URL=$kernel_url" \
+			--tag "$image" \
+			--file "$script_dir/sysext/Containerfile" \
+			"$script_dir/sysext"
+	fi
+
+	prepare_sign_file
+}
+
+run_in_builder()
+{
+	local image_identity
+	local parallelism
+	local -a source_volumes
+	image_identity=$(builder_identity)
+	parallelism=$(jobs)
+	source_volumes=(
+		--volume "$source_root:$source_root:rw"
+		--volume "$state_dir:$state_dir:rw"
+	)
+	case $mutter_source in
+	"$source_root"/*|"$state_dir"/*) ;;
+	*) source_volumes+=(--volume "$mutter_source:$mutter_source:rw") ;;
+	esac
+
+	podman_cmd run --rm \
+		--userns=keep-id \
+		--user "$(id -u):$(id -g)" \
+		--security-opt label=disable \
+		"${source_volumes[@]}" \
+		--workdir "$project_root" \
+		--env "CARGO_HOME=$state_dir/cargo" \
+		--env "CARGO_BUILD_JOBS=$parallelism" \
+		--env "PRONK_BUILD_JOBS=$parallelism" \
+		--env "PRONK_CASTKMS_SOURCE=$castkms_source" \
+		--env "PRONK_MUTTER_SOURCE=$mutter_source" \
+		--env "PRONK_CONTROL_CENTER_SOURCE=$control_center_source" \
+		--env "PRONK_WIREPLUMBER_SOURCE=$wireplumber_source" \
+		--env "PRONK_SYSEXT_STATE_DIR=$state_dir" \
+		--env "PRONK_HOST_ID=$(host_id)" \
+		--env "PRONK_HOST_VERSION_ID=$(host_version_id)" \
+		--env "PRONK_HOST_OSTREE_VERSION=$(host_ostree_version)" \
+		--env "PRONK_HOST_KERNEL_RELEASE=$(kernel_release)" \
+		--env "PRONK_BUILDER_IDENTITY=$image_identity" \
+		"$(builder_image)" \
+		"$@"
+}
+
+prepare_sign_file()
+{
+	local candidate=$state_dir/sign-file.candidate
+	local kernel_sign_file
+	kernel_sign_file="/usr/src/kernels/$(kernel_release)/scripts/sign-file"
+
+	if sudo test -x "$sign_file"; then
+		return
+	fi
+
+	if [[ -x $kernel_sign_file ]]; then
+		log 'Saving the Fedora module signer outside the transient /usr tree'
+		sudo install -d -m 0700 -o root -g root "$signing_dir"
+		sudo install -m 0755 -o root -g root "$kernel_sign_file" "$sign_file"
+		return
+	fi
+
+	log 'Copying the kernel module signer from the build image'
+	rm -f -- "$candidate"
+	run_in_builder install -m 0755 \
+		"/usr/src/kernels/$(kernel_release)/scripts/sign-file" \
+		"$candidate"
+	sudo install -d -m 0700 -o root -g root "$signing_dir"
+	sudo install -m 0755 -o root -g root "$candidate" "$sign_file"
+	rm -f -- "$candidate"
+}
+
+git_revision()
+{
+	local tree=$1
+	local revision
+	local status
+
+	revision=$(git -C "$tree" rev-parse --short=12 HEAD 2>/dev/null) || {
+		printf 'error: cannot read the Git revision for %s\n' "$tree" >&2
+		return 1
+	}
+	status=$(git -C "$tree" status --porcelain --untracked-files=normal) || {
+		printf 'error: cannot inspect the Git worktree at %s\n' "$tree" >&2
+		return 1
+	}
+	if [[ -n $status ]]; then
+		revision+="-dirty"
+	fi
+	printf '%s\n' "$revision"
+}
+
+build_id()
+{
+	printf '%s-%s\n' "$(date -u +%Y%m%dT%H%M%S%NZ)" "$(git_revision "$project_root")"
+}
+
+discard_managed_build()
+{
+	local build_dir=$1
+
+	case $build_dir in
+	"$state_dir"/builds/*)
+		rm -rf --one-file-system -- "$build_dir"
+		;;
+	*)
+		die "refusing to remove unexpected build directory: $build_dir"
+		;;
+	esac
+}
+
+reset_build_if_incompatible()
+{
+	local build_dir=$1
+	local build_context=${2:-default}
+	local stamp=$build_dir/.pronk-build-host
+	local expected
+	local actual=
+	printf -v expected '%s\n%s\n%s\n%s' \
+		"$(host_ostree_version)" \
+		"$(kernel_release)" \
+		"${PRONK_BUILDER_IDENTITY:-$(builder_image)}" \
+		"$build_context"
+
+	if [[ -d $build_dir ]]; then
+		[[ ! -r $stamp ]] || actual=$(<"$stamp")
+		if [[ $actual != "$expected" ]]; then
+			log "Discarding build products from another deployment: $build_dir"
+			discard_managed_build "$build_dir"
+		fi
+	fi
+
+	mkdir -p -- "$build_dir"
+	printf '%s\n' "$expected" > "$stamp"
+}
+
+meson_configure()
+{
+	local source=$1
+	local build=$2
+	shift 2
+
+	reset_build_if_incompatible "$build" "meson:$source"
+	# A failed Meson setup leaves meson-private behind but no usable Ninja
+	# graph. Start that managed build directory afresh on the next attempt.
+	if [[ ! -f $build/build.ninja && -d $build/meson-private ]]; then
+		log "Discarding an incomplete Meson setup: $build"
+		discard_managed_build "$build"
+		reset_build_if_incompatible "$build" "meson:$source"
+	fi
+	if [[ -f $build/build.ninja ]]; then
+		meson setup --reconfigure "$build" "$source" "$@"
+	else
+		meson setup "$build" "$source" "$@"
+	fi
+}
+
+find_wireplumber_rpm()
+{
+	local package_name=$1
+	local package_arch
+	local package_release
+	local package_version
+	local candidate_name
+	local candidate
+	local best=
+	local best_version=
+
+	while IFS= read -r -d '' candidate; do
+		[[ $candidate != *.src.rpm ]] || continue
+		read -r candidate_name package_version package_release package_arch < <(
+			rpm -qp --qf '%{NAME} %{VERSION} %{RELEASE} %{ARCH}\n' "$candidate" 2>/dev/null
+		) || continue
+		[[ $candidate_name == "$package_name" ]] || continue
+		[[ $package_arch == "$(uname -m)" || $package_arch == noarch ]] || continue
+		[[ $package_release == *"fc$(host_version_id)"* ]] || continue
+		if [[ -z $best_version || $(printf '%s\n%s\n' "$best_version" "$package_version" | sort -V | tail -1) == "$package_version" ]]; then
+			best=$candidate
+			best_version=$package_version
+		fi
+	done < <(find "$wireplumber_source" -type f -name '*.rpm' -print0)
+
+	[[ -n $best ]] || return 1
+	[[ $(printf '%s\n%s\n' 0.5.15 "$best_version" | sort -V | head -1) == 0.5.15 ]] || return 1
+	printf '%s\n' "$best"
+}
+
+stage_wireplumber()
+{
+	local stage=$1
+	local package_name
+	local package_path
+
+	for package_name in wireplumber wireplumber-libs; do
+		package_path=$(find_wireplumber_rpm "$package_name") || \
+			die "no Fedora $(host_version_id) $package_name 0.5.15+ RPM found below $wireplumber_source"
+		log "Staging $(basename "$package_path")"
+		rpm2cpio "$package_path" | (cd "$stage" && cpio -idm --quiet)
+	done
+
+	# sysext intentionally merges /usr and /opt only. The package's empty
+	# /etc directory ownership is already supplied by the base image.
+	rm -rf -- "${stage:?}/etc" "${stage:?}/var"
+}
+
+stage_video_encoder_runtime()
+{
+	local stage=$1
+	local package_dir=$stage/.runtime-packages
+	local package_name
+	local package_path
+	local candidate
+	local -a candidates
+	local -a package_names=(
+		gstreamer1-plugins-ugly
+		x264-libs
+	)
+
+	require_command dnf
+	require_command rpm
+	require_command rpm2cpio
+	mkdir -p -- "$package_dir"
+	log 'Downloading the GStreamer H.264 encoder runtime'
+	dnf -q download \
+		--arch="$(uname -m)" \
+		--destdir="$package_dir" \
+		"${package_names[@]}"
+
+	for package_name in "${package_names[@]}"; do
+		candidates=()
+		while IFS= read -r -d '' candidate; do
+			if [[ $(rpm -qp --qf '%{NAME}' "$candidate") == "$package_name" ]]; then
+				candidates+=("$candidate")
+			fi
+		done < <(find "$package_dir" -maxdepth 1 -type f -name '*.rpm' -print0)
+		((${#candidates[@]} == 1)) || \
+			die "expected one downloaded $package_name RPM, found ${#candidates[@]}"
+		package_path=${candidates[0]}
+		log "Staging $(basename "$package_path")"
+		rpm2cpio "$package_path" | (cd "$stage" && cpio -idmu --quiet)
+	done
+
+	rm -rf --one-file-system -- "${package_dir:?}"
+}
+
+build_castkms()
+{
+	local stage=$1
+	local build=$state_dir/builds/castkms
+	local kernel_build
+	kernel_build=/usr/src/kernels/$(kernel_release)
+
+	reset_build_if_incompatible "$build" "kbuild:$castkms_source"
+	log 'Building CastKMS'
+	# Kbuild rejects a separate MO output directory while legacy in-tree
+	# products exist. Remove generated module products only; source and tool
+	# outputs are deliberately left untouched.
+	make -C "$castkms_source" KDIR="$kernel_build" module-clean
+	make -C "$castkms_source" \
+		KDIR="$kernel_build" \
+		MO="$build" \
+		-j"$(jobs)" \
+		W=1
+	if $run_tests; then
+		make -C "$castkms_source" KDIR="$kernel_build" MO="$build" -j"$(jobs)" check
+	fi
+	install -Dm0644 "$build/castkms.ko" \
+		"$stage/usr/lib/modules/$(kernel_release)/extra/castkms.ko"
+}
+
+build_mutter()
+{
+	local stage=$1
+	local build=$state_dir/builds/mutter
+
+	log 'Building Mutter with the CastKMS grant broker'
+	meson_configure "$mutter_source" "$build" \
+		--prefix=/usr \
+		--libdir=lib64 \
+		--libexecdir=libexec \
+		--buildtype=debugoptimized \
+		-Dtests=disabled \
+		-Dinstalled_tests=false \
+		-Ddocs=false
+	meson compile -C "$build" -j "$(jobs)"
+	DESTDIR="$stage" meson install -C "$build" --no-rebuild
+}
+
+build_control_center()
+{
+	local stage=$1
+	local build=$state_dir/builds/gnome-control-center
+
+	log 'Building GNOME Settings with the Casting panel'
+	meson_configure "$control_center_source" "$build" \
+		--prefix=/usr \
+		--libdir=lib64 \
+		--libexecdir=libexec \
+		--buildtype=debugoptimized \
+		-Dtests=false \
+		-Ddocumentation=false
+	meson compile -C "$build" -j "$(jobs)"
+	DESTDIR="$stage" meson install -C "$build" --no-rebuild
+}
+
+build_pronk()
+{
+	local stage=$1
+	local build=$state_dir/builds/pronk
+
+	log 'Building Pronk and its Chromiacast backend'
+	PATH="$stage/usr/bin:$PATH" \
+	LD_LIBRARY_PATH="$stage/usr/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+		meson_configure "$project_root" "$build" \
+			--prefix=/usr \
+			--libdir=lib64 \
+			--libexecdir=libexec
+	meson compile -C "$build" -j "$(jobs)"
+	if $run_tests; then
+		(
+			local test_runtime
+			test_runtime=$(mktemp -d "$state_dir/.test-runtime.XXXXXX")
+			trap 'rm -rf --one-file-system -- "$test_runtime"' EXIT
+			chmod 0700 "$test_runtime"
+			PATH="$stage/usr/bin:$PATH" \
+			LD_LIBRARY_PATH="$stage/usr/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+			GST_PLUGIN_PATH="$stage/usr/lib64/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}" \
+			XDG_DATA_DIRS="$stage/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}" \
+			WIREPLUMBER_MODULE_DIR="$stage/usr/lib64/wireplumber-0.5" \
+			XDG_RUNTIME_DIR="$test_runtime" \
+				dbus-run-session -- \
+				meson test -C "$build" --print-errorlogs
+		)
+	fi
+	DESTDIR="$stage" meson install -C "$build" --no-rebuild
+
+	# Make discovery available without a one-time enable operation in $HOME.
+	install -d "$stage/usr/lib/systemd/user/sockets.target.wants"
+	ln -s ../pronk-chromiacast.socket \
+		"$stage/usr/lib/systemd/user/sockets.target.wants/pronk-chromiacast.socket"
+}
+
+write_extension_metadata()
+{
+	local stage=$1
+	local identifier=$2
+	local release_dir=$stage/usr/lib/extension-release.d
+	local metadata_dir=$stage/usr/lib/pronk-sysext
+	local pronk_revision
+	local castkms_revision
+	local mutter_revision
+	local control_center_revision
+	local wireplumber_revision
+
+	pronk_revision=$(git_revision "$project_root")
+	castkms_revision=$(git_revision "$castkms_source")
+	mutter_revision=$(git_revision "$mutter_source")
+	control_center_revision=$(git_revision "$control_center_source")
+	wireplumber_revision=$(git_revision "$wireplumber_source")
+
+	install -d "$release_dir" "$metadata_dir"
+	printf 'ID=%s\nVERSION_ID=%s\nSYSEXT_ID=pronk\nEXTENSION_RELOAD_MANAGER=1\n' \
+		"$(host_id)" "$(host_version_id)" \
+		> "$release_dir/extension-release.pronk"
+	printf '%s\n' \
+		"BUILD_ID=$identifier" \
+		"HOST_ID=$(host_id)" \
+		"HOST_VERSION_ID=$(host_version_id)" \
+		"HOST_OSTREE_VERSION=$(host_ostree_version)" \
+		"HOST_KERNEL_RELEASE=$(kernel_release)" \
+		"BUILDER_IMAGE=$(builder_image)" \
+		"BUILDER_IDENTITY=${PRONK_BUILDER_IDENTITY:-unknown}" \
+		"PRONK_REVISION=$pronk_revision" \
+		"CASTKMS_REVISION=$castkms_revision" \
+		"MUTTER_REVISION=$mutter_revision" \
+		"CONTROL_CENTER_REVISION=$control_center_revision" \
+		"WIREPLUMBER_REVISION=$wireplumber_revision" \
+		> "$metadata_dir/manifest"
+
+	install -Dm0755 "$script_dir/sysext/pronk-load-castkms" \
+		"$stage/usr/libexec/pronk-load-castkms"
+}
+
+sign_castkms()
+{
+	local stage=$1
+	local module
+	module=$stage/usr/lib/modules/$(kernel_release)/extra/castkms.ko
+
+	log 'Signing CastKMS with the enrolled local key'
+	sudo test -r "$signing_key" || die "module signing key is missing: $signing_key"
+	sudo test -r "$signing_certificate" || die "module signing certificate is missing: $signing_certificate"
+	sudo test -x "$sign_file" || die "module signing helper is missing: $sign_file (run prepare)"
+
+	if command -v mokutil >/dev/null && mokutil --sb-state 2>/dev/null | grep -q 'SecureBoot enabled'; then
+		# mokutil deliberately returns 1 when a key is already enrolled and 0
+		# when it is not enrolled. Other failures return 255.
+		if sudo mokutil --test-key "$signing_certificate" >/dev/null 2>&1; then
+			die 'the CastKMS module signing certificate is not enrolled'
+		else
+			[[ $? == 1 ]] || die 'could not verify the CastKMS module signing certificate'
+		fi
+	fi
+
+	sudo "$sign_file" sha256 "$signing_key" "$signing_certificate" "$module"
+}
+
+validate_stage()
+{
+	local stage=$1
+	local manifest=$stage/usr/lib/pronk-sysext/manifest
+	local manifest_key
+	local module
+	local required
+	local unexpected
+	module=$stage/usr/lib/modules/$(kernel_release)/extra/castkms.ko
+
+	for required in \
+		usr/bin/pronkd \
+		usr/bin/pronkctl \
+		usr/bin/gnome-control-center \
+		usr/bin/wireplumber \
+		usr/libexec/pronk/pronk-chromiacast \
+		usr/libexec/pronk-load-castkms \
+		usr/lib64/gstreamer-1.0/libgstx264.so \
+		usr/lib/systemd/user/pronk-chromiacast.socket \
+		usr/lib/extension-release.d/extension-release.pronk \
+		usr/lib/pronk-sysext/manifest; do
+		[[ -e $stage/$required ]] || die "staged extension is missing /$required"
+	done
+
+	find "$stage/usr/lib64" -name 'libmutter-*.so.*' -print -quit | grep -q . || \
+		die 'staged extension is missing the Mutter shared library'
+	find "$stage/usr/lib64" -name 'libx264.so.*' -type f -print -quit | grep -q . || \
+		die 'staged extension is missing the x264 shared library'
+	[[ -r $module ]] || die "staged extension is missing $module"
+	[[ $(modinfo -F vermagic "$module") == "$(kernel_release) "* ]] || \
+		die 'CastKMS was built for a different kernel'
+	[[ -n $(modinfo -F signer "$module") ]] || die 'the staged CastKMS module is unsigned'
+	for manifest_key in \
+		BUILD_ID \
+		HOST_ID \
+		HOST_VERSION_ID \
+		HOST_OSTREE_VERSION \
+		HOST_KERNEL_RELEASE \
+		BUILDER_IMAGE \
+		BUILDER_IDENTITY \
+		PRONK_REVISION \
+		CASTKMS_REVISION \
+		MUTTER_REVISION \
+		CONTROL_CENTER_REVISION \
+		WIREPLUMBER_REVISION; do
+		[[ -n $(read_value "$manifest" "$manifest_key") ]] || \
+			die "the staged manifest has no $manifest_key"
+	done
+
+	unexpected=$(find "$stage" -mindepth 1 -maxdepth 1 ! -name usr ! -name opt -print -quit)
+	[[ -z $unexpected ]] || die "sysext stage contains an unsupported top-level path: $unexpected"
+	unexpected=$(find "$stage" -xdev \( -type f -o -type d \) -perm /022 -print -quit)
+	[[ -z $unexpected ]] || die "sysext stage contains a group/world-writable path: $unexpected"
+}
+
+validate_host_abi()
+{
+	local stage=$1
+	local library_path
+	local mutter_library
+	local x264_plugin
+	local target
+	local output
+
+	library_path=$(find "$stage/usr/lib64" -type d -print | paste -sd:)
+	mutter_library=$(find "$stage/usr/lib64" -name 'libmutter-*.so.*' -type f -print -quit)
+	[[ -n $mutter_library ]] || die 'cannot locate the staged Mutter library for ABI validation'
+	x264_plugin=$stage/usr/lib64/gstreamer-1.0/libgstx264.so
+	[[ -f $x264_plugin ]] || die 'cannot locate the staged GStreamer x264 plugin'
+
+	# Resolve relocations with the running deployment's loader and dependency
+	# set. This catches a builder repository that has moved ahead of the exact
+	# Silverblue deployment recorded in the extension manifest.
+	for target in \
+		"$mutter_library" \
+		"$x264_plugin" \
+		"$stage/usr/bin/gnome-control-center" \
+		"$stage/usr/bin/wireplumber" \
+		"$stage/usr/bin/pronkd" \
+		/usr/bin/gnome-shell; do
+		output=$(LD_LIBRARY_PATH="$library_path" ldd -r "$target" 2>&1) || {
+			printf '%s\n' "$output" >&2
+			die "staged runtime is not link-compatible with the host: $target"
+		}
+		if grep -Eq 'not found|undefined symbol' <<< "$output"; then
+			printf '%s\n' "$output" >&2
+			die "staged runtime has unresolved host dependencies: $target"
+		fi
+	done
+}
+
+label_extension_for_target()
+{
+	local image=$1
+	local policy_type
+	local contexts
+	local hierarchy
+
+	command -v selinuxenabled >/dev/null 2>&1 || return 0
+	selinuxenabled || return 0
+	policy_type=$(awk -F= '$1 == "SELINUXTYPE" { print $2; exit }' /etc/selinux/config)
+	[[ $policy_type =~ ^[A-Za-z0-9._-]+$ ]] || \
+		die "cannot determine the active SELinux policy type: $policy_type"
+	contexts="/etc/selinux/$policy_type/contexts/files/file_contexts"
+	[[ -r $contexts ]] || die "SELinux file contexts are missing: $contexts"
+	command -v setfiles >/dev/null 2>&1 || die 'setfiles is required on an SELinux host'
+
+	# Label the image as an alternate root so files that will appear below
+	# /usr and /opt receive their target labels, not /var/lib labels.
+	for hierarchy in usr opt; do
+		[[ -e $image/$hierarchy ]] || continue
+		sudo setfiles -F -r "$image" "$contexts" "$image/$hierarchy"
+	done
+}
+
+replace_staged_extension()
+{
+	local temporary=$1
+	local staged=$state_dir/staged
+	local previous=$state_dir/.staged.previous.$$
+
+	if [[ -e $staged ]]; then
+		mv -- "$staged" "$previous"
+	fi
+	mv -- "$temporary" "$staged"
+	if [[ -e $previous ]]; then
+		rm -rf --one-file-system -- "$previous"
+	fi
+}
+
+build_in_container()
+{
+	local stage=$1
+	local identifier=$2
+
+	export PATH=/usr/bin:/usr/sbin:${PATH}
+	require_source_tree CastKMS "$castkms_source"
+	require_source_tree Mutter "$mutter_source"
+	require_source_tree 'GNOME Settings' "$control_center_source"
+	require_source_tree WirePlumber "$wireplumber_source"
+
+	stage_wireplumber "$stage"
+	build_castkms "$stage"
+	build_mutter "$stage"
+	build_control_center "$stage"
+	build_pronk "$stage"
+	write_extension_metadata "$stage" "$identifier"
+}
+
+build_extension()
+{
+	local identifier
+
+	ensure_state_directories
+	select_mutter_source
+	builder_exists || die 'the build image is missing; run prepare first'
+	identifier=$(build_id)
+	safe_component "$identifier"
+	temporary_stage=$(mktemp -d "$state_dir/.stage.XXXXXX")
+
+	log "Building extension $identifier with $(jobs) parallel jobs"
+	stage_video_encoder_runtime "$temporary_stage"
+	run_in_builder "$script_dir/pronk-dev-sysext" \
+		__build-in-container "$temporary_stage" "$identifier" "$run_tests"
+	sign_castkms "$temporary_stage"
+	validate_stage "$temporary_stage"
+	validate_host_abi "$temporary_stage"
+	replace_staged_extension "$temporary_stage"
+	temporary_stage=
+	log "Staged extension is ready in $state_dir/staged"
+}
+
+installed_manifest()
+{
+	printf '%s/pronk/usr/lib/pronk-sysext/manifest\n' "$extension_store"
+}
+
+manifest_matches_host()
+{
+	local manifest=$1
+	local expected_ostree
+	local expected_kernel
+
+	[[ -r $manifest ]] || return 1
+	expected_ostree=$(read_value "$manifest" HOST_OSTREE_VERSION) || return 1
+	expected_kernel=$(read_value "$manifest" HOST_KERNEL_RELEASE) || return 1
+	[[ $expected_ostree == "$(host_ostree_version)" && $expected_kernel == "$(kernel_release)" ]]
+}
+
+install_extension()
+{
+	local stage=$state_dir/staged
+	local manifest=$stage/usr/lib/pronk-sysext/manifest
+	local identifier
+	local target
+	local pending_target
+	local pending_link
+
+	[[ -d $stage ]] || die 'no staged extension exists; run build first'
+	validate_stage "$stage"
+	manifest_matches_host "$manifest" || die 'the staged extension does not match the running deployment and kernel'
+	identifier=$(read_value "$manifest" BUILD_ID)
+	safe_component "$identifier"
+	target=$extension_store/images/$identifier
+	pending_target=$extension_store/images/.pending.$identifier.$$
+	pending_installed_image=$pending_target
+	pending_link=$extension_store/.pronk.$$
+
+	log "Publishing immutable extension image $identifier"
+	sudo install -d -m 0755 -o root -g root "$extension_store/images"
+	if sudo test -e "$target"; then
+		die "an installed image already uses build ID $identifier"
+	fi
+	sudo install -d -m 0755 -o root -g root "$pending_target"
+	sudo cp -a "$stage/." "$pending_target/"
+	sudo chown -R root:root "$pending_target"
+	sudo chmod -R go-w "$pending_target"
+	# mktemp deliberately creates the local staging root as mode 0700. cp -a
+	# preserves that root mode on the destination, so normalize the published
+	# extension directory itself after copying its contents.
+	sudo chmod 0755 "$pending_target"
+	label_extension_for_target "$pending_target"
+	sudo mv -T "$pending_target" "$target"
+	pending_installed_image=
+	sudo ln -s "images/$identifier" "$pending_link"
+	sudo mv -Tf "$pending_link" "$extension_store/pronk"
+
+	log 'Installing the boot guard, ephemeral overlay policy, and CastKMS loader unit'
+	sudo install -d -m 0755 -o root -g root \
+		/etc/pronk-sysext \
+		/etc/systemd/system-generators \
+		/etc/systemd/sysext.conf.d
+	sudo install -m 0644 -o root -g root "$manifest" /etc/pronk-sysext/manifest
+	sudo install -m 0755 -o root -g root \
+		"$script_dir/sysext/pronk-sysext-generator" \
+		/etc/systemd/system-generators/pronk-sysext-generator
+	sudo install -m 0644 -o root -g root \
+		"$script_dir/sysext/80-pronk-dev.conf" \
+		/etc/systemd/sysext.conf.d/80-pronk-dev.conf
+	sudo install -m 0644 -o root -g root \
+		"$script_dir/sysext/pronk-castkms.service" \
+		/etc/systemd/system/pronk-castkms.service
+	# systemctl enable normally reloads the manager, which reruns generators
+	# and would expose the extension during the current (possibly unlocked)
+	# boot. Enable it for the next boot without changing current runtime state.
+	sudo systemctl enable --no-reload pronk-castkms.service
+	sudo env PRONK_SYSEXT_DISABLED=/dev/null \
+		/etc/systemd/system-generators/pronk-sysext-generator
+
+	log 'Installed. Reboot to enter the extension with one consistent desktop stack.'
+	log 'A new Fedora deployment or kernel automatically leaves it inactive until rebuilt.'
+}
+
+host_is_unlocked()
+{
+	rpm-ostree status --json | python3 -c '
+import json, sys
+deployments = json.load(sys.stdin)["deployments"]
+raise SystemExit(not any(d.get("booted") and d.get("unlocked") for d in deployments))
+'
+}
+
+activate_extension()
+{
+	local manifest=/etc/pronk-sysext/manifest
+
+	[[ ! -e /etc/pronk-sysext/disabled ]] || die 'the Pronk extension is disabled'
+	manifest_matches_host "$manifest" || die 'the installed extension does not match the running deployment and kernel'
+	if [[ -e /run/ostree-booted ]] && host_is_unlocked; then
+		die 'the deployment has a transient /usr overlay; reboot instead of stacking a live sysext on it'
+	fi
+	if grep -q '^castkms ' /proc/modules; then
+		die 'CastKMS is already loaded; reboot to replace it together with the desktop stack'
+	fi
+
+	log 'Activating the extension without logging out'
+	sudo systemctl daemon-reload
+	sudo systemd-sysext refresh
+	sudo systemctl daemon-reload
+	sudo systemctl start pronk-castkms.service
+	systemctl --user daemon-reload
+	systemctl --user start pronk-chromiacast.socket
+	systemctl --user restart pipewire.service wireplumber.service
+	log 'Runtime services are active. Log out and back in before testing Mutter or Settings.'
+}
+
+show_status()
+{
+	local manifest
+	local build
+	local expected_ostree
+	local expected_kernel
+
+	printf 'Host deployment: %s\n' "$(host_ostree_version 2>/dev/null || printf unknown)"
+	printf 'Host kernel:     %s\n' "$(kernel_release)"
+	if [[ -L $extension_store/pronk ]]; then
+		printf 'Installed image: %s\n' "$(readlink "$extension_store/pronk")"
+	else
+		printf 'Installed image: none\n'
+	fi
+
+	manifest=$(installed_manifest)
+	if [[ -r $manifest ]]; then
+		build=$(read_value "$manifest" BUILD_ID || printf unknown)
+		expected_ostree=$(read_value "$manifest" HOST_OSTREE_VERSION || printf unknown)
+		expected_kernel=$(read_value "$manifest" HOST_KERNEL_RELEASE || printf unknown)
+		printf 'Build:           %s\n' "$build"
+		printf 'Compatibility:   '
+		if manifest_matches_host "$manifest"; then
+			printf 'matches this boot\n'
+		else
+			printf 'inactive (needs %s / %s)\n' "$expected_ostree" "$expected_kernel"
+		fi
+	else
+		printf 'Compatibility:   no installed manifest\n'
+	fi
+
+	if [[ -e /etc/pronk-sysext/disabled ]]; then
+		printf 'Boot guard:      disabled by administrator\n'
+	elif [[ -L /run/extensions/pronk ]]; then
+		printf 'Boot guard:      exposed at %s\n' "$(readlink /run/extensions/pronk)"
+	else
+		printf 'Boot guard:      not exposed on this boot\n'
+	fi
+
+	printf '\n'
+	systemd-sysext status 2>&1 || true
+	printf '\nCastKMS: '
+	if grep -q '^castkms ' /proc/modules; then
+		printf 'loaded\n'
+	else
+		printf 'not loaded\n'
+	fi
+	printf 'Pronk socket: '
+	systemctl --user is-active pronk-chromiacast.socket 2>/dev/null || true
+}
+
+check_scripts()
+{
+	local target
+	local unit_fixture
+	local sysext_config=$script_dir/sysext/80-pronk-dev.conf
+	local shellcheck_files=(
+		"$script_dir/pronk-dev-sysext"
+		"$script_dir/sysext/pronk-sysext-generator"
+		"$script_dir/sysext/pronk-load-castkms"
+		"$project_root/tests/sysext/check-dev-sysext"
+	)
+
+	log 'Checking shell syntax'
+	bash -n "${shellcheck_files[@]}"
+	if command -v podman >/dev/null && [[ -d $podman_root ]] && builder_exists; then
+		log 'Running ShellCheck in the persistent builder'
+		run_in_builder shellcheck "${shellcheck_files[@]}"
+	elif command -v shellcheck >/dev/null; then
+		log 'Running ShellCheck'
+		shellcheck "${shellcheck_files[@]}"
+	fi
+	log 'Exercising the version guard'
+	"$project_root/tests/sysext/check-dev-sysext" \
+		"$script_dir/sysext/pronk-sysext-generator"
+	log 'Checking the system extension mutability policy'
+	grep -Fxq '[SysExt]' "$sysext_config"
+	grep -Fxq 'Mutable=ephemeral' "$sysext_config"
+	log 'Checking the system unit'
+	unit_fixture=$(mktemp -d)
+	install -Dm0644 "$script_dir/sysext/pronk-castkms.service" \
+		"$unit_fixture/etc/systemd/system/pronk-castkms.service"
+	install -Dm0755 "$script_dir/sysext/pronk-load-castkms" \
+		"$unit_fixture/usr/libexec/pronk-load-castkms"
+	for target in basic.target display-manager.service shutdown.target sysinit.target; do
+		install -Dm0644 /dev/null "$unit_fixture/usr/lib/systemd/system/$target"
+		printf '[Unit]\nDescription=Verification stub\n' \
+			> "$unit_fixture/usr/lib/systemd/system/$target"
+	done
+	printf '%s\n' \
+		'[Unit]' \
+		'Description=Verification stub' \
+		'[Service]' \
+		'Type=oneshot' \
+		'ExecStart=/usr/libexec/pronk-load-castkms' \
+		> "$unit_fixture/usr/lib/systemd/system/display-manager.service"
+	printf '%s\n' \
+		'[Unit]' \
+		'Description=Verification stub' \
+		'DefaultDependencies=no' \
+		'[Service]' \
+		'Type=oneshot' \
+		'ExecStart=/usr/libexec/pronk-load-castkms' \
+		> "$unit_fixture/usr/lib/systemd/system/systemd-sysext.service"
+	if ! systemd-analyze verify --root="$unit_fixture" pronk-castkms.service; then
+		rm -rf --one-file-system -- "${unit_fixture:?}"
+		return 1
+	fi
+	rm -rf --one-file-system -- "${unit_fixture:?}"
+}
+
+while (($# > 0)); do
+	case $1 in
+	--run-tests)
+		run_tests=true
+		shift
+		;;
+	--rebuild-builder)
+		rebuild_builder=true
+		shift
+		;;
+	-h|--help)
+		usage
+		exit 0
+		;;
+	-*)
+		die "unknown option: $1"
+		;;
+	*)
+		break
+		;;
+	esac
+done
+
+command=${1:-}
+[[ -n $command ]] || { usage >&2; exit 2; }
+shift
+
+case $command in
+prepare)
+	(($# == 0)) || die "unexpected argument: $1"
+	prepare_builder
+	;;
+build)
+	(($# == 0)) || die "unexpected argument: $1"
+	build_extension
+	;;
+install)
+	(($# == 0)) || die "unexpected argument: $1"
+	install_extension
+	;;
+deploy)
+	(($# == 0)) || die "unexpected argument: $1"
+	prepare_builder
+	build_extension
+	install_extension
+	;;
+activate)
+	(($# == 0)) || die "unexpected argument: $1"
+	activate_extension
+	;;
+status)
+	(($# == 0)) || die "unexpected argument: $1"
+	show_status
+	;;
+check)
+	(($# == 0)) || die "unexpected argument: $1"
+	check_scripts
+	;;
+__build-in-container)
+	(($# == 3)) || die 'invalid internal build invocation'
+	case $3 in
+	true|false) run_tests=$3 ;;
+	*) die 'invalid internal test setting' ;;
+	esac
+	build_in_container "$1" "$2"
+	;;
+*)
+	die "unknown command: $command"
+	;;
+esac
