@@ -1,0 +1,15 @@
+[Unit]
+Description=Load the CastKMS virtual display driver
+Documentation=https://github.com/pronkproject/castkms
+Requires=systemd-sysext.service
+After=systemd-sysext.service
+Before=display-manager.service
+ConditionPathExists=/usr/lib/modules/%v/extra/castkms.ko
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/pronk-load-castkms
+
+[Install]
+WantedBy=multi-user.target
