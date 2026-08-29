@@ -12,14 +12,17 @@ use pronk_media::{
     EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit, MediaGraphActor,
     MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics, PipeWireAudioInput,
     PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, OPUS_BITRATE, OPUS_CHANNELS,
-    OPUS_SAMPLE_RATE,
+    OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use zbus::zvariant::OwnedFd;
 
 use crate::audio_sender_actor::{AudioSenderActor, AudioSenderStatistics};
-use crate::feedback::{VideoFeedbackAction, VideoFeedbackController, INITIAL_PLAYOUT_DELAY};
+use crate::feedback::{
+    AdaptivePlayoutDelayConfiguration, VideoFeedbackAction, VideoFeedbackController,
+    INITIAL_PLAYOUT_DELAY, MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS,
+};
 use crate::sender_actor::{VideoSenderActor, VideoSenderFeedbackSnapshot, VideoSenderStatistics};
 use crate::transport::{
     AudioTransportConfiguration, VideoTransportConfiguration, VideoTransportError,
@@ -29,6 +32,23 @@ use crate::transport::{
 const ENCODED_OUTPUT_CAPACITY: usize = 8;
 const ENCODED_AUDIO_OUTPUT_CAPACITY: usize = 32;
 const START_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn minimum_playout_delay(
+    framerate_numerator: u32,
+    framerate_denominator: u32,
+    audio_enabled: bool,
+) -> Duration {
+    let frame_milliseconds = u64::from(framerate_denominator)
+        .saturating_mul(1_000)
+        .div_ceil(u64::from(framerate_numerator))
+        .max(1);
+    let audio_packet_duration = if audio_enabled {
+        OPUS_FRAME_DURATION
+    } else {
+        Duration::default()
+    };
+    Duration::from_millis(frame_milliseconds).max(audio_packet_duration)
+}
 
 #[async_trait]
 trait MediaGraphPort: Debug + Send + 'static {
@@ -308,10 +328,32 @@ impl ChromiacastMediaSession {
 
         let mut negotiated = transport.negotiate_video(transport_configuration).await?;
         self.transport_active = true;
+        let adaptive_playout_delay = negotiated
+            .sender
+            .supports_target_playout_delay_updates()
+            .then(|| AdaptivePlayoutDelayConfiguration {
+                minimum: minimum_playout_delay(
+                    transport_configuration.framerate_numerator,
+                    transport_configuration.framerate_denominator,
+                    transport_configuration.audio.is_some(),
+                ),
+                initial: transport_configuration.target_playout_delay,
+                receiver_maximum: negotiated.sender.maximum_target_playout_delay(),
+            });
+        tracing::info!(
+            supported = adaptive_playout_delay.is_some(),
+            minimum_milliseconds = adaptive_playout_delay
+                .map(|configuration| configuration.minimum.as_millis()),
+            initial_milliseconds = transport_configuration.target_playout_delay.as_millis(),
+            receiver_maximum_milliseconds = ?adaptive_playout_delay
+                .and_then(|configuration| configuration.receiver_maximum)
+                .map(|delay| delay.as_millis()),
+            "negotiated adaptive Cast playout delay"
+        );
         self.feedback_controller = Some(VideoFeedbackController::new(
             NonZeroU64::new(self.video_bitrate).expect("validated bitrate is nonzero"),
             negotiated.minimum_bitrate,
-            None,
+            adaptive_playout_delay,
         ));
 
         match (audio_enabled, negotiated.audio_sender.take()) {
@@ -382,6 +424,28 @@ impl ChromiacastMediaSession {
                         media_generation: generation.get(),
                         bitrate,
                     });
+                }
+                VideoFeedbackAction::SetPlayoutDelay(delay) => {
+                    self.sender()?
+                        .set_target_playout_delay(generation, delay)
+                        .await?;
+                    tracing::info!(
+                        media_generation = generation.get(),
+                        milliseconds = delay.as_millis(),
+                        "adjusted Cast target playout delay"
+                    );
+                }
+                VideoFeedbackAction::DisableAdaptivePlayoutDelay {
+                    requested,
+                    receiver,
+                } => {
+                    tracing::warn!(
+                        media_generation = generation.get(),
+                        requested_milliseconds = requested.as_millis(),
+                        receiver_milliseconds = ?receiver.map(|delay| delay.as_millis()),
+                        attempts = MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS,
+                        "receiver did not apply adaptive Cast playout delay"
+                    );
                 }
             }
         }
@@ -825,13 +889,18 @@ impl ChromiacastMediaSession {
         let bitrate = u32::try_from(configuration.video_bitrate).map_err(|_| {
             MediaSessionError::InvalidRequest("video bitrate exceeds Cast's u32 range".into())
         })?;
+        let minimum_playout_delay = minimum_playout_delay(
+            caps.framerate_numerator.get(),
+            caps.framerate_denominator.get(),
+            audio.is_some(),
+        );
         let transport = VideoTransportConfiguration {
             width: caps.width.get(),
             height: caps.height.get(),
             framerate_numerator: caps.framerate_numerator.get(),
             framerate_denominator: caps.framerate_denominator.get(),
             bitrate,
-            target_playout_delay: INITIAL_PLAYOUT_DELAY,
+            target_playout_delay: INITIAL_PLAYOUT_DELAY.max(minimum_playout_delay),
             audio: audio.as_ref().map(|(_, transport)| *transport),
         };
         let graph = MediaGraphConfiguration {
@@ -980,6 +1049,7 @@ impl From<VideoTransportError> for MediaSessionError {
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use pronk_backend_protocol::{
@@ -1141,6 +1211,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeSender {
         feedback: watch::Sender<VideoTransportFeedbackSnapshot>,
+        playout_delays: Option<Arc<Mutex<Vec<Duration>>>>,
     }
 
     #[derive(Debug)]
@@ -1169,6 +1240,23 @@ mod tests {
 
     #[async_trait]
     impl VideoSenderPort for FakeSender {
+        fn supports_target_playout_delay_updates(&self) -> bool {
+            self.playout_delays.is_some()
+        }
+
+        async fn set_target_playout_delay(
+            &mut self,
+            delay: Duration,
+        ) -> Result<(), VideoTransportError> {
+            self.playout_delays
+                .as_ref()
+                .ok_or_else(|| VideoTransportError::new("adaptive playout delay is disabled"))?
+                .lock()
+                .unwrap()
+                .push(delay);
+            Ok(())
+        }
+
         async fn send(
             &mut self,
             _access_unit: EncodedVideoAccessUnit,
@@ -1189,6 +1277,34 @@ mod tests {
     struct FakeTransport {
         configuration: Option<VideoTransportConfiguration>,
         stops: u32,
+    }
+
+    #[derive(Debug)]
+    struct AdaptiveTransport {
+        playout_delays: Arc<Mutex<Vec<Duration>>>,
+    }
+
+    #[async_trait]
+    impl VideoTransportNegotiator for AdaptiveTransport {
+        async fn negotiate_video(
+            &mut self,
+            _configuration: VideoTransportConfiguration,
+        ) -> Result<NegotiatedVideoTransport, VideoTransportError> {
+            let (feedback, receiver) = watch::channel(VideoTransportFeedbackSnapshot::default());
+            Ok(NegotiatedVideoTransport {
+                sender: Box::new(FakeSender {
+                    feedback,
+                    playout_delays: Some(self.playout_delays.clone()),
+                }),
+                audio_sender: None,
+                feedback: receiver,
+                minimum_bitrate: None,
+            })
+        }
+
+        async fn stop_video(&mut self) -> Result<(), VideoTransportError> {
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -1230,12 +1346,30 @@ mod tests {
         NegotiatedVideoTransport {
             sender: Box::new(FakeSender {
                 feedback: feedback.clone(),
+                playout_delays: None,
             }),
             audio_sender: with_audio
                 .then(|| Box::new(FakeAudioSender { feedback }) as Box<dyn AudioSenderPort>),
             feedback: receiver,
             minimum_bitrate: None,
         }
+    }
+
+    #[test]
+    fn playout_delay_floor_covers_one_video_or_audio_packet() {
+        assert_eq!(
+            minimum_playout_delay(60, 1, false),
+            Duration::from_millis(17)
+        );
+        assert_eq!(minimum_playout_delay(60, 1, true), OPUS_FRAME_DURATION);
+        assert_eq!(
+            minimum_playout_delay(30, 1, false),
+            Duration::from_millis(34)
+        );
+        assert_eq!(
+            minimum_playout_delay(60_000, 1_001, false),
+            Duration::from_millis(17)
+        );
     }
 
     #[tokio::test]
@@ -1525,6 +1659,49 @@ mod tests {
             ]
         );
         assert_eq!(media.statistics().await.unwrap().video_bitrate, 1_600_000);
+        media.stop_media(1, &mut transport).await.unwrap();
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn adaptive_feedback_updates_the_generation_owned_transport() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        let playout_delays = Arc::new(Mutex::new(Vec::new()));
+        let mut transport = AdaptiveTransport {
+            playout_delays: playout_delays.clone(),
+        };
+        media.complete_preparation(capabilities()).unwrap();
+        media
+            .configure(
+                remote(),
+                vec![target(session_id, 1)],
+                configuration(),
+                1,
+                &mut transport,
+            )
+            .await
+            .unwrap();
+
+        assert!(media
+            .handle_feedback(VideoSenderFeedbackSnapshot {
+                revision: 1,
+                generation: NonZeroU64::new(1),
+                pressure: Some(crate::transport::VideoTransportPressure {
+                    receiver_playout_delay: Some(INITIAL_PLAYOUT_DELAY),
+                    nack_count: 1,
+                    ..crate::transport::VideoTransportPressure::default()
+                }),
+                ..VideoSenderFeedbackSnapshot::default()
+            })
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(*playout_delays.lock().unwrap(), [Duration::from_millis(66)]);
+
         media.stop_media(1, &mut transport).await.unwrap();
         media.shutdown().await.unwrap();
     }

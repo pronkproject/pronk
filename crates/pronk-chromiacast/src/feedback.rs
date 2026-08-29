@@ -14,6 +14,7 @@ const PLAYOUT_DELAY_STEP: Duration = Duration::from_millis(33);
 const MAXIMUM_PLAYOUT_DELAY: Duration = Duration::from_millis(250);
 const PLAYOUT_ADJUSTMENT_INTERVAL: Duration = Duration::from_secs(1);
 const PLAYOUT_UPDATE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS: u8 = 3;
 const PLAYOUT_RECOVERY_INTERVAL: Duration = Duration::from_secs(15);
 const RTT_PLAYOUT_MULTIPLIER: u32 = 3;
 
@@ -31,6 +32,10 @@ pub(crate) enum VideoFeedbackAction {
     ForceKeyFrame,
     SetBitrate(NonZeroU64),
     SetPlayoutDelay(Duration),
+    DisableAdaptivePlayoutDelay {
+        requested: Duration,
+        receiver: Option<Duration>,
+    },
 }
 
 /// Generation-local adaptation policy. It contains no transport, GStreamer,
@@ -61,6 +66,8 @@ struct AdaptivePlayoutDelayController {
     stable_since: Option<Instant>,
     last_adjustment: Option<Instant>,
     last_update_sent: Option<Instant>,
+    update_attempts: u8,
+    updates_enabled: bool,
 }
 
 impl VideoFeedbackController {
@@ -103,8 +110,8 @@ impl VideoFeedbackController {
         if let Some(pressure) = feedback.pressure {
             self.observe_pressure(pressure, now, &mut actions);
             if let Some(playout_delay) = &mut self.playout_delay {
-                if let Some(requested) = playout_delay.observe(pressure, now) {
-                    actions.push(VideoFeedbackAction::SetPlayoutDelay(requested));
+                if let Some(action) = playout_delay.observe(pressure, now) {
+                    actions.push(action);
                 }
             }
         }
@@ -200,10 +207,19 @@ impl AdaptivePlayoutDelayController {
             stable_since: None,
             last_adjustment: None,
             last_update_sent: None,
+            update_attempts: 0,
+            updates_enabled: true,
         }
     }
 
-    fn observe(&mut self, pressure: VideoTransportPressure, now: Instant) -> Option<Duration> {
+    fn observe(
+        &mut self,
+        pressure: VideoTransportPressure,
+        now: Instant,
+    ) -> Option<VideoFeedbackAction> {
+        if !self.updates_enabled {
+            return None;
+        }
         let new_nack = pressure.nack_count > self.evaluated_nack_count;
         self.evaluated_nack_count = pressure.nack_count;
         let new_transport_drop =
@@ -234,13 +250,22 @@ impl AdaptivePlayoutDelayController {
                 .is_some_and(|elapsed| elapsed >= PLAYOUT_UPDATE_RETRY_INTERVAL)
             {
                 *last_update_sent = now;
-                return Some(self.current);
+                if self.update_attempts >= MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS {
+                    self.updates_enabled = false;
+                    return Some(VideoFeedbackAction::DisableAdaptivePlayoutDelay {
+                        requested: self.current,
+                        receiver: pressure.receiver_playout_delay,
+                    });
+                }
+                self.update_attempts += 1;
+                return Some(VideoFeedbackAction::SetPlayoutDelay(self.current));
             }
             return None;
         }
         if !self.confirmed {
             self.confirmed = true;
             self.last_update_sent = None;
+            self.update_attempts = 0;
         }
         if !deadline_pressure && !lossy {
             self.stable_since.get_or_insert(now);
@@ -277,13 +302,14 @@ impl AdaptivePlayoutDelayController {
         None
     }
 
-    fn set_current(&mut self, requested: Duration, now: Instant) -> Duration {
+    fn set_current(&mut self, requested: Duration, now: Instant) -> VideoFeedbackAction {
         self.current = requested;
         self.confirmed = false;
         self.stable_since = None;
         self.last_adjustment = Some(now);
         self.last_update_sent = Some(now);
-        requested
+        self.update_attempts = 1;
+        VideoFeedbackAction::SetPlayoutDelay(requested)
     }
 }
 
@@ -555,6 +581,76 @@ mod tests {
                 66
             ))]
         );
+    }
+
+    #[test]
+    fn disables_adaptation_when_the_receiver_ignores_bounded_retries() {
+        let start = Instant::now();
+        let mut controller = VideoFeedbackController::new(
+            NonZeroU64::new(2_000_000).unwrap(),
+            None,
+            Some(AdaptivePlayoutDelayConfiguration {
+                minimum: Duration::from_millis(17),
+                initial: INITIAL_PLAYOUT_DELAY,
+                receiver_maximum: None,
+            }),
+        );
+        let mut pressure = VideoTransportPressure {
+            receiver_playout_delay: Some(INITIAL_PLAYOUT_DELAY),
+            nack_count: 1,
+            ..VideoTransportPressure::default()
+        };
+
+        assert_eq!(
+            controller.observe(
+                VideoSenderFeedbackSnapshot {
+                    pressure: Some(pressure),
+                    ..VideoSenderFeedbackSnapshot::default()
+                },
+                start,
+            ),
+            [VideoFeedbackAction::SetPlayoutDelay(Duration::from_millis(
+                99
+            ))]
+        );
+        for attempt in 1..MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS {
+            assert_eq!(
+                controller.observe(
+                    VideoSenderFeedbackSnapshot {
+                        pressure: Some(pressure),
+                        ..VideoSenderFeedbackSnapshot::default()
+                    },
+                    start + PLAYOUT_UPDATE_RETRY_INTERVAL * u32::from(attempt),
+                ),
+                [VideoFeedbackAction::SetPlayoutDelay(Duration::from_millis(
+                    99
+                ))]
+            );
+        }
+        assert_eq!(
+            controller.observe(
+                VideoSenderFeedbackSnapshot {
+                    pressure: Some(pressure),
+                    ..VideoSenderFeedbackSnapshot::default()
+                },
+                start + PLAYOUT_UPDATE_RETRY_INTERVAL * u32::from(MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS),
+            ),
+            [VideoFeedbackAction::DisableAdaptivePlayoutDelay {
+                requested: Duration::from_millis(99),
+                receiver: Some(INITIAL_PLAYOUT_DELAY),
+            }]
+        );
+
+        pressure.nack_count += 1;
+        assert!(controller
+            .observe(
+                VideoSenderFeedbackSnapshot {
+                    pressure: Some(pressure),
+                    ..VideoSenderFeedbackSnapshot::default()
+                },
+                start + Duration::from_secs(60),
+            )
+            .is_empty());
     }
 
     #[test]
