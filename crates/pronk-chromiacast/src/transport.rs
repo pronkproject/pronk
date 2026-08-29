@@ -16,6 +16,7 @@ pub(crate) struct VideoTransportConfiguration {
     pub framerate_numerator: u32,
     pub framerate_denominator: u32,
     pub bitrate: u32,
+    pub target_playout_delay: Duration,
     pub audio: Option<AudioTransportConfiguration>,
 }
 

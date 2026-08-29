@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, watch};
 use zbus::zvariant::OwnedFd;
 
 use crate::audio_sender_actor::{AudioSenderActor, AudioSenderStatistics};
-use crate::feedback::{VideoFeedbackAction, VideoFeedbackController};
+use crate::feedback::{VideoFeedbackAction, VideoFeedbackController, INITIAL_PLAYOUT_DELAY};
 use crate::sender_actor::{VideoSenderActor, VideoSenderFeedbackSnapshot, VideoSenderStatistics};
 use crate::transport::{
     AudioTransportConfiguration, VideoTransportConfiguration, VideoTransportError,
@@ -831,6 +831,7 @@ impl ChromiacastMediaSession {
             framerate_numerator: caps.framerate_numerator.get(),
             framerate_denominator: caps.framerate_denominator.get(),
             bitrate,
+            target_playout_delay: INITIAL_PLAYOUT_DELAY,
             audio: audio.as_ref().map(|(_, transport)| *transport),
         };
         let graph = MediaGraphConfiguration {
@@ -1280,6 +1281,7 @@ mod tests {
                 framerate_numerator: 60,
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
+                target_playout_delay: INITIAL_PLAYOUT_DELAY,
                 audio: None,
             })
         );
@@ -1362,6 +1364,7 @@ mod tests {
                 framerate_numerator: 60,
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
+                target_playout_delay: INITIAL_PLAYOUT_DELAY,
                 audio: Some(AudioTransportConfiguration {
                     sample_rate: OPUS_SAMPLE_RATE,
                     channels: 2,

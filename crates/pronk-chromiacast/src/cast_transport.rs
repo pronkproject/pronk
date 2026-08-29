@@ -17,7 +17,6 @@ use crate::transport::{
     VideoTransportPressure,
 };
 
-const TARGET_PLAYOUT_DELAY: Duration = Duration::from_millis(400);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) async fn negotiate_video(
@@ -43,33 +42,26 @@ async fn negotiate_launched_video(
     app: &CastApp,
     configuration: VideoTransportConfiguration,
 ) -> Result<NegotiatedVideoTransport, VideoTransportError> {
-    let offer_builder = Offer::builder();
-    let offer_builder = match configuration.audio {
-        Some(audio) => offer_builder.audio(AudioStreamConfig {
-            codec: AudioCodec::Opus,
-            bit_rate: audio.bitrate,
-            sample_rate: audio.sample_rate,
-            channels: audio.channels,
-            target_delay: TARGET_PLAYOUT_DELAY,
-        }),
-        None => offer_builder,
-    };
-    let offer = offer_builder
-        .video(VideoStreamConfig {
-            codec: VideoCodec::H264,
-            max_bit_rate: configuration.bitrate,
-            max_frame_rate: Framerate::new(
-                configuration.framerate_numerator,
-                configuration.framerate_denominator,
-            ),
-            resolutions: vec![Resolution::new(configuration.width, configuration.height)],
-            target_delay: TARGET_PLAYOUT_DELAY,
-        })
-        .build();
+    tracing::info!(
+        width = configuration.width,
+        height = configuration.height,
+        framerate_numerator = configuration.framerate_numerator,
+        framerate_denominator = configuration.framerate_denominator,
+        bitrate = configuration.bitrate,
+        target_playout_delay_milliseconds = configuration.target_playout_delay.as_millis(),
+        audio = configuration.audio.is_some(),
+        "offering Cast media configuration"
+    );
+    let offer = build_offer(configuration);
     let answer = connection
         .exchange_offer(&offer, app)
         .await
         .map_err(|error| VideoTransportError::new(format!("exchange Cast OFFER: {error}")))?;
+    tracing::info!(
+        constraints = ?answer.constraints,
+        display = ?answer.display,
+        "received Cast streaming constraints"
+    );
     validate_answer_constraints(&answer, configuration)?;
     let minimum_bitrate = answer
         .constraints
@@ -99,14 +91,41 @@ async fn negotiate_launched_video(
         })?),
         None => None,
     };
+    let maximum_playout_delay = maximum_playout_delay(&answer, configuration.audio.is_some());
     let (sender, audio_sender, feedback) =
-        ChromiacastVideoSender::new(session, video, audio, events);
+        ChromiacastVideoSender::new(session, video, audio, events, maximum_playout_delay);
     Ok(NegotiatedVideoTransport {
         sender: Box::new(sender),
         audio_sender: audio_sender.map(|sender| Box::new(sender) as Box<dyn AudioSenderPort>),
         feedback,
         minimum_bitrate,
     })
+}
+
+fn build_offer(configuration: VideoTransportConfiguration) -> Offer {
+    let offer_builder = Offer::builder();
+    let offer_builder = match configuration.audio {
+        Some(audio) => offer_builder.audio(AudioStreamConfig {
+            codec: AudioCodec::Opus,
+            bit_rate: audio.bitrate,
+            sample_rate: audio.sample_rate,
+            channels: audio.channels,
+            target_delay: configuration.target_playout_delay,
+        }),
+        None => offer_builder,
+    };
+    offer_builder
+        .video(VideoStreamConfig {
+            codec: VideoCodec::H264,
+            max_bit_rate: configuration.bitrate,
+            max_frame_rate: Framerate::new(
+                configuration.framerate_numerator,
+                configuration.framerate_denominator,
+            ),
+            resolutions: vec![Resolution::new(configuration.width, configuration.height)],
+            target_delay: configuration.target_playout_delay,
+        })
+        .build()
 }
 
 fn validate_answer_constraints(
@@ -132,7 +151,8 @@ fn validate_answer_constraints(
                     .max_bit_rate
                     .is_some_and(|maximum| configured.bitrate > maximum)
                 || audio.max_delay.is_some_and(|maximum_ms| {
-                    TARGET_PLAYOUT_DELAY > Duration::from_millis(u64::from(maximum_ms))
+                    configuration.target_playout_delay
+                        > Duration::from_millis(u64::from(maximum_ms))
                 })
             {
                 return Err(VideoTransportError::new(
@@ -167,7 +187,7 @@ fn validate_answer_constraints(
             .max_bit_rate
             .is_some_and(|maximum| configuration.bitrate > maximum)
         || video.max_delay.is_some_and(|maximum_ms| {
-            TARGET_PLAYOUT_DELAY > Duration::from_millis(u64::from(maximum_ms))
+            configuration.target_playout_delay > Duration::from_millis(u64::from(maximum_ms))
         })
     {
         return Err(VideoTransportError::new(
@@ -193,9 +213,23 @@ fn frame_rate_exceeds(numerator: u32, denominator: u32, maximum: Framerate) -> b
         > u64::from(maximum.numerator) * u64::from(denominator)
 }
 
+fn maximum_playout_delay(answer: &chromiacast::Answer, audio_enabled: bool) -> Option<Duration> {
+    let constraints = answer.constraints.as_ref()?;
+    let video = constraints.video.as_ref().and_then(|video| video.max_delay);
+    let audio = audio_enabled
+        .then(|| constraints.audio.as_ref().and_then(|audio| audio.max_delay))
+        .flatten();
+    video
+        .into_iter()
+        .chain(audio)
+        .min()
+        .map(|milliseconds| Duration::from_millis(u64::from(milliseconds)))
+}
+
 struct ChromiacastVideoSender {
     session: Option<SenderSession>,
     video: StreamHandle,
+    maximum_playout_delay: Option<Duration>,
     terminal: watch::Receiver<Option<VideoTransportError>>,
     event_task: Option<JoinHandle<()>>,
 }
@@ -206,6 +240,7 @@ impl ChromiacastVideoSender {
         video: StreamHandle,
         audio: Option<StreamHandle>,
         mut events: tokio::sync::mpsc::Receiver<SenderEvent>,
+        maximum_playout_delay: Option<Duration>,
     ) -> (
         Self,
         Option<ChromiacastAudioSender>,
@@ -228,6 +263,7 @@ impl ChromiacastVideoSender {
             Self {
                 session: Some(session),
                 video,
+                maximum_playout_delay,
                 terminal,
                 event_task: Some(event_task),
             },
@@ -431,6 +467,30 @@ impl std::fmt::Debug for ChromiacastVideoSender {
 
 #[async_trait]
 impl VideoSenderPort for ChromiacastVideoSender {
+    fn supports_target_playout_delay_updates(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(SenderSession::supports_target_playout_delay_updates)
+    }
+
+    fn maximum_target_playout_delay(&self) -> Option<Duration> {
+        self.maximum_playout_delay
+    }
+
+    async fn set_target_playout_delay(
+        &mut self,
+        delay: Duration,
+    ) -> Result<(), VideoTransportError> {
+        self.session
+            .as_ref()
+            .ok_or_else(|| VideoTransportError::new("Cast sender session is stopped"))?
+            .set_target_playout_delay(delay)
+            .await
+            .map_err(|error| {
+                VideoTransportError::new(format!("set Cast target playout delay: {error}"))
+            })
+    }
+
     async fn send(
         &mut self,
         access_unit: EncodedVideoAccessUnit,
@@ -534,8 +594,8 @@ mod tests {
     use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, VideoFrameDependency};
 
     use super::{
-        cast_audio_packet, cast_frame, join_sender_event_task, project_sender_event,
-        validate_answer_constraints,
+        build_offer, cast_audio_packet, cast_frame, join_sender_event_task, maximum_playout_delay,
+        project_sender_event, validate_answer_constraints,
     };
     use crate::transport::{
         AudioTransportConfiguration, VideoTransportConfiguration, VideoTransportError,
@@ -564,6 +624,7 @@ mod tests {
             framerate_numerator: 60,
             framerate_denominator: 1,
             bitrate: 2_000_000,
+            target_playout_delay: Duration::from_millis(33),
             audio: None,
         };
         assert!(validate_answer_constraints(&answer, configuration).is_err());
@@ -594,6 +655,7 @@ mod tests {
             framerate_numerator: 60,
             framerate_denominator: 1,
             bitrate: 8_000_000,
+            target_playout_delay: Duration::from_millis(33),
             audio: None,
         };
         assert!(validate_answer_constraints(&answer, configuration).is_err());
@@ -601,6 +663,29 @@ mod tests {
         configuration.framerate_numerator = 30;
         assert!(validate_answer_constraints(&answer, configuration).is_ok());
     }
+
+    #[test]
+    fn desktop_offer_requests_interactive_synchronized_playout() {
+        let configuration = VideoTransportConfiguration {
+            width: 1920,
+            height: 1080,
+            framerate_numerator: 60,
+            framerate_denominator: 1,
+            bitrate: 2_000_000,
+            target_playout_delay: Duration::from_millis(33),
+            audio: Some(AudioTransportConfiguration {
+                sample_rate: 48_000,
+                channels: 2,
+                bitrate: 128_000,
+            }),
+        };
+        let offer = serde_json::to_value(build_offer(configuration)).unwrap();
+        let streams = offer["supportedStreams"].as_array().unwrap();
+
+        assert_eq!(streams.len(), 2);
+        assert!(streams.iter().all(|stream| stream["targetDelay"] == 33));
+    }
+
     #[test]
     fn encoded_access_unit_maps_wholesale_to_chromiacast() {
         let reference_time = Instant::now();
@@ -655,6 +740,7 @@ mod tests {
             framerate_numerator: 60,
             framerate_denominator: 1,
             bitrate: 2_000_000,
+            target_playout_delay: Duration::from_millis(33),
             audio: Some(AudioTransportConfiguration {
                 sample_rate: 48_000,
                 channels: 2,
@@ -662,6 +748,31 @@ mod tests {
             }),
         };
         assert!(validate_answer_constraints(&answer, configuration).is_err());
+    }
+
+    #[test]
+    fn shared_delay_ceiling_uses_the_tighter_stream_constraint() {
+        let answer: Answer = serde_json::from_str(
+            r#"{
+                "udpPort": 2344,
+                "sendIndexes": [0, 1],
+                "ssrcs": [123, 456],
+                "constraints": {
+                    "audio": {"maxDelay": 120},
+                    "video": {"maxDelay": 250}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            maximum_playout_delay(&answer, true),
+            Some(Duration::from_millis(120))
+        );
+        assert_eq!(
+            maximum_playout_delay(&answer, false),
+            Some(Duration::from_millis(250))
+        );
     }
 
     #[test]
