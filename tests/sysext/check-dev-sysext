@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+set -euo pipefail
+
+generator=${1:?usage: check-dev-sysext GENERATOR}
+fixture=$(mktemp -d)
+trap 'rm -rf -- "$fixture"' EXIT
+
+manifest=$fixture/manifest
+os_release=$fixture/os-release
+runtime=$fixture/extensions
+image=$fixture/image
+disabled=$fixture/disabled
+
+mkdir -p "$image/usr"
+printf "OSTREE_VERSION='45.20260828.n.0'\n" > "$os_release"
+printf '%s\n' \
+	'HOST_OSTREE_VERSION=45.20260828.n.0' \
+	'HOST_KERNEL_RELEASE=7.2.0-61.fc45.x86_64' \
+	> "$manifest"
+
+run_generator()
+{
+	PRONK_SYSEXT_MANIFEST=$manifest \
+	PRONK_SYSEXT_DISABLED=$disabled \
+	PRONK_SYSEXT_OS_RELEASE=$os_release \
+	PRONK_SYSEXT_RUNTIME_DIR=$runtime \
+	PRONK_SYSEXT_IMAGE=$image \
+	PRONK_SYSEXT_KERNEL_RELEASE=${1:-7.2.0-61.fc45.x86_64} \
+		"$generator"
+}
+
+run_generator
+test -L "$runtime/pronk"
+test "$(readlink "$runtime/pronk")" = "$image"
+
+run_generator 7.2.0-62.fc45.x86_64
+test ! -e "$runtime/pronk"
+
+run_generator
+touch "$disabled"
+run_generator
+test ! -e "$runtime/pronk"
+rm "$disabled"
+
+sentinel=$fixture/should-not-exist
+printf '%s\n' \
+	"HOST_OSTREE_VERSION=\$(touch $sentinel)" \
+	'HOST_KERNEL_RELEASE=7.2.0-61.fc45.x86_64' \
+	> "$manifest"
+run_generator
+test ! -e "$sentinel"
+test ! -e "$runtime/pronk"
+
+printf '%s\n' \
+	'HOST_OSTREE_VERSION=45.20260828.n.0' \
+	'HOST_KERNEL_RELEASE=7.2.0-61.fc45.x86_64' \
+	> "$manifest"
+mkdir -p "$runtime/pronk"
+run_generator
+test -d "$runtime/pronk"
+test ! -L "$runtime/pronk"

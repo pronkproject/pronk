@@ -118,4 +118,5 @@ run_target(
 
 subdir('tests/castkms-live')
 subdir('tests/backend-activation')
+subdir('tests/sysext')
 subdir('data')
