@@ -30,6 +30,7 @@ daemon and never connects to the network itself. You control it with the
 
 - [Requirements](#requirements)
 - [Build and install](#build-and-install)
+- [Silverblue development extension](#silverblue-development-extension)
 - [Add and remove a display](#add-and-remove-a-display)
 - [How Pronk works](#how-pronk-works)
 - [Technical FAQ](#technical-faq)
@@ -105,6 +106,65 @@ To run only the Rust tests, without using Meson, use:
 ```sh
 cargo test --workspace --locked
 ```
+
+## Silverblue development extension
+
+On Fedora Silverblue, the complete development stack can be built and deployed
+without repeatedly installing build dependencies into an ephemeral `/usr`
+overlay. The deployment helper builds CastKMS, Mutter, GNOME Settings,
+WirePlumber, and Pronk in a dedicated rootless Podman image, then publishes only
+their runtime files as a `systemd-sysext` system extension. The helper also
+stages the RPM Fusion GStreamer x264 encoder and its runtime library, so those
+packages must be available from the host's enabled repositories:
+
+```sh
+scripts/pronk-dev-sysext deploy
+```
+
+The helper uses the sibling source trees described above and the Mutter,
+GNOME Settings, and WirePlumber trees under `/var/srv/sources` by default.
+Environment variables listed by `scripts/pronk-dev-sysext --help` can override
+those locations. It reuses incremental build directories and limits parallel
+jobs according to available memory; set `PRONK_BUILD_JOBS` to override that
+limit.
+
+When the Mutter repository has a `pronk-f<VERSION_ID>-runtime` branch, the
+helper uses that branch's registered worktree, or creates a managed worktree
+below `~/.local/state/pronk-sysext/sources`. This keeps the patched Mutter ABI
+matched to the GNOME Shell shipped by that Fedora release. Set
+`PRONK_MUTTER_SOURCE` only when an explicit source tree should take precedence.
+
+A system extension layers on top of Silverblue's normal immutable `/usr`; the
+two are designed to compose. The helper configures systemd-sysext's ephemeral
+mutable mode, so the merged `/usr` remains writable for the rest of the boot;
+those writes disappear when the extension is refreshed, unmerged, or the
+machine is rebooted. A transient `rpm-ostree usroverlay` is a separate writable
+overlay whose ordering is significant and would hide an extension that was
+merged earlier, so it should not be added after booting with Pronk active. It is
+safe to build and publish while `/usr` is already unlocked, then reboot normally
+to activate the extension on the clean Silverblue deployment.
+
+`deploy` does not reboot or replace libraries underneath the running desktop.
+After it completes, reboot normally. At early boot a small generator exposes
+the extension only when both the exact Silverblue deployment version and the
+running kernel match the build. An OS deployment or kernel update therefore
+falls back to the stock desktop until `deploy` is run again, rather than trying
+to start GNOME with stale replacement libraries.
+
+Useful diagnostics are available without changing the system:
+
+```sh
+scripts/pronk-dev-sysext check
+scripts/pronk-dev-sysext status
+```
+
+The published images live below `/var/lib/pronk-sysext`; the active image is a
+small symlink, so publication is atomic and previous images remain available
+for diagnosis. The exact-version manifest and boot generator live below
+`/etc/pronk-sysext` and `/etc/systemd/system-generators`; the ephemeral
+mutability policy lives in `/etc/systemd/sysext.conf.d`. To prevent the extension
+from being exposed on the next boot, create
+`/etc/pronk-sysext/disabled` before rebooting.
 
 ## Add and remove a display
 
