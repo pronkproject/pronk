@@ -10,7 +10,7 @@ use crate::castkms::{EdidError, ValidatedEdid, EDID_BLOCK_SIZE};
 use crate::identity::{normalize_manufacturer_name, PnpId};
 
 pub const EDID_PRODUCT_NAME_MAX_BYTES: usize = 106;
-pub const MAX_INITIAL_EDID_MODES: usize = 4;
+pub const MAX_EDID_MODES: usize = 16;
 
 const DISPLAYID_EXTENSION_TAG: u8 = 0x70;
 const DISPLAYID_VERSION_1_3: u8 = 0x13;
@@ -58,7 +58,7 @@ pub struct CastDisplayEdidRequest {
     pub display_name: Option<String>,
     pub backend_id: String,
     pub device_id: String,
-    /// Preferred mode first, followed by at most three fallback modes.
+    /// Preferred mode first, followed by standard fallback modes.
     pub modes: Vec<EdidMode>,
     pub audio: bool,
     /// HDMI-CEC physical address advertised through the HDMI VSDB.
@@ -279,7 +279,7 @@ fn validate_modes(modes: &[EdidMode]) -> Result<(), CastDisplayEdidError> {
     if modes.is_empty() {
         return Err(CastDisplayEdidError::NoModes);
     }
-    if modes.len() > MAX_INITIAL_EDID_MODES {
+    if modes.len() > MAX_EDID_MODES {
         return Err(CastDisplayEdidError::TooManyModes(modes.len()));
     }
     let mut unique = HashSet::with_capacity(modes.len());
@@ -385,12 +385,25 @@ fn write_base_block(
     block[23] = 120; // Gamma 2.20.
     block[24] = 0x0e; // sRGB, RGB, preferred timing in the first descriptor.
     block[25..35].copy_from_slice(&[0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54]);
+    write_established_timings(&mut block[35..38], modes);
     for timing in block[38..54].chunks_exact_mut(2) {
         timing.copy_from_slice(&[0x01, 0x01]);
     }
 
+    let detailed_modes = select_base_detailed_modes(modes);
+    for (slot, mode) in block[38..54].chunks_exact_mut(2).zip(
+        modes
+            .iter()
+            .copied()
+            .filter(|mode| !detailed_modes.contains(mode))
+            .filter(|mode| established_timing_bit(*mode).is_none())
+            .filter_map(standard_timing),
+    ) {
+        slot.copy_from_slice(&mode);
+    }
+
     for (index, descriptor) in block[54..126].chunks_exact_mut(18).enumerate() {
-        if let Some(mode) = modes.get(index) {
+        if let Some(mode) = detailed_modes.get(index) {
             write_detailed_timing(descriptor, timing_for(*mode).expect("modes were validated"));
         } else {
             descriptor[3] = 0x10; // Dummy descriptor, never product name (0xfc).
@@ -487,10 +500,14 @@ fn write_cta_extension(
     block[0] = CTA_EXTENSION_TAG;
     block[1] = CTA_REVISION_3;
     let mut position = 4;
-    block[position] = 0x40 | modes.len() as u8; // Video data block.
+    let video_modes: Vec<_> = modes
+        .iter()
+        .copied()
+        .filter_map(video_identification_code)
+        .collect();
+    block[position] = 0x40 | video_modes.len() as u8; // Video data block.
     position += 1;
-    for mode in modes {
-        let vic = video_identification_code(*mode).expect("modes were validated");
+    for vic in video_modes {
         block[position] = vic;
         position += 1;
     }
@@ -537,17 +554,93 @@ fn write_cta_extension(
 }
 
 fn aspect_ratio_code(mode: EdidMode) -> u8 {
-    match (mode.width, mode.height) {
-        (640, 480) => 2,
+    match reduced_aspect_ratio(mode) {
+        (5, 4) => 1,
+        (4, 3) => 2,
+        (8, 5) => 5,
         _ => 4,
     }
 }
 
 fn aspect_ratio_value(mode: EdidMode) -> u8 {
-    match (mode.width, mode.height) {
-        (640, 480) => 33,
+    match reduced_aspect_ratio(mode) {
+        (5, 4) => 25,
+        (4, 3) => 33,
+        (8, 5) => 60,
         _ => 78,
     }
+}
+
+fn reduced_aspect_ratio(mode: EdidMode) -> (u32, u32) {
+    let divisor = greatest_common_divisor(mode.width, mode.height);
+    (mode.width / divisor, mode.height / divisor)
+}
+
+fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
+}
+
+fn select_base_detailed_modes(modes: &[EdidMode]) -> Vec<EdidMode> {
+    const BASE_DETAILED_TIMING_SLOTS: usize = 4;
+
+    let mut selected = vec![modes[0]];
+    selected.extend(
+        modes
+            .iter()
+            .copied()
+            .skip(1)
+            .filter(|mode| established_timing_bit(*mode).is_none())
+            .filter(|mode| standard_timing(*mode).is_none())
+            .take(BASE_DETAILED_TIMING_SLOTS - 1),
+    );
+    for mode in modes {
+        if selected.len() == BASE_DETAILED_TIMING_SLOTS {
+            break;
+        }
+        if !selected.contains(mode) {
+            selected.push(*mode);
+        }
+    }
+    selected
+}
+
+fn write_established_timings(bytes: &mut [u8], modes: &[EdidMode]) {
+    debug_assert_eq!(bytes.len(), 3);
+    for mode in modes {
+        if let Some((byte, bit)) = established_timing_bit(*mode) {
+            bytes[byte] |= 1 << bit;
+        }
+    }
+}
+
+fn established_timing_bit(mode: EdidMode) -> Option<(usize, u8)> {
+    match (mode.width, mode.height, mode.refresh_millihz) {
+        (640, 480, 60_000) => Some((0, 5)),
+        (800, 600, 60_000) => Some((0, 0)),
+        (1024, 768, 60_000) => Some((1, 3)),
+        _ => None,
+    }
+}
+
+fn standard_timing(mode: EdidMode) -> Option<[u8; 2]> {
+    if mode.refresh_millihz != 60_000 || mode.width % 8 != 0 {
+        return None;
+    }
+    let horizontal = mode.width / 8;
+    if !(31..=286).contains(&horizontal) {
+        return None;
+    }
+    let aspect = match reduced_aspect_ratio(mode) {
+        (8, 5) => 0,
+        (4, 3) => 1,
+        (5, 4) => 2,
+        (16, 9) => 3,
+        _ => return None,
+    };
+    Some([(horizontal - 31) as u8, aspect << 6])
 }
 
 fn write_minus_one_u16(output: &mut [u8], value: u16) {
@@ -618,6 +711,102 @@ fn timing_for(mode: EdidMode) -> Option<DetailedTiming> {
             vsync: 5,
             features: 0x1e,
         },
+        (800, 600, 60_000) => DetailedTiming {
+            clock_10khz: 4_000,
+            hactive: 800,
+            hblank: 256,
+            vactive: 600,
+            vblank: 28,
+            hfront: 40,
+            hsync: 128,
+            vfront: 1,
+            vsync: 4,
+            features: 0x1e,
+        },
+        (1024, 768, 60_000) => DetailedTiming {
+            clock_10khz: 6_500,
+            hactive: 1024,
+            hblank: 320,
+            vactive: 768,
+            vblank: 38,
+            hfront: 24,
+            hsync: 136,
+            vfront: 3,
+            vsync: 6,
+            features: 0x18,
+        },
+        (1280, 800, 60_000) => DetailedTiming {
+            clock_10khz: 7_100,
+            hactive: 1280,
+            hblank: 160,
+            vactive: 800,
+            vblank: 23,
+            hfront: 48,
+            hsync: 32,
+            vfront: 3,
+            vsync: 6,
+            features: 0x1a,
+        },
+        (1280, 1024, 60_000) => DetailedTiming {
+            clock_10khz: 10_800,
+            hactive: 1280,
+            hblank: 408,
+            vactive: 1024,
+            vblank: 42,
+            hfront: 48,
+            hsync: 112,
+            vfront: 1,
+            vsync: 3,
+            features: 0x1e,
+        },
+        (1366, 768, 60_000) => DetailedTiming {
+            clock_10khz: 8_550,
+            hactive: 1366,
+            hblank: 426,
+            vactive: 768,
+            vblank: 30,
+            hfront: 70,
+            hsync: 143,
+            vfront: 3,
+            vsync: 3,
+            features: 0x1e,
+        },
+        (1440, 900, 60_000) => DetailedTiming {
+            clock_10khz: 8_875,
+            hactive: 1440,
+            hblank: 160,
+            vactive: 900,
+            vblank: 26,
+            hfront: 48,
+            hsync: 32,
+            vfront: 3,
+            vsync: 6,
+            features: 0x1a,
+        },
+        (1600, 900, 60_000) => DetailedTiming {
+            clock_10khz: 9_750,
+            hactive: 1600,
+            hblank: 160,
+            vactive: 900,
+            vblank: 26,
+            hfront: 48,
+            hsync: 32,
+            vfront: 3,
+            vsync: 5,
+            features: 0x1a,
+        },
+        (1680, 1050, 60_000) => DetailedTiming {
+            clock_10khz: 11_900,
+            hactive: 1680,
+            hblank: 160,
+            vactive: 1050,
+            vblank: 30,
+            hfront: 48,
+            hsync: 32,
+            vfront: 3,
+            vsync: 6,
+            features: 0x1a,
+        },
         (1920, 1080, 60_000) => DetailedTiming {
             clock_10khz: 14_850,
             hactive: 1920,
@@ -629,6 +818,30 @@ fn timing_for(mode: EdidMode) -> Option<DetailedTiming> {
             vfront: 4,
             vsync: 5,
             features: 0x1e,
+        },
+        (1920, 1200, 60_000) => DetailedTiming {
+            clock_10khz: 15_400,
+            hactive: 1920,
+            hblank: 160,
+            vactive: 1200,
+            vblank: 35,
+            hfront: 48,
+            hsync: 32,
+            vfront: 3,
+            vsync: 6,
+            features: 0x1a,
+        },
+        (2560, 1440, 60_000) => DetailedTiming {
+            clock_10khz: 24_150,
+            hactive: 2560,
+            hblank: 160,
+            vactive: 1440,
+            vblank: 41,
+            hfront: 48,
+            hsync: 32,
+            vfront: 3,
+            vsync: 5,
+            features: 0x1a,
         },
         (3840, 2160, 30_000) => DetailedTiming {
             clock_10khz: 29_700,
@@ -704,11 +917,11 @@ pub enum CastDisplayEdidError {
     NonPrintableProductName,
     #[error("EDID requires at least one mode")]
     NoModes,
-    #[error("EDID has {0} modes; limit is {MAX_INITIAL_EDID_MODES}")]
+    #[error("EDID has {0} modes; limit is {MAX_EDID_MODES}")]
     TooManyModes(usize),
     #[error("CEC physical address 0x{0:04x} is not a valid non-root topology address")]
     InvalidCecPhysicalAddress(u16),
-    #[error("EDID mode {0:?} is outside the conservative timing set")]
+    #[error("EDID mode {0:?} is outside the supported timing set")]
     UnsupportedMode(EdidMode),
     #[error("EDID mode {0:?} is duplicated")]
     DuplicateMode(EdidMode),
@@ -877,7 +1090,7 @@ mod tests {
         assert_eq!(cta[3], 0x81);
 
         assert!(matches!(
-            EdidMode::new(1366, 768, 60_000),
+            EdidMode::new(1234, 567, 60_000),
             Err(CastDisplayEdidError::UnsupportedMode(_))
         ));
         let mut duplicate = request(None);
@@ -886,6 +1099,66 @@ mod tests {
             build_cast_display_edid(duplicate),
             Err(CastDisplayEdidError::DuplicateMode(_))
         ));
+    }
+
+    #[test]
+    fn advertises_4k_and_standard_monitor_fallbacks_within_four_blocks() {
+        let mut input = request(None);
+        input.modes = [
+            (3840, 2160, 30_000),
+            (2560, 1440, 60_000),
+            (1920, 1200, 60_000),
+            (1920, 1080, 60_000),
+            (1680, 1050, 60_000),
+            (1600, 900, 60_000),
+            (1440, 900, 60_000),
+            (1366, 768, 60_000),
+            (1280, 1024, 60_000),
+            (1280, 800, 60_000),
+            (1280, 720, 60_000),
+            (1024, 768, 60_000),
+            (800, 600, 60_000),
+            (640, 480, 60_000),
+        ]
+        .into_iter()
+        .map(|(width, height, refresh)| EdidMode::new(width, height, refresh).unwrap())
+        .collect();
+
+        let generated = build_cast_display_edid(input).unwrap();
+        let bytes = generated.edid().as_bytes();
+        assert!(bytes.len() <= EDID_BLOCK_SIZE * 4);
+        assert_eq!(&bytes[35..38], &[0x21, 0x08, 0x00]);
+
+        let detailed_widths: Vec<_> = bytes[54..126]
+            .chunks_exact(18)
+            .map(|descriptor| u16::from(descriptor[2]) | (u16::from(descriptor[4] & 0xf0) << 4))
+            .collect();
+        assert_eq!(detailed_widths, [3840, 2560, 1366, 1920]);
+
+        let standard_timings: Vec<_> = bytes[38..54]
+            .chunks_exact(2)
+            .map(|timing| [timing[0], timing[1]])
+            .collect();
+        assert_eq!(
+            standard_timings,
+            [
+                [0xd1, 0xc0],
+                [0xb3, 0x00],
+                [0xa9, 0xc0],
+                [0x95, 0x00],
+                [0x81, 0x80],
+                [0x81, 0x00],
+                [0x81, 0xc0],
+                [0x01, 0x01],
+            ]
+        );
+
+        let cta = bytes
+            .chunks_exact(EDID_BLOCK_SIZE)
+            .find(|block| block[0] == CTA_EXTENSION_TAG)
+            .unwrap();
+        assert_eq!(cta[4], 0x44);
+        assert_eq!(&cta[5..9], &[95, 16, 4, 1]);
     }
 
     #[test]

@@ -1118,7 +1118,7 @@ fn prepare_device_error_code(error: &PrepareCastDeviceError) -> OperationErrorCo
         PrepareCastDeviceError::InvalidCapabilities(_)
         | PrepareCastDeviceError::UnsupportedIdentitySource { .. }
         | PrepareCastDeviceError::Pnp(_)
-        | PrepareCastDeviceError::NoConservativeMode
+        | PrepareCastDeviceError::NoSupportedMode
         | PrepareCastDeviceError::MissingRequired640x480
         | PrepareCastDeviceError::Edid(_) => OperationErrorCode::DevicePreparationFailed,
         PrepareCastDeviceError::InvalidDevice(_) => OperationErrorCode::Internal,

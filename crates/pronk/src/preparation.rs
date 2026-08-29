@@ -8,18 +8,39 @@ use pronk_backend_protocol::{
 };
 use pronk_core::edid::{
     build_cast_display_edid, CastDisplayEdidError, CastDisplayEdidRequest, EdidMode,
-    GeneratedCastDisplayEdid, MAX_INITIAL_EDID_MODES,
+    GeneratedCastDisplayEdid, MAX_EDID_MODES,
 };
 use pronk_core::identity::{PnpIdError, PnpIdResolver, ResolvedPnpId};
 use pronk_dbus::{DeviceAvailability, DeviceInfo};
 use thiserror::Error;
 
-/// Conservative version-1 offer supported end-to-end by the initial EDID and
-/// software-encoder path.
+/// Modes supported end-to-end by the generated EDID and H.264 encoder path.
+///
+/// 4K is deliberately limited to 30 Hz. Lower standard monitor modes remain
+/// available at 60 Hz so the compositor can choose a useful compatibility or
+/// performance fallback without inventing modes the backend did not advertise.
 pub fn initial_preparation_offer(audio_enabled: bool) -> PreparationRequest {
     PreparationRequest {
         preparation_generation: 1,
         candidate_modes: vec![
+            DisplayMode {
+                width: 3840,
+                height: 2160,
+                refresh_millihz: 30_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 2560,
+                height: 1440,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1920,
+                height: 1200,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
             DisplayMode {
                 width: 1920,
                 height: 1080,
@@ -27,8 +48,56 @@ pub fn initial_preparation_offer(audio_enabled: bool) -> PreparationRequest {
                 flags: 0,
             },
             DisplayMode {
+                width: 1680,
+                height: 1050,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1600,
+                height: 900,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1440,
+                height: 900,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1366,
+                height: 768,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1280,
+                height: 1024,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1280,
+                height: 800,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
                 width: 1280,
                 height: 720,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1024,
+                height: 768,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 800,
+                height: 600,
                 refresh_millihz: 60_000,
                 flags: 0,
             },
@@ -42,8 +111,8 @@ pub fn initial_preparation_offer(audio_enabled: bool) -> PreparationRequest {
         video_profiles: vec![VideoProfile {
             profile_id: "h264-high".into(),
             codec: "h264".into(),
-            max_width: 1920,
-            max_height: 1080,
+            max_width: 3840,
+            max_height: 2160,
             max_refresh_millihz: 60_000,
         }],
         audio_profiles: if audio_enabled {
@@ -293,18 +362,14 @@ fn select_initial_modes(
         }
     }
     if supported.is_empty() {
-        return Err(PrepareCastDeviceError::NoConservativeMode);
+        return Err(PrepareCastDeviceError::NoSupportedMode);
     }
     let required = EdidMode::new(640, 480, 60_000).expect("required timing is built in");
     if !supported.contains(&required) {
         return Err(PrepareCastDeviceError::MissingRequired640x480);
     }
 
-    let mut selected: Vec<_> = supported
-        .iter()
-        .copied()
-        .take(MAX_INITIAL_EDID_MODES)
-        .collect();
+    let mut selected: Vec<_> = supported.iter().copied().take(MAX_EDID_MODES).collect();
     if !selected.contains(&required) {
         *selected
             .last_mut()
@@ -328,8 +393,8 @@ pub enum PrepareCastDeviceError {
     },
     #[error("resolve EDID manufacturer identity: {0}")]
     Pnp(#[from] PnpIdError),
-    #[error("prepared Device has no mode in the conservative EDID timing set")]
-    NoConservativeMode,
+    #[error("prepared Device has no mode in the supported EDID timing set")]
+    NoSupportedMode,
     #[error("prepared Device lacks required 640x480 at 60 Hz compatibility")]
     MissingRequired640x480,
     #[error("build cast-display EDID: {0}")]
@@ -367,7 +432,12 @@ mod tests {
             SESSION_FEATURE_AUDIO | SESSION_FEATURE_CONTROL
         );
         assert_eq!(audiovisual.audio_profiles.len(), 1);
-        assert_eq!(audiovisual.video_profiles[0].max_width, 1920);
+        assert_eq!(audiovisual.video_profiles[0].max_width, 3840);
+        assert_eq!(audiovisual.candidate_modes.len(), 14);
+        assert_eq!(audiovisual.candidate_modes[0], mode(3840, 2160, 30_000));
+        assert!(audiovisual
+            .candidate_modes
+            .contains(&mode(2560, 1440, 60_000)));
     }
 
     fn device() -> DeviceInfo {
