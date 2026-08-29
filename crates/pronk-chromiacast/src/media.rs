@@ -311,6 +311,7 @@ impl ChromiacastMediaSession {
         self.feedback_controller = Some(VideoFeedbackController::new(
             NonZeroU64::new(self.video_bitrate).expect("validated bitrate is nonzero"),
             negotiated.minimum_bitrate,
+            None,
         ));
 
         match (audio_enabled, negotiated.audio_sender.take()) {
