@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chromiacast::{AppAvailability, CastApp, CastConnection, SetupInfoOutcome, APP_MIRRORING};
 use pronk_backend_protocol::{
-    AudioProfile, ControlKind, ControlOperation, DeviceCapabilities, DisplayIdentity,
+    AudioProfile, ControlKind, ControlOperation, DeviceCapabilities, DisplayIdentity, DisplayMode,
     IdentitySource, MediaConfiguration, PipeWireTarget, PreparationRequest, SessionStatistics,
     StopReason, SuspendReason, Validate, VideoProfile, MAX_ERROR_TEXT_BYTES,
     MAX_MANUFACTURER_NAME_BYTES, MAX_PRODUCT_NAME_BYTES, SESSION_FEATURE_AUDIO,
@@ -1275,14 +1275,7 @@ fn negotiate_capabilities(
     let modes: Vec<_> = request
         .candidate_modes
         .into_iter()
-        .filter(|mode| {
-            mode.flags == 0
-                && mode.refresh_millihz == 60_000
-                && matches!(
-                    (mode.width, mode.height),
-                    (1_920, 1_080) | (1_280, 720) | (640, 480)
-                )
-        })
+        .filter(supported_h264_sender_mode)
         .collect();
     if modes.is_empty() {
         return Err(DeviceActorError::NoSupportedMode);
@@ -1343,10 +1336,33 @@ fn narrow_h264_profile(mut profile: VideoProfile) -> Option<VideoProfile> {
     if profile.codec != "h264" {
         return None;
     }
-    profile.max_width = profile.max_width.min(1_920);
-    profile.max_height = profile.max_height.min(1_080);
+    profile.max_width = profile.max_width.min(3_840);
+    profile.max_height = profile.max_height.min(2_160);
     profile.max_refresh_millihz = profile.max_refresh_millihz.min(60_000);
     Some(profile)
+}
+
+fn supported_h264_sender_mode(mode: &DisplayMode) -> bool {
+    if mode.flags != 0 {
+        return false;
+    }
+
+    // Cast transports only the encoded picture; DRM blanking and sync flags do
+    // not reach the receiver. Keep presentation modes at the receiver's 16:9
+    // aspect so Cast applications cannot crop wider or taller desktops while
+    // fitting the video to the television. CTA EDIDs still require the VGA
+    // compatibility timing, so retain that one fallback until the media path
+    // can letterbox it explicitly.
+    matches!(
+        (mode.width, mode.height, mode.refresh_millihz),
+        (3_840, 2_160, 30_000)
+            | (2_560, 1_440, 60_000)
+            | (1_920, 1_080, 60_000)
+            | (1_600, 900, 60_000)
+            | (1_366, 768, 60_000)
+            | (1_280, 720, 60_000)
+            | (640, 480, 60_000)
+    )
 }
 
 async fn close_control(
@@ -1824,6 +1840,83 @@ mod tests {
         );
         feedback.changed().await.unwrap();
         assert_eq!(feedback.borrow().acknowledged_audio_packets, 1);
+    }
+
+    #[test]
+    fn video_capability_keeps_safe_presentation_and_compatibility_modes() {
+        let mut offer = request();
+        offer.candidate_modes = vec![
+            DisplayMode {
+                width: 3_840,
+                height: 2_160,
+                refresh_millihz: 30_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 3_840,
+                height: 2_160,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 2_560,
+                height: 1_440,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1_680,
+                height: 1_050,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 1_366,
+                height: 768,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 640,
+                height: 480,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+        ];
+        offer.video_profiles[0].max_width = 7_680;
+        offer.video_profiles[0].max_height = 4_320;
+        offer.video_profiles[0].max_refresh_millihz = 240_000;
+
+        let capabilities = negotiate_capabilities(offer, display_identity()).unwrap();
+        assert_eq!(capabilities.modes.len(), 4);
+        assert!(capabilities.modes.iter().any(|mode| (
+            mode.width,
+            mode.height,
+            mode.refresh_millihz
+        ) == (3_840, 2_160, 30_000)));
+        assert!(!capabilities.modes.iter().any(|mode| (
+            mode.width,
+            mode.height,
+            mode.refresh_millihz
+        ) == (3_840, 2_160, 60_000)));
+        assert!(!capabilities.modes.iter().any(|mode| (
+            mode.width,
+            mode.height,
+            mode.refresh_millihz
+        ) == (1_680, 1_050, 60_000)));
+        assert!(capabilities.modes.iter().any(|mode| (
+            mode.width,
+            mode.height,
+            mode.refresh_millihz
+        ) == (1_366, 768, 60_000)));
+        assert!(capabilities.modes.iter().any(|mode| (
+            mode.width,
+            mode.height,
+            mode.refresh_millihz
+        ) == (640, 480, 60_000)));
+        assert_eq!(capabilities.video_profiles[0].max_width, 3_840);
+        assert_eq!(capabilities.video_profiles[0].max_height, 2_160);
+        assert_eq!(capabilities.video_profiles[0].max_refresh_millihz, 60_000);
     }
 
     #[test]
