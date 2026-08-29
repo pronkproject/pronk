@@ -109,6 +109,19 @@ impl VideoSenderActor {
         .await
     }
 
+    pub(crate) async fn set_target_playout_delay(
+        &self,
+        generation: NonZeroU64,
+        delay: Duration,
+    ) -> Result<(), VideoTransportError> {
+        self.request(|reply| Command::SetTargetPlayoutDelay {
+            generation,
+            delay,
+            reply,
+        })
+        .await
+    }
+
     pub(crate) async fn start(&self, generation: NonZeroU64) -> Result<(), VideoTransportError> {
         self.transition(generation, Transition::Start).await
     }
@@ -309,6 +322,11 @@ enum Command {
         transition: Transition,
         reply: oneshot::Sender<Result<(), VideoTransportError>>,
     },
+    SetTargetPlayoutDelay {
+        generation: NonZeroU64,
+        delay: Duration,
+        reply: oneshot::Sender<Result<(), VideoTransportError>>,
+    },
     Stop {
         generation: NonZeroU64,
         reply: oneshot::Sender<Result<VideoSenderStatistics, VideoTransportError>>,
@@ -448,6 +466,14 @@ async fn run_actor(
                 reply,
             } => {
                 let result = transition_active(&mut active, generation, requested, &snapshot);
+                let _ = reply.send(result);
+            }
+            Command::SetTargetPlayoutDelay {
+                generation,
+                delay,
+                reply,
+            } => {
+                let result = set_target_playout_delay(&mut active, generation, delay).await;
                 let _ = reply.send(result);
             }
             Command::Stop { generation, reply } => {
@@ -763,6 +789,19 @@ fn transition_active(
     Ok(())
 }
 
+async fn set_target_playout_delay(
+    active: &mut Option<ActiveSender>,
+    generation: NonZeroU64,
+    delay: Duration,
+) -> Result<(), VideoTransportError> {
+    matching_active(active, generation)?
+        .sender
+        .as_mut()
+        .ok_or_else(|| VideoTransportError::new("video sender transport is missing"))?
+        .set_target_playout_delay(delay)
+        .await
+}
+
 async fn stop_active(
     active: &mut Option<ActiveSender>,
     generation: NonZeroU64,
@@ -861,6 +900,7 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use pronk_media::{EncodedVideoAccessUnit, VideoFrameDependency};
@@ -876,6 +916,11 @@ mod tests {
         _feedback: tokio::sync::watch::Sender<VideoTransportFeedbackSnapshot>,
     }
 
+    #[derive(Debug)]
+    struct RecordingSender {
+        playout_delays: Arc<Mutex<Vec<Duration>>>,
+    }
+
     #[async_trait::async_trait]
     impl VideoSenderPort for AcceptingSender {
         async fn send(
@@ -888,6 +933,71 @@ mod tests {
         async fn shutdown(self: Box<Self>) -> Result<(), VideoTransportError> {
             Ok(())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl VideoSenderPort for RecordingSender {
+        fn supports_target_playout_delay_updates(&self) -> bool {
+            true
+        }
+
+        async fn set_target_playout_delay(
+            &mut self,
+            delay: Duration,
+        ) -> Result<(), VideoTransportError> {
+            self.playout_delays.lock().unwrap().push(delay);
+            Ok(())
+        }
+
+        async fn send(
+            &mut self,
+            _access_unit: EncodedVideoAccessUnit,
+        ) -> Result<VideoSendOutcome, VideoTransportError> {
+            Ok(VideoSendOutcome::Accepted)
+        }
+
+        async fn shutdown(self: Box<Self>) -> Result<(), VideoTransportError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn playout_delay_updates_are_generation_scoped() {
+        let (_output, receiver) = tokio::sync::mpsc::channel(1);
+        let actor = VideoSenderActor::spawn(receiver);
+        let generation = NonZeroU64::new(2).unwrap();
+        let playout_delays = Arc::new(Mutex::new(Vec::new()));
+        let (_feedback, feedback) =
+            tokio::sync::watch::channel(VideoTransportFeedbackSnapshot::default());
+        actor
+            .configure(
+                generation,
+                NegotiatedVideoTransport {
+                    sender: Box::new(RecordingSender {
+                        playout_delays: playout_delays.clone(),
+                    }),
+                    audio_sender: None,
+                    feedback,
+                    minimum_bitrate: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(actor
+            .set_target_playout_delay(NonZeroU64::new(1).unwrap(), Duration::from_millis(66),)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("active generation is 2"));
+        actor
+            .set_target_playout_delay(generation, Duration::from_millis(66))
+            .await
+            .unwrap();
+        assert_eq!(*playout_delays.lock().unwrap(), [Duration::from_millis(66)]);
+
+        actor.stop(generation).await.unwrap();
+        actor.shutdown().await.unwrap();
     }
 
     #[tokio::test]
