@@ -40,6 +40,7 @@ daemon and never connects to the network itself. You control it with the
 - [Private audio and video](#private-audio-and-video)
 - [D-Bus API](#d-bus-api)
 - [Tests](#tests)
+- [License](#license)
 
 ## Requirements
 
@@ -460,3 +461,9 @@ It covers:
 Tests that exercise real grants, Mutter display changes, PipeWire capture, and
 a complete connection to a Device require a graphical virtual machine. See
 [`tests/vm/README.md`](tests/vm/README.md) for setup and usage.
+
+## License
+
+Pronk is available under the [MIT License](LICENSE). Files that carry a
+different SPDX license identifier remain available under the license named in
+that file.
