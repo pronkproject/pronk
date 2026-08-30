@@ -3,57 +3,57 @@ edid_decode = find_program('edid-decode')
 env_program = find_program('env')
 activation_probe = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-systemd-activation-probe',
 )
 activation_test = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-systemd-activation-test',
 )
 backend_p2p_test = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-backend-p2p-test',
 )
 chromiacast_p2p_test = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-chromiacast-p2p-test',
 )
 edid_upstream_test = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-edid-upstream-test',
 )
 caller_identity_test = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-caller-identity-test',
 )
 mock_backend = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-backend-mock',
 )
 chromiacast_backend = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-chromiacast',
 )
 public_inventory_test_service = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-public-inventory-test-service',
 )
 pronkctl_test = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronkctl',
 )
 public_lifecycle_test_client = join_paths(
   cargo_target_dir,
-  'debug',
+  cargo_profile_dir,
   'pronk-public-lifecycle-test-client',
 )
 

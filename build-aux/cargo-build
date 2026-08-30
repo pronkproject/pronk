@@ -5,8 +5,25 @@ cargo=$1
 source_dir=$2
 target_dir=$3
 stamp=$4
+profile=$5
 
+case "$profile" in
+dev)
+  profile_args=
+  ;;
+release)
+  profile_args=--release
+  ;;
+*)
+  printf 'unsupported Cargo profile: %s\n' "$profile" >&2
+  exit 2
+  ;;
+esac
+
+# profile_args is either empty or the single trusted Cargo option above.
+# shellcheck disable=SC2086
 CARGO_TARGET_DIR="$target_dir" "$cargo" build \
+  $profile_args \
   --workspace \
   --locked \
   --manifest-path "$source_dir/Cargo.toml"

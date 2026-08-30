@@ -27,6 +27,9 @@ cargo = find_program('cargo')
 sh = find_program('sh')
 xmllint = find_program('xmllint')
 cargo_target_dir = join_paths(meson.project_build_root(), 'cargo-target')
+cargo_profile = get_option('cargo-profile')
+cargo_profile_dir = cargo_profile == 'dev' ? 'debug' : 'release'
+cargo_profile_args = cargo_profile == 'dev' ? [] : ['--release']
 
 cargo_workspace = custom_target(
   'cargo-workspace',
@@ -38,6 +41,7 @@ cargo_workspace = custom_target(
     meson.project_source_root(),
     cargo_target_dir,
     '@OUTPUT@',
+    cargo_profile,
   ],
   build_always_stale: true,
   build_by_default: true,
@@ -50,7 +54,7 @@ pronkd = custom_target(
   command: [
     sh,
     files('build-aux/copy-executable'),
-    join_paths(cargo_target_dir, 'debug', 'pronkd'),
+    join_paths(cargo_target_dir, cargo_profile_dir, 'pronkd'),
     '@OUTPUT@',
   ],
   depends: cargo_workspace,
@@ -65,7 +69,7 @@ pronkctl = custom_target(
   command: [
     sh,
     files('build-aux/copy-executable'),
-    join_paths(cargo_target_dir, 'debug', 'pronkctl'),
+    join_paths(cargo_target_dir, cargo_profile_dir, 'pronkctl'),
     '@OUTPUT@',
   ],
   depends: cargo_workspace,
@@ -80,7 +84,7 @@ pronk_backend_mock = custom_target(
   command: [
     sh,
     files('build-aux/copy-executable'),
-    join_paths(cargo_target_dir, 'debug', 'pronk-backend-mock'),
+    join_paths(cargo_target_dir, cargo_profile_dir, 'pronk-backend-mock'),
     '@OUTPUT@',
   ],
   depends: cargo_workspace,
@@ -95,7 +99,7 @@ pronk_chromiacast = custom_target(
   command: [
     sh,
     files('build-aux/copy-executable'),
-    join_paths(cargo_target_dir, 'debug', 'pronk-chromiacast'),
+    join_paths(cargo_target_dir, cargo_profile_dir, 'pronk-chromiacast'),
     '@OUTPUT@',
   ],
   depends: cargo_workspace,
@@ -111,6 +115,7 @@ run_target(
     'test',
     '--workspace',
     '--locked',
+    cargo_profile_args,
     '--target-dir', cargo_target_dir,
     '--manifest-path', join_paths(meson.project_source_root(), 'Cargo.toml'),
   ],

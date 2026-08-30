@@ -1,0 +1,7 @@
+option(
+  'cargo-profile',
+  type: 'combo',
+  choices: ['dev', 'release'],
+  value: 'dev',
+  description: 'Cargo profile used for installed Rust binaries',
+)
