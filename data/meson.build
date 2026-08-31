@@ -286,5 +286,6 @@ test(
   ],
   depends: cargo_workspace,
   workdir: meson.project_source_root(),
+  suite: 'integration',
   timeout: 90,
 )
