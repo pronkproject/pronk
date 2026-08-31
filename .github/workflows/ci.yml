@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LIBCLANG_PATH: /usr/lib64
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-24.04
+    container: fedora:45
+    steps:
+      - name: Install checkout dependency
+        run: dnf install -y --setopt=install_weak_deps=False git
+      - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-45.noarch.rpm
+          dnf install -y --setopt=install_weak_deps=False \
+            clang-devel gcc gstreamer1-devel gstreamer1-plugins-bad-free \
+            gstreamer1-plugins-base-devel gstreamer1-plugins-good \
+            gstreamer1-plugins-ugly libdrm-devel pipewire-devel \
+            pipewire-gstreamer pkgconf-pkg-config rustup systemd-devel
+          rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install Rust quality components
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component clippy,rustfmt
+          rustup default stable
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test workspace
+        run: cargo test --workspace --all-features --locked
+      - name: Lint every target
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+
+  msrv:
+    name: Rust 1.83
+    runs-on: ubuntu-24.04
+    container: fedora:45
+    steps:
+      - name: Install checkout dependency
+        run: dnf install -y --setopt=install_weak_deps=False git
+      - uses: actions/checkout@v7
+      - name: Install native build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-45.noarch.rpm
+          dnf install -y --setopt=install_weak_deps=False \
+            clang-devel gcc gstreamer1-devel gstreamer1-plugins-bad-free \
+            gstreamer1-plugins-base-devel gstreamer1-plugins-good \
+            gstreamer1-plugins-ugly libdrm-devel pipewire-devel \
+            pipewire-gstreamer pkgconf-pkg-config rustup systemd-devel
+          rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install the supported Rust toolchain
+        run: rustup toolchain install 1.83.0 --profile minimal
+      - name: Resolve and test with the MSRV
+        run: cargo +1.83.0 test --workspace --all-features --locked
+
+  meson:
+    name: Meson and process boundaries
+    runs-on: ubuntu-24.04
+    container: fedora:45
+    steps:
+      - name: Install checkout dependency
+        run: dnf install -y --setopt=install_weak_deps=False git
+      - uses: actions/checkout@v7
+      - name: Install build and integration dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-45.noarch.rpm
+          dnf install -y --setopt=install_weak_deps=False \
+            clang-devel dbus-daemon edid-decode gcc gstreamer1-devel \
+            gstreamer1-plugins-bad-free gstreamer1-plugins-base-devel \
+            gstreamer1-plugins-good gstreamer1-plugins-ugly jq libdrm-devel \
+            libxml2 meson ninja-build pipewire-devel pipewire-gstreamer \
+            pipewire-utils pkgconf-pkg-config rustup systemd systemd-devel
+          rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Configure and build
+        run: |
+          meson setup build -Dcargo-profile=dev
+          meson compile -C build
+      - name: Run non-product integration tests
+        run: |
+          runtime_dir=$(mktemp -d)
+          chmod 0700 "$runtime_dir"
+          XDG_RUNTIME_DIR="$runtime_dir" dbus-run-session -- \
+            meson test -C build --no-suite integration --print-errorlogs
+      - name: Test installation
+        run: DESTDIR="$PWD/install-root" meson install -C build
+      - name: Test distribution archive
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          meson dist -C build --no-tests
