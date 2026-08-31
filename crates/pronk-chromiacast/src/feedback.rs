@@ -717,13 +717,13 @@ mod tests {
             None,
             Some(AdaptivePlayoutDelayConfiguration {
                 minimum: Duration::from_millis(17),
-                initial: INITIAL_PLAYOUT_DELAY,
+                initial: Duration::from_millis(17),
                 receiver_maximum: None,
             }),
         );
         let pressure = VideoTransportPressure {
             current_rtt: Some(Duration::from_millis(12)),
-            receiver_playout_delay: Some(INITIAL_PLAYOUT_DELAY),
+            receiver_playout_delay: Some(Duration::from_millis(17)),
             ..VideoTransportPressure::default()
         };
 
