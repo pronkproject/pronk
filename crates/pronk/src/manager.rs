@@ -927,7 +927,9 @@ async fn run_manager(
 
     loop {
         tokio::select! {
-            biased;
+            // Public requests must not starve setup, removal, backend, or
+            // display-slot progress. Tokio's default randomized branch order
+            // gives every continuously-ready input a chance to run.
             Some(release) = reservation_release_rx.recv() => {
                 if !output_slots.release(&release) {
                     debug!(?release, "ignored stale display-slot release");
