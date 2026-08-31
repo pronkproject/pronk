@@ -505,7 +505,7 @@ mod tests {
                 receiver_maximum: None,
             }),
         );
-        let pressure = VideoTransportPressure {
+        let mut pressure = VideoTransportPressure {
             receiver_playout_delay: Some(INITIAL_PLAYOUT_DELAY),
             ..VideoTransportPressure::default()
         };
@@ -526,6 +526,30 @@ mod tests {
                     ..VideoSenderFeedbackSnapshot::default()
                 },
                 start + PLAYOUT_RECOVERY_INTERVAL,
+            ),
+            [VideoFeedbackAction::SetPlayoutDelay(Duration::from_millis(
+                33
+            ))]
+        );
+
+        pressure.receiver_playout_delay = Some(Duration::from_millis(33));
+        let confirmed_at = start + PLAYOUT_RECOVERY_INTERVAL + Duration::from_secs(1);
+        assert!(controller
+            .observe(
+                VideoSenderFeedbackSnapshot {
+                    pressure: Some(pressure),
+                    ..VideoSenderFeedbackSnapshot::default()
+                },
+                confirmed_at,
+            )
+            .is_empty());
+        assert_eq!(
+            controller.observe(
+                VideoSenderFeedbackSnapshot {
+                    pressure: Some(pressure),
+                    ..VideoSenderFeedbackSnapshot::default()
+                },
+                confirmed_at + PLAYOUT_RECOVERY_INTERVAL,
             ),
             [VideoFeedbackAction::SetPlayoutDelay(minimum)]
         );
