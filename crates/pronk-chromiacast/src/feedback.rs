@@ -557,7 +557,7 @@ mod tests {
                 start,
             ),
             [VideoFeedbackAction::SetPlayoutDelay(Duration::from_millis(
-                66
+                99
             ))]
         );
         assert!(controller
@@ -578,7 +578,7 @@ mod tests {
                 start + PLAYOUT_UPDATE_RETRY_INTERVAL,
             ),
             [VideoFeedbackAction::SetPlayoutDelay(Duration::from_millis(
-                66
+                99
             ))]
         );
     }
