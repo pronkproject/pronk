@@ -457,7 +457,7 @@ mod tests {
                 start,
             ),
             [VideoFeedbackAction::SetPlayoutDelay(Duration::from_millis(
-                66
+                99
             ))]
         );
         assert!(controller
@@ -470,7 +470,7 @@ mod tests {
             )
             .is_empty());
 
-        pressure.receiver_playout_delay = Some(Duration::from_millis(66));
+        pressure.receiver_playout_delay = Some(Duration::from_millis(99));
         assert!(controller
             .observe(
                 VideoSenderFeedbackSnapshot {
