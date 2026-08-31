@@ -255,9 +255,9 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chromiacast"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba007126bd44b6a65e6b053b82baba84d1a063861ee17adc7d87b06eb58ab67"
+checksum = "b7be1986637ec73bfa7fa448f6f4d35efe85ed99930322e85ce99d63c438606a"
 dependencies = [
  "aes",
  "bytes",

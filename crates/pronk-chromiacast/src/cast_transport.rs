@@ -52,7 +52,7 @@ async fn negotiate_launched_video(
         audio = configuration.audio.is_some(),
         "offering Cast media configuration"
     );
-    let offer = build_offer(configuration);
+    let offer = build_offer(configuration)?;
     let answer = connection
         .exchange_offer(&offer, app)
         .await
@@ -102,7 +102,14 @@ async fn negotiate_launched_video(
     })
 }
 
-fn build_offer(configuration: VideoTransportConfiguration) -> Offer {
+fn build_offer(configuration: VideoTransportConfiguration) -> Result<Offer, VideoTransportError> {
+    let max_frame_rate = Framerate::new(
+        configuration.framerate_numerator,
+        configuration.framerate_denominator,
+    )
+    .map_err(|error| VideoTransportError::new(format!("configure Cast frame rate: {error}")))?;
+    let resolution = Resolution::new(configuration.width, configuration.height)
+        .map_err(|error| VideoTransportError::new(format!("configure Cast resolution: {error}")))?;
     let offer_builder = Offer::builder();
     let offer_builder = match configuration.audio {
         Some(audio) => offer_builder.audio(AudioStreamConfig {
@@ -118,14 +125,12 @@ fn build_offer(configuration: VideoTransportConfiguration) -> Offer {
         .video(VideoStreamConfig {
             codec: VideoCodec::H264,
             max_bit_rate: configuration.bitrate,
-            max_frame_rate: Framerate::new(
-                configuration.framerate_numerator,
-                configuration.framerate_denominator,
-            ),
-            resolutions: vec![Resolution::new(configuration.width, configuration.height)],
+            max_frame_rate,
+            resolutions: vec![resolution],
             target_delay: configuration.target_playout_delay,
         })
         .build()
+        .map_err(|error| VideoTransportError::new(format!("build Cast OFFER: {error}")))
 }
 
 fn validate_answer_constraints(
@@ -169,7 +174,7 @@ fn validate_answer_constraints(
         return Ok(());
     };
     if video.min_resolution.is_some_and(|minimum| {
-        configuration.width < minimum.width || configuration.height < minimum.height
+        configuration.width < minimum.width() || configuration.height < minimum.height()
     }) || video.max_dimensions.is_some_and(|maximum| {
         configuration.width > maximum.width
             || configuration.height > maximum.height
@@ -209,8 +214,8 @@ fn validate_answer_constraints(
 }
 
 fn frame_rate_exceeds(numerator: u32, denominator: u32, maximum: Framerate) -> bool {
-    u64::from(numerator) * u64::from(maximum.denominator)
-        > u64::from(maximum.numerator) * u64::from(denominator)
+    u64::from(numerator) * u64::from(maximum.denominator())
+        > u64::from(maximum.numerator()) * u64::from(denominator)
 }
 
 fn maximum_playout_delay(answer: &chromiacast::Answer, audio_enabled: bool) -> Option<Duration> {
@@ -679,11 +684,31 @@ mod tests {
                 bitrate: 128_000,
             }),
         };
-        let offer = serde_json::to_value(build_offer(configuration)).unwrap();
+        let offer = serde_json::to_value(build_offer(configuration).unwrap()).unwrap();
         let streams = offer["supportedStreams"].as_array().unwrap();
 
         assert_eq!(streams.len(), 2);
         assert!(streams.iter().all(|stream| stream["targetDelay"] == 33));
+    }
+
+    #[test]
+    fn desktop_offer_rejects_invalid_transport_configuration() {
+        let mut configuration = VideoTransportConfiguration {
+            width: 1920,
+            height: 1080,
+            framerate_numerator: 60,
+            framerate_denominator: 1,
+            bitrate: 2_000_000,
+            target_playout_delay: Duration::from_millis(33),
+            audio: None,
+        };
+
+        configuration.framerate_denominator = 0;
+        assert!(build_offer(configuration).is_err());
+
+        configuration.framerate_denominator = 1;
+        configuration.width = 0;
+        assert!(build_offer(configuration).is_err());
     }
 
     #[test]
