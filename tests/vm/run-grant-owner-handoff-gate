@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if test "$#" -ne 5; then
+	printf 'usage: %s BINARY DEVICE SESSION CONNECTOR-ID CRTC-ID\n' "$0" >&2
+	exit 2
+fi
+
+binary=$1
+device=$2
+session_id=$3
+connector_id=$4
+crtc_id=$5
+unit="pronk-grant-owner-handoff-$PPID-$$"
+gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+unit_output() {
+	journalctl --user -u "$unit.service" --no-pager -o cat
+}
+
+stop_unit() {
+	systemctl --user kill --kill-whom=main --signal=SIGTERM \
+		"$unit.service" 2>/dev/null || true
+}
+
+fail_with_log() {
+	unit_output >&2 || true
+	exit 1
+}
+
+trap stop_unit EXIT INT TERM
+
+"$gate_directory/ensure-mutter-display-on"
+
+systemd-run --user --unit="$unit" --collect --wait --property=Type=exec \
+	--setenv=PRONK_VM_GRANT_OWNER_HANDOFF_GATE=release-name -- \
+	"$binary" "$device" "$session_id" "$connector_id" "$crtc_id" || fail_with_log
+
+output=$(unit_output)
+for required in \
+	'grant_owner_release_revokes=pass' \
+	'grant_owner_replacement_acquires=pass'; do
+	if ! grep -Fxq "$required" <<<"$output"; then
+		printf '%s\n' "$output" >&2
+		exit 1
+	fi
+done
+
+trap - EXIT INT TERM
+printf '%s\n' "$output"

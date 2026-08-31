@@ -93,6 +93,13 @@ fn main() -> anyhow::Result<()> {
         Some(value) if value.to_str() == Some("detach-reattach") => true,
         Some(_) => bail!("PRONK_VM_MASTER_REOPEN_GATE must be unset or 'detach-reattach'"),
     };
+    let exercise_grant_owner_handoff = match std::env::var_os("PRONK_VM_GRANT_OWNER_HANDOFF_GATE") {
+        None => false,
+        Some(value) if value.to_str() == Some("release-name") => true,
+        Some(_) => {
+            bail!("PRONK_VM_GRANT_OWNER_HANDOFF_GATE must be unset or 'release-name'")
+        }
+    };
     let pipewire_remote = match std::env::var_os("PRONK_VM_PIPEWIRE_GATE") {
         None => None,
         Some(value) if value.to_str() == Some("ambient-development") => {
@@ -122,6 +129,7 @@ fn main() -> anyhow::Result<()> {
         usize::from(exercise_mode_restart)
             + usize::from(exercise_grant_suspension)
             + usize::from(exercise_master_reopen)
+            + usize::from(exercise_grant_owner_handoff)
             + usize::from(pipewire_remote.is_some())
             + usize::from(pipewire_mode_restart_remote.is_some())
             <= 1,
@@ -149,7 +157,8 @@ fn main() -> anyhow::Result<()> {
         .context("own the Pronk bus name used by Mutter authorization")?;
     let lease = runtime
         .block_on(
-            MutterGrantProvider::new(connection.clone()).acquire(target, CancellationToken::new()),
+            MutterGrantProvider::new(connection.clone())
+                .acquire(target.clone(), CancellationToken::new()),
         )
         .context("acquire CastKMS grant from Mutter")?;
     ensure!(lease.grant_id() != 0, "Mutter returned a zero grant ID");
@@ -177,6 +186,18 @@ fn main() -> anyhow::Result<()> {
         live.connector_id == connector_id,
         "client connector differs"
     );
+    if exercise_grant_owner_handoff {
+        exercise_grant_owner_handoff_gate(
+            &runtime,
+            &connection,
+            target,
+            &mut client,
+            expected_grant_id,
+        )?;
+        println!("grant_owner_release_revokes=pass");
+        println!("grant_owner_replacement_acquires=pass");
+        return Ok(());
+    }
 
     let first_edid = diagnostic_edid(1)?;
     let second_edid = diagnostic_edid(2)?;
@@ -798,6 +819,56 @@ fn main() -> anyhow::Result<()> {
     println!("lease_drop_detaches_monitor=pass");
     println!("holder_drop_releases_grant=pass");
     Ok(())
+}
+
+fn exercise_grant_owner_handoff_gate(
+    runtime: &Runtime,
+    old_connection: &zbus::Connection,
+    target: GrantTarget,
+    old_client: &mut AsyncCastKmsClient,
+    old_grant_id: u32,
+) -> anyhow::Result<()> {
+    runtime
+        .block_on(old_connection.release_name(BUS_NAME))
+        .context("release the Pronk bus name while retaining its connection")?;
+
+    let replacement_connection = runtime
+        .block_on(zbus::Connection::session())
+        .context("connect replacement Pronk owner to the graphical session bus")?;
+    runtime
+        .block_on(replacement_connection.request_name(BUS_NAME))
+        .context("transfer the Pronk bus name to the replacement connection")?;
+    let replacement_lease = runtime
+        .block_on(
+            MutterGrantProvider::new(replacement_connection.clone())
+                .acquire(target, CancellationToken::new()),
+        )
+        .context("acquire replacement grant after Pronk owner handoff")?;
+    ensure!(
+        replacement_lease.grant_id() != old_grant_id,
+        "replacement owner received the stale grant ID"
+    );
+
+    runtime.block_on(async {
+        let deadline = tokio::time::Instant::now() + GRANT_ACTIVE_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            ensure!(
+                !remaining.is_zero(),
+                "timed out waiting for the previous owner's grant revocation"
+            );
+            let events = tokio::time::timeout(remaining, old_client.read_events())
+                .await
+                .context("timed out reading the previous owner's terminal grant event")?
+                .context("read the previous owner's terminal grant event")?;
+            for event in events {
+                if let CastKmsEvent::GrantRevoked(event) = event {
+                    ensure!(event.status == 0, "grant revocation status is nonzero");
+                    return Ok(());
+                }
+            }
+        }
+    })
 }
 
 #[derive(Debug, Clone)]

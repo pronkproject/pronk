@@ -1,5 +1,24 @@
 # VM live gates
 
+## Mutter grant-owner handoff
+
+`run-grant-owner-handoff-gate` verifies that capture authority follows the
+current owner of `io.github.pronkproject.Pronk1`, rather than the lifetime of a
+connection that owned the name previously. The live client acquires a grant,
+releases the well-known name without disconnecting, transfers the name to a
+second connection, and requires the old holder to become terminal before the
+replacement owner acquires a fresh grant for the same connector.
+
+```sh
+tests/vm/run-grant-owner-handoff-gate \
+  target/debug/pronk-castkms-live-test \
+  /dev/dri/card1 SESSION CONNECTOR-ID CRTC-ID
+```
+
+Run it in the same graphical CastKMS VM used by the other direct live gates.
+The test does not attach a monitor or start capture, so it isolates brokered
+grant ownership from display and media lifecycle behavior.
+
 ## Whole-daemon media and recovery
 
 `run-whole-daemon-video-gate` is the opt-in production-path media and recovery
