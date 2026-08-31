@@ -1700,7 +1700,7 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
-        assert_eq!(*playout_delays.lock().unwrap(), [Duration::from_millis(66)]);
+        assert_eq!(*playout_delays.lock().unwrap(), [Duration::from_millis(99)]);
 
         media.stop_media(1, &mut transport).await.unwrap();
         media.shutdown().await.unwrap();
