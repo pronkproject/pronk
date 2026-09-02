@@ -5,9 +5,8 @@
 //! raw syncobj handle. The caller remains the sole capture owner and advances
 //! its reuse timeline only after [`VideoSourceEvent::BufferReleased`].
 
-mod audio_sink;
-mod audio_sink_model;
-mod audio_sink_runtime;
+mod audio_source;
+mod audio_source_runtime;
 mod model;
 mod policy_gate;
 mod remote_provider;
@@ -22,9 +21,10 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
-pub use audio_sink::{
-    AudioSinkConfigurationError, CastKmsAudioSinkRequest, CastKmsAudioSinkResolver,
-    CastKmsAudioSinkResolverError, CastKmsAudioSinkTarget, DEFAULT_AUDIO_SINK_RESOLUTION_TIMEOUT,
+pub use audio_source::{
+    AudioNodeIdentity, AudioSource, AudioSourceConfig, AudioSourceConfigurationError,
+    AudioSourceError, AudioSourceEvent, AudioSourceRuntimeError,
+    DEFAULT_AUDIO_SOURCE_STARTUP_TIMEOUT,
 };
 pub use remote_provider::{
     BackendRemoteSet, ClassifiedSocketPaths, ClassifiedSocketPathsError,

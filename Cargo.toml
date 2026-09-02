@@ -33,7 +33,7 @@ gstreamer = { version = "=0.23.7", features = ["v1_20"] }
 gstreamer-app = { version = "=0.23.5", features = ["v1_20"] }
 gstreamer-base = { version = "=0.23.6", features = ["v1_20"] }
 gstreamer-video = { version = "=0.23.5", features = ["v1_20"] }
-nix = { version = "=0.29.0", features = ["event", "fs", "ioctl", "process", "signal", "socket", "uio", "user"] }
+nix = { version = "=0.29.0", features = ["event", "fs", "ioctl", "process", "signal", "socket", "time", "uio", "user"] }
 pipewire = { version = "=0.10.1", features = ["v1_2_0"] }
 sd-notify = "=0.5.0"
 serde = { version = "1", features = ["derive"] }
