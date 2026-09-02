@@ -50,12 +50,14 @@ orderly failure path detaches the monitor instead of leaving a phantom output.
 
 ### Does the core design require GNOME?
 
-No. CastKMS is a DRM driver, `pronkd` is a systemd user service, and backends
-use a private peer-to-peer D-Bus protocol. Session mode uses the experimental
-capture-grant integration in the
+No. CastKMS is a DRM driver, `pronkd` can be a systemd user or system service,
+and backends use a private peer-to-peer D-Bus protocol. Session mode currently
+uses the experimental capture-grant integration in the
 [PronkProject Mutter fork](https://github.com/pronkproject/mutter) and a GNOME
 Settings panel. Upstream Mutter does not provide that grant API. Another
-compositor or display server could implement the same normal-grant interface.
+compositor or display server can implement the same normal-grant interface, or
+Pronk can use optional system mode and its tightly scoped administrative-grant
+helper without display-server integration.
 
 ## DRM and kernel design
 
@@ -214,20 +216,71 @@ disappearance.
   master, is bound to the current top-level owner master, and can outlive the
   short-lived helper that created it. It exists for integrations that need
   such a helper; Pronk does not currently need one.
-- An **administrative** grant is a host-root diagnostic facility that follows
-  whichever master owns safe content. It is useful for VM and laboratory
-  tests, not the desktop authorization path.
+- An **administrative** grant is created by host root and follows whichever
+  master owns safe content. VM tests use it directly, and Pronk's optional
+  system mode uses it through a single-purpose one-shot helper. Session mode
+  never silently falls back to it.
 
 The forms are explicit. A privileged non-master caller does not silently
 receive administrative behavior when it requested an ordinary grant.
 
-### Does session mode require a privileged helper?
+### Does Pronk require a privileged helper?
 
-No. The display server already owns DRM master, and the experimental
-PronkProject Mutter fork can create a normal grant on behalf of Pronk. Pronk
-receives only the holder descriptor and runs as a sandboxed user service.
-Failure to reach or pass the compositor's authorization fails setup; there is
-no privileged or administrative fallback.
+Session mode does not. The display server already owns DRM master, and the
+experimental PronkProject Mutter fork can create a normal grant on behalf of
+Pronk. Pronk receives only the holder descriptor and runs as a sandboxed user
+service. Failure to reach or pass the compositor's authorization fails setup;
+there is no administrative fallback.
+
+System mode deliberately uses a privileged helper because it cannot assume the
+active display server implements Pronk's grant interface. The long-running
+daemon, backends, PipeWire, and WirePlumber all run as the dedicated non-root
+`pronk` user. `pronkd` invokes the installed helper through
+`pkexec --disable-internal-agent --keep-cwd` from the unit's fixed `/` working
+directory; a polkit rule admits only that service user, and the helper
+independently verifies the live parent, Unix peer credentials, installed
+`pronkd` inode, and
+`pronk.service` membership before and after creating one fixed-profile grant.
+It drops supplementary groups and every capability except `CAP_SYS_ADMIN`
+for grant creation and `CAP_SYS_PTRACE` for its repeated parent-executable
+checks before opening CastKMS, passes the restricted holder and anonymous
+close-to-revoke control descriptor back, closes its privileged DRM file, and
+exits. Administrative grants are deliberately independent of that creator
+file, so the long-running daemon never owns a root-opened DRM descriptor.
+
+### Why does the helper not exchange the parent's process start time?
+
+`/proc/PID/stat` start time does not change across `exec`; it only helps
+distinguish a reused numeric PID. The helper already opens a pidfd for the
+exact parent and repeatedly checks that it is live, still its parent, still
+the seqpacket peer, still running the installed `pronkd` inode, and still the
+member of `pronk.service`. Adding a caller-supplied start time would not
+prove anything about the `exec` transition and would duplicate the pidfd's PID
+reuse protection.
+
+### How can an ordinary user control system mode?
+
+`pronkctl --system` follows the `grdctl` model: if it is not already running
+as `pronk`, it asks polkit to run the installed `pronkctl` as that account.
+The action uses `auth_admin`, so the active authentication agent can request
+an administrator password. Only the `pronk` account may call the public
+system-bus service; `pronkd` also checks the bus broker's PID and UID and
+pidfd-pins every caller that starts a setup operation.
+
+### Why does each mode run a separate PipeWire server?
+
+A root daemon sending captured pixels over a socket controlled by a desktop
+user would invert the intended trust boundary. System mode therefore runs
+PipeWire and WirePlumber as `pronk` in `/run/pronk`, alongside the non-root
+daemon and backends.
+
+Session mode uses the same media architecture below `%t/pronk/media`. One path
+is easier to secure and test, and there is no need for the old special case
+that found and captured a sink monitor in the desktop graph. The desktop graph
+still routes applications into the ordinary CastKMS playback sink. The kernel
+copies the consumed samples into the grant-scoped audio tap, and Pronk
+publishes that fd as a source in its private graph. Neither mode needs a
+cross-graph PipeWire link.
 
 ## Process and PipeWire architecture
 
@@ -254,11 +307,12 @@ cross-process media protocol, and future backends are not forced to link the
 CastKMS capture implementation.
 
 It is also a security boundary between service roles and ordinary session
-clients. The kernel grant controls who can obtain the original pixels.
-WirePlumber controls which admitted role may consume the published video and
-the matching virtual HDMI sink monitor. Those are different questions, so
-PipeWire is more than a compatibility shim. This boundary does not claim to
-separate mutually hostile, unsandboxed processes owned by one Unix user.
+clients. The kernel grant controls who can obtain the original pixels and
+audio-tap fd. The private WirePlumber controls which admitted role may consume
+the video and audio sources published from those capabilities. Those are
+different questions, so PipeWire is more than a compatibility shim. This
+boundary does not claim to separate mutually hostile, unsandboxed processes
+owned by one Unix user.
 
 Putting both halves in one process remains technically possible, but it would
 combine kernel capture authority with the network attack surface and make
@@ -271,19 +325,16 @@ generation it creates fresh connected descriptors and passes only the backend
 side to the selected backend. WirePlumber 0.5.15 or newer restricts the visible
 objects before either side can use PipeWire.
 
-The core role can publish versioned Pronk video and inspect audio sinks while
-being denied every audio source. It resolves one sink by its CastKMS device
-path and output index. Its remaining default visibility is broad; the core
-connection is not an object-minimal capability. The backend role is denied
-ordinary video sources, audio sources, and audio sinks, then allowed compatible
-Pronk-private video sources and CastKMS-marked audio sinks. The private
-protocol supplies the exact node identity for the current media generation,
-and the normal backend uses only that target.
+The core role can publish versioned Pronk video and the exact audio source made
+from its kernel tap. The backend role is denied ordinary video sources, audio
+sources, and audio sinks, then allowed compatible Pronk-private video and
+kernel-tap audio sources. The private protocol supplies the exact node identity
+for the current media generation, and the normal backend uses only that target.
 
 The current PipeWire permission is role-wide, not a per-session object
 capability: a client admitted to the backend role can see every object carrying
-the supported Pronk or CastKMS marker. Ordinary clients cannot see the private
-video, and the backend cannot see cameras, microphones, or ordinary desktop
+the supported Pronk marker. Ordinary clients cannot see the private video or
+audio, and the backend cannot see cameras, microphones, or ordinary desktop
 audio sink/source nodes.
 
 ### Does Pronk hide captured media from other unsandboxed same-user processes?
@@ -334,9 +385,19 @@ the current driver.
 
 Afterward, the capture destination is a DMA-BUF shared through PipeWire. The
 backend's GStreamer source uses the PipeWire buffer pool, avoiding an extra
-full-size BGRx staging copy before conversion. The current `videoconvert` and
+full-size BGRx staging copy before conversion. Pronk marks that PipeWire stream
+non-live because the pipeline already forces `GstSystemClock`; this prevents
+GstBaseSrc's live presentation-timestamp wait from pinning a dequeued CastKMS
+destination. The
+leaky queue follows `videoconvert`, so any queued frame is the copied I420
+allocation rather than an imported BGRx DMA-BUF. The current `videoconvert` and
 software `x264enc` path still maps the linear DMA-BUF and allocates converted
 I420 output; this is not an end-to-end zero-copy encoder path.
+
+Explicit synchronization does not replace pool depth or timely buffer return.
+The software encoder still CPU-maps its input, and CastKMS cannot compose into
+a destination while a consumer is reading it; synchronization timelines order
+those accesses but do not create additional destinations.
 
 Vulkan could become useful for GPU composition, conversion, or encoding, but
 adding it now would not remove the current CPU composition requirement and
@@ -424,17 +485,20 @@ the normal desktop output and selects a newly available Cast sink without
 changing the user's configured default. A later explicit output choice clears
 that automatic selection.
 
-Pronk resolves that connector-bound sink, and the backend captures its
-PipeWire monitor through a restricted connection, converts it to 48 kHz
-stereo, encodes Opus, and sends it on the same Cast media timeline as video.
-Detaching the monitor disconnects the audio card immediately; ALSA retains its
-storage only until existing handles close.
+The CastKMS card has playback only, fixed at 48 kHz, signed 16-bit stereo. An
+audio-enabled grant lets Pronk open one anonymous kernel tap for that exact
+attachment. The tap follows the playback position, returns the samples the
+desktop actually sent, and supplies silence while playback is idle. Pronk
+publishes it as an `Audio/Source` only in its private PipeWire graph; the
+backend converts and encodes Opus on the same Cast media timeline as video.
 
-If the connector-bound sink cannot be resolved during media startup, Pronk
-logs the failure and starts that generation with video only. Cancellation and
-failures in the required video or capture path still fail startup. A terminal
-failure after an A/V graph is already running follows the ordinary media
-generation recovery path rather than silently dropping one stream in place.
+Starting desktop playback before Pronk opens the tap is supported. Detach,
+grant loss, ELD replacement, or device removal terminates the tap and the media
+generation. Audio-source startup is required when audio was negotiated; it
+does not silently degrade that generation to video-only.
+
+The tap is an anonymous fd, not an ALSA capture PCM. The desktop session sees
+the CastKMS card as an output and cannot enumerate the tap as a microphone.
 
 ### Can a television microphone be exposed as an input?
 
