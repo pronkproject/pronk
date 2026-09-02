@@ -7,6 +7,9 @@ dbus_service=$3
 interface_xml=$4
 daemon_cargo=$5
 expected_bindir=$6
+pipewire_socket=$7
+pipewire_service=$8
+wireplumber_service=$9
 
 require_unit_line() {
     line=$1
@@ -31,7 +34,7 @@ for line in \
     'PrivateNetwork=yes' \
     'PrivateTmp=yes' \
     'ProtectControlGroups=yes' \
-    'InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0' \
+    'InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0 -%t/pronk/media/pipewire-0 -%t/pronk/media/pipewire-0-manager' \
     'ProtectKernelLogs=yes' \
     'ProtectKernelModules=yes' \
     'ProtectKernelTunables=yes' \
@@ -46,6 +49,54 @@ for line in \
 do
     require_unit_line "$line"
 done
+
+require_unit_line 'BindsTo=pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service'
+
+for line in \
+    'ListenStream=%t/pronk/media/pipewire-0' \
+    'ListenStream=%t/pronk/media/pipewire-0-manager' \
+    'SocketMode=0600' \
+    'DirectoryMode=0700' \
+    'Service=pronk-pipewire.service'
+do
+    if ! grep -Fqx "$line" "$pipewire_socket"; then
+        echo "private media socket is missing: $line" >&2
+        exit 1
+    fi
+done
+
+for media_unit in "$pipewire_service" "$wireplumber_service"; do
+    for line in \
+        'Environment=XDG_RUNTIME_DIR=%t/pronk/media' \
+        'Environment=PIPEWIRE_RUNTIME_DIR=%t/pronk/media' \
+        'NoNewPrivileges=yes' \
+        'CapabilityBoundingSet=' \
+        'DevicePolicy=closed' \
+        'PrivateDevices=yes' \
+        'InaccessiblePaths=-/home -/var/home -/root'
+    do
+        if ! grep -Fqx "$line" "$media_unit"; then
+            echo "private media service is missing: $line" >&2
+            exit 1
+        fi
+    done
+    if grep -Fqx 'ProtectHome=yes' "$media_unit"; then
+        echo "private media service masks its /run/user runtime: $media_unit" >&2
+        exit 1
+    fi
+done
+if ! grep -Fqx 'ExecStart=pipewire' "$pipewire_service"; then
+    echo 'private PipeWire must use stable systemd executable lookup' >&2
+    exit 1
+fi
+if ! grep -Fqx 'ExecStart=wireplumber -p policy' "$wireplumber_service"; then
+    echo 'private WirePlumber must use stable systemd executable lookup and the hardware-free policy profile' >&2
+    exit 1
+fi
+if grep -Fq 'DeviceAllow=/dev/snd/' "$pipewire_service" "$wireplumber_service"; then
+    echo 'private media services must not open desktop ALSA devices' >&2
+    exit 1
+fi
 
 if grep -Eq '^(DevicePolicy=closed|PrivateDevices=yes)$' "$unit"; then
     echo 'core unit would prevent CastKMS output discovery' >&2
@@ -119,5 +170,9 @@ fi
 test_dir=$(mktemp -d)
 trap 'rm -rf "$test_dir"' EXIT HUP INT TERM
 sed 's|^ExecStart=.*|ExecStart=/bin/true|' "$unit" > "$test_dir/pronk.service"
+cp "$pipewire_socket" "$test_dir/pronk-pipewire.socket"
+sed 's|^ExecStart=.*|ExecStart=/bin/true|' "$pipewire_service" > "$test_dir/pronk-pipewire.service"
+sed 's|^ExecStart=.*|ExecStart=/bin/true|' "$wireplumber_service" > "$test_dir/pronk-wireplumber.service"
 SYSTEMD_UNIT_PATH="$test_dir:" \
-    "$systemd_analyze" --user verify pronk.service
+    "$systemd_analyze" --user verify pronk.service pronk-pipewire.socket \
+        pronk-pipewire.service pronk-wireplumber.service

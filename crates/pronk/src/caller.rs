@@ -1,7 +1,7 @@
-//! Trusted session-bus caller identity for display-setup operations.
+//! Trusted D-Bus caller identity for public service operations.
 
 use nix::unistd::Uid;
-use pronk_core::session::{CallerSessionError, PinnedCallerSession};
+use pronk_core::session::{CallerSessionError, PinnedCallerProcess, PinnedCallerSession};
 use thiserror::Error;
 use zbus::names::UniqueName;
 use zbus::Connection;
@@ -10,6 +10,12 @@ use zbus::Connection;
 pub struct BusCallerCredentials {
     pub pid: u32,
     pub uid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicBus {
+    Session,
+    System,
 }
 
 /// Resolve one immutable D-Bus unique name through the bus broker.
@@ -51,18 +57,58 @@ pub async fn pin_bus_caller(
         .map_err(BusCallerError::PinSession)
 }
 
+pub async fn pin_bus_caller_for(
+    connection: &Connection,
+    sender: &UniqueName<'_>,
+    bus: PublicBus,
+) -> Result<PinnedCallerProcess, BusCallerError> {
+    let credentials = query_bus_caller_credentials(connection, sender).await?;
+    match bus {
+        PublicBus::Session => PinnedCallerSession::pin_async(
+            credentials.pid,
+            credentials.uid,
+            Uid::effective().as_raw(),
+        )
+        .await
+        .map(PinnedCallerSession::into_process),
+        PublicBus::System => {
+            PinnedCallerProcess::pin_async(
+                credentials.pid,
+                credentials.uid,
+                Uid::effective().as_raw(),
+            )
+            .await
+        }
+    }
+    .map_err(BusCallerError::PinSession)
+}
+
+/// Pin a system-bus caller against the credentials assigned by the bus.
+///
+/// This is used only after a separate authorization decision has accepted an
+/// ordinary desktop user. Re-reading `/proc` through the pidfd-backed helper
+/// prevents a recycled process ID or changed process identity from inheriting
+/// that decision.
+pub async fn pin_authorized_system_bus_caller(
+    credentials: BusCallerCredentials,
+) -> Result<PinnedCallerProcess, BusCallerError> {
+    PinnedCallerProcess::pin_async(credentials.pid, credentials.uid, credentials.uid)
+        .await
+        .map_err(BusCallerError::PinSession)
+}
+
 #[derive(Debug, Error)]
 pub enum BusCallerError {
-    #[error("create session-bus broker proxy: {0}")]
+    #[error("create bus-broker proxy: {0}")]
     CreateBusProxy(zbus::Error),
-    #[error("query session-bus caller credentials: {0}")]
+    #[error("query D-Bus caller credentials: {0}")]
     QueryCredentials(zbus::fdo::Error),
-    #[error("session-bus broker omitted the caller process ID")]
+    #[error("bus broker omitted the caller process ID")]
     MissingProcessId,
-    #[error("session-bus broker returned process ID zero")]
+    #[error("bus broker returned process ID zero")]
     InvalidProcessId,
-    #[error("session-bus broker omitted the caller Unix user ID")]
+    #[error("bus broker omitted the caller Unix user ID")]
     MissingUserId,
-    #[error("pin caller process and graphical login session: {0}")]
+    #[error("pin caller process identity: {0}")]
     PinSession(#[source] CallerSessionError),
 }

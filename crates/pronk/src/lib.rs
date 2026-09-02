@@ -21,6 +21,7 @@ pub mod mutter_grant_provider;
 pub mod preparation;
 pub mod replaceable_device_session;
 mod slot;
+pub mod system_authorization;
 
 #[cfg(test)]
 pub(crate) mod test_support {

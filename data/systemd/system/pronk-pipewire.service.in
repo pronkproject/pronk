@@ -1,0 +1,40 @@
+[Unit]
+Description=Pronk private system PipeWire service
+PartOf=pronk.service
+Requires=pronk-pipewire.socket
+After=pronk-pipewire.socket
+Before=pronk-wireplumber.service pronk.service
+
+[Service]
+Type=simple
+User=pronk
+Group=pronk
+ExecStart=@pipewire@
+Restart=on-failure
+StateDirectory=pronk
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/pronk
+Environment=XDG_RUNTIME_DIR=/run/pronk
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pronk
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service mincore
+SystemCallErrorNumber=EPERM

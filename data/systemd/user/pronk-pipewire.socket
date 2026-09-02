@@ -1,0 +1,15 @@
+[Unit]
+Description=Pronk private session PipeWire sockets
+PartOf=pronk.service
+Before=pronk-pipewire.service pronk-wireplumber.service pronk.service
+
+[Socket]
+ListenStream=%t/pronk/media/pipewire-0
+ListenStream=%t/pronk/media/pipewire-0-manager
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+Service=pronk-pipewire.service
+
+[Install]
+WantedBy=sockets.target

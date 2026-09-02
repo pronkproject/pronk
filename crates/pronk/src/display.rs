@@ -17,7 +17,7 @@ use pronk_core::grant::{GrantAcquisitionError, GrantProvider};
 use pronk_core::grant::{GrantProfile, GrantTarget};
 use pronk_core::identity::PnpIdResolver;
 use pronk_core::output::CastKmsOutputId;
-use pronk_core::session::PinnedCallerSession;
+use pronk_core::session::PinnedCallerProcess;
 use pronk_dbus::{DeviceInfo, DeviceSelection, OperationErrorCode};
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use thiserror::Error;
@@ -49,6 +49,52 @@ use crate::slot::OutputReservationError;
 
 const INITIAL_SESSION_GENERATION: u64 = 1;
 const MAX_OPERATION_ERROR_BYTES: usize = 512;
+
+/// PipeWire runtime owned by the account running the media services.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaRuntime {
+    directory: PathBuf,
+    server_uid: u32,
+}
+
+impl MediaRuntime {
+    pub fn new(directory: PathBuf, server_uid: u32) -> Self {
+        Self {
+            directory,
+            server_uid,
+        }
+    }
+
+    pub fn for_user(uid: u32) -> Self {
+        Self::new(PathBuf::from(format!("/run/user/{uid}/pronk/media")), uid)
+    }
+}
+
+pub(crate) struct DisplaySetupDependencies {
+    grant_provider: Arc<dyn GrantProvider>,
+    pnp_resolver: Arc<PnpIdResolver>,
+    media_runtime: MediaRuntime,
+    offer: PreparationRequest,
+    audio_enabled: bool,
+}
+
+impl DisplaySetupDependencies {
+    pub(crate) fn new(
+        grant_provider: Arc<dyn GrantProvider>,
+        pnp_resolver: Arc<PnpIdResolver>,
+        media_runtime: MediaRuntime,
+        offer: PreparationRequest,
+        audio_enabled: bool,
+    ) -> Self {
+        Self {
+            grant_provider,
+            pnp_resolver,
+            media_runtime,
+            offer,
+            audio_enabled,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CastDisplayId([u8; 16]);
@@ -234,19 +280,23 @@ impl DisplaySetupHandle {
 impl DisplaySetupOperation {
     pub fn spawn(
         slot: ReservedCastDisplaySlot,
-        caller: PinnedCallerSession,
+        caller: PinnedCallerProcess,
         grant_provider: Arc<dyn GrantProvider>,
         pnp_resolver: Arc<PnpIdResolver>,
+        media_runtime: MediaRuntime,
         offer: PreparationRequest,
         audio_enabled: bool,
     ) -> Result<Self, DisplaySetupStartError> {
         Self::spawn_with_caller(
             DisplayReservation::Ready(Box::new(slot)),
             DisplaySetupCaller::from(caller),
-            grant_provider,
-            pnp_resolver,
-            offer,
-            audio_enabled,
+            DisplaySetupDependencies::new(
+                grant_provider,
+                pnp_resolver,
+                media_runtime,
+                offer,
+                audio_enabled,
+            ),
             DisplaySetupStage::Authorizing,
         )
     }
@@ -254,19 +304,13 @@ impl DisplaySetupOperation {
     pub(crate) fn spawn_pending(
         manager: ManagerHandle,
         pending: PendingDisplaySelection,
-        caller: PinnedCallerSession,
-        grant_provider: Arc<dyn GrantProvider>,
-        pnp_resolver: Arc<PnpIdResolver>,
-        offer: PreparationRequest,
-        audio_enabled: bool,
+        caller: PinnedCallerProcess,
+        dependencies: DisplaySetupDependencies,
     ) -> Result<Self, DisplaySetupStartError> {
         Self::spawn_with_caller(
             DisplayReservation::Pending { manager, pending },
             DisplaySetupCaller::from(caller),
-            grant_provider,
-            pnp_resolver,
-            offer,
-            audio_enabled,
+            dependencies,
             DisplaySetupStage::Validating,
         )
     }
@@ -274,13 +318,11 @@ impl DisplaySetupOperation {
     fn spawn_with_caller(
         reservation: DisplayReservation,
         caller: DisplaySetupCaller,
-        grant_provider: Arc<dyn GrantProvider>,
-        pnp_resolver: Arc<PnpIdResolver>,
-        offer: PreparationRequest,
-        audio_enabled: bool,
+        dependencies: DisplaySetupDependencies,
         initial_stage: DisplaySetupStage,
     ) -> Result<Self, DisplaySetupStartError> {
-        offer
+        dependencies
+            .offer
             .validate()
             .map_err(|error| DisplaySetupStartError::InvalidOffer(error.to_string()))?;
         let display_id = CastDisplayId::generate().map_err(DisplaySetupStartError::Identity)?;
@@ -298,10 +340,11 @@ impl DisplaySetupOperation {
                 caller,
                 DisplaySetupContext {
                     display_id,
-                    grant_provider,
-                    pnp_resolver,
-                    offer,
-                    audio_enabled,
+                    grant_provider: dependencies.grant_provider,
+                    pnp_resolver: dependencies.pnp_resolver,
+                    media_runtime: dependencies.media_runtime,
+                    offer: dependencies.offer,
+                    audio_enabled: dependencies.audio_enabled,
                     cancellation: task_cancellation,
                     status: status_tx.clone(),
                 },
@@ -516,6 +559,7 @@ struct DisplaySetupContext {
     display_id: CastDisplayId,
     grant_provider: Arc<dyn GrantProvider>,
     pnp_resolver: Arc<PnpIdResolver>,
+    media_runtime: MediaRuntime,
     offer: PreparationRequest,
     audio_enabled: bool,
     cancellation: CancellationToken,
@@ -534,8 +578,8 @@ struct DisplaySetupCaller {
     exit: Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>>,
 }
 
-impl From<PinnedCallerSession> for DisplaySetupCaller {
-    fn from(caller: PinnedCallerSession) -> Self {
+impl From<PinnedCallerProcess> for DisplaySetupCaller {
+    fn from(caller: PinnedCallerProcess) -> Self {
         let exit = Box::pin(async move { caller.wait_for_exit().await });
         Self { exit }
     }
@@ -612,6 +656,11 @@ async fn run_display_setup_inner(
     }
     let device = slot.device().clone();
     let output = slot.output().clone();
+    let grant_profile = if context.audio_enabled {
+        GrantProfile::DisplayCecAudioV1
+    } else {
+        GrantProfile::DisplayCecV1
+    };
     let lease = context
         .grant_provider
         .acquire(
@@ -619,7 +668,7 @@ async fn run_display_setup_inner(
                 device_major: output.device_major,
                 device_minor: output.device_minor,
                 connector_id: output.connector_id,
-                profile: GrantProfile::DisplayCecV1,
+                profile: grant_profile,
             },
             context.cancellation.clone(),
         )
@@ -785,24 +834,27 @@ async fn run_display_setup_inner(
         return Err(DisplaySetupError::Cancelled);
     }
 
-    let runtime_directory = PathBuf::from(format!("/run/user/{}", Uid::effective().as_raw()));
-    let pipewire_paths = match ClassifiedSocketPaths::in_runtime_dir(runtime_directory) {
-        Ok(paths) => paths,
-        Err(error) => {
-            stop_partial_backend(backend_session).await;
-            if let Err(detach_error) = detach_client(client).await {
-                warn!(%detach_error, "failed to detach after PipeWire path validation failed");
+    let pipewire_paths =
+        match ClassifiedSocketPaths::in_runtime_dir(context.media_runtime.directory.clone()) {
+            Ok(paths) => paths,
+            Err(error) => {
+                stop_partial_backend(backend_session).await;
+                if let Err(detach_error) = detach_client(client).await {
+                    warn!(%detach_error, "failed to detach after PipeWire path validation failed");
+                }
+                return Err(DisplaySetupError::Monitor(format!(
+                    "construct classified PipeWire paths: {error}"
+                )));
             }
-            return Err(DisplaySetupError::Monitor(format!(
-                "construct classified PipeWire paths: {error}"
-            )));
-        }
-    };
+        };
     let video_profile_id = prepared.capabilities().video_profiles[0].profile_id.clone();
     let audio_profile_id = (context.audio_enabled
         && !prepared.capabilities().audio_profiles.is_empty())
     .then(|| prepared.capabilities().audio_profiles[0].profile_id.clone());
-    let remote_provider = ClassifiedSocketRemoteProvider::new(pipewire_paths);
+    let remote_provider = ClassifiedSocketRemoteProvider::new_for_server_uid(
+        pipewire_paths,
+        Uid::from_raw(context.media_runtime.server_uid),
+    );
     let session_id = context.display_id.to_string();
     let initial_session_generation =
         NonZeroU64::new(INITIAL_SESSION_GENERATION).expect("initial session generation is nonzero");
@@ -815,9 +867,7 @@ async fn run_display_setup_inner(
         session_id: session_id.clone(),
         device_instance: format!("cast-display-{}", context.display_id.object_segment()),
         node_description: device.display_name.clone(),
-        device_path: output.id.device_path.clone(),
         output_index: output.id.output_index,
-        audio_sink_resolver: pronk_pipewire::CastKmsAudioSinkResolver::default(),
         video_profile_id,
         audio_profile_id,
         video_bitrate: NonZeroU64::new(8_000_000).expect("fixed bitrate is nonzero"),
@@ -1246,10 +1296,13 @@ mod tests {
                 },
             },
             caller,
-            provider,
-            resolver,
-            crate::preparation::initial_preparation_offer(false),
-            false,
+            DisplaySetupDependencies::new(
+                provider,
+                resolver,
+                MediaRuntime::for_user(Uid::effective().as_raw()),
+                crate::preparation::initial_preparation_offer(false),
+                false,
+            ),
             DisplaySetupStage::Validating,
         )
         .unwrap();
@@ -1312,10 +1365,13 @@ mod tests {
         let operation = DisplaySetupOperation::spawn_with_caller(
             DisplayReservation::Ready(Box::new(slot)),
             caller,
-            provider,
-            resolver,
-            crate::preparation::initial_preparation_offer(false),
-            false,
+            DisplaySetupDependencies::new(
+                provider,
+                resolver,
+                MediaRuntime::for_user(Uid::effective().as_raw()),
+                crate::preparation::initial_preparation_offer(false),
+                false,
+            ),
             DisplaySetupStage::Authorizing,
         )
         .unwrap();

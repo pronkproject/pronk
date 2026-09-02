@@ -45,7 +45,7 @@ require_line "$service_unit" 'FileDescriptorStoreMax=0'
 require_line "$service_unit" 'NoNewPrivileges=yes'
 require_line "$service_unit" 'CapabilityBoundingSet='
 require_line "$service_unit" 'DevicePolicy=closed'
-require_line "$service_unit" 'InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0 -%t/pipewire-0-pronk-core -%t/pipewire-0-pronk-backend'
+require_line "$service_unit" 'InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0 -%t/pronk/media/pipewire-0 -%t/pronk/media/pipewire-0-manager -%t/pronk/media/pipewire-0-pronk-core -%t/pronk/media/pipewire-0-pronk-backend'
 case "$network_mode" in
     isolated)
         require_line "$service_unit" 'PrivateNetwork=yes'

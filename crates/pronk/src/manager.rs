@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use nix::unistd::Uid;
 use pronk_backend_host::{
     BackendEndpoint, BackendHandle, BackendReconnectPolicy, BackendRegistrationValidator,
     BackendSessionError, BackendSessionHandle, BackendSessionRequest, BackendShutdownReport,
@@ -14,7 +15,7 @@ use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID, SYSTEM_PNP
 use pronk_core::output::{
     discover_castkms_outputs, CastKmsOutput, CastKmsOutputId, OutputDiscoveryError,
 };
-use pronk_core::session::PinnedCallerSession;
+use pronk_core::session::PinnedCallerProcess;
 use pronk_dbus::{
     DeviceAvailability, DeviceInfo, DeviceSelection, DeviceSnapshot, DiscoveryMetadataEntry,
     MAX_PUBLIC_DEVICES,
@@ -28,9 +29,9 @@ use tracing::{debug, warn};
 use crate::cast_display_slot::{CastDisplaySlotActor, CastDisplaySlotEvent};
 use crate::device_session_port::DeviceSessionStopReason;
 use crate::display::{
-    AddedCastDisplay, AddedCastDisplaySnapshot, CastDisplayId, DisplaySetupHandle,
-    DisplaySetupOperation, DisplaySetupOperationError, DisplaySetupStartError,
-    PendingDisplaySelection,
+    AddedCastDisplay, AddedCastDisplaySnapshot, CastDisplayId, DisplaySetupDependencies,
+    DisplaySetupHandle, DisplaySetupOperation, DisplaySetupOperationError, DisplaySetupStartError,
+    MediaRuntime, PendingDisplaySelection,
 };
 use crate::preparation::initial_preparation_offer;
 use crate::slot::{
@@ -130,6 +131,7 @@ pub struct ManagerHandle {
     output_provider: Arc<dyn OutputInventoryProvider>,
     grant_provider: Arc<dyn GrantProvider>,
     pnp_resolver: Arc<PnpIdResolver>,
+    media_runtime: MediaRuntime,
 }
 
 impl ManagerHandle {
@@ -236,7 +238,7 @@ impl ManagerHandle {
 
     /// Begin one manager-owned setup operation for an exact Device selection.
     ///
-    /// The caller identity must already have been obtained from the session
+    /// The caller identity must already have been obtained from the selected
     /// bus broker and pidfd-pinned. No grant policy or DRM target is accepted
     /// from the public client. The returned handle observes and explicitly
     /// cancels the operation; dropping it does not cancel manager-owned work.
@@ -244,7 +246,7 @@ impl ManagerHandle {
         &self,
         selection: DeviceSelection,
         preferred_output: Option<CastKmsOutputId>,
-        caller: PinnedCallerSession,
+        caller: PinnedCallerProcess,
         audio_enabled: bool,
     ) -> Result<DisplaySetupHandle, StartDisplaySetupError> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -335,7 +337,7 @@ impl ManagerHandle {
         &self,
         selection: DeviceSelection,
         preferred_output: Option<CastKmsOutputId>,
-        caller: PinnedCallerSession,
+        caller: PinnedCallerProcess,
         audio_enabled: bool,
     ) -> Result<DisplaySetupOperation, DisplaySetupStartError> {
         DisplaySetupOperation::spawn_pending(
@@ -345,10 +347,13 @@ impl ManagerHandle {
                 preferred_output,
             },
             caller,
-            Arc::clone(&self.grant_provider),
-            Arc::clone(&self.pnp_resolver),
-            initial_preparation_offer(audio_enabled),
-            audio_enabled,
+            DisplaySetupDependencies::new(
+                Arc::clone(&self.grant_provider),
+                Arc::clone(&self.pnp_resolver),
+                self.media_runtime.clone(),
+                initial_preparation_offer(audio_enabled),
+                audio_enabled,
+            ),
         )
     }
 }
@@ -533,10 +538,23 @@ impl ManagerActor {
         configs: Vec<BackendConfig>,
         grant_provider: Arc<dyn GrantProvider>,
     ) -> Result<Self, ManagerStartError> {
-        Self::spawn_with_output_provider(
+        Self::spawn_with_media_runtime(
+            configs,
+            grant_provider,
+            MediaRuntime::for_user(Uid::effective().as_raw()),
+        )
+    }
+
+    pub fn spawn_with_media_runtime(
+        configs: Vec<BackendConfig>,
+        grant_provider: Arc<dyn GrantProvider>,
+        media_runtime: MediaRuntime,
+    ) -> Result<Self, ManagerStartError> {
+        Self::spawn_with_output_provider_and_media_runtime(
             configs,
             Arc::new(SystemOutputInventoryProvider),
             grant_provider,
+            media_runtime,
         )
     }
 
@@ -545,14 +563,29 @@ impl ManagerActor {
         output_provider: Arc<dyn OutputInventoryProvider>,
         grant_provider: Arc<dyn GrantProvider>,
     ) -> Result<Self, ManagerStartError> {
+        Self::spawn_with_output_provider_and_media_runtime(
+            configs,
+            output_provider,
+            grant_provider,
+            MediaRuntime::for_user(Uid::effective().as_raw()),
+        )
+    }
+
+    pub fn spawn_with_output_provider_and_media_runtime(
+        configs: Vec<BackendConfig>,
+        output_provider: Arc<dyn OutputInventoryProvider>,
+        grant_provider: Arc<dyn GrantProvider>,
+        media_runtime: MediaRuntime,
+    ) -> Result<Self, ManagerStartError> {
         let pnp_resolver =
             PnpIdResolver::load_system(SYSTEM_PNP_IDS_PATH, &[], DEFAULT_SYNTHESIZER_PNP_ID)
                 .map_err(|error| ManagerStartError::LoadPnpDatabase(error.to_string()))?;
-        Self::spawn_with_providers(
+        Self::spawn_with_providers_and_media_runtime(
             configs,
             output_provider,
             grant_provider,
             Arc::new(pnp_resolver),
+            media_runtime,
         )
     }
 
@@ -561,6 +594,22 @@ impl ManagerActor {
         output_provider: Arc<dyn OutputInventoryProvider>,
         grant_provider: Arc<dyn GrantProvider>,
         pnp_resolver: Arc<PnpIdResolver>,
+    ) -> Result<Self, ManagerStartError> {
+        Self::spawn_with_providers_and_media_runtime(
+            configs,
+            output_provider,
+            grant_provider,
+            pnp_resolver,
+            MediaRuntime::for_user(Uid::effective().as_raw()),
+        )
+    }
+
+    pub fn spawn_with_providers_and_media_runtime(
+        configs: Vec<BackendConfig>,
+        output_provider: Arc<dyn OutputInventoryProvider>,
+        grant_provider: Arc<dyn GrantProvider>,
+        pnp_resolver: Arc<PnpIdResolver>,
+        media_runtime: MediaRuntime,
     ) -> Result<Self, ManagerStartError> {
         if configs.len() > MAX_INSTALLED_BACKENDS {
             return Err(ManagerStartError::TooManyBackends(configs.len()));
@@ -606,6 +655,7 @@ impl ManagerActor {
             output_provider,
             grant_provider,
             pnp_resolver,
+            media_runtime,
         };
         let task = tokio::spawn(run_manager(ManagerTaskContext {
             commands: command_rx,
@@ -736,7 +786,7 @@ enum ManagerCommand {
     StartDisplaySetup {
         selection: DeviceSelection,
         preferred_output: Option<CastKmsOutputId>,
-        caller: PinnedCallerSession,
+        caller: PinnedCallerProcess,
         audio_enabled: bool,
         response: oneshot::Sender<Result<DisplaySetupHandle, StartDisplaySetupError>>,
     },
@@ -1219,7 +1269,7 @@ fn start_managed_display_setup(
     manager: &ManagerHandle,
     selection: DeviceSelection,
     preferred_output: Option<CastKmsOutputId>,
-    caller: PinnedCallerSession,
+    caller: PinnedCallerProcess,
     audio_enabled: bool,
     operations: &mut BTreeMap<CastDisplayId, ManagedSetupOperation>,
     target_owners: &mut BTreeMap<DeviceTarget, CastDisplayId>,

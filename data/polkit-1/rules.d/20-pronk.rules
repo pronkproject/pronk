@@ -1,0 +1,25 @@
+// The root grant helper has a second, independent caller validation boundary:
+// exact pronk UID, parent/peer PID, pidfd liveness, installed pronkd inode,
+// and pronk.service membership are checked before and after grant creation.
+polkit.addRule(function(action, subject) {
+  if (subject.user !== "pronk")
+    return polkit.Result.NOT_HANDLED;
+
+  if (action.id ===
+      "io.github.pronkproject.Pronk.acquire-administrative-grant")
+    return polkit.Result.YES;
+
+  if (action.id === "io.github.pronkproject.Pronk.control-system-service")
+    return polkit.Result.YES;
+
+  // pronkd only stops instances from its two installed backend templates.
+  if (action.id === "org.freedesktop.systemd1.manage-units" &&
+      action.lookup("verb") === "stop") {
+    var unit = action.lookup("unit");
+    if (unit !== null &&
+        /^pronk-(backend-mock|chromiacast)@[^/]+\.service$/.test(unit))
+      return polkit.Result.YES;
+  }
+
+  return polkit.Result.NOT_HANDLED;
+});
