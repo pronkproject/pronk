@@ -1,9 +1,10 @@
-//! Opt-in live coverage for Mutter-issued CastKMS grants and media transport.
+//! Opt-in live coverage for compositor-issued or administratively launched
+//! CastKMS grants and media transport.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
@@ -11,9 +12,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
 use castkms_sys::{
-    dma_buf_ioctl_sync, DmaBufSync, CAPTURE_FRAME_FULL_DAMAGE, CAPTURE_FRAME_MODE_CHANGED,
-    DISPLAY_CEC_V1_RIGHTS, DMA_BUF_SYNC_END, DMA_BUF_SYNC_READ, DMA_BUF_SYNC_START,
-    DMA_BUF_SYNC_WRITE, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888,
+    dma_buf_ioctl_sync, drm_ioctl_castkms_get_grant, DmaBufSync, DrmCastkmsGetGrant,
+    CAPTURE_FRAME_FULL_DAMAGE, CAPTURE_FRAME_MODE_CHANGED, CAPTURE_UAPI_MAJOR, CAPTURE_UAPI_MINOR,
+    DISPLAY_CEC_AUDIO_V1_RIGHTS, DISPLAY_CEC_V1_RIGHTS, DMA_BUF_SYNC_END, DMA_BUF_SYNC_READ,
+    DMA_BUF_SYNC_START, DMA_BUF_SYNC_WRITE, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888,
+    GRANT_FLAG_ADMIN,
 };
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
@@ -26,7 +29,7 @@ use pronk_core::castkms::{
     CastKmsError, CastKmsEvent, CursorCaptureMode, GrantCaptureReconciliation, GrantState,
     GrantStateEvidence, ValidatedEdid,
 };
-use pronk_core::grant::{GrantProfile, GrantProvider, GrantTarget};
+use pronk_core::grant::{GrantLease, GrantMetadata, GrantProfile, GrantProvider, GrantTarget};
 use pronk_dbus::BUS_NAME;
 use pronk_pipewire::{
     ClassifiedSocketPaths, ClassifiedSocketRemoteProvider, PipeWireBufferTransport, PipeWireRemote,
@@ -100,6 +103,13 @@ fn main() -> anyhow::Result<()> {
             bail!("PRONK_VM_GRANT_OWNER_HANDOFF_GATE must be unset or 'release-name'")
         }
     };
+    let inherited_administrative_grant = match std::env::var_os("PRONK_VM_INHERITED_ADMIN_GRANT") {
+        None => false,
+        Some(value) if value.to_str() == Some("external-control") => true,
+        Some(_) => {
+            bail!("PRONK_VM_INHERITED_ADMIN_GRANT must be unset or 'external-control'")
+        }
+    };
     let pipewire_remote = match std::env::var_os("PRONK_VM_PIPEWIRE_GATE") {
         None => None,
         Some(value) if value.to_str() == Some("ambient-development") => {
@@ -135,6 +145,10 @@ fn main() -> anyhow::Result<()> {
             <= 1,
         "enable at most one orchestrated VM gate per invocation"
     );
+    ensure!(
+        !inherited_administrative_grant || !exercise_grant_owner_handoff,
+        "the grant-owner handoff gate requires compositor-issued grants"
+    );
 
     let metadata = std::fs::metadata(&device)
         .with_context(|| format!("inspect DRM device {}", device.display()))?;
@@ -149,22 +163,47 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("create Tokio runtime")?;
-    let connection = runtime
-        .block_on(zbus::Connection::session())
-        .context("connect to the graphical session bus")?;
-    runtime
-        .block_on(connection.request_name(BUS_NAME))
-        .context("own the Pronk bus name used by Mutter authorization")?;
-    let lease = runtime
-        .block_on(
-            MutterGrantProvider::new(connection.clone())
-                .acquire(target.clone(), CancellationToken::new()),
+    let (connection, lease) = if inherited_administrative_grant {
+        (
+            None,
+            inherited_administrative_lease(connector_id)
+                .context("adopt externally controlled administrative grant")?,
         )
-        .context("acquire CastKMS grant from Mutter")?;
-    ensure!(lease.grant_id() != 0, "Mutter returned a zero grant ID");
+    } else {
+        let connection = runtime
+            .block_on(zbus::Connection::session())
+            .context("connect to the graphical session bus")?;
+        runtime
+            .block_on(connection.request_name(BUS_NAME))
+            .context("own the Pronk bus name used by Mutter authorization")?;
+        let lease = runtime
+            .block_on(
+                MutterGrantProvider::new(connection.clone())
+                    .acquire(target.clone(), CancellationToken::new()),
+            )
+            .context("acquire CastKMS grant from Mutter")?;
+        (Some(connection), lease)
+    };
+    ensure!(lease.grant_id() != 0, "grant has a zero ID");
     ensure!(lease.connector_id() == connector_id, "connector ID differs");
-    ensure!(lease.rights() == DISPLAY_CEC_V1_RIGHTS, "rights differ");
-    ensure!(lease.flags() == 0, "grant flags differ");
+    ensure!(
+        lease.rights()
+            == if inherited_administrative_grant {
+                DISPLAY_CEC_AUDIO_V1_RIGHTS
+            } else {
+                DISPLAY_CEC_V1_RIGHTS
+            },
+        "rights differ"
+    );
+    ensure!(
+        lease.flags()
+            == if inherited_administrative_grant {
+                GRANT_FLAG_ADMIN
+            } else {
+                0
+            },
+        "grant flags differ"
+    );
     let expected_grant_id = lease.grant_id();
 
     let client = CastKmsClient::new(lease).context("construct inherited-holder client")?;
@@ -187,9 +226,12 @@ fn main() -> anyhow::Result<()> {
         "client connector differs"
     );
     if exercise_grant_owner_handoff {
+        let connection = connection
+            .as_ref()
+            .context("grant-owner handoff has no compositor connection")?;
         exercise_grant_owner_handoff_gate(
             &runtime,
-            &connection,
+            connection,
             target,
             &mut client,
             expected_grant_id,
@@ -660,13 +702,17 @@ fn main() -> anyhow::Result<()> {
     drop(client);
     wait_for_status(&connector_sysfs, "disconnected")?;
     wait_for_edid(&connector_sysfs, &[])?;
-    runtime
-        .block_on(connection.release_name(BUS_NAME))
-        .context("release the Pronk bus name")?;
-
-    println!("mutter_bus_name_authorization=pass");
-    println!("mutter_grant_creation=pass");
-    println!("normal_grant_validation=pass");
+    if let Some(connection) = connection.as_ref() {
+        runtime
+            .block_on(connection.release_name(BUS_NAME))
+            .context("release the Pronk bus name")?;
+        println!("mutter_bus_name_authorization=pass");
+        println!("mutter_grant_creation=pass");
+        println!("normal_grant_validation=pass");
+    } else {
+        println!("administrative_grant_validation=pass");
+        println!("external_grant_control=pass");
+    }
     println!("inherited_holder_client=pass");
     println!("authoritative_grant_activation=pass");
     println!("grant_activation_path={activation_path}");
@@ -813,12 +859,63 @@ fn main() -> anyhow::Result<()> {
     }
     println!("exclusive_capture_start_stop=pass");
     println!("validated_edid_attach=pass");
-    println!("mutter_hotplug_activates_grant=pass");
+    if inherited_administrative_grant {
+        println!("administrative_hotplug_activates_grant=pass");
+    } else {
+        println!("mutter_hotplug_activates_grant=pass");
+    }
     println!("edid_replace_and_clear=pass");
     println!("explicit_monitor_detach=pass");
     println!("lease_drop_detaches_monitor=pass");
     println!("holder_drop_releases_grant=pass");
     Ok(())
+}
+
+fn inherited_administrative_lease(connector_id: u32) -> anyhow::Result<GrantLease> {
+    let inherited_fd = std::env::var("CASTKMS_GRANT_FD")
+        .context("CASTKMS_GRANT_FD is unset for administrative launch")?
+        .parse::<i32>()
+        .context("CASTKMS_GRANT_FD is not a descriptor number")?;
+    ensure!(
+        inherited_fd > libc::STDERR_FILENO,
+        "CASTKMS_GRANT_FD aliases a standard stream"
+    );
+
+    // SAFETY: the administrative launcher transfers ownership of this open
+    // descriptor to its child through CASTKMS_GRANT_FD.
+    let inherited = unsafe { OwnedFd::from_raw_fd(inherited_fd) };
+    let holder_fd = fcntl(
+        inherited.as_raw_fd(),
+        FcntlArg::F_DUPFD_CLOEXEC(libc::STDERR_FILENO + 1),
+    )
+    .context("duplicate inherited administrative grant")?;
+    // SAFETY: F_DUPFD_CLOEXEC returned a new owned descriptor.
+    let holder = unsafe { OwnedFd::from_raw_fd(holder_fd) };
+    drop(inherited);
+
+    let mut query = DrmCastkmsGetGrant::default();
+    // SAFETY: `query` has the checked CastKMS userspace layout and remains
+    // writable for the duration of the synchronous ioctl.
+    unsafe { drm_ioctl_castkms_get_grant(holder.as_raw_fd(), &mut query) }
+        .context("query inherited administrative grant")?;
+    ensure!(query.reserved == 0, "grant query reserved field is nonzero");
+
+    GrantLease::from_external_administrator(
+        holder,
+        GrantMetadata {
+            grant_id: query.grant_id,
+            connector_id: query.connector_id,
+            output_index: query.output_index,
+            rights: query.rights,
+            flags: query.flags,
+            initial_state: query.state,
+            capture_uapi_major: CAPTURE_UAPI_MAJOR,
+            capture_uapi_minor: CAPTURE_UAPI_MINOR,
+        },
+        connector_id,
+        DISPLAY_CEC_AUDIO_V1_RIGHTS,
+    )
+    .context("validate inherited administrative grant")
 }
 
 fn exercise_grant_owner_handoff_gate(
