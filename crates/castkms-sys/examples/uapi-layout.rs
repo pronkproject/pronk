@@ -49,8 +49,10 @@ fn main() {
         DrmCastkmsCaptureDetachMonitor,
         "drm_castkms_capture_detach_monitor"
     );
+    layout!(DrmCastkmsCreateGrant, "drm_castkms_create_grant");
     layout!(DrmCastkmsGetGrant, "drm_castkms_get_grant");
     layout!(DrmCastkmsGetOutput, "drm_castkms_get_output");
+    layout!(DrmCastkmsOpenAudioTap, "drm_castkms_open_audio_tap");
     layout!(
         DrmEventCastkmsGrantRevoked,
         "drm_event_castkms_grant_revoked"
@@ -100,10 +102,21 @@ fn main() {
         display_name_ptr,
         "drm_castkms_capture_attach_monitor.display_name_ptr"
     );
+    field!(DrmCastkmsCreateGrant, fd, "drm_castkms_create_grant.fd");
+    field!(
+        DrmCastkmsCreateGrant,
+        control_fd,
+        "drm_castkms_create_grant.control_fd"
+    );
     field!(
         DrmCastkmsGetGrant,
         output_index,
         "drm_castkms_get_grant.output_index"
+    );
+    field!(
+        DrmCastkmsOpenAudioTap,
+        buffer_frames,
+        "drm_castkms_open_audio_tap.buffer_frames"
     );
     field!(
         DrmEventCastkmsCaptureFrame,

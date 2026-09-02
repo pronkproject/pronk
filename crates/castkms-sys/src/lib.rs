@@ -1,4 +1,4 @@
-//! Minimal checked-in Rust bindings for the CastKMS 0.11 grant, attachment,
+//! Minimal checked-in Rust bindings for the CastKMS 0.12 grant, attachment,
 //! capture, event, output-discovery, and required standard DRM UAPIs.
 
 use std::ffi::c_char;
@@ -11,7 +11,7 @@ pub const DRM_MODE_CONNECTOR_VIRTUAL: u32 = 15;
 pub const DRM_MODE_CONNECTOR_WRITEBACK: u32 = 18;
 
 pub const CAPTURE_UAPI_MAJOR: u16 = 0;
-pub const CAPTURE_UAPI_MINOR: u16 = 11;
+pub const CAPTURE_UAPI_MINOR: u16 = 12;
 pub const CAPTURE_MAX_DISPLAY_NAME_SIZE: usize = 79;
 
 pub const CAPTURE_CAP_SYNCOBJ_TIMELINE: u64 = 1 << 0;
@@ -30,10 +30,22 @@ pub const GRANT_MANAGE_ATTACHMENT: u32 = 1 << 1;
 pub const GRANT_UPDATE_EDID: u32 = 1 << 2;
 pub const GRANT_READ_CURSOR: u32 = 1 << 3;
 pub const GRANT_MANAGE_CEC: u32 = 1 << 4;
+pub const GRANT_CAPTURE_AUDIO: u32 = 1 << 5;
 
 pub const DISPLAY_V1_RIGHTS: u32 =
     GRANT_CAPTURE_PIXELS | GRANT_MANAGE_ATTACHMENT | GRANT_UPDATE_EDID | GRANT_READ_CURSOR;
 pub const DISPLAY_CEC_V1_RIGHTS: u32 = DISPLAY_V1_RIGHTS | GRANT_MANAGE_CEC;
+pub const DISPLAY_AUDIO_V1_RIGHTS: u32 = DISPLAY_V1_RIGHTS | GRANT_CAPTURE_AUDIO;
+pub const DISPLAY_CEC_AUDIO_V1_RIGHTS: u32 = DISPLAY_CEC_V1_RIGHTS | GRANT_CAPTURE_AUDIO;
+
+pub const AUDIO_FORMAT_S16_LE: u32 = 1;
+pub const AUDIO_TAP_RATE: u32 = 48_000;
+pub const AUDIO_TAP_CHANNELS: u32 = 2;
+pub const AUDIO_TAP_FRAME_BYTES: u32 = 4;
+
+pub const GRANT_CREATE_ADMIN: u32 = 1 << 0;
+pub const GRANT_CREATE_DELEGATED: u32 = 1 << 1;
+pub const GRANT_CREATE_FLAGS_MASK: u32 = GRANT_CREATE_ADMIN | GRANT_CREATE_DELEGATED;
 
 pub const GRANT_FLAG_ADMIN: u32 = 1 << 0;
 pub const GRANT_FLAG_DELEGATED: u32 = 1 << 1;
@@ -482,6 +494,19 @@ pub struct DrmCastkmsCaptureDetachMonitor {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
+pub struct DrmCastkmsCreateGrant {
+    pub connector_id: u32,
+    pub rights: u32,
+    pub flags: u32,
+    pub fd: i32,
+    pub grant_id: u32,
+    pub fd_flags: u32,
+    pub control_fd: i32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct DrmCastkmsGetGrant {
     pub grant_id: u32,
     pub connector_id: u32,
@@ -504,6 +529,21 @@ pub struct DrmCastkmsGetOutput {
     pub flags: u32,
     pub output_index: u32,
     pub reserved: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsOpenAudioTap {
+    pub connector_id: u32,
+    pub flags: u32,
+    pub fd: i32,
+    pub fd_flags: u32,
+    pub format: u32,
+    pub rate: u32,
+    pub channels: u32,
+    pub frame_bytes: u32,
+    pub buffer_frames: u64,
+    pub reserved: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -625,7 +665,9 @@ pub struct DrmEventCastkmsCecTx {
 }
 
 nix::ioctl_readwrite!(drm_ioctl_version, b'd', 0x00, DrmVersion);
+nix::ioctl_write_ptr!(drm_ioctl_auth_magic, b'd', 0x11, u32);
 nix::ioctl_readwrite!(drm_ioctl_mode_getresources, b'd', 0xa0, DrmModeCardRes);
+nix::ioctl_none!(drm_ioctl_drop_master, b'd', 0x1f);
 nix::ioctl_readwrite!(drm_ioctl_prime_handle_to_fd, b'd', 0x2d, DrmPrimeHandle);
 nix::ioctl_readwrite!(drm_ioctl_mode_getcrtc, b'd', 0xa1, DrmModeCrtc);
 nix::ioctl_readwrite!(drm_ioctl_mode_getencoder, b'd', 0xa6, DrmModeGetEncoder);
@@ -780,6 +822,14 @@ nix::ioctl_readwrite!(
     DrmCastkmsCecGetState
 );
 
+// DRM_COMMAND_BASE (0x40) + DRM_CASTKMS_CREATE_GRANT (0x11).
+nix::ioctl_readwrite!(
+    drm_ioctl_castkms_create_grant,
+    b'd',
+    0x51,
+    DrmCastkmsCreateGrant
+);
+
 // DRM_COMMAND_BASE (0x40) + DRM_CASTKMS_GET_GRANT (0x13).
 nix::ioctl_readwrite!(drm_ioctl_castkms_get_grant, b'd', 0x53, DrmCastkmsGetGrant);
 
@@ -791,6 +841,14 @@ nix::ioctl_readwrite!(
     DrmCastkmsGetOutput
 );
 
+// DRM_COMMAND_BASE (0x40) + DRM_CASTKMS_OPEN_AUDIO_TAP (0x15).
+nix::ioctl_readwrite!(
+    drm_ioctl_castkms_open_audio_tap,
+    b'd',
+    0x55,
+    DrmCastkmsOpenAudioTap
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,12 +856,34 @@ mod tests {
     #[test]
     fn grant_query_matches_the_uapi_layout() {
         assert_eq!(CAPTURE_UAPI_MAJOR, 0);
-        assert_eq!(CAPTURE_UAPI_MINOR, 11);
+        assert_eq!(CAPTURE_UAPI_MINOR, 12);
         assert_eq!(CAPTURE_CAP_GRANT_CONTROL_FD, 1 << 4);
         assert_eq!(CAPTURE_CAPS_MASK & CAPTURE_CAP_GRANT_CONTROL_FD, 1 << 4);
         assert_eq!(std::mem::size_of::<DrmCastkmsGetGrant>(), 32);
         assert_eq!(std::mem::align_of::<DrmCastkmsGetGrant>(), 8);
         assert_eq!(std::mem::offset_of!(DrmCastkmsGetGrant, output_index), 20);
+    }
+
+    #[test]
+    fn audio_tap_matches_the_uapi_layout() {
+        assert_eq!(GRANT_CAPTURE_AUDIO, 1 << 5);
+        assert_eq!(AUDIO_FORMAT_S16_LE, 1);
+        assert_eq!(std::mem::size_of::<DrmCastkmsOpenAudioTap>(), 48);
+        assert_eq!(std::mem::align_of::<DrmCastkmsOpenAudioTap>(), 8);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsOpenAudioTap, fd), 8);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsOpenAudioTap, buffer_frames),
+            32
+        );
+    }
+
+    #[test]
+    fn grant_creation_matches_the_uapi_layout() {
+        assert_eq!(GRANT_CREATE_FLAGS_MASK, 0b11);
+        assert_eq!(std::mem::size_of::<DrmCastkmsCreateGrant>(), 32);
+        assert_eq!(std::mem::align_of::<DrmCastkmsCreateGrant>(), 4);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsCreateGrant, fd), 12);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsCreateGrant, control_fd), 24);
     }
 
     #[test]
