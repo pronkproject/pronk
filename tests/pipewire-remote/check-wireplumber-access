@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 16 ]; then
-    echo "usage: $0 PIPEWIRE WIREPLUMBER PW_CLI WPCTL TIMEOUT GST_LAUNCH PW_DUMP JQ PIPEWIRE_CONFIG TEST_REMOTES WIREPLUMBER_CONFIG CASTKMS_AUDIO_CONFIG PRIVATE_POLICY_SCRIPT POLICY_MARKER_SCRIPT CAST_AUDIO_DEFAULT_SCRIPT POLICY_GATE_PROBE" >&2
+if [ "$#" -ne 17 ]; then
+    echo "usage: $0 PIPEWIRE WIREPLUMBER PW_CLI WPCTL TIMEOUT GST_LAUNCH PW_DUMP JQ PIPEWIRE_CONFIG TEST_REMOTES WIREPLUMBER_CONFIG CASTKMS_AUDIO_CONFIG PRIVATE_POLICY_SCRIPT POLICY_MARKER_SCRIPT CAST_AUDIO_DEFAULT_SCRIPT POLICY_GATE_PROBE AUDIO_SOURCE_TEST" >&2
     exit 2
 fi
 
@@ -22,6 +22,7 @@ private_policy_script=${13}
 policy_marker_script=${14}
 cast_audio_default_script=${15}
 policy_gate_probe=${16}
+audio_source_test=${17}
 
 wireplumber_version=$(
     "$wireplumber" --version 2>/dev/null |
@@ -47,14 +48,15 @@ wireplumber_pid=
 producer_pid=
 unknown_producer_pid=
 policy_probe_pid=
+audio_source_pid=
 
 cleanup() {
-    for child in "$policy_probe_pid" "$unknown_producer_pid" "$producer_pid" "$wireplumber_pid" "$pipewire_pid"; do
+    for child in "$policy_probe_pid" "$audio_source_pid" "$unknown_producer_pid" "$producer_pid" "$wireplumber_pid" "$pipewire_pid"; do
         if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
             kill "$child" 2>/dev/null || true
         fi
     done
-    for child in "$policy_probe_pid" "$unknown_producer_pid" "$producer_pid" "$wireplumber_pid" "$pipewire_pid"; do
+    for child in "$policy_probe_pid" "$audio_source_pid" "$unknown_producer_pid" "$producer_pid" "$wireplumber_pid" "$pipewire_pid"; do
         if [ -n "$child" ]; then
             wait "$child" 2>/dev/null || true
         fi
@@ -88,6 +90,19 @@ run_in_test_session() {
     PIPEWIRE_RUNTIME_DIR="$runtime_dir" \
     HOME="$home_dir" \
         "$@"
+}
+
+# Backgrounding a shell function that merely invokes another process makes
+# $! identify the intermediate shell on some /bin/sh implementations.  Exec
+# background children so the PID retained by cleanup remains the real owner.
+start_in_test_session() {
+    XDG_CONFIG_HOME="$config_home"
+    XDG_DATA_HOME="$data_home"
+    XDG_RUNTIME_DIR="$runtime_dir"
+    PIPEWIRE_RUNTIME_DIR="$runtime_dir"
+    HOME="$home_dir"
+    export XDG_CONFIG_HOME XDG_DATA_HOME XDG_RUNTIME_DIR PIPEWIRE_RUNTIME_DIR HOME
+    exec "$@"
 }
 
 env XDG_CONFIG_HOME="$config_home" \
@@ -168,7 +183,7 @@ start_producer() {
     marker=$1
     node_name=$2
     log_file=$3
-    run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-core \
+    start_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-core \
         "$gst_launch" -q \
         videotestsrc is-live=true pattern=black ! \
         video/x-raw,format=BGRx,width=320,height=180,framerate=10/1 ! \
@@ -213,6 +228,34 @@ done
 if [ "$producers_ready" != true ]; then
     echo "private policy test producers did not appear" >&2
     cat "$test_root/producer.log" "$test_root/unknown-producer.log" >&2
+    exit 1
+fi
+
+start_in_test_session "$audio_source_test" >"$test_root/audio-source.log" 2>&1 &
+audio_source_pid=$!
+audio_source_ready=false
+for _attempt in $(seq 1 100); do
+    if grep -q '^ready name=pronk.policy.test.kernel-audio ' "$test_root/audio-source.log" && \
+       run_in_test_session "$pw_dump" -r pipewire-0-manager 2>/dev/null |
+        "$jq" -e '.[] | select(
+            .type == "PipeWire:Interface:Node" and
+            .info.props["node.name"] == "pronk.policy.test.kernel-audio" and
+            .info.props["media.class"] == "Audio/Source" and
+            .info.props["api.pronk.private"] == "v1" and
+            .info.props["api.pronk.kernel-audio-tap"] == "v1"
+        )' >/dev/null; then
+        audio_source_ready=true
+        break
+    fi
+    if ! kill -0 "$audio_source_pid" 2>/dev/null; then
+        cat "$test_root/audio-source.log" >&2
+        exit 1
+    fi
+    sleep 0.05
+done
+if [ "$audio_source_ready" != true ]; then
+    echo "private kernel-audio source did not become ready" >&2
+    cat "$test_root/audio-source.log" "$test_root/wireplumber.log" >&2
     exit 1
 fi
 
@@ -291,19 +334,45 @@ expect_capture_denied pipewire-0-test-flatpak pronk.policy.test.private flatpak
 expect_capture_denied pipewire-0-test-portal pronk.policy.test.private portal
 expect_capture_denied pipewire-0-pronk-backend pronk.policy.test.unknown backend-unknown-version
 
+expect_audio_capture_denied() {
+    remote=$1
+    label=$2
+    set +e
+    run_in_test_session env PIPEWIRE_REMOTE="$remote" \
+        "$timeout_program" 1 \
+        "$gst_launch" -q pipewiresrc target-object=pronk.policy.test.kernel-audio num-buffers=2 \
+        stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true ! \
+        audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2 ! fakesink \
+        >"$test_root/denied-audio-$label.log" 2>&1
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        echo "$label unexpectedly captured the private kernel-audio source" >&2
+        cat "$test_root/denied-audio-$label.log" >&2
+        exit 1
+    fi
+}
+
+expect_audio_capture_denied pipewire-0 default
+expect_audio_capture_denied pipewire-0-test-restricted restricted
+expect_audio_capture_denied pipewire-0-test-flatpak flatpak
+expect_audio_capture_denied pipewire-0-test-portal portal
+
 backend_audio_inventory=$test_root/backend-audio-inventory.json
 run_in_test_session "$pw_dump" -r pipewire-0-pronk-backend >"$backend_audio_inventory"
 if ! "$jq" -e '[.[] | select(
         .type == "PipeWire:Interface:Node" and
-        .info.props["node.name"] == "pronk.policy.test.castkms-audio" and
-        .info.props["api.pronk.castkms.audio-sink"] == "v1" and
-        (.info.props["api.pronk.castkms.output-index"] | tostring) == "1"
+        .info.props["node.name"] == "pronk.policy.test.kernel-audio" and
+        .info.props["media.class"] == "Audio/Source" and
+        .info.props["api.pronk.private"] == "v1" and
+        .info.props["api.pronk.kernel-audio-tap"] == "v1"
     )] | length == 1' "$backend_audio_inventory" >/dev/null ||
    "$jq" -e '.[] | select(
         .type == "PipeWire:Interface:Node" and
-        .info.props["node.name"] == "pronk.policy.test.unknown-audio"
+        (.info.props["media.class"] == "Audio/Sink" or
+         .info.props["node.name"] == "pronk.policy.test.unknown-audio")
     )' "$backend_audio_inventory" >/dev/null; then
-    echo "backend audio inventory did not expose only the supported CastKMS sink" >&2
+    echo "backend audio inventory did not expose only the private kernel tap source" >&2
     exit 1
 fi
 
@@ -319,35 +388,19 @@ run_in_test_session env PIPEWIRE_REMOTE=pipewire-0 \
         exit 1
     }
 
-# The backend can capture only the supported sink's monitor and cannot fall
-# through to another sink if the exact target is unavailable.
+# The backend captures the exact private source produced from the kernel tap.
 run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-backend \
     "$timeout_program" 3 \
-    "$gst_launch" -q pipewiresrc target-object=pronk.policy.test.castkms-audio num-buffers=3 \
-    stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true,stream.capture.sink=true ! \
-    audio/x-raw,rate=48000,channels=2 ! fakesink \
+    "$gst_launch" -q pipewiresrc target-object=pronk.policy.test.kernel-audio num-buffers=3 \
+    stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true ! \
+    audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2 ! fakesink \
     >"$test_root/backend-audio-capture.log" 2>&1 || {
         cat "$test_root/backend-audio-capture.log" >&2
         cat "$test_root/wireplumber.log" >&2
         exit 1
     }
 
-set +e
-run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-backend \
-    "$timeout_program" 1 \
-    "$gst_launch" -q pipewiresrc target-object=pronk.policy.test.unknown-audio num-buffers=2 \
-    stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true,stream.capture.sink=true ! \
-    audio/x-raw ! fakesink \
-    >"$test_root/backend-unknown-audio.log" 2>&1
-unknown_audio_status=$?
-set -e
-if [ "$unknown_audio_status" -eq 0 ]; then
-    echo "backend unexpectedly captured an unknown CastKMS audio marker version" >&2
-    cat "$test_root/backend-unknown-audio.log" >&2
-    exit 1
-fi
-
-for child in "$producer_pid" "$unknown_producer_pid"; do
+for child in "$audio_source_pid" "$producer_pid" "$unknown_producer_pid"; do
     if ! kill -0 "$child" 2>/dev/null; then
         echo "a denied capture disturbed its producer" >&2
         cat "$test_root/producer.log" "$test_root/unknown-producer.log" >&2
@@ -366,7 +419,7 @@ run_in_test_session env PIPEWIRE_REMOTE=pipewire-0-pronk-backend \
         exit 1
     }
 
-run_in_test_session "$timeout_program" 10 "$policy_gate_probe" \
+start_in_test_session "$timeout_program" 10 "$policy_gate_probe" \
     >"$test_root/policy-probe.log" 2>&1 &
 policy_probe_pid=$!
 probe_ready=false
@@ -386,6 +439,14 @@ if [ "$probe_ready" != true ]; then
     cat "$test_root/policy-probe.log" >&2
     exit 1
 fi
+
+kill "$audio_source_pid"
+if ! wait "$audio_source_pid"; then
+    echo "private audio source did not stop cleanly" >&2
+    cat "$test_root/audio-source.log" >&2
+    exit 1
+fi
+audio_source_pid=
 
 kill "$wireplumber_pid"
 wait "$wireplumber_pid" 2>/dev/null || true
