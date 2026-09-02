@@ -1,7 +1,7 @@
 # CastKMS live tests
 
 This package contains opt-in tests that require a graphical VM with the
-matching CastKMS 0.11 module and Mutter CastKMS D-Bus API. The Rust binary owns
+matching CastKMS 0.12 module and Mutter CastKMS D-Bus API. The Rust binary owns
 `io.github.pronkproject.Pronk1` on the session bus, requests a normal grant from
 Mutter, validates the returned holder, and then exercises real attachment,
 capture, mode-change, grant-state, DMA-BUF, and PipeWire paths.
