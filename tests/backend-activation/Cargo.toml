@@ -71,5 +71,5 @@ name = "pronk-pipewire-policy-gate-test"
 path = "src/pipewire_policy_gate_test.rs"
 
 [[bin]]
-name = "pronk-audio-sink-resolver-test"
-path = "src/audio_sink_resolver_test.rs"
+name = "pronk-pipewire-audio-source-test"
+path = "src/pipewire_audio_source_test.rs"

@@ -44,6 +44,10 @@ fn video_stream_properties() -> gst::Structure {
         .build()
 }
 
+fn is_segment_anchor(buffer: &gst::BufferRef) -> bool {
+    buffer.pts().is_some() && !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT)
+}
+
 pub(crate) struct GStreamerGraph {
     generation: NonZeroU64,
     pipeline: gst::Pipeline,
@@ -300,6 +304,7 @@ impl GStreamerGraph {
         let previous_video = self.statistics.frames;
         let previous_audio = self.statistics.audio_packets;
         self.change_state(gst::State::Playing, PIPELINE_STATE_TIMEOUT)?;
+        self.force_key_frame()?;
         self.wait_for_media_after(previous_video, previous_audio, FIRST_FRAME_TIMEOUT)
     }
 
@@ -550,7 +555,7 @@ impl GStreamerGraph {
             let Some(sample) = self.app_sink.try_pull_sample(gst::ClockTime::ZERO) else {
                 return Ok(None);
             };
-            if !self.timeline_needs_reanchor {
+            if !self.needs_segment_key_frame {
                 return Ok(Some(sample));
             }
             let buffer = sample
@@ -559,8 +564,9 @@ impl GStreamerGraph {
             // A newly linked PipeWire stream can expose one transition buffer
             // without a presentation timestamp. Do not let that buffer, or a
             // delta frame queued before the forced key frame, anchor the new
-            // media segment.
-            if buffer.pts().is_some() && !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT) {
+            // media segment, including the initial segment when another media
+            // branch delays collection long enough to fill the appsink.
+            if is_segment_anchor(buffer) {
                 return Ok(Some(sample));
             }
         }
@@ -798,13 +804,36 @@ mod tests {
     use std::os::fd::AsFd;
     use std::os::unix::net::{UnixDatagram, UnixStream};
 
-    use super::{validate_remote_socket, video_stream_properties};
+    use super::{is_segment_anchor, validate_remote_socket, video_stream_properties};
 
     #[test]
     fn video_stream_is_non_live_while_using_the_pipeline_system_clock() {
         gstreamer::init().unwrap();
         let properties = video_stream_properties();
         assert_eq!(properties.get::<String>("stream.is-live").unwrap(), "false");
+    }
+
+    #[test]
+    fn segment_anchor_requires_a_timestamped_key_frame() {
+        gstreamer::init().unwrap();
+
+        let missing_timestamp = gstreamer::Buffer::new();
+        assert!(!is_segment_anchor(&missing_timestamp));
+
+        let mut delta_frame = gstreamer::Buffer::new();
+        {
+            let buffer = delta_frame.get_mut().unwrap();
+            buffer.set_pts(gstreamer::ClockTime::ZERO);
+            buffer.set_flags(gstreamer::BufferFlags::DELTA_UNIT);
+        }
+        assert!(!is_segment_anchor(&delta_frame));
+
+        let mut key_frame = gstreamer::Buffer::new();
+        key_frame
+            .get_mut()
+            .unwrap()
+            .set_pts(gstreamer::ClockTime::ZERO);
+        assert!(is_segment_anchor(&key_frame));
     }
 
     #[test]
