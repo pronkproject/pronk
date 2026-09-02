@@ -292,12 +292,35 @@ impl AsyncCastKmsClient {
         let connector_id = self.client().connector_id();
         let events =
             read_event_batch(&self.io, &mut self.decoder, Some((grant_id, connector_id))).await?;
-        for event in &events {
+        self.record_capture_events(&events)?;
+        Ok(events)
+    }
+
+    /// Drain events already queued on the holder without waiting for another.
+    ///
+    /// A successful capture-stop ioctl waits for every producer fence. Since
+    /// completed frame events are published before those fences become ready,
+    /// a nonblocking drain after all fences are ready distinguishes completed
+    /// frames from stop-canceled requests, for which CastKMS removes the event.
+    pub fn try_read_events(&mut self) -> Result<Vec<CastKmsEvent>, EventReadError> {
+        let grant_id = self.client().grant_id();
+        let connector_id = self.client().connector_id();
+        let events = try_read_event_batch(
+            self.io.get_ref(),
+            &mut self.decoder,
+            Some((grant_id, connector_id)),
+        )?;
+        self.record_capture_events(&events)?;
+        Ok(events)
+    }
+
+    fn record_capture_events(&mut self, events: &[CastKmsEvent]) -> Result<(), EventReadError> {
+        for event in events {
             if let CastKmsEvent::CaptureFrame(frame) = event {
                 self.io.get_mut().record_capture_frame(*frame)?;
             }
         }
-        Ok(events)
+        Ok(())
     }
 }
 
@@ -323,18 +346,12 @@ async fn read_event_batch<T: AsRawFd>(
                     return Err(EventReadError::StreamClosed);
                 }
                 Ok(Ok(count)) => {
-                    let decoded = decoder.push(&read_buffer[..count])?;
-                    if events.len() + decoded.len() > MAX_EVENTS_PER_READINESS {
-                        return Err(EventReadError::TooManyEvents {
-                            maximum: MAX_EVENTS_PER_READINESS,
-                        });
-                    }
-                    for event in decoded {
-                        if let Some((grant_id, connector_id)) = expected_scope {
-                            validate_event_scope(grant_id, connector_id, &event)?;
-                        }
-                        events.push(event);
-                    }
+                    append_decoded_events(
+                        decoder,
+                        &read_buffer[..count],
+                        expected_scope,
+                        &mut events,
+                    )?;
                 }
                 Ok(Err(error)) => return Err(EventReadError::Read(error)),
                 Err(_would_block) => break,
@@ -346,6 +363,50 @@ async fn read_event_batch<T: AsRawFd>(
             return Ok(events);
         }
     }
+}
+
+fn try_read_event_batch<T: AsRawFd>(
+    io: &T,
+    decoder: &mut EventDecoder,
+    expected_scope: Option<(u32, u32)>,
+) -> Result<Vec<CastKmsEvent>, EventReadError> {
+    let mut events = Vec::new();
+    let mut read_buffer = [0_u8; DRM_EVENT_READ_SIZE];
+
+    loop {
+        match read_nonblocking(io.as_raw_fd(), &mut read_buffer) {
+            Ok(0) => {
+                decoder.finish()?;
+                return Err(EventReadError::StreamClosed);
+            }
+            Ok(count) => {
+                append_decoded_events(decoder, &read_buffer[..count], expected_scope, &mut events)?
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(events),
+            Err(error) => return Err(EventReadError::Read(error)),
+        }
+    }
+}
+
+fn append_decoded_events(
+    decoder: &mut EventDecoder,
+    bytes: &[u8],
+    expected_scope: Option<(u32, u32)>,
+    events: &mut Vec<CastKmsEvent>,
+) -> Result<(), EventReadError> {
+    let decoded = decoder.push(bytes)?;
+    if events.len() + decoded.len() > MAX_EVENTS_PER_READINESS {
+        return Err(EventReadError::TooManyEvents {
+            maximum: MAX_EVENTS_PER_READINESS,
+        });
+    }
+    for event in decoded {
+        if let Some((grant_id, connector_id)) = expected_scope {
+            validate_event_scope(grant_id, connector_id, &event)?;
+        }
+        events.push(event);
+    }
+    Ok(())
 }
 
 fn read_nonblocking(fd: std::os::fd::RawFd, buffer: &mut [u8]) -> io::Result<usize> {
@@ -874,6 +935,29 @@ mod tests {
             release_tx.send(()).unwrap();
             writer_task.await.unwrap();
         });
+    }
+
+    #[test]
+    fn nonblocking_reader_drains_only_already_queued_events() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(false).unwrap();
+
+        let mut bytes = state_event(GrantState::Active);
+        bytes.extend_from_slice(&revoked_event());
+        writer.write_all(&bytes).unwrap();
+
+        let mut decoder = EventDecoder::new();
+        let events =
+            try_read_event_batch(&reader, &mut decoder, Some((GRANT_ID, CONNECTOR_ID))).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], CastKmsEvent::GrantState(_)));
+        assert!(matches!(events[1], CastKmsEvent::GrantRevoked(_)));
+        assert!(
+            try_read_event_batch(&reader, &mut decoder, Some((GRANT_ID, CONNECTOR_ID)))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

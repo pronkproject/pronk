@@ -1,11 +1,11 @@
-//! Ownership and validation of compositor-issued CastKMS grants.
+//! Ownership and validation of CastKMS grants.
 
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use async_trait::async_trait;
 use castkms_sys::{
     drm_ioctl_castkms_get_grant, DrmCastkmsGetGrant, CAPTURE_UAPI_MAJOR, CAPTURE_UAPI_MINOR,
-    GRANT_STATE_REVOKED, GRANT_STATE_SUSPENDED_FOREIGN_CONTENT,
+    GRANT_FLAG_ADMIN, GRANT_STATE_REVOKED, GRANT_STATE_SUSPENDED_FOREIGN_CONTENT,
 };
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub enum GrantProfile {
     DisplayV1 = 1,
     DisplayCecV1 = 2,
+    DisplayCecAudioV1 = 3,
 }
 
 impl GrantProfile {
@@ -25,6 +26,7 @@ impl GrantProfile {
         match self {
             Self::DisplayV1 => castkms_sys::DISPLAY_V1_RIGHTS,
             Self::DisplayCecV1 => castkms_sys::DISPLAY_CEC_V1_RIGHTS,
+            Self::DisplayCecAudioV1 => castkms_sys::DISPLAY_CEC_AUDIO_V1_RIGHTS,
         }
     }
 }
@@ -74,27 +76,38 @@ pub struct GrantMetadata {
     pub capture_uapi_minor: u16,
 }
 
-/// A validated holder descriptor for a grant retained by the compositor.
+/// A validated restricted holder descriptor used for CastKMS operations.
 #[derive(Debug)]
 pub struct GrantLease {
     holder: OwnedFd,
+    _lifetime: GrantLifetime,
     metadata: GrantMetadata,
+}
+
+#[derive(Debug)]
+enum GrantLifetime {
+    ExternalGrantor,
+    Administrative { _control: OwnedFd },
 }
 
 #[derive(Debug, Error)]
 pub enum GrantValidationError {
-    #[error("compositor grant metadata differs: {0}")]
+    #[error("grant metadata differs: {0}")]
     InvalidMetadata(&'static str),
-    #[error("query compositor grant descriptor: {0}")]
+    #[error("query grant descriptor: {0}")]
     HolderQuery(#[source] Errno),
-    #[error("compositor grant descriptor differs: {0}")]
+    #[error("grant descriptor differs: {0}")]
     InvalidHolder(&'static str),
 }
 
 impl GrantLease {
     #[cfg(test)]
     pub(crate) fn new_unchecked(holder: OwnedFd, metadata: GrantMetadata) -> Self {
-        Self { holder, metadata }
+        Self {
+            holder,
+            _lifetime: GrantLifetime::ExternalGrantor,
+            metadata,
+        }
     }
 
     /// Validate and own a grant whose private control endpoint remains with
@@ -105,9 +118,64 @@ impl GrantLease {
         expected_connector_id: u32,
         expected_rights: u32,
     ) -> Result<Self, GrantValidationError> {
-        validate_metadata(&metadata, expected_connector_id, expected_rights)?;
+        validate_metadata(&metadata, expected_connector_id, expected_rights, 0)?;
         validate_holder(&holder, &metadata)?;
-        Ok(Self { holder, metadata })
+        Ok(Self {
+            holder,
+            _lifetime: GrantLifetime::ExternalGrantor,
+            metadata,
+        })
+    }
+
+    /// Validate and own an administrative grant whose control endpoint stays
+    /// with a separate privileged launcher or broker.
+    pub fn from_external_administrator(
+        holder: OwnedFd,
+        metadata: GrantMetadata,
+        expected_connector_id: u32,
+        expected_rights: u32,
+    ) -> Result<Self, GrantValidationError> {
+        validate_metadata(
+            &metadata,
+            expected_connector_id,
+            expected_rights,
+            GRANT_FLAG_ADMIN,
+        )?;
+        validate_holder(&holder, &metadata)?;
+        Ok(Self {
+            holder,
+            _lifetime: GrantLifetime::ExternalGrantor,
+            metadata,
+        })
+    }
+
+    /// Validate and retain the narrow lifetime descriptor returned by the
+    /// one-shot administrative helper. It remains private to the lease.
+    pub(crate) fn from_administrator(
+        holder: OwnedFd,
+        control: OwnedFd,
+        metadata: GrantMetadata,
+        expected_connector_id: u32,
+        expected_rights: u32,
+    ) -> Result<Self, GrantValidationError> {
+        validate_metadata(
+            &metadata,
+            expected_connector_id,
+            expected_rights,
+            GRANT_FLAG_ADMIN,
+        )?;
+        if holder.as_raw_fd() == control.as_raw_fd() {
+            return Err(GrantValidationError::InvalidHolder(
+                "administrative descriptor alias",
+            ));
+        }
+        validate_control(&control)?;
+        validate_holder(&holder, &metadata)?;
+        Ok(Self {
+            holder,
+            _lifetime: GrantLifetime::Administrative { _control: control },
+            metadata,
+        })
     }
 
     /// Borrow the restricted holder used for every CastKMS operation.
@@ -148,6 +216,7 @@ fn validate_metadata(
     metadata: &GrantMetadata,
     expected_connector_id: u32,
     expected_rights: u32,
+    expected_flags: u32,
 ) -> Result<(), GrantValidationError> {
     if metadata.grant_id == 0 {
         return Err(GrantValidationError::InvalidMetadata("zero grant ID"));
@@ -158,7 +227,7 @@ fn validate_metadata(
     if metadata.rights != expected_rights {
         return Err(GrantValidationError::InvalidMetadata("rights"));
     }
-    if metadata.flags != 0 {
+    if metadata.flags != expected_flags {
         return Err(GrantValidationError::InvalidMetadata("grant flags"));
     }
     if !is_live_grant_state(metadata.initial_state) {
@@ -170,6 +239,15 @@ fn validate_metadata(
         return Err(GrantValidationError::InvalidMetadata(
             "capture UAPI version",
         ));
+    }
+    Ok(())
+}
+
+fn validate_control(control: &OwnedFd) -> Result<(), GrantValidationError> {
+    let descriptor_flags =
+        fcntl(control.as_raw_fd(), FcntlArg::F_GETFD).map_err(GrantValidationError::HolderQuery)?;
+    if !FdFlag::from_bits_truncate(descriptor_flags).contains(FdFlag::FD_CLOEXEC) {
+        return Err(GrantValidationError::InvalidHolder("control FD_CLOEXEC"));
     }
     Ok(())
 }
@@ -202,9 +280,6 @@ fn validate_holder(holder: &OwnedFd, metadata: &GrantMetadata) -> Result<(), Gra
     {
         return Err(GrantValidationError::InvalidHolder("grant identity"));
     }
-    if query.flags != 0 {
-        return Err(GrantValidationError::InvalidHolder("grant flags"));
-    }
     if !is_live_grant_state(query.state) {
         return Err(GrantValidationError::InvalidHolder("grant state"));
     }
@@ -226,7 +301,7 @@ mod tests {
     #[test]
     fn metadata_is_exactly_connector_profile_and_uapi_scoped() {
         let metadata = valid_metadata();
-        validate_metadata(&metadata, 43, DISPLAY_V1_RIGHTS).unwrap();
+        validate_metadata(&metadata, 43, DISPLAY_V1_RIGHTS, 0).unwrap();
 
         for (invalid, field) in [
             (
@@ -273,10 +348,16 @@ mod tests {
             ),
         ] {
             assert!(matches!(
-                validate_metadata(&invalid, 43, DISPLAY_V1_RIGHTS),
+                validate_metadata(&invalid, 43, DISPLAY_V1_RIGHTS, 0),
                 Err(GrantValidationError::InvalidMetadata(actual)) if actual == field
             ));
         }
+
+        let administrative = GrantMetadata {
+            flags: GRANT_FLAG_ADMIN,
+            ..metadata
+        };
+        validate_metadata(&administrative, 43, DISPLAY_V1_RIGHTS, GRANT_FLAG_ADMIN).unwrap();
     }
 
     fn valid_metadata() -> GrantMetadata {

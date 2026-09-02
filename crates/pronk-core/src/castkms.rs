@@ -1,20 +1,23 @@
 //! Safe connector-scoped operations over an inherited CastKMS grant holder.
 
 use std::num::NonZeroU32;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use castkms_sys::{
     drm_ioctl_castkms_capture_attach_monitor, drm_ioctl_castkms_capture_detach_monitor,
     drm_ioctl_castkms_capture_set_output_edid, drm_ioctl_castkms_get_grant,
-    drm_ioctl_mode_getconnector, drm_ioctl_mode_getcrtc, drm_ioctl_mode_getencoder,
-    DrmCastkmsCaptureAttachMonitor, DrmCastkmsCaptureDetachMonitor, DrmCastkmsCaptureSetOutputEdid,
-    DrmCastkmsGetGrant, DrmModeCrtc, DrmModeGetConnector, DrmModeGetEncoder,
-    CAPTURE_MAX_DISPLAY_NAME_SIZE, DRM_MODE_CONNECTED, DRM_MODE_DISCONNECTED,
-    DRM_MODE_UNKNOWN_CONNECTION, GRANT_FLAGS_MASK, GRANT_MANAGE_ATTACHMENT, GRANT_STATE_ACTIVE,
-    GRANT_STATE_PENDING, GRANT_STATE_REVOKED, GRANT_STATE_SUSPENDED_FOREIGN_CONTENT,
-    GRANT_STATE_SUSPENDED_NO_MASTER, GRANT_STATE_SUSPENDED_OTHER_MASTER, GRANT_UPDATE_EDID,
+    drm_ioctl_castkms_open_audio_tap, drm_ioctl_mode_getconnector, drm_ioctl_mode_getcrtc,
+    drm_ioctl_mode_getencoder, DrmCastkmsCaptureAttachMonitor, DrmCastkmsCaptureDetachMonitor,
+    DrmCastkmsCaptureSetOutputEdid, DrmCastkmsGetGrant, DrmCastkmsOpenAudioTap, DrmModeCrtc,
+    DrmModeGetConnector, DrmModeGetEncoder, AUDIO_FORMAT_S16_LE, AUDIO_TAP_CHANNELS,
+    AUDIO_TAP_FRAME_BYTES, AUDIO_TAP_RATE, CAPTURE_MAX_DISPLAY_NAME_SIZE, DRM_MODE_CONNECTED,
+    DRM_MODE_DISCONNECTED, DRM_MODE_UNKNOWN_CONNECTION, GRANT_CAPTURE_AUDIO, GRANT_FLAGS_MASK,
+    GRANT_MANAGE_ATTACHMENT, GRANT_STATE_ACTIVE, GRANT_STATE_PENDING, GRANT_STATE_REVOKED,
+    GRANT_STATE_SUSPENDED_FOREIGN_CONTENT, GRANT_STATE_SUSPENDED_NO_MASTER,
+    GRANT_STATE_SUSPENDED_OTHER_MASTER, GRANT_UPDATE_EDID,
 };
 use nix::errno::Errno;
+use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use thiserror::Error;
 
 use crate::grant::GrantLease;
@@ -99,6 +102,32 @@ pub enum MonitorAttachmentState {
     Detached,
     Attached,
     Unknown,
+}
+
+/// Private grant-scoped PCM stream returned by CastKMS.
+///
+/// This is an anonymous descriptor rather than an ALSA capture PCM, so desktop
+/// audio policy cannot enumerate it as a microphone.
+#[derive(Debug)]
+pub struct CastKmsAudioTap {
+    fd: OwnedFd,
+    buffer_frames: u64,
+}
+
+impl CastKmsAudioTap {
+    pub fn buffer_frames(&self) -> u64 {
+        self.buffer_frames
+    }
+
+    pub fn into_owned_fd(self) -> OwnedFd {
+        self.fd
+    }
+}
+
+impl AsFd for CastKmsAudioTap {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
 }
 
 /// One active route observed through the grant holder.
@@ -224,6 +253,12 @@ pub enum CastKmsError {
     InvalidCecMetadata(&'static str),
     #[error("invalid CastKMS CEC lifecycle: {0}")]
     InvalidCecState(&'static str),
+    #[error("open CastKMS audio tap: {0}")]
+    OpenAudioTap(Errno),
+    #[error("inspect CastKMS audio tap descriptor: {0}")]
+    InspectAudioTap(Errno),
+    #[error("CastKMS returned invalid audio tap metadata: {0}")]
+    InvalidAudioTap(&'static str),
 }
 
 /// The connector-scoped CastKMS client used by the core actor.
@@ -453,6 +488,57 @@ impl CastKmsClient {
         unsafe { drm_ioctl_castkms_capture_detach_monitor(self.lease.holder().as_raw_fd(), &args) }
             .map_err(CastKmsError::DetachMonitor)?;
         Ok(())
+    }
+
+    pub fn open_audio_tap(&self, nonblocking: bool) -> Result<CastKmsAudioTap, CastKmsError> {
+        self.require_rights(GRANT_CAPTURE_AUDIO)?;
+        let requested_fd_flags = if nonblocking {
+            nix::libc::O_NONBLOCK as u32
+        } else {
+            0
+        };
+        let mut args = DrmCastkmsOpenAudioTap {
+            connector_id: self.connector_id(),
+            fd: -1,
+            fd_flags: requested_fd_flags,
+            ..DrmCastkmsOpenAudioTap::default()
+        };
+        // SAFETY: `args` exactly matches the checked-in CastKMS UAPI layout
+        // and remains writable for the duration of the synchronous ioctl.
+        unsafe { drm_ioctl_castkms_open_audio_tap(self.as_raw_fd(), &mut args) }
+            .map_err(CastKmsError::OpenAudioTap)?;
+        if args.fd < 0 {
+            return Err(CastKmsError::InvalidAudioTap("negative descriptor"));
+        }
+        // SAFETY: a successful CastKMS ioctl returns a new caller-owned fd.
+        let fd = unsafe { OwnedFd::from_raw_fd(args.fd) };
+        if args.connector_id != self.connector_id()
+            || args.flags != 0
+            || args.fd_flags != requested_fd_flags
+            || args.format != AUDIO_FORMAT_S16_LE
+            || args.rate != AUDIO_TAP_RATE
+            || args.channels != AUDIO_TAP_CHANNELS
+            || args.frame_bytes != AUDIO_TAP_FRAME_BYTES
+            || args.buffer_frames == 0
+            || args.reserved != 0
+        {
+            return Err(CastKmsError::InvalidAudioTap("format or identity"));
+        }
+        let descriptor_flags =
+            fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD).map_err(CastKmsError::InspectAudioTap)?;
+        if !FdFlag::from_bits_truncate(descriptor_flags).contains(FdFlag::FD_CLOEXEC) {
+            return Err(CastKmsError::InvalidAudioTap("FD_CLOEXEC"));
+        }
+        let status_flags =
+            fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL).map_err(CastKmsError::InspectAudioTap)?;
+        if OFlag::from_bits_truncate(status_flags).contains(OFlag::O_NONBLOCK) != nonblocking {
+            return Err(CastKmsError::InvalidAudioTap("O_NONBLOCK"));
+        }
+
+        Ok(CastKmsAudioTap {
+            fd,
+            buffer_frames: args.buffer_frames,
+        })
     }
 
     fn require_rights(&self, required: u32) -> Result<(), CastKmsError> {
