@@ -158,7 +158,8 @@ mod tests {
     use std::time::Duration;
 
     use castkms_sys::{
-        CAPTURE_UAPI_MAJOR, CAPTURE_UAPI_MINOR, DISPLAY_CEC_V1_RIGHTS, GRANT_STATE_ACTIVE,
+        CAPTURE_UAPI_MAJOR, CAPTURE_UAPI_MINOR, DISPLAY_CEC_AUDIO_V1_RIGHTS, DISPLAY_CEC_V1_RIGHTS,
+        GRANT_STATE_ACTIVE,
     };
     use pronk_core::grant::GrantProfile;
     use tokio::net::UnixStream;
@@ -186,6 +187,12 @@ mod tests {
             connector_id: u32,
             profile: u16,
         ) -> zbus::fdo::Result<(ZbusOwnedFd, u32, u32, u32, u32, u32, u16, u16)> {
+            let rights = match profile {
+                1 => castkms_sys::DISPLAY_V1_RIGHTS,
+                2 => DISPLAY_CEC_V1_RIGHTS,
+                3 => DISPLAY_CEC_AUDIO_V1_RIGHTS,
+                _ => return Err(zbus::fdo::Error::InvalidArgs("unknown profile".into())),
+            };
             self.requests
                 .lock()
                 .unwrap()
@@ -203,7 +210,7 @@ mod tests {
                 holder.into(),
                 91,
                 3,
-                DISPLAY_CEC_V1_RIGHTS,
+                rights,
                 0,
                 GRANT_STATE_ACTIVE,
                 CAPTURE_UAPI_MAJOR,
@@ -296,6 +303,29 @@ mod tests {
             Err(GrantAcquisitionError::Cancelled)
         ));
         assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dbus_client_requests_audio_profile_without_downgrading_rights() {
+        let (holder, _holder_peer) = StdUnixStream::pair().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (_server, client_connection) = connections(FakeMutter {
+            holder: Mutex::new(Some(OwnedFd::from(holder))),
+            requests: Arc::clone(&requests),
+            release: None,
+        })
+        .await;
+        let client = MutterCastKmsClient {
+            connection: client_connection,
+        };
+        let audio_target = GrantTarget {
+            profile: GrantProfile::DisplayCecAudioV1,
+            ..target()
+        };
+
+        let received = client.request(&audio_target).await.unwrap();
+        assert_eq!(requests.lock().unwrap().as_slice(), &[(226, 42, 77, 3)]);
+        assert_eq!(received.metadata.rights, DISPLAY_CEC_AUDIO_V1_RIGHTS);
     }
 
     #[tokio::test]

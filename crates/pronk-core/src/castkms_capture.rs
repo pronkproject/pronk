@@ -477,6 +477,8 @@ pub enum CaptureError {
     UnknownRetiredStream(u32),
     #[error("retired capture stream still owns non-idle buffers")]
     RetiredStreamBusy,
+    #[error("silently canceled capture queue differs from the tracked request")]
+    CancelledQueueMismatch,
     #[error("grant-state event names grant {actual}; expected {expected}")]
     ForeignGrantStateEvent { expected: u32, actual: u32 },
     #[error("terminal Revoked state arrived as a grant-state event instead of GRANT_REVOKED")]
@@ -1480,6 +1482,40 @@ impl CastKmsClient {
             buffer_id,
             reuse_point,
         })
+    }
+
+    /// Retire a queued request canceled by a successful capture-stop ioctl.
+    ///
+    /// CastKMS synchronously completes the producer fence but removes the DRM
+    /// event for `ECANCELED`. The caller must first wait for that exact queue's
+    /// producer fence and drain all already-published frame events. A queue
+    /// still tracked as queued after those two proofs is the silent
+    /// cancellation and never became consumer-owned.
+    pub fn retire_cancelled_capture_buffer(
+        &mut self,
+        queue: CaptureQueue,
+    ) -> Result<(), CaptureError> {
+        let stream = self
+            .capture
+            .retired
+            .as_mut()
+            .filter(|stream| stream.info.stream_id == queue.stream_id)
+            .ok_or(CaptureError::UnknownRetiredStream(queue.stream_id.get()))?;
+        let buffer = stream
+            .buffer_mut(queue.buffer_id)
+            .ok_or(CaptureError::UnknownBuffer(queue.buffer_id.get()))?;
+        match buffer.state {
+            TrackedBufferState::Queued(actual) if actual == queue => {
+                buffer.state = TrackedBufferState::Idle;
+                Ok(())
+            }
+            TrackedBufferState::Queued(_) => Err(CaptureError::CancelledQueueMismatch),
+            state => Err(CaptureError::InvalidBufferState {
+                buffer_id: queue.buffer_id.get(),
+                expected: CaptureBufferState::Queued,
+                actual: state.public(),
+            }),
+        }
     }
 
     pub fn stop_capture(&mut self) -> Result<CaptureStopOutcome, CaptureError> {
@@ -2607,6 +2643,28 @@ mod tests {
         assert_eq!(retired.buffers.len(), 1);
         assert_eq!(retired.buffers[0].state, CaptureBufferState::Idle);
         assert!(client.capture.retired.is_none());
+    }
+
+    #[test]
+    fn retired_stream_accepts_an_exact_silent_cancellation() {
+        let queue = test_queue(CaptureSynchronization::Implicit);
+        let mut client = test_client(
+            CaptureSynchronization::Implicit,
+            TrackedBufferState::Queued(queue),
+        );
+        assert_eq!(client.capture.retire_active(), 1);
+
+        let mut wrong_queue = queue;
+        wrong_queue.user_data = nonzero64(USER_DATA + 1);
+        assert!(matches!(
+            client.retire_cancelled_capture_buffer(wrong_queue),
+            Err(CaptureError::CancelledQueueMismatch)
+        ));
+        client.retire_cancelled_capture_buffer(queue).unwrap();
+
+        let retired = client.finish_retired_capture(nonzero32(STREAM_ID)).unwrap();
+        assert_eq!(retired.buffers.len(), 1);
+        assert_eq!(retired.buffers[0].state, CaptureBufferState::Idle);
     }
 
     #[test]
