@@ -23,13 +23,15 @@ daemon and never connects to the network itself. You control it with the
 
 > [!IMPORTANT]
 > Pronk is not yet a ready-to-install desktop application. It currently
-> requires a separately built kernel driver, a source build, and a Mutter
-> build with the experimental CastKMS grant broker enabled.
+> requires a separately built kernel driver and a source build. Session mode
+> additionally requires a compositor with the experimental CastKMS grant
+> broker; optional system mode can operate without compositor integration.
 
 ## Contents
 
 - [Requirements](#requirements)
 - [Build and install](#build-and-install)
+- [Optional system service](#optional-system-service)
 - [Silverblue development extension](#silverblue-development-extension)
 - [Add and remove a display](#add-and-remove-a-display)
 - [How Pronk works](#how-pronk-works)
@@ -44,10 +46,10 @@ daemon and never connects to the network itself. You control it with the
 
 ## Requirements
 
-To run Pronk, you need:
+To run Pronk in its default session mode, you need:
 
 - a Linux desktop with an active graphical login session;
-- the CastKMS 0.11 kernel driver installed and loaded, with at least one
+- the CastKMS 0.12 kernel driver installed and loaded, with at least one
   available virtual monitor slot;
 - GNOME Mutter with the `org.gnome.Mutter.CastKms` session-bus grant broker;
 - a Google Cast Device on the same network as the computer;
@@ -58,6 +60,13 @@ To run Pronk, you need:
 
 Pronk uses systemd to start its processes, PipeWire to move captured media
 between them, and WirePlumber to restrict what each process can access.
+
+System mode replaces the active graphical-session and Mutter requirements
+with polkit, a dedicated `pronk` system account, and system services for
+PipeWire and WirePlumber. The compositor still needs ordinary DRM/KMS support
+for the CastKMS connector, but it does not need a Pronk-specific D-Bus API.
+When the system service is running, it is authoritative: a session daemon
+declines startup or shuts down when the system service appears.
 
 On Fedora, `x264enc` is provided by RPM Fusion's
 `gstreamer1-plugins-ugly` package. Package names differ on other Linux
@@ -94,19 +103,58 @@ Install the build and update the affected user services:
 sudo meson install -C build
 systemctl --user daemon-reload
 systemctl --user enable --now pronk-chromiacast.socket
-systemctl --user restart pipewire.service wireplumber.service
+systemctl --user restart wireplumber.service
 ```
 
 The Chromiacast socket waits for Pronk to request a backend connection. When
-that request arrives, systemd starts the backend. Restarting PipeWire and
-WirePlumber loads Pronk's private media connections and access rules. The main
-Pronk service starts automatically when you run `pronkctl`.
+that request arrives, systemd starts the backend. Restarting the desktop
+WirePlumber loads CastKMS output routing; Pronk starts its own private
+PipeWire/WirePlumber pair automatically when `pronkctl` activates the main
+service.
 
 To run only the Rust tests, without using Meson, use:
 
 ```sh
 cargo test --workspace --locked
 ```
+
+## Optional system service
+
+The system service is useful when the compositor does not implement the
+CastKMS grant broker. After installing, create the packaged service account
+and private directories, then start the service:
+
+```sh
+sudo systemd-sysusers /usr/lib/sysusers.d/pronk.conf
+sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/pronk.conf
+sudo systemctl daemon-reload
+sudo systemctl enable --now pronk.service
+```
+
+Use `--system` for every control operation:
+
+```sh
+pronkctl --system list-devices
+pronkctl --system add-display --device chromiacast:<device-id> --no-audio
+pronkctl --system list-displays
+```
+
+An unprivileged invocation asks polkit to authenticate an administrator and
+then runs only the installed `pronkctl` as the `pronk` account. The public
+system-bus API also exposes read-only inventory and state to desktop clients.
+Its control methods only accept a caller that already holds the polkit
+authorization; the daemon never asks polkit to display an authentication
+dialog. Graphical clients acquire that authorization through an explicit
+Unlock action. The daemon, backends, PipeWire, and WirePlumber remain under
+`pronk`; root exists only in a short-lived grant helper described under
+[Capture authorization](#capture-authorization).
+
+System mode has its own PipeWire graph below `/run/pronk`. This prevents a
+root process from exchanging pixels with a user-controlled media server and
+keeps backend media private. Desktop audio still follows the normal output
+path into the CastKMS ALSA playback card; a grant-scoped kernel tap carries the
+consumed samples into Pronk's private graph, so no cross-graph audio route is
+needed.
 
 ## Silverblue development extension
 
@@ -216,9 +264,9 @@ that `pronk-chromiacast.socket` is active. If media does not reach `Running`,
 check that WirePlumber is new enough, that the required GStreamer elements are
 installed, and that PipeWire and WirePlumber were restarted after
 installation. Use `pronkctl list-displays` to check the media state.
-If setup fails while authorizing the display, verify that Mutter owns
+If session setup fails while authorizing the display, verify that Mutter owns
 `org.gnome.Mutter.CastKms` on the session bus and that the loaded CastKMS
-driver exposes capture UAPI 0.11 with the grant-control-fd capability.
+driver exposes capture UAPI 0.12 with the grant-control-fd capability.
 
 Pronk can tell when a Device accepts a stream, but the Device does not
 confirm that the television decoded and displayed it. A successful send means
@@ -226,12 +274,19 @@ confirm that the television decoded and displayed it. A successful send means
 
 ## How Pronk works
 
-The media path is:
+The media paths are:
 
 ```text
 desktop compositor
   → CastKMS virtual monitor
-  → Pronk capture
+  → grant-scoped video capture
+  → Pronk private PipeWire
+  → Chromiacast backend
+  → Cast Device
+
+desktop PipeWire
+  → CastKMS playback-only ALSA card
+  → grant-scoped kernel audio tap
   → private PipeWire connection
   → Chromiacast backend
   → Cast Device
@@ -242,9 +297,10 @@ A display is set up as follows:
 1. CastKMS creates empty virtual monitor slots. At this point, the desktop does
    not see a monitor attached to them.
 2. The Chromiacast backend discovers Devices on the local network.
-3. When you select a Device, Pronk confirms that the request came from the
-   active local graphical session and asks Mutter for permission to use one
-   CastKMS monitor slot.
+3. When you select a Device, session mode confirms that the request came from
+   the active local graphical session and asks Mutter for permission to use
+   one CastKMS monitor slot. System mode accepts only the `pronk` account and
+   obtains the same connector-scoped rights through its one-shot helper.
 4. The backend authenticates the Device. It then finds video and audio
    formats supported by both the Device and Pronk. The backend gives Pronk
    the information needed to describe the virtual monitor. Device
@@ -320,7 +376,7 @@ process permission to capture CastKMS pixels. CastKMS requires a **grant**. The
 grant is a file descriptor—an operating-system handle—that gives its holder
 specific rights for one virtual monitor slot.
 
-### How authorization works today
+### Session-mode authorization
 
 Pronk asks Mutter, GNOME's compositor and DRM master, to create a normal grant
 with exactly the rights required by the selected display profile. Mutter
@@ -337,10 +393,40 @@ closes the control descriptor; if Pronk simply finishes with a display, it
 drops the holder and Mutter observes the hangup. Pronk never receives the
 control descriptor or the authority to revoke grants independently of Mutter.
 
-Grant acquisition has no privileged fallback. A missing broker, rejected
-request, invalid response, or cancelled operation fails display setup and
-drops any received descriptor. This lets `pronk.service` run with its systemd
-sandbox and without permission to start setuid programs.
+Session-mode grant acquisition has no privileged fallback. A missing broker,
+rejected request, invalid response, or cancelled operation fails display setup
+and drops any received descriptor. The user service therefore runs with
+`NoNewPrivileges=yes` and cannot start setuid programs.
+
+### System-mode authorization
+
+System mode runs `pronkd` permanently as the non-root `pronk` account. For one
+grant request it launches `/usr/libexec/pronk-grant-helper` through
+`pkexec --keep-cwd` from the unit's fixed `/` working directory. This avoids
+exposing `/root` through the daemon's `ProtectHome` sandbox merely to satisfy
+`pkexec`'s default target-home-directory change.
+Polkit permits that helper only when the requesting process already runs as
+`pronk`; the helper then independently requires its Unix seqpacket peer and
+parent to be a live process in `pronk.service`, executing the installed
+root-owned `pronkd` inode. Those checks are repeated immediately before and
+after grant creation.
+
+The helper accepts only a device major/minor, virtual connector, and one fixed
+rights profile. It creates an explicit administrative CastKMS grant, drops any
+accidental DRM-master state, and transfers exactly two descriptors: the
+restricted holder and the close-to-revoke control endpoint. Administrative
+grants are creator-independent, so the helper closes its privileged DRM file
+before exiting; only the anonymous control descriptor can revoke the grant.
+
+The fixed audio-enabled profile also includes the right to open the
+attachment's anonymous kernel audio tap. The long-lived daemon has no
+effective, permitted, or inheritable
+capabilities and verifies that fact at startup. Its systemd capability
+bounding set exists only so `pkexec` can enter the helper with
+`CAP_SYS_ADMIN` for grant creation and `CAP_SYS_PTRACE` for repeated
+`/proc/PID/exe` identity checks. The helper clears supplementary groups,
+drops every other capability, and sets `NoNewPrivileges`. No root daemon
+connects to the `pronk` PipeWire server.
 
 ## Backends
 
@@ -357,25 +443,27 @@ backend configuration therefore cannot make Pronk run an arbitrary command.
 This repository includes two backends:
 
 - **`pronk-chromiacast`** is the backend for normal use. It starts on demand
-  through a private systemd user socket. It discovers and authenticates Cast
-  Devices, encodes H.264 video and optional Opus audio, and handles the Cast
-  network protocol.
+  through a private systemd user or system socket. It discovers and
+  authenticates Cast Devices, encodes H.264 video and optional Opus audio, and
+  handles the Cast network protocol.
 - **`pronk-backend-mock`** behaves predictably for automated tests. It lets
   developers test Pronk without a physical Device, but it does not replace
   testing with real Cast hardware.
 
-The main service and backend verify each other's identities through the user's
-systemd manager. The backend must have been started from its installed socket,
-and the main process must be `pronk.service`. On the accepted backend socket,
-Pronk also requires kernel-supplied process credentials with every D-Bus read.
+The main service and backend verify each other's identities through the
+selected systemd manager. The backend must have been started from its installed
+socket, and the main process must be `pronk.service`. On the accepted backend
+socket, Pronk also requires kernel-supplied process credentials with every D-Bus read.
 It rejects a writer change and verifies that the authenticated writer is the
 backend unit's current main process before admitting the connection.
 
 ## Private audio and video
 
-Most desktop applications connect to PipeWire through one shared socket. Pronk
-does not publish captured media there. The installation instead creates two
-restricted connections:
+Most desktop applications connect to PipeWire through one shared server.
+Pronk does not publish captured media there. Both service modes start a second,
+hardware-free PipeWire/WirePlumber pair: session mode below `%t/pronk/media`
+and system mode below `/run/pronk`. That private server creates two classified
+connections:
 
 - `pipewire-0-pronk-core` for the main service; and
 - `pipewire-0-pronk-backend` for backends.
@@ -384,23 +472,24 @@ For each media generation, Pronk opens fresh PipeWire connections and passes
 the backend connections as file descriptors; the backend does not need to open
 a PipeWire socket by path. A Unix socket is an endpoint for communication
 between processes on the same computer. WirePlumber 0.5.15 or newer applies the
-following access rules before either process can use PipeWire:
+following access rules before either process can use the private graph:
 
-- The main service may publish Pronk video and locate the virtual audio output
-  for the selected CastKMS monitor. PipeWire calls this audio output a
-  **sink**. The service cannot inspect other desktop audio sources.
-- Pronk labels its video with a version of its access rules. The backend may
-  see the video only if it recognizes that version. For audio, the backend may
-  capture only the sound played to the selected CastKMS sink, identified by
-  `api.pronk.castkms.audio-sink=v1`.
+- The main service may publish versioned Pronk video and one audio source made
+  directly from its grant-scoped CastKMS tap. The private media services do not
+  enumerate ALSA hardware and cannot open `/dev/snd`.
+- The backend may see only compatible Pronk-private video and kernel-tap audio
+  sources. Each source carries the exact connector, grant, session, and media
+  generation identity supplied in the backend protocol.
 - Cameras, microphones, unrelated monitors, and video carrying an unrecognized
-  access-rule version remain hidden from both processes. Other desktop
-  applications retain their usual playback access.
+  access-rule version remain hidden. Other desktop applications retain their
+  usual playback access on the ordinary desktop graph.
 
 Pronk refuses to start a real media stream if these access rules are not
 loaded. It does not silently use the less restricted default PipeWire
-connection. On WirePlumber versions older than 0.5.15, the corresponding test
-is skipped because those versions cannot provide the same protection.
+connection. In system mode all four PipeWire sockets and WirePlumber are owned
+by the non-root `pronk` account. On WirePlumber versions older than 0.5.15, the
+corresponding test is skipped because those versions cannot provide the same
+protection.
 
 The current named sockets are mode `0600` and classify a connection by the
 socket endpoint. Pronk treats one Unix user ID as one trust principal and does
@@ -419,10 +508,14 @@ The first supported video encoder is GStreamer's `x264enc`. Audio uses
 
 Everything available through `pronkctl` is also available through D-Bus, the
 desktop's standard system for communication between applications and
-services. Pronk's service name on the user's D-Bus session is
-`io.github.pronkproject.Pronk1`. A panel applet or another graphical client should
-use this programming interface (API) instead of launching `pronkctl` as a
-separate process.
+services. Pronk uses `io.github.pronkproject.Pronk1` on the session bus or the
+system bus. A graphical client should prefer an already-running system-bus
+service and otherwise use the session bus. System-bus inventory and state are
+public; control methods require a previously acquired polkit authorization.
+Graphical clients should expose that as a deliberate Unlock action and remain
+read-only until it succeeds. Command-line callers can use `pronkctl --system`,
+whose equivalent polkit workflow runs the installed client as the `pronk`
+service account.
 
 An `AddDisplay` call returns immediately with an object that reports the
 operation's progress. If setup fails or is cancelled, Pronk gives up the
@@ -449,7 +542,7 @@ meson test -C build --print-errorlogs
 
 It covers:
 
-- Mutter grant requests and strict holder-metadata validation;
+- Mutter and one-shot helper grant requests with strict metadata validation;
 - systemd service and socket definitions;
 - PipeWire connection access and WirePlumber privacy rules;
 - mock and Chromiacast streaming behavior;
