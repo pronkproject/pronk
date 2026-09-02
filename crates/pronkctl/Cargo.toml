@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 futures-util.workspace = true
+nix.workspace = true
 pronk-dbus = { path = "../pronk-dbus" }
 tokio.workspace = true
 zbus.workspace = true
