@@ -1,0 +1,17 @@
+[Unit]
+Description=Pronk private system PipeWire sockets
+PartOf=pronk.service
+Before=pronk-pipewire.service pronk-wireplumber.service pronk.service
+
+[Socket]
+ListenStream=/run/pronk/pipewire-0
+ListenStream=/run/pronk/pipewire-0-manager
+SocketUser=pronk
+SocketGroup=pronk
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+Service=pronk-pipewire.service
+
+[Install]
+WantedBy=sockets.target

@@ -20,6 +20,7 @@ pub use endpoint::{BackendEndpoint, EndpointError};
 pub use inventory::{DeviceInventorySnapshot, InventoryError};
 pub use registry::{
     BackendRegistry, BackendRegistryError, InstalledBackend, MAX_INSTALLED_BACKENDS,
+    SYSTEM_BACKEND_RUNTIME_DIR,
 };
 pub use session::{BackendSessionError, BackendSessionHandle, BackendSessionRequest};
 pub use session_monitor::{BackendSessionEvent, BackendSessionMonitor};

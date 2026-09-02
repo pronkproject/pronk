@@ -1,0 +1,40 @@
+[Unit]
+Description=Pronk private session media policy
+BindsTo=pronk-pipewire.socket pronk-pipewire.service
+After=pronk-pipewire.socket pronk-pipewire.service
+PartOf=pronk.service
+Before=pronk.service
+
+[Service]
+Type=simple
+ExecStart=@wireplumber@ -p policy
+Restart=on-failure
+Environment=HOME=%t/pronk/media
+Environment=XDG_RUNTIME_DIR=%t/pronk/media
+Environment=PIPEWIRE_RUNTIME_DIR=%t/pronk/media
+Environment=GIO_USE_VFS=local
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+DevicePolicy=closed
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+# ProtectHome also masks /run/user, including the private PipeWire runtime and
+# the session bus used by the real-time scheduling module.
+InaccessiblePaths=-/home -/var/home -/root
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service mincore
+SystemCallErrorNumber=EPERM

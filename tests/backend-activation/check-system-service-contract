@@ -1,0 +1,171 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 16 ]; then
+    echo "usage: $0 CORE PIPEWIRE_SOCKET PIPEWIRE WIREPLUMBER DBUS_SERVICE DBUS_POLICY POLKIT_ACTIONS POLKIT_RULES SYSUSERS TMPFILES BINDIR LIBEXECDIR MOCK_SOCKET MOCK_SERVICE CAST_SOCKET CAST_SERVICE" >&2
+    exit 2
+fi
+
+core=$1
+pipewire_socket=$2
+pipewire=$3
+wireplumber=$4
+dbus_service=$5
+dbus_policy=$6
+polkit_actions=$7
+polkit_rules=$8
+sysusers=$9
+tmpfiles=${10}
+bindir=${11}
+libexecdir=${12}
+mock_socket=${13}
+mock_service=${14}
+cast_socket=${15}
+cast_service=${16}
+
+require_line() {
+    file=$1
+    line=$2
+    if ! grep -Fqx "$line" "$file"; then
+        echo "missing system-service contract line '$line' in $file" >&2
+        exit 1
+    fi
+}
+
+for line in \
+    'User=pronk' \
+    'Group=pronk' \
+    'SupplementaryGroups=video' \
+    "ExecStart=$bindir/pronkd --system" \
+    'WorkingDirectory=/' \
+    'Environment=HOME=/var/lib/pronk' \
+    'Environment=XDG_RUNTIME_DIR=/run/pronk' \
+    'Environment=PIPEWIRE_RUNTIME_DIR=/run/pronk' \
+    'CapabilityBoundingSet=CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SYS_PTRACE' \
+    'AmbientCapabilities=' \
+    'DevicePolicy=closed' \
+    'DeviceAllow=char-drm rw' \
+    'PrivateNetwork=yes' \
+    'RestrictAddressFamilies=AF_UNIX'
+do
+    require_line "$core" "$line"
+done
+
+# Either directive would prevent the intended pkexec transition. The daemon
+# is still an unprivileged User=pronk process with no ambient capabilities.
+for forbidden in 'NoNewPrivileges=yes' 'RestrictSUIDSGID=yes'; do
+    if grep -Fqx "$forbidden" "$core"; then
+        echo "system pronkd unit blocks its confined pkexec helper: $forbidden" >&2
+        exit 1
+    fi
+done
+
+for unit in "$pipewire" "$wireplumber"; do
+    for line in \
+        'User=pronk' \
+        'Group=pronk' \
+        'StateDirectory=pronk' \
+        'NoNewPrivileges=yes' \
+        'CapabilityBoundingSet=' \
+        'DevicePolicy=closed' \
+        'PrivateDevices=yes'
+    do
+        require_line "$unit" "$line"
+    done
+done
+require_line "$pipewire" 'ExecStart=pipewire'
+require_line "$wireplumber" 'ExecStart=wireplumber -p policy'
+if grep -Fq 'DeviceAllow=/dev/snd/' "$pipewire" "$wireplumber"; then
+    echo 'system private media services must not open ALSA devices' >&2
+    exit 1
+fi
+if grep -Fq 'SupplementaryGroups=audio' "$core" "$pipewire" "$wireplumber" "$mock_service" "$cast_service"; then
+    echo 'system components retain obsolete access to desktop audio devices' >&2
+    exit 1
+fi
+
+for line in \
+    'ListenStream=/run/pronk/pipewire-0' \
+    'ListenStream=/run/pronk/pipewire-0-manager' \
+    'SocketUser=pronk' \
+    'SocketGroup=pronk' \
+    'SocketMode=0600' \
+    'DirectoryMode=0700' \
+    'RemoveOnStop=yes' \
+    'Service=pronk-pipewire.service'
+do
+    require_line "$pipewire_socket" "$line"
+done
+
+for unit in "$core" "$pipewire" "$wireplumber"; do
+    if grep -Fq 'RuntimeDirectory=pronk' "$unit"; then
+        echo "system media runtime must remain tmpfiles-owned across restarts: $unit" >&2
+        exit 1
+    fi
+done
+
+for file in "$core" "$pipewire" "$wireplumber" "$dbus_service"; do
+    if grep -Fqx 'User=root' "$file"; then
+        echo "long-running system component is configured as root: $file" >&2
+        exit 1
+    fi
+done
+
+for socket in "$mock_socket" "$cast_socket"; do
+    require_line "$socket" 'PartOf=pronk.service'
+    require_line "$socket" 'Before=pronk.service'
+    require_line "$socket" 'SocketUser=pronk'
+    require_line "$socket" 'SocketGroup=pronk'
+    require_line "$socket" 'SocketMode=0600'
+done
+for service in "$mock_service" "$cast_service"; do
+    require_line "$service" 'Before=pronk.service'
+    require_line "$service" 'User=pronk'
+    require_line "$service" 'Group=pronk'
+    require_line "$service" 'Environment=PRONK_BACKEND_EXPECTED_PEER_BUS=system'
+    require_line "$service" 'Environment=XDG_RUNTIME_DIR=/run/pronk'
+    require_line "$service" 'InaccessiblePaths=-/home -/var/home -/root -/run/pronk/pipewire-0 -/run/pronk/pipewire-0-manager -/run/pronk/pipewire-0-pronk-core -/run/pronk/pipewire-0-pronk-backend'
+done
+if grep -Fqx 'Requires=pronk-chromiacast.socket' "$cast_service"; then
+    echo 'accepted Chromiacast instances must not restart with their activation socket' >&2
+    exit 1
+fi
+
+require_line "$dbus_service" 'User=pronk'
+require_line "$dbus_service" "Exec=$bindir/pronkd --system"
+grep -Fq '<policy user="pronk">' "$dbus_policy"
+grep -Fq '<policy user="root">' "$dbus_policy"
+grep -Fq 'send_member="GetUnitByPID"' "$dbus_policy"
+grep -Fq 'send_member="GetUnitByInvocationID"' "$dbus_policy"
+grep -Fq 'send_member="Get"' "$dbus_policy"
+grep -Fq 'send_member="GetAll"' "$dbus_policy"
+grep -Fq 'send_member="StopUnit"' "$dbus_policy"
+grep -Fq 'receive_member="GetUnitByPID"' "$dbus_policy"
+grep -Fq 'receive_member="GetUnitByInvocationID"' "$dbus_policy"
+grep -Fq 'receive_member="Get"' "$dbus_policy"
+grep -Fq 'receive_member="GetAll"' "$dbus_policy"
+grep -Fq 'receive_member="StopUnit"' "$dbus_policy"
+grep -Fq 'send_member="CheckAuthorization"' "$dbus_policy"
+grep -Fq 'send_interface="io.github.pronkproject.Pronk1.Manager"' "$dbus_policy"
+grep -Fq 'send_interface="io.github.pronkproject.Pronk1.Operation"' "$dbus_policy"
+grep -Fq 'send_interface="io.github.pronkproject.Pronk1.CastDisplay"' "$dbus_policy"
+grep -Fq 'send_interface="io.github.pronkproject.Pronk1.MediaSession"' "$dbus_policy"
+grep -Fq '<allow receive_sender="io.github.pronkproject.Pronk1"/>' "$dbus_policy"
+
+grep -Fq 'io.github.pronkproject.Pronk.acquire-administrative-grant' "$polkit_actions"
+grep -Fq "<annotate key=\"org.freedesktop.policykit.exec.path\">$libexecdir/pronk-grant-helper</annotate>" "$polkit_actions"
+grep -Fq 'io.github.pronkproject.Pronk.control-system-service' "$polkit_actions"
+grep -Fq "<annotate key=\"org.freedesktop.policykit.exec.path\">$bindir/pronkctl</annotate>" "$polkit_actions"
+grep -Fq '<annotate key="org.freedesktop.policykit.owner">unix-user:pronk</annotate>' "$polkit_actions"
+grep -Fq '<allow_active>auth_admin_keep</allow_active>' "$polkit_actions"
+
+grep -Fq 'subject.user !== "pronk"' "$polkit_rules"
+grep -Fq 'io.github.pronkproject.Pronk.acquire-administrative-grant' "$polkit_rules"
+grep -Fq 'org.freedesktop.systemd1.manage-units' "$polkit_rules"
+grep -Fq 'action.lookup("verb") === "stop"' "$polkit_rules"
+
+require_line "$sysusers" 'u pronk - "Pronk system service" /var/lib/pronk'
+require_line "$sysusers" 'm pronk video'
+require_line "$tmpfiles" 'd /var/lib/pronk 0700 pronk pronk -'
+require_line "$tmpfiles" 'd /run/pronk 0700 pronk pronk -'
+require_line "$tmpfiles" 'd /run/pronk/backends 0700 pronk pronk -'

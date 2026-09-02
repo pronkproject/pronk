@@ -7,29 +7,39 @@ const SYSTEMD_INVOCATION_ID_BYTES: usize = 16;
 
 /// Root-owned startup policy for authenticating a backend's Pronk peer.
 ///
-/// Packaged services set `PRONK_BACKEND_EXPECTED_PEER_UNIT`. The unmanaged
-/// variant exists only for process-boundary tests and is deliberately
-/// incompatible with an expected-unit setting.
+/// Packaged services set `PRONK_BACKEND_EXPECTED_PEER_UNIT` and select the
+/// systemd manager scope with `PRONK_BACKEND_EXPECTED_PEER_BUS`. The unmanaged
+/// variant exists only for process-boundary tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendPeerPolicy {
-    SystemdUnit(String),
+    SystemdUnit {
+        expected_unit: String,
+        manager_bus: ManagerBus,
+    },
     UnmanagedTest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerBus {
+    Session,
+    System,
 }
 
 impl BackendPeerPolicy {
     pub fn from_environment() -> Result<Self, BackendPeerPolicyError> {
         let unmanaged = std::env::var("PRONK_BACKEND_ALLOW_UNMANAGED_PEER").ok();
         let expected_unit = std::env::var("PRONK_BACKEND_EXPECTED_PEER_UNIT").ok();
-        match (unmanaged.as_deref(), expected_unit) {
-            (Some("1"), None) => Ok(Self::UnmanagedTest),
-            (None, Some(expected_unit)) => {
-                validate_service_unit_name(&expected_unit)?;
-                Ok(Self::SystemdUnit(expected_unit))
-            }
-            (Some(value), _) => Err(BackendPeerPolicyError::InvalidUnmanagedOverride(
+        let manager_bus = std::env::var("PRONK_BACKEND_EXPECTED_PEER_BUS").ok();
+        match (unmanaged.as_deref(), expected_unit, manager_bus.as_deref()) {
+            (Some("1"), None, None) => Ok(Self::UnmanagedTest),
+            (None, Some(expected_unit), manager_bus) => Ok(Self::SystemdUnit {
+                expected_unit: validate_service_unit_name(&expected_unit)?.to_owned(),
+                manager_bus: parse_manager_bus(manager_bus)?,
+            }),
+            (Some(value), _, _) => Err(BackendPeerPolicyError::InvalidUnmanagedOverride(
                 value.into(),
             )),
-            (None, None) => Err(BackendPeerPolicyError::MissingExpectedUnit),
+            (None, None, _) => Err(BackendPeerPolicyError::MissingExpectedUnit),
         }
     }
 
@@ -39,12 +49,20 @@ impl BackendPeerPolicy {
 
     pub async fn validate(&self, connection: &Connection) -> Result<(), BackendPeerPolicyError> {
         match self {
-            Self::SystemdUnit(expected_unit) => SystemdPeerValidator::session(expected_unit)
-                .await?
-                .validate_peer(connection)
-                .await
-                .map(|_| ())
-                .map_err(Into::into),
+            Self::SystemdUnit {
+                expected_unit,
+                manager_bus,
+            } => {
+                let validator = match manager_bus {
+                    ManagerBus::Session => SystemdPeerValidator::session(expected_unit).await?,
+                    ManagerBus::System => SystemdPeerValidator::system(expected_unit).await?,
+                };
+                validator
+                    .validate_peer(connection)
+                    .await
+                    .map(|_| ())
+                    .map_err(Into::into)
+            }
             Self::UnmanagedTest => Ok(()),
         }
     }
@@ -56,6 +74,8 @@ pub enum BackendPeerPolicyError {
     MissingExpectedUnit,
     #[error("invalid PRONK_BACKEND_ALLOW_UNMANAGED_PEER value {0:?} or ambiguous peer policy")]
     InvalidUnmanagedOverride(String),
+    #[error("invalid PRONK_BACKEND_EXPECTED_PEER_BUS value {0:?}")]
+    InvalidManagerBus(String),
     #[error(transparent)]
     Systemd(#[from] PeerServiceValidationError),
 }
@@ -84,6 +104,17 @@ impl SystemdPeerValidator {
     ) -> Result<Self, PeerServiceValidationError> {
         Self::new(
             Connection::session()
+                .await
+                .map_err(PeerServiceValidationError::ManagerConnection)?,
+            expected_unit,
+        )
+    }
+
+    pub async fn system(
+        expected_unit: impl Into<String>,
+    ) -> Result<Self, PeerServiceValidationError> {
+        Self::new(
+            Connection::system()
                 .await
                 .map_err(PeerServiceValidationError::ManagerConnection)?,
             expected_unit,
@@ -196,7 +227,7 @@ pub struct PeerServiceIdentity {
     pub invocation_id: [u8; SYSTEMD_INVOCATION_ID_BYTES],
 }
 
-fn validate_service_unit_name(unit: &str) -> Result<(), PeerServiceValidationError> {
+fn validate_service_unit_name(unit: &str) -> Result<&str, PeerServiceValidationError> {
     let Some(stem) = unit.strip_suffix(".service") else {
         return Err(PeerServiceValidationError::InvalidExpectedUnit(unit.into()));
     };
@@ -208,14 +239,22 @@ fn validate_service_unit_name(unit: &str) -> Result<(), PeerServiceValidationErr
     {
         return Err(PeerServiceValidationError::InvalidExpectedUnit(unit.into()));
     }
-    Ok(())
+    Ok(unit)
+}
+
+fn parse_manager_bus(value: Option<&str>) -> Result<ManagerBus, BackendPeerPolicyError> {
+    match value.unwrap_or("session") {
+        "session" => Ok(ManagerBus::Session),
+        "system" => Ok(ManagerBus::System),
+        value => Err(BackendPeerPolicyError::InvalidManagerBus(value.into())),
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum PeerServiceValidationError {
     #[error("invalid expected systemd service unit {0:?}")]
     InvalidExpectedUnit(String),
-    #[error("cannot connect to the user systemd manager: {0}")]
+    #[error("cannot connect to the selected systemd manager: {0}")]
     ManagerConnection(zbus::Error),
     #[error("cannot read P2P peer credentials: {0}")]
     PeerCredentials(std::io::Error),

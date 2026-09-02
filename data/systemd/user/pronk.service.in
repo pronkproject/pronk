@@ -1,7 +1,8 @@
 [Unit]
 Description=Pronk remote-display session coordinator
 PartOf=graphical-session.target
-After=graphical-session-pre.target
+After=graphical-session-pre.target pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service
+BindsTo=pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service
 
 [Service]
 Type=dbus
@@ -26,7 +27,7 @@ ProtectControlGroups=yes
 # PipeWire endpoints. Hide persistent home roots and ambient PipeWire without
 # masking either classified endpoint: Pronk connects the backend-class socket
 # itself and passes the untouched connected fd to the backend.
-InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0
+InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0 -%t/pronk/media/pipewire-0 -%t/pronk/media/pipewire-0-manager
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes

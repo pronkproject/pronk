@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use pronk::caller::PublicBus;
 use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
 use pronk::manager::{BackendConfig, ManagerActor};
 use pronk_backend_host::{BackendEndpoint, BackendReconnectPolicy, ExactRegistrationValidator};
@@ -29,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let connection = zbus::Connection::session()
         .await
         .context("connect to isolated session bus")?;
-    register_manager(&connection, manager.handle()).await?;
+    register_manager(&connection, manager.handle(), PublicBus::Session).await?;
     let inventory_events = manager
         .take_events()
         .context("manager event stream was already taken")?;
@@ -44,7 +45,13 @@ async fn main() -> anyhow::Result<()> {
     let lifecycle_connection = connection.clone();
     let lifecycle_manager = manager.handle();
     let lifecycle_task = tokio::spawn(async move {
-        serve_lifecycle_events(&lifecycle_connection, lifecycle_manager, lifecycle_events).await
+        serve_lifecycle_events(
+            &lifecycle_connection,
+            lifecycle_manager,
+            lifecycle_events,
+            PublicBus::Session,
+        )
+        .await
     });
 
     timeout(START_TIMEOUT, async {

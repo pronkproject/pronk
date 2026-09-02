@@ -189,9 +189,16 @@ pub struct ClassifiedSocketRemoteProvider {
 
 impl ClassifiedSocketRemoteProvider {
     pub fn new(paths: ClassifiedSocketPaths) -> Self {
+        Self::new_for_server_uid(paths, Uid::effective())
+    }
+
+    /// Construct a provider for a PipeWire server owned by an explicitly
+    /// selected account. System mode uses the dedicated `pronk` account;
+    /// session mode defaults to the daemon's effective UID.
+    pub fn new_for_server_uid(paths: ClassifiedSocketPaths, expected_server_uid: Uid) -> Self {
         Self {
             paths,
-            expected_server_uid: Uid::effective(),
+            expected_server_uid,
         }
     }
 
@@ -267,10 +274,7 @@ impl ClassifiedSocketRemoteProvider {
 
     #[cfg(test)]
     fn with_expected_server_uid(paths: ClassifiedSocketPaths, expected_server_uid: Uid) -> Self {
-        Self {
-            paths,
-            expected_server_uid,
-        }
+        Self::new_for_server_uid(paths, expected_server_uid)
     }
 }
 

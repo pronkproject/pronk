@@ -657,7 +657,9 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
         .find(|device| device.device_id == "living-room")
         .context("mock living-room Device is missing")?;
     let uid = fs::metadata("/proc/self")?.uid();
-    let caller = PinnedCallerSession::pin_async(std::process::id(), uid, uid).await?;
+    let caller = PinnedCallerSession::pin_async(std::process::id(), uid, uid)
+        .await?
+        .into_process();
     let operation = manager
         .handle()
         .start_display_setup(DeviceSelection::from_device(device), None, caller, false)

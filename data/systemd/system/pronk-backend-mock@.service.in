@@ -1,13 +1,22 @@
 [Unit]
-Description=Pronk deterministic device backend connection
+Description=Pronk system deterministic device backend connection
+# The activation socket is PartOf=pronk.service.  If both it and an accepted
+# instance are stopped with pronkd, keep the peer alive until pronkd has sent
+# the protocol Shutdown request and observed EOF.
+Before=pronk.service
 CollectMode=inactive-or-failed
 
 [Service]
 Type=notify
+User=pronk
+Group=pronk
 ExecStart=@libexecdir@/pronk-backend-mock
 Environment=PRONK_BACKEND_INSTANCE=%i
 Environment=PRONK_BACKEND_EXPECTED_PEER_UNIT=pronk.service
-Environment=PRONK_BACKEND_EXPECTED_PEER_BUS=session
+Environment=PRONK_BACKEND_EXPECTED_PEER_BUS=system
+Environment=HOME=/var/lib/pronk
+Environment=XDG_RUNTIME_DIR=/run/pronk
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pronk
 NotifyAccess=main
 NonBlocking=yes
 FileDescriptorStoreMax=0
@@ -25,10 +34,7 @@ PrivateDevices=yes
 PrivateNetwork=yes
 PrivateTmp=yes
 ProtectControlGroups=yes
-# ProtectHome=yes also masks /run/user, including the user manager's
-# NOTIFY_SOCKET. Hide the persistent home roots without hiding that runtime
-# control socket.
-InaccessiblePaths=-/home -/var/home -/root -%t/pipewire-0 -%t/pronk/media/pipewire-0 -%t/pronk/media/pipewire-0-manager -%t/pronk/media/pipewire-0-pronk-core -%t/pronk/media/pipewire-0-pronk-backend
+InaccessiblePaths=-/home -/var/home -/root -/run/pronk/pipewire-0 -/run/pronk/pipewire-0-manager -/run/pronk/pipewire-0-pronk-core -/run/pronk/pipewire-0-pronk-backend
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes

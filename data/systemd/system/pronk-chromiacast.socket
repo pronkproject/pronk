@@ -1,0 +1,21 @@
+[Unit]
+Description=Pronk system Google Cast device backend activation socket
+PartOf=pronk.service
+Before=pronk.service
+
+[Socket]
+ListenStream=%t/pronk/backends/chromiacast.sock
+SocketUser=pronk
+SocketGroup=pronk
+SocketMode=0600
+DirectoryMode=0700
+Accept=yes
+FileDescriptorName=pronk-backend-control
+RemoveOnStop=yes
+MaxConnections=1
+MaxConnectionsPerSource=1
+TriggerLimitIntervalSec=30s
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=sockets.target

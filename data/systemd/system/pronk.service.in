@@ -1,0 +1,47 @@
+[Unit]
+Description=Pronk system remote-display coordinator
+After=dbus.service pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service pronk-backend-mock.socket pronk-chromiacast.socket
+BindsTo=pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service
+Wants=pronk-backend-mock.socket pronk-chromiacast.socket
+
+[Service]
+Type=dbus
+BusName=io.github.pronkproject.Pronk1
+User=pronk
+Group=pronk
+SupplementaryGroups=video
+ExecStart=@bindir@/pronkd --system
+WorkingDirectory=/
+Restart=on-failure
+TimeoutStopSec=25s
+Environment=HOME=/var/lib/pronk
+Environment=XDG_RUNTIME_DIR=/run/pronk
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pronk
+KillMode=control-group
+UMask=0077
+
+# pronkd itself receives no capabilities. The bounding set only lets pkexec
+# acquire the credentials its annotated one-shot grant helper needs.
+CapabilityBoundingSet=CAP_SETGID CAP_SETUID CAP_SYS_ADMIN CAP_SYS_PTRACE
+AmbientCapabilities=
+DevicePolicy=closed
+DeviceAllow=char-drm rw
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+InaccessiblePaths=-/run/pronk/pipewire-0 -/run/pronk/pipewire-0-manager
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

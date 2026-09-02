@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+futures-util.workspace = true
 nix.workspace = true
 pronk-backend-host = { path = "../pronk-backend-host" }
 pronk-backend-protocol = { path = "../pronk-backend-protocol" }
@@ -30,7 +31,6 @@ zvariant.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 castkms-sys = { path = "../castkms-sys" }
-futures-util.workspace = true
 
 [lints]
 workspace = true

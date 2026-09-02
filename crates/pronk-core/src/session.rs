@@ -26,12 +26,22 @@ pub enum GraphicalSessionType {
 
 #[derive(Debug)]
 pub struct PinnedCallerSession {
-    pid: u32,
-    uid: u32,
-    process_start_time_ticks: u64,
+    process: PinnedCallerProcess,
     session_id: String,
     seat: String,
     session_type: GraphicalSessionType,
+}
+
+/// One transport-authenticated caller pinned to an exact live process.
+///
+/// Unlike `PinnedCallerSession`, this identity does not require or claim a
+/// graphical logind session. It is suitable for callers running as a
+/// dedicated system-service account.
+#[derive(Debug)]
+pub struct PinnedCallerProcess {
+    pid: u32,
+    uid: u32,
+    process_start_time_ticks: u64,
     pidfd: AsyncFd<OwnedFd>,
 }
 
@@ -65,16 +75,73 @@ impl PinnedCallerSession {
         pinned: PinnedProcess,
         session: GraphicalSession,
     ) -> Result<Self, CallerSessionError> {
-        let pid = pinned.pid;
-        let process_start_time_ticks = pinned.start_time_ticks;
-        let pidfd = AsyncFd::new(pinned.pidfd).map_err(CallerSessionError::RegisterPidFd)?;
         Ok(Self {
-            pid,
-            uid: session.uid,
-            process_start_time_ticks,
+            process: PinnedCallerProcess::from_identity(pinned, session.uid)?,
             session_id: session.id,
             seat: session.seat,
             session_type: session.session_type,
+        })
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.process.pid()
+    }
+
+    pub fn uid(&self) -> u32 {
+        self.process.uid()
+    }
+
+    pub fn process_start_time_ticks(&self) -> u64 {
+        self.process.process_start_time_ticks()
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn seat(&self) -> &str {
+        &self.seat
+    }
+
+    pub fn session_type(&self) -> GraphicalSessionType {
+        self.session_type
+    }
+
+    pub fn into_process(self) -> PinnedCallerProcess {
+        self.process
+    }
+
+    /// Complete when the exact pidfd-pinned caller exits.
+    pub async fn wait_for_exit(&self) -> Result<(), io::Error> {
+        self.process.wait_for_exit().await
+    }
+}
+
+impl PinnedCallerProcess {
+    /// Pin a caller whose PID and UID came from a trusted transport.
+    pub async fn pin_async(
+        pid: u32,
+        uid: u32,
+        expected_uid: u32,
+    ) -> Result<Self, CallerSessionError> {
+        let pinned =
+            tokio::task::spawn_blocking(move || PinnedProcess::pin(pid, uid, expected_uid))
+                .await
+                .map_err(|error| CallerSessionError::PinTask(error.to_string()))??;
+        Self::from_identity(pinned, uid)
+    }
+
+    fn from_identity(pinned: PinnedProcess, uid: u32) -> Result<Self, CallerSessionError> {
+        let PinnedProcess {
+            pid,
+            start_time_ticks,
+            pidfd,
+        } = pinned;
+        let pidfd = AsyncFd::new(pidfd).map_err(CallerSessionError::RegisterPidFd)?;
+        Ok(Self {
+            pid,
+            uid,
+            process_start_time_ticks: start_time_ticks,
             pidfd,
         })
     }
@@ -89,18 +156,6 @@ impl PinnedCallerSession {
 
     pub fn process_start_time_ticks(&self) -> u64 {
         self.process_start_time_ticks
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub fn seat(&self) -> &str {
-        &self.seat
-    }
-
-    pub fn session_type(&self) -> GraphicalSessionType {
-        self.session_type
     }
 
     /// Complete when the exact pidfd-pinned caller exits.
@@ -618,6 +673,20 @@ mod tests {
         );
         assert!(!process.has_exited().unwrap());
         process.revalidate().unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_caller_pins_without_a_graphical_login_lookup() {
+        let uid = nix::unistd::getuid().as_raw();
+        let process = PinnedCallerProcess::pin_async(std::process::id(), uid, uid)
+            .await
+            .unwrap();
+        assert_eq!(process.pid(), std::process::id());
+        assert_eq!(process.uid(), uid);
+        assert_eq!(
+            process.process_start_time_ticks(),
+            process_start_time_ticks(process.pid()).unwrap()
+        );
     }
 
     #[test]

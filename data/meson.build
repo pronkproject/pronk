@@ -13,9 +13,40 @@ backend_mock_definition = files('backends.d/mock.toml')
 chromiacast_socket = files('systemd/user/pronk-chromiacast.socket')
 chromiacast_definition = files('backends.d/chromiacast.toml')
 public_interface = files('dbus-1/interfaces/io.github.pronkproject.Pronk1.xml')
+system_bus_policy = files('dbus-1/system.d/io.github.pronkproject.Pronk1.conf')
+system_user_definition = files('sysusers.d/pronk.conf')
+system_runtime_directories = files('tmpfiles.d/pronk.conf')
+polkit_rules = files('polkit-1/rules.d/20-pronk.rules')
 
 systemd_dep = dependency('systemd')
 systemd_user_unit_dir = systemd_dep.get_variable(pkgconfig: 'systemduserunitdir')
+systemd_system_unit_dir = systemd_dep.get_variable(pkgconfig: 'systemdsystemunitdir')
+systemd_sysusers_dir = systemd_dep.get_variable(pkgconfig: 'sysusersdir')
+systemd_tmpfiles_dir = systemd_dep.get_variable(pkgconfig: 'tmpfilesdir')
+user_pipewire_socket = files('systemd/user/pronk-pipewire.socket')
+user_media_unit_configuration = configuration_data()
+user_media_unit_configuration.set(
+  'pipewire',
+  'pipewire',
+)
+user_media_unit_configuration.set(
+  'wireplumber',
+  'wireplumber',
+)
+user_pipewire_service = configure_file(
+  input: 'systemd/user/pronk-pipewire.service.in',
+  output: 'pronk-pipewire.service',
+  configuration: user_media_unit_configuration,
+  install: true,
+  install_dir: systemd_user_unit_dir,
+)
+user_wireplumber_service = configure_file(
+  input: 'systemd/user/pronk-wireplumber.service.in',
+  output: 'pronk-wireplumber.service',
+  configuration: user_media_unit_configuration,
+  install: true,
+  install_dir: systemd_user_unit_dir,
+)
 backend_unit_configuration = configuration_data()
 backend_unit_configuration.set('libexecdir', pronk_backend_install_dir)
 backend_mock_service = configure_file(
@@ -50,6 +81,19 @@ dbus_service = configure_file(
   install_dir: join_paths(get_option('datadir'), 'dbus-1', 'services'),
 )
 
+polkit_configuration = configuration_data()
+polkit_configuration.set('bindir', pronk_bindir)
+polkit_configuration.set('libexecdir', pronk_libexec_dir)
+polkit_actions = configure_file(
+  input: 'polkit-1/actions/io.github.pronkproject.Pronk.policy.in',
+  output: 'io.github.pronkproject.Pronk.policy',
+  configuration: polkit_configuration,
+  install: true,
+  install_dir: join_paths(get_option('datadir'), 'polkit-1', 'actions'),
+)
+
+subdir('systemd/system')
+
 install_data(
   backend_mock_socket,
   install_dir: systemd_user_unit_dir,
@@ -57,6 +101,11 @@ install_data(
 
 install_data(
   chromiacast_socket,
+  install_dir: systemd_user_unit_dir,
+)
+
+install_data(
+  user_pipewire_socket,
   install_dir: systemd_user_unit_dir,
 )
 
@@ -73,6 +122,26 @@ install_data(
 install_data(
   public_interface,
   install_dir: join_paths(get_option('datadir'), 'dbus-1', 'interfaces'),
+)
+
+install_data(
+  system_bus_policy,
+  install_dir: join_paths(get_option('datadir'), 'dbus-1', 'system.d'),
+)
+
+install_data(
+  system_user_definition,
+  install_dir: systemd_sysusers_dir,
+)
+
+install_data(
+  system_runtime_directories,
+  install_dir: systemd_tmpfiles_dir,
+)
+
+install_data(
+  polkit_rules,
+  install_dir: join_paths(get_option('datadir'), 'polkit-1', 'rules.d'),
 )
 
 install_data(
@@ -108,7 +177,43 @@ test(
   args: ['--noout', public_interface],
 )
 
+test(
+  'system-bus-policy-xml',
+  xmllint,
+  args: ['--noout', system_bus_policy],
+)
+
+test(
+  'polkit-actions-xml',
+  xmllint,
+  args: ['--noout', polkit_actions],
+)
+
 systemd_analyze = find_program('systemd-analyze')
+test(
+  'system-service-privilege-contract',
+  sh,
+  args: [
+    files('../tests/backend-activation/check-system-service-contract'),
+    system_core_service,
+    system_pipewire_socket,
+    system_pipewire_service,
+    system_wireplumber_service,
+    system_dbus_service,
+    system_bus_policy,
+    polkit_actions,
+    polkit_rules,
+    system_user_definition,
+    system_runtime_directories,
+    pronk_bindir,
+    pronk_libexec_dir,
+    system_backend_mock_socket,
+    system_backend_mock_service,
+    system_chromiacast_socket,
+    system_chromiacast_service,
+  ],
+)
+
 test(
   'backend-systemd-unit-contract',
   sh,
@@ -152,6 +257,9 @@ test(
     public_interface,
     files('../crates/pronk/Cargo.toml'),
     pronk_bindir,
+    user_pipewire_socket,
+    user_pipewire_service,
+    user_wireplumber_service,
   ],
 )
 

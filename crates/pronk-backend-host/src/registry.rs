@@ -13,6 +13,7 @@ use thiserror::Error;
 use crate::{BackendEndpoint, EndpointError};
 
 pub const INSTALLED_BACKEND_REGISTRY_DIR: &str = "/usr/lib/pronk/backends.d";
+pub const SYSTEM_BACKEND_RUNTIME_DIR: &str = "/run";
 pub const MAX_INSTALLED_BACKENDS: usize = 16;
 pub const MAX_BACKEND_DEFINITION_BYTES: u64 = 16 * 1024;
 
@@ -230,8 +231,11 @@ impl BackendDefinition {
 }
 
 fn validate_runtime_directory(path: &Path) -> Result<(), BackendRegistryError> {
-    let expected = PathBuf::from(format!("/run/user/{}", Uid::effective().as_raw()));
-    if path != expected {
+    let effective_uid = Uid::effective();
+    let user_runtime = PathBuf::from(format!("/run/user/{}", effective_uid.as_raw()));
+    let is_user_runtime = path == user_runtime;
+    let is_system_runtime = path == Path::new(SYSTEM_BACKEND_RUNTIME_DIR);
+    if !is_user_runtime && !is_system_runtime {
         return Err(BackendRegistryError::InvalidRuntimeDirectory(path.into()));
     }
     let metadata = fs::symlink_metadata(path).map_err(|source| BackendRegistryError::Io {
@@ -239,9 +243,14 @@ fn validate_runtime_directory(path: &Path) -> Result<(), BackendRegistryError> {
         path: path.into(),
         source,
     })?;
+    let trusted_owner = if is_system_runtime {
+        is_host_root_owner(metadata.uid())
+    } else {
+        metadata.uid() == effective_uid.as_raw()
+    };
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
-        || metadata.uid() != Uid::effective().as_raw()
+        || !trusted_owner
         || metadata.mode() & 0o022 != 0
     {
         return Err(BackendRegistryError::UntrustedRuntimeDirectory(path.into()));
@@ -367,6 +376,19 @@ protocol_major = 1
             "pronk-backend-mock@.service"
         );
         assert!(registry.get("caller-selected").is_none());
+    }
+
+    #[test]
+    fn resolves_the_system_socket_below_run() {
+        let registry = BackendRegistry::from_documents(
+            Path::new(SYSTEM_BACKEND_RUNTIME_DIR),
+            vec![(PathBuf::from("mock.toml"), MOCK.into())],
+        )
+        .unwrap();
+        assert_eq!(
+            registry.get("mock").unwrap().endpoint().socket_path(),
+            Path::new("/run/pronk/backends/mock.sock")
+        );
     }
 
     #[test]
