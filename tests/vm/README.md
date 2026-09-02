@@ -109,10 +109,16 @@ permission-manager API with distribution-provided 0.5.14 data files.
 `run-pipewire-gstreamer-bufferpool-gate` is the deterministic, TV-independent
 test for the shared video-buffer path. It attaches a real CastKMS output, starts
 the classified Pronk PipeWire producer, and targets it with stock
-`pipewiresrc use-bufferpool=true`. The gate requires all four caller-owned
-buffers to be wrapped as DMA-BUF memory, 30 buffers to return asynchronously,
-and the production BGRx-to-I420-to-H.264 shape to reach EOS before the grant and
-pool are destroyed.
+`pipewiresrc use-bufferpool=true` with `stream.is-live=false`. The gate requires
+all four caller-owned buffers to be wrapped as DMA-BUF memory, 30 buffers to be
+consumed, and the production BGRx-to-I420-to-H.264 shape—with its leaky queue
+after conversion—to reach EOS before the grant and pool are destroyed. The
+producer keeps the pool in flight so its quarter-frame process trigger carries
+returns between frames. Stock `pipewiresrc` emits no final `RequestProcess`, so
+the finite test waits for GStreamer teardown and permits the last logical
+submission to be reclaimed only after the source loop is joined. It connects
+through the session service's private `$XDG_RUNTIME_DIR/pronk/media` graph, not
+the desktop PipeWire graph.
 
 ```sh
 tests/vm/run-pipewire-gstreamer-bufferpool-gate \
