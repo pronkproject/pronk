@@ -23,14 +23,29 @@ if ! test -x "$gst_launch"; then
 	printf 'gst-launch is not executable: %s\n' "$gst_launch" >&2
 	exit 2
 fi
+producer=$(realpath -- "$producer")
+gst_launch=$(realpath -- "$gst_launch")
+administrative_launcher=${PRONK_VM_ADMIN_GRANT_LAUNCHER:-}
+if test -n "$administrative_launcher" && ! test -x "$administrative_launcher"; then
+	printf 'administrative grant launcher is not executable: %s\n' \
+		"$administrative_launcher" >&2
+	exit 2
+fi
+if test -n "$administrative_launcher"; then
+	administrative_launcher=$(realpath -- "$administrative_launcher")
+fi
 
 unit="pronk-gstreamer-bufferpool-$PPID-$$"
 temporary_directory=$(mktemp -d --tmpdir pronk-gstreamer-bufferpool.XXXXXX)
 gst_output="$temporary_directory/gstreamer.log"
 gst_debug="$temporary_directory/gstreamer-debug.log"
+producer_output="$temporary_directory/producer.log"
+consumer_done="$temporary_directory/consumer.done"
 
 unit_output() {
-	journalctl --user -u "$unit.service" --no-pager -o cat
+	if test -f "$producer_output"; then
+		cat "$producer_output"
+	fi
 }
 
 stop_unit() {
@@ -40,7 +55,8 @@ stop_unit() {
 
 cleanup() {
 	stop_unit
-	unlink -- "$gst_output" "$gst_debug" 2>/dev/null || true
+	unlink -- "$gst_output" "$gst_debug" "$producer_output" "$consumer_done" \
+		2>/dev/null || true
 	rmdir -- "$temporary_directory" 2>/dev/null || true
 }
 
@@ -52,7 +68,8 @@ fail_with_logs() {
 	fi
 	if test -f "$gst_debug"; then
 		printf '%s\n' '--- GStreamer PipeWire debug ---' >&2
-		grep -E 'wrap data|recycle buffer|ERROR|WARN' "$gst_debug" >&2 || true
+		grep -E 'live [01]|got new buffer|wrap data|recycle buffer|ERROR|WARN' \
+			"$gst_debug" >&2 || true
 	fi
 	exit 1
 }
@@ -63,8 +80,9 @@ if test "$(loginctl show-session "$session_id" -p Active --value)" != yes; then
 	printf 'login session %s is not active\n' "$session_id" >&2
 	exit 1
 fi
+pipewire_runtime="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is unset}/pronk/media"
 for remote in pipewire-0-pronk-core pipewire-0-pronk-backend; do
-	if ! test -S "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is unset}/$remote"; then
+	if ! test -S "$pipewire_runtime/$remote"; then
 		printf 'classified PipeWire endpoint %s is unavailable\n' "$remote" >&2
 		exit 1
 	fi
@@ -72,9 +90,41 @@ done
 
 "$gate_directory/ensure-mutter-display-on"
 
-systemd-run --user --unit="$unit" --collect --property=Type=exec \
-	--setenv=PRONK_VM_PIPEWIRE_GATE=classified-core -- \
+producer_command=(
 	"$producer" "$device" "$session_id" "$connector_id" "$crtc_id"
+)
+if test -n "$administrative_launcher"; then
+	gate_uid=$(id -u)
+	gate_gid=$(id -g)
+	pipewire_debug_environment=()
+	if test -n "${PRONK_VM_PIPEWIRE_DEBUG:-}"; then
+		pipewire_debug_environment+=("PIPEWIRE_DEBUG=$PRONK_VM_PIPEWIRE_DEBUG")
+	fi
+	producer_command=(
+		/usr/bin/sudo -n -- "$administrative_launcher"
+		"$device" "$connector_id" --
+		/usr/bin/setpriv --reuid="$gate_uid" --regid="$gate_gid" --clear-groups
+		/usr/bin/env
+		"HOME=${HOME:?HOME is unset}"
+		"XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is unset}"
+		PRONK_VM_INHERITED_ADMIN_GRANT=external-control
+		PRONK_VM_PIPEWIRE_GATE=classified-core
+		PRONK_VM_PIPEWIRE_FINITE_CONSUMER=tail-reclaim
+		"PRONK_VM_PIPEWIRE_CONSUMER_DONE=$consumer_done"
+		"PRONK_VM_PIPEWIRE_RUNTIME_DIR=$pipewire_runtime"
+		"${pipewire_debug_environment[@]}"
+		"$producer" "$device" "$session_id" "$connector_id" "$crtc_id"
+	)
+fi
+
+systemd-run --user --unit="$unit" --collect --property=Type=exec \
+	--property="StandardOutput=append:$producer_output" \
+	--property="StandardError=append:$producer_output" \
+	--setenv=PRONK_VM_PIPEWIRE_GATE=classified-core \
+	--setenv=PRONK_VM_PIPEWIRE_FINITE_CONSUMER=tail-reclaim \
+	--setenv=PRONK_VM_PIPEWIRE_CONSUMER_DONE="$consumer_done" \
+	--setenv=PRONK_VM_PIPEWIRE_RUNTIME_DIR="$pipewire_runtime" -- \
+	"${producer_command[@]}"
 
 marker=
 for _attempt in $(seq 1 200); do
@@ -105,7 +155,8 @@ esac
 
 visible=false
 for _attempt in $(seq 1 100); do
-	if PIPEWIRE_REMOTE=pipewire-0-pronk-backend pw-dump |
+	if PIPEWIRE_RUNTIME_DIR="$pipewire_runtime" \
+		PIPEWIRE_REMOTE=pipewire-0-pronk-backend pw-dump |
 		jq -e --arg node_name "$node_name" \
 			--arg object_id "$object_id" \
 			--arg object_serial "$object_serial" \
@@ -131,16 +182,18 @@ fi
 set +e
 timeout 45 env \
 	PIPEWIRE_REMOTE=pipewire-0-pronk-backend \
+	PIPEWIRE_RUNTIME_DIR="$pipewire_runtime" \
 	GST_DEBUG_NO_COLOR=1 \
 	GST_DEBUG='pipewirepool:7,pipewiresrc:7' \
 	GST_DEBUG_FILE="$gst_debug" \
 	"$gst_launch" -e -v \
 	pipewiresrc target-object="$object_serial" autoconnect=true \
+		stream-properties='props,stream.is-live=false' \
 		use-bufferpool=true client-name=pronk-bufferpool-gate num-buffers=30 \
 	'!' video/x-raw,format=BGRx \
-	'!' queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream \
 	'!' videoconvert \
 	'!' video/x-raw,format=I420 \
+	'!' queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream \
 	'!' x264enc tune=zerolatency speed-preset=ultrafast bitrate=8000 \
 		key-int-max=60 bframes=0 byte-stream=true aud=true sliced-threads=true \
 	'!' h264parse config-interval=-1 disable-passthrough=true \
@@ -153,6 +206,7 @@ if test "$pipeline_status" -ne 0; then
 	printf 'GStreamer pipeline exited with status %s\n' "$pipeline_status" >&2
 	fail_with_logs
 fi
+touch -- "$consumer_done"
 
 for _attempt in $(seq 1 200); do
 	if unit_output | grep -Fxq 'holder_drop_releases_grant=pass'; then
@@ -166,10 +220,12 @@ done
 
 producer_log=$(unit_output)
 wrapped_dma_bufs=$(grep -c 'wrap data (DmaBuf ' "$gst_debug" || true)
+dequeued_buffers=$(grep -c 'got new buffer' "$gst_debug" || true)
 recycled_buffers=$(grep -c 'recycle buffer' "$gst_debug" || true)
-if test "$wrapped_dma_bufs" -ne 4 || test "$recycled_buffers" -lt 30; then
-	printf 'unexpected DMA-BUF wrapping/recycling: %s/%s\n' \
-		"$wrapped_dma_bufs" "$recycled_buffers" >&2
+if test "$wrapped_dma_bufs" -ne 4 || test "$dequeued_buffers" -ne 30 || \
+	test "$recycled_buffers" -lt 29; then
+	printf 'unexpected DMA-BUF wrapping/dequeue/recycling: %s/%s/%s\n' \
+		"$wrapped_dma_bufs" "$dequeued_buffers" "$recycled_buffers" >&2
 	fail_with_logs
 fi
 for required in \
@@ -188,6 +244,7 @@ for required in \
 	'pipewire_exact_node_identity=pass' \
 	'pipewire_dma_buf_metadata=pass' \
 	'pipewire_downstream_release=pass' \
+	'pipewire_finite_tail_reclaim=pass' \
 	'pipewire_video_source=pass' \
 	'holder_drop_releases_grant=pass'; do
 	if ! grep -Fxq "$required" <<<"$producer_log"; then
@@ -202,6 +259,7 @@ fi
 trap - EXIT INT TERM
 cleanup
 printf 'gstreamer_dma_bufs=%s\n' "$wrapped_dma_bufs"
+printf 'gstreamer_dequeued_buffers=%s\n' "$dequeued_buffers"
 printf 'gstreamer_recycled_buffers=%s\n' "$recycled_buffers"
 printf '%s\n' 'gstreamer_bufferpool=pass'
 printf '%s\n' 'gstreamer_h264_encode=pass'
