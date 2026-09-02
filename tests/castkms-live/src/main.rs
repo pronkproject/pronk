@@ -1,7 +1,7 @@
 //! Opt-in live coverage for compositor-issued or administratively launched
 //! CastKMS grants and media transport.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -122,6 +122,21 @@ fn main() -> anyhow::Result<()> {
             "PRONK_VM_PIPEWIRE_GATE must be unset, 'classified-core', or 'ambient-development'"
         ),
     };
+    let finite_pipewire_consumer = match std::env::var_os("PRONK_VM_PIPEWIRE_FINITE_CONSUMER") {
+        None => false,
+        Some(value) if value.to_str() == Some("tail-reclaim") => true,
+        Some(_) => {
+            bail!("PRONK_VM_PIPEWIRE_FINITE_CONSUMER must be unset or 'tail-reclaim'")
+        }
+    };
+    let finite_pipewire_consumer_done =
+        std::env::var_os("PRONK_VM_PIPEWIRE_CONSUMER_DONE").map(PathBuf::from);
+    if let Some(path) = finite_pipewire_consumer_done.as_deref() {
+        ensure!(
+            path.is_absolute(),
+            "PRONK_VM_PIPEWIRE_CONSUMER_DONE must be absolute"
+        );
+    }
     let pipewire_mode_restart_remote =
         match std::env::var_os("PRONK_VM_PIPEWIRE_MODE_CHANGE_GATE") {
             None => None,
@@ -148,6 +163,14 @@ fn main() -> anyhow::Result<()> {
     ensure!(
         !inherited_administrative_grant || !exercise_grant_owner_handoff,
         "the grant-owner handoff gate requires compositor-issued grants"
+    );
+    ensure!(
+        !finite_pipewire_consumer || pipewire_remote.is_some(),
+        "finite PipeWire consumer mode requires the ordinary PipeWire gate"
+    );
+    ensure!(
+        finite_pipewire_consumer == finite_pipewire_consumer_done.is_some(),
+        "finite PipeWire consumer mode and completion path must be set together"
     );
 
     let metadata = std::fs::metadata(&device)
@@ -606,6 +629,7 @@ fn main() -> anyhow::Result<()> {
             stream,
             &login_session_id,
             remote,
+            finite_pipewire_consumer_done.as_deref(),
         )?)
     } else {
         None
@@ -1005,8 +1029,9 @@ fn create_pipewire_gate_remote(
     let remote = match kind {
         PipeWireGateRemote::AmbientDevelopment => PipeWireRemote::AmbientDevelopment,
         PipeWireGateRemote::ClassifiedCore => {
-            let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
-                .context("XDG_RUNTIME_DIR is unset for classified PipeWire gate")?;
+            let runtime_dir = std::env::var_os("PRONK_VM_PIPEWIRE_RUNTIME_DIR")
+                .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+                .context("PipeWire runtime directory is unset for classified gate")?;
             let paths = ClassifiedSocketPaths::in_runtime_dir(PathBuf::from(runtime_dir))
                 .context("construct classified PipeWire socket paths")?;
             let provider = ClassifiedSocketRemoteProvider::new(paths);
@@ -1026,7 +1051,9 @@ fn exercise_pipewire_gate(
     stream: CaptureStreamInfo,
     login_session_id: &str,
     remote: PipeWireGateRemote,
+    finite_consumer_done: Option<&Path>,
 ) -> anyhow::Result<PipeWireGateResult> {
+    let finite_consumer = finite_consumer_done.is_some();
     let mut actor = {
         let _runtime_guard = runtime.enter();
         VideoSourceActor::spawn().context("spawn PipeWire source actor")?
@@ -1057,12 +1084,25 @@ fn exercise_pipewire_gate(
         &mut generation,
         PIPEWIRE_FRAME_COUNT,
         CAPTURE_USER_DATA + 0x100,
+        finite_consumer,
     )?;
+    if let Some(path) = finite_consumer_done {
+        wait_for_finite_pipewire_consumer(path)?;
+    }
     let identity = generation.identity.clone();
     let transport = generation
         .transport
         .context("PipeWire generation has no negotiated transport")?;
-    stop_pipewire_gate_generation(runtime, &actor, client, &generation, true)?;
+    stop_pipewire_gate_generation(
+        runtime,
+        &actor,
+        client,
+        &generation,
+        usize::from(finite_consumer),
+    )?;
+    if finite_consumer {
+        println!("pipewire_finite_tail_reclaim=pass");
+    }
     unregister_pipewire_gate_generation(client, &generation)?;
     ensure!(
         runtime
@@ -1237,101 +1277,113 @@ fn produce_pipewire_frames(
     generation: &mut PipeWireGateGeneration,
     frame_count: usize,
     user_data_base: u64,
+    allow_finite_tail_reclaim: bool,
 ) -> anyhow::Result<()> {
     initialize_pipewire_gate_generation(runtime, actor, generation)?;
     let transport = generation
         .transport
         .context("PipeWire generation has no negotiated transport")?;
     let mut release_points = HashMap::<NonZeroU32, NonZeroU64>::new();
-    for index in 0..frame_count {
-        let buffer_id = generation
-            .available
-            .pop_front()
-            .context("PipeWire capture pool became empty")?;
-        let user_data = NonZeroU64::new(
-            user_data_base
-                .checked_add(index as u64)
-                .context("PipeWire capture user data overflowed")?,
-        )
-        .context("PipeWire capture user data is zero")?;
-        let queue = client
-            .client_mut()
-            .queue_capture_buffer(buffer_id, user_data)
-            .with_context(|| format!("queue PipeWire capture buffer {buffer_id}"))?;
-        let fence = client
-            .client()
-            .arm_explicit_capture_fence(generation.stream.stream_id, buffer_id)
-            .with_context(|| format!("arm PipeWire capture buffer {buffer_id}"))?;
-        let event = wait_for_capture_frame(runtime, client, queue)?;
-        validate_capture_frame(
-            event,
-            generation.stream.mode_generation.get(),
-            generation.stream.width.get(),
-            generation.stream.height.get(),
-            queue,
-        )?;
-        let ready = runtime
-            .block_on(async { tokio::time::timeout(CAPTURE_TIMEOUT, fence.wait()).await })
-            .with_context(|| format!("timed out waiting for PipeWire buffer {buffer_id}"))?
-            .with_context(|| format!("wait for PipeWire buffer {buffer_id}"))?;
-        let completion = client
-            .client_mut()
-            .take_capture_completion(ready)
-            .with_context(|| format!("take PipeWire capture completion {buffer_id}"))?;
-        ensure!(
-            completion.queue == queue && completion.frame == event,
-            "PipeWire capture completion differs"
-        );
-        let acquire_point = completion
-            .queue
-            .ready_point
-            .context("explicit PipeWire capture has no ready point")?;
-        let frame = VideoFrame {
-            buffer_id,
-            sequence: event.sequence,
-            pts_ns: event.timestamp_ns,
-            damage: VideoDamage {
-                x: u32::try_from(event.damage_x).context("convert PipeWire damage x")?,
-                y: u32::try_from(event.damage_y).context("convert PipeWire damage y")?,
-                width: NonZeroU32::new(event.damage_width)
-                    .context("PipeWire damage width is zero")?,
-                height: NonZeroU32::new(event.damage_height)
-                    .context("PipeWire damage height is zero")?,
-            },
-            discontinuity: event.dropped_frames != 0,
-            acquire_point: match transport {
-                PipeWireBufferTransport::SyncTimeline => Some(acquire_point),
-                PipeWireBufferTransport::Waited => None,
-            },
-        };
-        runtime
-            .block_on(async {
-                tokio::time::timeout(
-                    CAPTURE_TIMEOUT,
-                    actor.publish(generation.stream.mode_generation, frame),
-                )
-                .await
-            })
-            .with_context(|| format!("timed out publishing PipeWire buffer {buffer_id}"))?
-            .with_context(|| format!("publish PipeWire buffer {buffer_id}"))?;
+    let mut submitted = HashSet::<NonZeroU32>::with_capacity(CAPTURE_POOL_SIZE);
+    let mut published_count = 0;
+    let mut released_count = 0;
+    ensure!(
+        !allow_finite_tail_reclaim || frame_count != 0,
+        "finite PipeWire consumer requires at least one frame"
+    );
+    let expected_tail_reclaims = usize::from(allow_finite_tail_reclaim);
+    while released_count + expected_tail_reclaims < frame_count {
+        while published_count < frame_count {
+            let Some(buffer_id) = generation.available.pop_front() else {
+                break;
+            };
+            let user_data = NonZeroU64::new(
+                user_data_base
+                    .checked_add(published_count as u64)
+                    .context("PipeWire capture user data overflowed")?,
+            )
+            .context("PipeWire capture user data is zero")?;
+            let queue = client
+                .client_mut()
+                .queue_capture_buffer(buffer_id, user_data)
+                .with_context(|| format!("queue PipeWire capture buffer {buffer_id}"))?;
+            let fence = client
+                .client()
+                .arm_explicit_capture_fence(generation.stream.stream_id, buffer_id)
+                .with_context(|| format!("arm PipeWire capture buffer {buffer_id}"))?;
+            let event = wait_for_capture_frame(runtime, client, queue)?;
+            validate_capture_frame(
+                event,
+                generation.stream.mode_generation.get(),
+                generation.stream.width.get(),
+                generation.stream.height.get(),
+                queue,
+            )?;
+            let ready = runtime
+                .block_on(async { tokio::time::timeout(CAPTURE_TIMEOUT, fence.wait()).await })
+                .with_context(|| format!("timed out waiting for PipeWire buffer {buffer_id}"))?
+                .with_context(|| format!("wait for PipeWire buffer {buffer_id}"))?;
+            let completion = client
+                .client_mut()
+                .take_capture_completion(ready)
+                .with_context(|| format!("take PipeWire capture completion {buffer_id}"))?;
+            ensure!(
+                completion.queue == queue && completion.frame == event,
+                "PipeWire capture completion differs"
+            );
+            let acquire_point = completion
+                .queue
+                .ready_point
+                .context("explicit PipeWire capture has no ready point")?;
+            let frame = VideoFrame {
+                buffer_id,
+                sequence: event.sequence,
+                pts_ns: event.timestamp_ns,
+                damage: VideoDamage {
+                    x: u32::try_from(event.damage_x).context("convert PipeWire damage x")?,
+                    y: u32::try_from(event.damage_y).context("convert PipeWire damage y")?,
+                    width: NonZeroU32::new(event.damage_width)
+                        .context("PipeWire damage width is zero")?,
+                    height: NonZeroU32::new(event.damage_height)
+                        .context("PipeWire damage height is zero")?,
+                },
+                discontinuity: event.dropped_frames != 0,
+                acquire_point: match transport {
+                    PipeWireBufferTransport::SyncTimeline => Some(acquire_point),
+                    PipeWireBufferTransport::Waited => None,
+                },
+            };
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(
+                        CAPTURE_TIMEOUT,
+                        actor.publish(generation.stream.mode_generation, frame),
+                    )
+                    .await
+                })
+                .with_context(|| format!("timed out publishing PipeWire buffer {buffer_id}"))?
+                .with_context(|| format!("publish PipeWire buffer {buffer_id}"))?;
+            ensure!(
+                submitted.insert(buffer_id),
+                "PipeWire buffer {buffer_id} was submitted twice"
+            );
+            published_count += 1;
+        }
 
         let released = runtime
             .block_on(async { tokio::time::timeout(CAPTURE_TIMEOUT, actor.next_event()).await })
-            .with_context(|| format!("timed out waiting for PipeWire release {buffer_id}"))?
+            .with_context(|| format!("timed out waiting for PipeWire release {released_count}"))?
             .context("PipeWire actor stopped before releasing a buffer")?;
-        match released {
+        let buffer_id = match released {
             VideoSourceActorEvent::BufferReleased {
                 media_generation,
-                buffer_id: released_id,
+                buffer_id,
             } => {
                 ensure!(
                     media_generation == generation.stream.mode_generation,
                     "PipeWire release belongs to another generation"
                 );
-                ensure!(
-                    released_id == buffer_id,
-                    "PipeWire released a different buffer"
-                );
+                buffer_id
             }
             VideoSourceActorEvent::BufferAvailable {
                 buffer_id: unexpected,
@@ -1343,7 +1395,11 @@ fn produce_pipewire_frames(
                 "PipeWire generation {} failed during publication: {error}",
                 identity.media_generation
             ),
-        }
+        };
+        ensure!(
+            submitted.remove(&buffer_id),
+            "PipeWire released unsubmitted buffer {buffer_id}"
+        );
         let release = client
             .client_mut()
             .release_capture_buffer(generation.stream.stream_id, buffer_id)
@@ -1363,7 +1419,12 @@ fn produce_pipewire_frames(
             );
         }
         generation.available.push_back(buffer_id);
+        released_count += 1;
     }
+    ensure!(
+        published_count == frame_count && submitted.len() == expected_tail_reclaims,
+        "PipeWire frame drain is incomplete"
+    );
     Ok(())
 }
 
@@ -1372,7 +1433,7 @@ fn stop_pipewire_gate_generation(
     actor: &VideoSourceActor,
     client: &mut AsyncCastKmsClient,
     generation: &PipeWireGateGeneration,
-    require_no_reclaims: bool,
+    maximum_reclaim_count: usize,
 ) -> anyhow::Result<()> {
     let report = runtime
         .block_on(actor.stop(generation.stream.mode_generation))
@@ -1381,12 +1442,11 @@ fn stop_pipewire_gate_generation(
         report.identity == generation.identity,
         "stopped PipeWire generation identity differs"
     );
-    if require_no_reclaims {
-        ensure!(
-            report.reclaimed_buffers.is_empty(),
-            "PipeWire generation stopped with submitted buffers"
-        );
-    }
+    ensure!(
+        report.reclaimed_buffers.len() <= maximum_reclaim_count,
+        "PipeWire generation reclaimed {} buffers; maximum is {maximum_reclaim_count}",
+        report.reclaimed_buffers.len()
+    );
     for buffer_id in report.reclaimed_buffers.iter().copied() {
         client
             .client_mut()
@@ -1394,6 +1454,35 @@ fn stop_pipewire_gate_generation(
             .with_context(|| format!("release reclaimed PipeWire buffer {buffer_id}"))?;
     }
     Ok(())
+}
+
+fn wait_for_finite_pipewire_consumer(path: &Path) -> anyhow::Result<()> {
+    let deadline = Instant::now() + CAPTURE_TIMEOUT;
+    loop {
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_file(),
+                    "finite PipeWire consumer completion marker is not a file"
+                );
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect finite PipeWire consumer completion marker {}",
+                        path.display()
+                    )
+                })
+            }
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for finite PipeWire consumer completion"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 fn unregister_pipewire_gate_generation(
@@ -1473,6 +1562,7 @@ fn exercise_pipewire_mode_restart_gate(
         &mut old_generation,
         PIPEWIRE_MODE_GENERATION_FRAME_COUNT,
         CAPTURE_USER_DATA + 0x200,
+        false,
     )?;
 
     println!(
@@ -1489,7 +1579,7 @@ fn exercise_pipewire_mode_restart_gate(
         .context("timed out waiting for PipeWire mode-change acknowledgement")?
         .context("PipeWire mode-change signal stream closed")?;
 
-    stop_pipewire_gate_generation(runtime, &actor, client, &old_generation, true)?;
+    stop_pipewire_gate_generation(runtime, &actor, client, &old_generation, 0)?;
     let stale_buffer = old_generation.capture_buffers[0];
     let stale_user_data =
         NonZeroU64::new(CAPTURE_USER_DATA + 0x300).expect("stale user data is nonzero");
@@ -1587,8 +1677,9 @@ fn exercise_pipewire_mode_restart_gate(
         &mut new_generation,
         PIPEWIRE_MODE_GENERATION_FRAME_COUNT,
         CAPTURE_USER_DATA + 0x400,
+        false,
     )?;
-    stop_pipewire_gate_generation(runtime, &actor, client, &new_generation, true)?;
+    stop_pipewire_gate_generation(runtime, &actor, client, &new_generation, 0)?;
     unregister_pipewire_gate_generation(client, &new_generation)?;
     let stopped = client
         .client_mut()
