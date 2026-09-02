@@ -234,6 +234,7 @@ test(
     wireplumber_policy_scripts[1],
     wireplumber_policy_scripts[2],
     join_paths(cargo_target_dir, cargo_profile_dir, 'pronk-pipewire-policy-gate-test'),
+    join_paths(cargo_target_dir, cargo_profile_dir, 'pronk-pipewire-audio-source-test'),
   ],
   depends: cargo_workspace,
   timeout: 30,
