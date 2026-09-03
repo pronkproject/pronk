@@ -12,6 +12,7 @@ mod gstreamer_graph;
 mod h264;
 mod media_timeline;
 mod model;
+mod vp8;
 
 pub use actor::{EncodedMediaReceivers, MediaGraphActor};
 pub use model::{
