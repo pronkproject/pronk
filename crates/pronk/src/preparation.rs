@@ -14,7 +14,7 @@ use pronk_core::identity::{PnpIdError, PnpIdResolver, ResolvedPnpId};
 use pronk_dbus::{DeviceAvailability, DeviceInfo};
 use thiserror::Error;
 
-/// Modes supported end-to-end by the generated EDID and H.264 encoder path.
+/// Modes supported end-to-end by the generated EDID and Cast encoder paths.
 ///
 /// 4K is deliberately limited to 30 Hz. Lower standard monitor modes remain
 /// available at 60 Hz so the compositor can choose a useful compatibility or
