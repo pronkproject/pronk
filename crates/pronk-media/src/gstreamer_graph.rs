@@ -20,9 +20,10 @@ use crate::h264;
 use crate::media_timeline::{GenerationMediaTimeline, MediaStreamKind};
 use crate::model::{
     parse_caps, EncodedAudioPacket, EncodedVideoAccessUnit, MediaGraphConfiguration,
-    MediaGraphError, MediaGraphStatistics, VideoFrameDependency, OPUS_BITRATE, OPUS_CHANNELS,
-    OPUS_SAMPLE_RATE, VIDEO_FRAME_RATE,
+    MediaGraphError, MediaGraphStatistics, VideoCodec, VideoFrameDependency, OPUS_BITRATE,
+    OPUS_CHANNELS, OPUS_SAMPLE_RATE, VIDEO_FRAME_RATE,
 };
+use crate::vp8;
 
 // These remain strictly inside the backend protocol's 5-second stop and
 // 15-second media-control deadlines, leaving time for D-Bus dispatch and
@@ -33,6 +34,135 @@ const POLL_QUANTUM: Duration = Duration::from_millis(20);
 const RAW_QUEUE_BUFFERS: u32 = 2;
 const VIDEO_FRAME_INTERVAL_NANOSECONDS: u64 = 1_000_000_000 / VIDEO_FRAME_RATE as u64;
 const VIDEO_FRAME_INTERVAL_TOLERANCE_NANOSECONDS: u64 = 2_000_000;
+
+impl VideoCodec {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Vp8 => "VP8",
+            Self::H264 => "H.264",
+        }
+    }
+
+    fn encoder_name(self) -> &'static str {
+        match self {
+            Self::Vp8 => vp8::ENCODER_NAME,
+            Self::H264 => h264::ENCODER_NAME,
+        }
+    }
+
+    fn encoder_input_caps(self) -> Result<gst::Caps, MediaGraphError> {
+        match self {
+            Self::Vp8 => vp8::encoder_input_caps(),
+            Self::H264 => h264::encoder_input_caps(),
+        }
+    }
+
+    fn encoder_output_caps(self) -> Result<gst::Caps, MediaGraphError> {
+        match self {
+            Self::Vp8 => vp8::encoder_output_caps(),
+            Self::H264 => h264::encoder_output_caps(),
+        }
+    }
+
+    fn build_encoder(self, bitrate: NonZeroU64) -> Result<gst::Element, MediaGraphError> {
+        match self {
+            Self::Vp8 => gst::ElementFactory::make(vp8::ENCODER_NAME)
+                .name("pronk-vp8-encoder")
+                .property("deadline", 1_i64)
+                .property("cpu-used", 8_i32)
+                .property_from_str("end-usage", "cbr")
+                .property("undershoot", 100_i32)
+                .property("overshoot", 15_i32)
+                .property("buffer-initial-size", 500_i32)
+                .property("buffer-optimal-size", 600_i32)
+                .property("buffer-size", 1_000_i32)
+                .property("target-bitrate", vp8::bitrate(bitrate.get())?)
+                .property_from_str("keyframe-mode", "disabled")
+                .property("keyframe-max-dist", vp8::key_frame_interval())
+                .property("lag-in-frames", 0_i32)
+                .property("threads", 8_i32)
+                .property("static-threshold", 100_i32)
+                .build()
+                .map_err(|error| {
+                    MediaGraphError::new(format!("construct {}: {error}", vp8::ENCODER_NAME))
+                }),
+            Self::H264 => gst::ElementFactory::make(h264::ENCODER_NAME)
+                .name("pronk-h264-encoder")
+                .property_from_str("tune", "zerolatency")
+                .property_from_str("speed-preset", "ultrafast")
+                .property("bitrate", h264::bitrate_kbits(bitrate.get())?)
+                .property("key-int-max", h264::key_frame_interval())
+                .property("bframes", 0_u32)
+                .property("byte-stream", true)
+                .property("aud", true)
+                .property("sliced-threads", true)
+                .build()
+                .map_err(|error| {
+                    MediaGraphError::new(format!("construct {}: {error}", h264::ENCODER_NAME))
+                }),
+        }
+    }
+
+    fn build_parser(self) -> Result<Option<gst::Element>, MediaGraphError> {
+        match self {
+            Self::Vp8 => Ok(None),
+            Self::H264 => gst::ElementFactory::make("h264parse")
+                .name("pronk-h264-parser")
+                .property("config-interval", -1_i32)
+                .property("disable-passthrough", true)
+                .build()
+                .map(Some)
+                .map_err(|error| MediaGraphError::new(format!("construct H.264 parser: {error}"))),
+        }
+    }
+
+    fn effective_bitrate(self, bitrate: NonZeroU64) -> Result<u64, MediaGraphError> {
+        match self {
+            Self::Vp8 => u64::try_from(vp8::bitrate(bitrate.get())?)
+                .map_err(|_| MediaGraphError::new("validated VP8 bitrate is negative")),
+            Self::H264 => Ok(u64::from(h264::bitrate_kbits(bitrate.get())?).saturating_mul(1_000)),
+        }
+    }
+
+    fn set_bitrate(
+        self,
+        encoder: &gst::Element,
+        bitrate: NonZeroU64,
+    ) -> Result<u64, MediaGraphError> {
+        match self {
+            Self::Vp8 => {
+                let bitrate = vp8::bitrate(bitrate.get())?;
+                encoder.set_property("target-bitrate", bitrate);
+                u64::try_from(bitrate)
+                    .map_err(|_| MediaGraphError::new("validated VP8 bitrate is negative"))
+            }
+            Self::H264 => {
+                let bitrate = h264::bitrate_kbits(bitrate.get())?;
+                encoder.set_property("bitrate", bitrate);
+                Ok(u64::from(bitrate).saturating_mul(1_000))
+            }
+        }
+    }
+
+    fn validate_caps(self, caps: &gst::CapsRef) -> Result<(), MediaGraphError> {
+        match self {
+            Self::Vp8 => vp8::validate_caps(caps),
+            Self::H264 => h264::validate_caps(caps),
+        }
+    }
+
+    fn validate_frame(
+        self,
+        bytes: &[u8],
+        dependency: VideoFrameDependency,
+        first: bool,
+    ) -> Result<(), MediaGraphError> {
+        match self {
+            Self::Vp8 => vp8::validate_frame(bytes, dependency, first),
+            Self::H264 => h264::validate_access_unit(bytes, dependency, first),
+        }
+    }
+}
 
 fn video_stream_properties() -> gst::Structure {
     gst::Structure::builder("pronk-pipewire-stream")
@@ -84,6 +214,7 @@ fn install_video_frame_rate_gate(rate: &gst::Element) -> Result<(), MediaGraphEr
 
 pub(crate) struct GStreamerGraph {
     generation: NonZeroU64,
+    video_codec: VideoCodec,
     pipeline: gst::Pipeline,
     video_source: gst_base::BaseSrc,
     encoder: gst::Element,
@@ -107,6 +238,7 @@ impl std::fmt::Debug for GStreamerGraph {
         formatter
             .debug_struct("GStreamerGraph")
             .field("generation", &self.generation)
+            .field("video_codec", &self.video_codec)
             .field("statistics", &self.statistics)
             .finish_non_exhaustive()
     }
@@ -126,8 +258,9 @@ impl GStreamerGraph {
             return Err(MediaGraphError::new("PipeWire video node name is empty"));
         }
         let (raw_caps, _) = parse_caps(&configuration.video.caps)?;
-        let converted_caps = h264::encoder_input_caps()?;
-        let encoded_caps = h264::encoder_output_caps()?;
+        let video_codec = configuration.video_codec;
+        let converted_caps = video_codec.encoder_input_caps()?;
+        let encoded_caps = video_codec.encoder_output_caps()?;
         let stream_properties = video_stream_properties();
         let source = gst::ElementFactory::make("pipewiresrc")
             .name("pronk-video-source")
@@ -194,40 +327,24 @@ impl GStreamerGraph {
             .map_err(|error| {
                 MediaGraphError::new(format!("construct encoder input caps filter: {error}"))
             })?;
-        let encoder = gst::ElementFactory::make(h264::ENCODER_NAME)
-            .name("pronk-h264-encoder")
-            .property_from_str("tune", "zerolatency")
-            .property_from_str("speed-preset", "ultrafast")
-            .property(
-                "bitrate",
-                h264::bitrate_kbits(configuration.video_bitrate.get())?,
-            )
-            .property("key-int-max", h264::key_frame_interval())
-            .property("bframes", 0_u32)
-            .property("byte-stream", true)
-            .property("aud", true)
-            .property("sliced-threads", true)
-            .build()
-            .map_err(|error| {
-                MediaGraphError::new(format!("construct {}: {error}", h264::ENCODER_NAME))
-            })?;
-        let parser = gst::ElementFactory::make("h264parse")
-            .name("pronk-h264-parser")
-            .property("config-interval", -1_i32)
-            .property("disable-passthrough", true)
-            .build()
-            .map_err(|error| MediaGraphError::new(format!("construct H.264 parser: {error}")))?;
+        let encoder = video_codec.build_encoder(configuration.video_bitrate)?;
+        let parser = video_codec.build_parser()?;
         let encoded_caps_filter = gst::ElementFactory::make("capsfilter")
-            .name("pronk-h264-caps")
+            .name("pronk-encoded-video-caps")
             .property("caps", &encoded_caps)
             .build()
             .map_err(|error| {
-                MediaGraphError::new(format!("construct H.264 caps filter: {error}"))
+                MediaGraphError::new(format!(
+                    "construct {} caps filter: {error}",
+                    video_codec.name()
+                ))
             })?;
         let app_sink = gst::ElementFactory::make("appsink")
-            .name("pronk-h264-access-unit-sink")
+            .name("pronk-encoded-video-sink")
             .build()
-            .map_err(|error| MediaGraphError::new(format!("construct H.264 appsink: {error}")))?
+            .map_err(|error| {
+                MediaGraphError::new(format!("construct {} appsink: {error}", video_codec.name()))
+            })?
             .downcast::<gst_app::AppSink>()
             .map_err(|_| MediaGraphError::new("appsink factory returned another element type"))?;
         app_sink.set_caps(Some(&encoded_caps));
@@ -256,13 +373,17 @@ impl GStreamerGraph {
                 &converted_caps_filter,
                 &queue,
                 &encoder,
-                &parser,
                 &encoded_caps_filter,
                 app_sink.upcast_ref(),
             ])
             .map_err(|error| {
                 MediaGraphError::new(format!("assemble backend video pipeline: {error}"))
             })?;
+        if let Some(parser) = &parser {
+            pipeline
+                .add(parser)
+                .map_err(|error| MediaGraphError::new(format!("assemble H.264 parser: {error}")))?;
+        }
         gst::Element::link_many([
             &source,
             &caps_filter,
@@ -271,11 +392,25 @@ impl GStreamerGraph {
             &converted_caps_filter,
             &queue,
             &encoder,
-            &parser,
-            &encoded_caps_filter,
-            app_sink.upcast_ref(),
         ])
         .map_err(|error| MediaGraphError::new(format!("link backend video pipeline: {error}")))?;
+        match &parser {
+            Some(parser) => gst::Element::link_many([
+                &encoder,
+                parser,
+                &encoded_caps_filter,
+                app_sink.upcast_ref(),
+            ]),
+            None => {
+                gst::Element::link_many([&encoder, &encoded_caps_filter, app_sink.upcast_ref()])
+            }
+        }
+        .map_err(|error| {
+            MediaGraphError::new(format!(
+                "link {} encoder output: {error}",
+                video_codec.name()
+            ))
+        })?;
 
         let audio = configuration
             .audio
@@ -304,10 +439,10 @@ impl GStreamerGraph {
         });
         let has_audio = audio.is_some();
 
-        let effective_bitrate = u64::from(h264::bitrate_kbits(configuration.video_bitrate.get())?)
-            .saturating_mul(1_000);
+        let effective_bitrate = video_codec.effective_bitrate(configuration.video_bitrate)?;
         let graph = Self {
             generation: configuration.media_generation,
+            video_codec,
             pipeline,
             video_source,
             encoder,
@@ -318,7 +453,7 @@ impl GStreamerGraph {
             audio,
             statistics: MediaGraphStatistics {
                 video_bitrate: effective_bitrate,
-                encoder_name: Some(h264::ENCODER_NAME.into()),
+                encoder_name: Some(video_codec.encoder_name().into()),
                 encoded_caps: Some(encoded_caps.to_string()),
                 audio_encoder_name: has_audio.then(|| "opusenc".into()),
                 encoded_audio_caps: has_audio.then(|| {
@@ -413,9 +548,10 @@ impl GStreamerGraph {
             .all_headers(true)
             .build();
         if !self.encoder.send_event(event) {
-            return Err(MediaGraphError::new(
-                "x264enc rejected an upstream force-key-unit event",
-            ));
+            return Err(MediaGraphError::new(format!(
+                "{} rejected an upstream force-key-unit event",
+                self.video_codec.encoder_name()
+            )));
         }
         Ok(())
     }
@@ -424,9 +560,7 @@ impl GStreamerGraph {
         &mut self,
         bitrate: NonZeroU64,
     ) -> Result<u64, MediaGraphError> {
-        let bitrate_kbits = h264::bitrate_kbits(bitrate.get())?;
-        self.encoder.set_property("bitrate", bitrate_kbits);
-        let effective_bitrate = u64::from(bitrate_kbits).saturating_mul(1_000);
+        let effective_bitrate = self.video_codec.set_bitrate(&self.encoder, bitrate)?;
         if self.statistics.video_bitrate != effective_bitrate {
             self.statistics.video_bitrate = effective_bitrate;
             self.statistics.bitrate_changes = self.statistics.bitrate_changes.saturating_add(1);
@@ -627,7 +761,7 @@ impl GStreamerGraph {
                 self.expected_encoded_caps
             )));
         }
-        h264::validate_caps(caps)?;
+        self.video_codec.validate_caps(caps)?;
         let effective_caps = caps.to_string();
         match &self.effective_encoded_caps {
             Some(previous) if previous != &effective_caps => {
@@ -650,7 +784,8 @@ impl GStreamerGraph {
         })?;
         if buffer.dts().is_some_and(|dts| dts.nseconds() != pts) {
             return Err(MediaGraphError::new(format!(
-                "zero-reorder H.264 access unit has DTS {:?} but PTS {pts}",
+                "zero-reorder {} frame has decoding timestamp {:?} but presentation timestamp {pts}",
+                self.video_codec.name(),
                 buffer.dts().map(|dts| dts.nseconds())
             )));
         }
@@ -668,7 +803,8 @@ impl GStreamerGraph {
         } else {
             VideoFrameDependency::KeyFrame
         };
-        h264::validate_access_unit(bytes, dependency, self.needs_segment_key_frame)?;
+        self.video_codec
+            .validate_frame(bytes, dependency, self.needs_segment_key_frame)?;
 
         let (media_timestamp, reference_time) = self
             .timeline

@@ -36,7 +36,14 @@ pub struct MediaGraphConfiguration {
     pub media_generation: NonZeroU64,
     pub video: PipeWireVideoInput,
     pub audio: Option<PipeWireAudioInput>,
+    pub video_codec: VideoCodec,
     pub video_bitrate: NonZeroU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodec {
+    Vp8,
+    H264,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,7 +66,7 @@ pub enum VideoFrameDependency {
     Delta,
 }
 
-/// One complete H.264 Annex-B access unit from the backend encoder.
+/// One complete encoded video frame from the backend encoder.
 #[derive(Debug, Clone)]
 pub struct EncodedVideoAccessUnit {
     pub media_generation: NonZeroU64,

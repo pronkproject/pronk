@@ -129,6 +129,7 @@ impl MockMediaEngine {
                             caps: target.caps,
                         },
                         audio: None,
+                        video_codec: pronk_media::VideoCodec::H264,
                         video_bitrate: NonZeroU64::new(configuration.video_bitrate)
                             .expect("wire validation rejected zero bitrate"),
                     })

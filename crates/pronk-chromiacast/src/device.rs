@@ -12,7 +12,7 @@ use pronk_backend_protocol::{
     MAX_MANUFACTURER_NAME_BYTES, MAX_PRODUCT_NAME_BYTES, SESSION_FEATURE_AUDIO,
     SESSION_FEATURE_CONTROL,
 };
-use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, OPUS_SAMPLE_RATE};
+use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, VideoCodec, OPUS_SAMPLE_RATE};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -412,6 +412,7 @@ impl VideoTransportNegotiator for FixtureDeviceControl {
 fn fixture_video_transport(with_audio: bool) -> NegotiatedVideoTransport {
     let (feedback, receiver) = watch::channel(VideoTransportFeedbackSnapshot::default());
     NegotiatedVideoTransport {
+        video_codec: VideoCodec::H264,
         sender: Box::new(FixtureVideoSender {
             feedback: feedback.clone(),
             feedback_sent: false,
