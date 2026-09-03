@@ -152,6 +152,26 @@ impl MediaGraphPort for GStreamerMediaGraph {
     }
 }
 
+#[derive(Debug)]
+struct PendingMediaGraphConfiguration {
+    media_generation: NonZeroU64,
+    video: PipeWireVideoInput,
+    audio: Option<PipeWireAudioInput>,
+    video_bitrate: NonZeroU64,
+}
+
+impl PendingMediaGraphConfiguration {
+    fn with_video_codec(self, video_codec: VideoCodec) -> MediaGraphConfiguration {
+        MediaGraphConfiguration {
+            media_generation: self.media_generation,
+            video: self.video,
+            audio: self.audio,
+            video_codec,
+            video_bitrate: self.video_bitrate,
+        }
+    }
+}
+
 /// Session-local media state machine. It owns generation admission and the
 /// backend media graph but has no D-Bus, discovery, or Cast control concerns.
 #[derive(Debug)]
@@ -312,11 +332,12 @@ impl ChromiacastMediaSession {
             self.graph_configuration(remotes, targets, configuration, generation)?;
         let audio_enabled = graph_configuration.audio.is_some();
 
-        // Admit ownership before crossing the asynchronous graph boundary.
+        // Admit ownership before crossing an asynchronous service boundary.
         // Once the method has consumed its passed fd, matching StopMedia must
-        // remain valid even if graph setup fails or the D-Bus reply is lost.
+        // remain valid even if negotiation or graph setup fails, or the D-Bus
+        // reply is lost.
         self.active_generation = Some(generation);
-        self.graph_received_generation = true;
+        self.graph_received_generation = false;
         self.sender_received_generation = false;
         self.audio_sender_received_generation = false;
         self.transport_active = false;
@@ -324,10 +345,15 @@ impl ChromiacastMediaSession {
         self.media_ready = false;
         self.video_bitrate = graph_configuration.video_bitrate.get();
         self.state = SessionState::Configured;
-        self.graph.configure(graph_configuration).await?;
 
         let mut negotiated = transport.negotiate_video(transport_configuration).await?;
         self.transport_active = true;
+        let graph_configuration = graph_configuration.with_video_codec(negotiated.video_codec);
+        self.graph_received_generation = true;
+        if let Err(error) = self.graph.configure(graph_configuration).await {
+            let _ = negotiated.sender.shutdown().await;
+            return Err(error.into());
+        }
         let adaptive_playout_delay = negotiated
             .sender
             .supports_target_playout_delay_updates()
@@ -745,7 +771,8 @@ impl ChromiacastMediaSession {
         targets: Vec<PipeWireTarget>,
         configuration: MediaConfiguration,
         generation: NonZeroU64,
-    ) -> Result<(MediaGraphConfiguration, VideoTransportConfiguration), MediaSessionError> {
+    ) -> Result<(PendingMediaGraphConfiguration, VideoTransportConfiguration), MediaSessionError>
+    {
         let capabilities = self
             .capabilities
             .as_ref()
@@ -899,7 +926,7 @@ impl ChromiacastMediaSession {
             target_playout_delay: INITIAL_PLAYOUT_DELAY.max(minimum_playout_delay),
             audio: audio.as_ref().map(|(_, transport)| *transport),
         };
-        let graph = MediaGraphConfiguration {
+        let graph = PendingMediaGraphConfiguration {
             media_generation: generation,
             video: PipeWireVideoInput {
                 remote: video_remote,
@@ -909,7 +936,6 @@ impl ChromiacastMediaSession {
                 caps: video_target.caps,
             },
             audio: audio.map(|(input, _)| input),
-            video_codec: VideoCodec::H264,
             video_bitrate: NonZeroU64::new(configuration.video_bitrate)
                 .expect("wire validation rejected zero bitrate"),
         };
@@ -1102,6 +1128,13 @@ mod tests {
         ) -> Result<(), MediaGraphError> {
             self.generation = Some(configuration.media_generation);
             self.statistics.video_bitrate = configuration.video_bitrate.get();
+            self.statistics.encoder_name = Some(
+                match configuration.video_codec {
+                    VideoCodec::Vp8 => "vp8enc",
+                    VideoCodec::H264 => "x264enc",
+                }
+                .into(),
+            );
             drop(configuration.video.remote);
             self.audio_enabled = configuration.audio.is_some();
             if let Some(audio) = configuration.audio {
@@ -1273,6 +1306,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeTransport {
         configuration: Option<VideoTransportConfiguration>,
+        video_codec: Option<VideoCodec>,
         stops: u32,
     }
 
@@ -1289,7 +1323,7 @@ mod tests {
         ) -> Result<NegotiatedVideoTransport, VideoTransportError> {
             let (feedback, receiver) = watch::channel(VideoTransportFeedbackSnapshot::default());
             Ok(NegotiatedVideoTransport {
-                video_codec: VideoCodec::H264,
+                video_codec: VideoCodec::Vp8,
                 sender: Box::new(FakeSender {
                     feedback,
                     playout_delays: Some(self.playout_delays.clone()),
@@ -1313,7 +1347,10 @@ mod tests {
         ) -> Result<NegotiatedVideoTransport, VideoTransportError> {
             let with_audio = configuration.audio.is_some();
             self.configuration = Some(configuration);
-            Ok(fake_transport(with_audio))
+            Ok(fake_transport(
+                with_audio,
+                self.video_codec.unwrap_or(VideoCodec::Vp8),
+            ))
         }
 
         async fn stop_video(&mut self) -> Result<(), VideoTransportError> {
@@ -1339,10 +1376,10 @@ mod tests {
         }
     }
 
-    fn fake_transport(with_audio: bool) -> NegotiatedVideoTransport {
+    fn fake_transport(with_audio: bool, video_codec: VideoCodec) -> NegotiatedVideoTransport {
         let (feedback, receiver) = watch::channel(VideoTransportFeedbackSnapshot::default());
         NegotiatedVideoTransport {
-            video_codec: VideoCodec::H264,
+            video_codec,
             sender: Box::new(FakeSender {
                 feedback: feedback.clone(),
                 playout_delays: None,
@@ -1449,6 +1486,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receiver_selected_h264_configures_the_fallback_encoder() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        let mut transport = FakeTransport {
+            video_codec: Some(VideoCodec::H264),
+            ..FakeTransport::default()
+        };
+        media.complete_preparation(capabilities()).unwrap();
+
+        media
+            .configure(
+                remote(),
+                vec![target(session_id, 1)],
+                configuration(),
+                1,
+                &mut transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            media
+                .graph
+                .statistics(NonZeroU64::new(1).unwrap())
+                .await
+                .unwrap()
+                .encoder_name
+                .as_deref(),
+            Some("x264enc")
+        );
+        media.stop_media(1, &mut transport).await.unwrap();
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn audio_generation_requires_exact_pairing_and_receiver_acknowledgement() {
         let session_id = "12345678-1234-1234-1234-123456789abc";
         let (video_output, video_receiver) = mpsc::channel(4);
@@ -1543,7 +1618,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_stop_cleans_graph_after_transport_negotiation_failure() {
+    async fn matching_stop_remains_valid_after_transport_negotiation_failure() {
         let session_id = "12345678-1234-1234-1234-123456789abc";
         let (output, receiver) = mpsc::channel(4);
         let graph = FakeGraph::video(output);

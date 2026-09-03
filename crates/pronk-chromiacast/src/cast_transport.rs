@@ -5,11 +5,9 @@ use async_trait::async_trait;
 use chromiacast::{
     AudioCodec, AudioStreamConfig, CastApp, CastConnection, EncodedFrame, EnqueueError,
     FrameDependency, Framerate, Offer, Resolution, SenderEvent, SenderSession, StreamHandle,
-    StreamType, UdpTransport, VideoCodec, VideoStreamConfig, APP_MIRRORING,
+    StreamType, UdpTransport, VideoCodec as CastVideoCodec, VideoStreamConfig, APP_MIRRORING,
 };
-use pronk_media::{
-    EncodedAudioPacket, EncodedVideoAccessUnit, VideoCodec as MediaVideoCodec, VideoFrameDependency,
-};
+use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, VideoCodec, VideoFrameDependency};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -65,6 +63,8 @@ async fn negotiate_launched_video(
         "received Cast streaming constraints"
     );
     validate_answer_constraints(&answer, configuration)?;
+    let video_codec = selected_video_codec(&answer, configuration.audio.is_some())?;
+    tracing::info!(?video_codec, "Cast receiver selected video codec");
     let minimum_bitrate = answer
         .constraints
         .as_ref()
@@ -97,7 +97,7 @@ async fn negotiate_launched_video(
     let (sender, audio_sender, feedback) =
         ChromiacastVideoSender::new(session, video, audio, events, maximum_playout_delay);
     Ok(NegotiatedVideoTransport {
-        video_codec: MediaVideoCodec::H264,
+        video_codec,
         sender: Box::new(sender),
         audio_sender: audio_sender.map(|sender| Box::new(sender) as Box<dyn AudioSenderPort>),
         feedback,
@@ -124,9 +124,19 @@ fn build_offer(configuration: VideoTransportConfiguration) -> Result<Offer, Vide
         }),
         None => offer_builder,
     };
+    // Cast answers with one selected video-stream index. Keep VP8 first for
+    // the lower-cost interactive path and retain H.264 as the compatibility
+    // fallback.
     offer_builder
         .video(VideoStreamConfig {
-            codec: VideoCodec::H264,
+            codec: CastVideoCodec::Vp8,
+            max_bit_rate: configuration.bitrate,
+            max_frame_rate,
+            resolutions: vec![resolution],
+            target_delay: configuration.target_playout_delay,
+        })
+        .video(VideoStreamConfig {
+            codec: CastVideoCodec::H264,
             max_bit_rate: configuration.bitrate,
             max_frame_rate,
             resolutions: vec![resolution],
@@ -134,6 +144,30 @@ fn build_offer(configuration: VideoTransportConfiguration) -> Result<Offer, Vide
         })
         .build()
         .map_err(|error| VideoTransportError::new(format!("build Cast OFFER: {error}")))
+}
+
+fn selected_video_codec(
+    answer: &chromiacast::Answer,
+    audio_offered: bool,
+) -> Result<VideoCodec, VideoTransportError> {
+    let vp8_index = usize::from(audio_offered);
+    let h264_index = vp8_index + 1;
+    let mut selected = answer.send_indexes.iter().filter_map(|index| match *index {
+        index if index == vp8_index => Some(VideoCodec::Vp8),
+        index if index == h264_index => Some(VideoCodec::H264),
+        _ => None,
+    });
+    let Some(codec) = selected.next() else {
+        return Err(VideoTransportError::new(
+            "Cast receiver did not accept a supported video stream",
+        ));
+    };
+    if selected.next().is_some() {
+        return Err(VideoTransportError::new(
+            "Cast receiver accepted more than one video stream",
+        ));
+    }
+    Ok(codec)
 }
 
 fn validate_answer_constraints(
@@ -599,11 +633,13 @@ mod tests {
     use chromiacast::{
         Answer, FrameId, SenderEvent, SessionStatistics, StreamStatistics, StreamType,
     };
-    use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, VideoFrameDependency};
+    use pronk_media::{
+        EncodedAudioPacket, EncodedVideoAccessUnit, VideoCodec, VideoFrameDependency,
+    };
 
     use super::{
         build_offer, cast_audio_packet, cast_frame, join_sender_event_task, maximum_playout_delay,
-        project_sender_event, validate_answer_constraints,
+        project_sender_event, selected_video_codec, validate_answer_constraints,
     };
     use crate::transport::{
         AudioTransportConfiguration, VideoTransportConfiguration, VideoTransportError,
@@ -690,8 +726,38 @@ mod tests {
         let offer = serde_json::to_value(build_offer(configuration).unwrap()).unwrap();
         let streams = offer["supportedStreams"].as_array().unwrap();
 
-        assert_eq!(streams.len(), 2);
+        assert_eq!(streams.len(), 3);
         assert!(streams.iter().all(|stream| stream["targetDelay"] == 33));
+        assert_eq!(streams[0]["codecName"], "opus");
+        assert_eq!(streams[1]["codecName"], "vp8");
+        assert_eq!(streams[2]["codecName"], "h264");
+    }
+
+    #[test]
+    fn receiver_selection_uses_vp8_first_and_h264_as_fallback() {
+        let vp8: Answer =
+            serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0],"ssrcs":[123]}"#).unwrap();
+        assert_eq!(selected_video_codec(&vp8, false).unwrap(), VideoCodec::Vp8);
+
+        let h264: Answer =
+            serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[1],"ssrcs":[123]}"#).unwrap();
+        assert_eq!(
+            selected_video_codec(&h264, false).unwrap(),
+            VideoCodec::H264
+        );
+
+        let audio_and_h264: Answer =
+            serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0,2],"ssrcs":[123,456]}"#)
+                .unwrap();
+        assert_eq!(
+            selected_video_codec(&audio_and_h264, true).unwrap(),
+            VideoCodec::H264
+        );
+
+        let both_video_codecs: Answer =
+            serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0,1],"ssrcs":[123,456]}"#)
+                .unwrap();
+        assert!(selected_video_codec(&both_video_codecs, false).is_err());
     }
 
     #[test]
