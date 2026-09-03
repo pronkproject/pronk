@@ -11,8 +11,8 @@ use pronk_backend_protocol::{
 use pronk_media::{
     EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit, MediaGraphActor,
     MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics, PipeWireAudioInput,
-    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, OPUS_BITRATE, OPUS_CHANNELS,
-    OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
+    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, OPUS_BITRATE,
+    OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE, VIDEO_FRAME_RATE,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -889,16 +889,12 @@ impl ChromiacastMediaSession {
         let bitrate = u32::try_from(configuration.video_bitrate).map_err(|_| {
             MediaSessionError::InvalidRequest("video bitrate exceeds Cast's u32 range".into())
         })?;
-        let minimum_playout_delay = minimum_playout_delay(
-            caps.framerate_numerator.get(),
-            caps.framerate_denominator.get(),
-            audio.is_some(),
-        );
+        let minimum_playout_delay = minimum_playout_delay(VIDEO_FRAME_RATE, 1, audio.is_some());
         let transport = VideoTransportConfiguration {
             width: caps.width.get(),
             height: caps.height.get(),
-            framerate_numerator: caps.framerate_numerator.get(),
-            framerate_denominator: caps.framerate_denominator.get(),
+            framerate_numerator: VIDEO_FRAME_RATE,
+            framerate_denominator: 1,
             bitrate,
             target_playout_delay: INITIAL_PLAYOUT_DELAY.max(minimum_playout_delay),
             audio: audio.as_ref().map(|(_, transport)| *transport),
@@ -1412,7 +1408,7 @@ mod tests {
             Some(VideoTransportConfiguration {
                 width: 640,
                 height: 480,
-                framerate_numerator: 60,
+                framerate_numerator: VIDEO_FRAME_RATE,
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
                 target_playout_delay: INITIAL_PLAYOUT_DELAY,
@@ -1495,7 +1491,7 @@ mod tests {
             Some(VideoTransportConfiguration {
                 width: 640,
                 height: 480,
-                framerate_numerator: 60,
+                framerate_numerator: VIDEO_FRAME_RATE,
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
                 target_playout_delay: INITIAL_PLAYOUT_DELAY,

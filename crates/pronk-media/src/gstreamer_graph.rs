@@ -1,5 +1,6 @@
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
@@ -20,7 +21,7 @@ use crate::media_timeline::{GenerationMediaTimeline, MediaStreamKind};
 use crate::model::{
     parse_caps, EncodedAudioPacket, EncodedVideoAccessUnit, MediaGraphConfiguration,
     MediaGraphError, MediaGraphStatistics, VideoFrameDependency, OPUS_BITRATE, OPUS_CHANNELS,
-    OPUS_SAMPLE_RATE,
+    OPUS_SAMPLE_RATE, VIDEO_FRAME_RATE,
 };
 
 // These remain strictly inside the backend protocol's 5-second stop and
@@ -30,6 +31,8 @@ const PIPELINE_STATE_TIMEOUT: Duration = Duration::from_secs(3);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_QUANTUM: Duration = Duration::from_millis(20);
 const RAW_QUEUE_BUFFERS: u32 = 2;
+const VIDEO_FRAME_INTERVAL_NANOSECONDS: u64 = 1_000_000_000 / VIDEO_FRAME_RATE as u64;
+const VIDEO_FRAME_INTERVAL_TOLERANCE_NANOSECONDS: u64 = 2_000_000;
 
 fn video_stream_properties() -> gst::Structure {
     gst::Structure::builder("pronk-pipewire-stream")
@@ -46,6 +49,37 @@ fn video_stream_properties() -> gst::Structure {
 
 fn is_segment_anchor(buffer: &gst::BufferRef) -> bool {
     buffer.pts().is_some() && !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT)
+}
+
+fn install_video_frame_rate_gate(rate: &gst::Element) -> Result<(), MediaGraphError> {
+    let source_pad = rate
+        .static_pad("src")
+        .ok_or_else(|| MediaGraphError::new("videorate has no static source pad"))?;
+    let last_forwarded_timestamp = Arc::new(Mutex::new(None::<u64>));
+    source_pad
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+            let Some(timestamp) = info
+                .buffer()
+                .and_then(|buffer| buffer.pts())
+                .map(|timestamp| timestamp.nseconds())
+            else {
+                return gst::PadProbeReturn::Ok;
+            };
+            let mut last = last_forwarded_timestamp
+                .lock()
+                .expect("video frame-rate gate mutex poisoned");
+            let minimum_interval = VIDEO_FRAME_INTERVAL_NANOSECONDS
+                .saturating_sub(VIDEO_FRAME_INTERVAL_TOLERANCE_NANOSECONDS);
+            if last.is_some_and(|previous| {
+                timestamp >= previous && timestamp - previous < minimum_interval
+            }) {
+                return gst::PadProbeReturn::Drop;
+            }
+            *last = Some(timestamp);
+            gst::PadProbeReturn::Ok
+        })
+        .ok_or_else(|| MediaGraphError::new("install video frame-rate gate"))?;
+    Ok(())
 }
 
 pub(crate) struct GStreamerGraph {
@@ -91,7 +125,7 @@ impl GStreamerGraph {
         if configuration.video.node_name.is_empty() {
             return Err(MediaGraphError::new("PipeWire video node name is empty"));
         }
-        let (raw_caps, validated_caps) = parse_caps(&configuration.video.caps)?;
+        let (raw_caps, _) = parse_caps(&configuration.video.caps)?;
         let converted_caps = h264::encoder_input_caps()?;
         let encoded_caps = h264::encoder_output_caps()?;
         let stream_properties = video_stream_properties();
@@ -144,6 +178,15 @@ impl GStreamerGraph {
             .name("pronk-video-convert")
             .build()
             .map_err(|error| MediaGraphError::new(format!("construct video converter: {error}")))?;
+        let rate = gst::ElementFactory::make("videorate")
+            .name("pronk-video-rate")
+            .property("drop-only", true)
+            .property("max-rate", VIDEO_FRAME_RATE as i32)
+            .build()
+            .map_err(|error| {
+                MediaGraphError::new(format!("construct video rate limiter: {error}"))
+            })?;
+        install_video_frame_rate_gate(&rate)?;
         let converted_caps_filter = gst::ElementFactory::make("capsfilter")
             .name("pronk-encoder-input-caps")
             .property("caps", &converted_caps)
@@ -159,7 +202,7 @@ impl GStreamerGraph {
                 "bitrate",
                 h264::bitrate_kbits(configuration.video_bitrate.get())?,
             )
-            .property("key-int-max", h264::key_frame_interval(&validated_caps))
+            .property("key-int-max", h264::key_frame_interval())
             .property("bframes", 0_u32)
             .property("byte-stream", true)
             .property("aud", true)
@@ -209,6 +252,7 @@ impl GStreamerGraph {
                 &source,
                 &caps_filter,
                 &convert,
+                &rate,
                 &converted_caps_filter,
                 &queue,
                 &encoder,
@@ -223,6 +267,7 @@ impl GStreamerGraph {
             &source,
             &caps_filter,
             &convert,
+            &rate,
             &converted_caps_filter,
             &queue,
             &encoder,
