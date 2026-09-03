@@ -11,7 +11,7 @@ use pronk_backend_protocol::{
 use pronk_media::{
     EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit, MediaGraphActor,
     MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics, PipeWireAudioInput,
-    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, OPUS_BITRATE,
+    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCodec, OPUS_BITRATE,
     OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE, VIDEO_FRAME_RATE,
 };
 use thiserror::Error;
@@ -909,6 +909,7 @@ impl ChromiacastMediaSession {
                 caps: video_target.caps,
             },
             audio: audio.map(|(input, _)| input),
+            video_codec: VideoCodec::H264,
             video_bitrate: NonZeroU64::new(configuration.video_bitrate)
                 .expect("wire validation rejected zero bitrate"),
         };
@@ -1288,6 +1289,7 @@ mod tests {
         ) -> Result<NegotiatedVideoTransport, VideoTransportError> {
             let (feedback, receiver) = watch::channel(VideoTransportFeedbackSnapshot::default());
             Ok(NegotiatedVideoTransport {
+                video_codec: VideoCodec::H264,
                 sender: Box::new(FakeSender {
                     feedback,
                     playout_delays: Some(self.playout_delays.clone()),
@@ -1340,6 +1342,7 @@ mod tests {
     fn fake_transport(with_audio: bool) -> NegotiatedVideoTransport {
         let (feedback, receiver) = watch::channel(VideoTransportFeedbackSnapshot::default());
         NegotiatedVideoTransport {
+            video_codec: VideoCodec::H264,
             sender: Box::new(FakeSender {
                 feedback: feedback.clone(),
                 playout_delays: None,

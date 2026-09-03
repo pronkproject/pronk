@@ -524,6 +524,7 @@ async fn configure_active(
     feedback_snapshot: &watch::Sender<VideoSenderFeedbackSnapshot>,
 ) -> Result<(), VideoTransportError> {
     let NegotiatedVideoTransport {
+        video_codec: _,
         sender,
         audio_sender,
         feedback,
@@ -973,6 +974,7 @@ mod tests {
             .configure(
                 generation,
                 NegotiatedVideoTransport {
+                    video_codec: pronk_media::VideoCodec::Vp8,
                     sender: Box::new(RecordingSender {
                         playout_delays: playout_delays.clone(),
                     }),
@@ -1256,6 +1258,7 @@ mod tests {
         let (feedback, receiver) =
             tokio::sync::watch::channel(VideoTransportFeedbackSnapshot::default());
         NegotiatedVideoTransport {
+            video_codec: pronk_media::VideoCodec::Vp8,
             sender: Box::new(AcceptingSender {
                 _feedback: feedback,
             }),
@@ -1273,6 +1276,7 @@ mod tests {
             tokio::sync::watch::channel(VideoTransportFeedbackSnapshot::default());
         (
             NegotiatedVideoTransport {
+                video_codec: pronk_media::VideoCodec::Vp8,
                 sender: Box::new(AcceptingSender {
                     _feedback: feedback.clone(),
                 }),

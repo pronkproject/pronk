@@ -653,6 +653,7 @@ mod tests {
                 caps: "video/x-raw,format=BGRx,width=320,height=240,framerate=30/1".into(),
             },
             audio: None,
+            video_codec: crate::VideoCodec::Vp8,
             video_bitrate: NonZeroU64::new(1_000_000).unwrap(),
         }
     }

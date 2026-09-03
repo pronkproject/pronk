@@ -7,7 +7,9 @@ use chromiacast::{
     FrameDependency, Framerate, Offer, Resolution, SenderEvent, SenderSession, StreamHandle,
     StreamType, UdpTransport, VideoCodec, VideoStreamConfig, APP_MIRRORING,
 };
-use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, VideoFrameDependency};
+use pronk_media::{
+    EncodedAudioPacket, EncodedVideoAccessUnit, VideoCodec as MediaVideoCodec, VideoFrameDependency,
+};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -95,6 +97,7 @@ async fn negotiate_launched_video(
     let (sender, audio_sender, feedback) =
         ChromiacastVideoSender::new(session, video, audio, events, maximum_playout_delay);
     Ok(NegotiatedVideoTransport {
+        video_codec: MediaVideoCodec::H264,
         sender: Box::new(sender),
         audio_sender: audio_sender.map(|sender| Box::new(sender) as Box<dyn AudioSenderPort>),
         feedback,

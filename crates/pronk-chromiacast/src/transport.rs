@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit};
+use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, VideoCodec};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -69,6 +69,7 @@ pub(crate) struct VideoTransportFeedbackSnapshot {
 }
 
 pub(crate) struct NegotiatedVideoTransport {
+    pub video_codec: VideoCodec,
     pub sender: Box<dyn VideoSenderPort>,
     pub audio_sender: Option<Box<dyn AudioSenderPort>>,
     pub feedback: watch::Receiver<VideoTransportFeedbackSnapshot>,
@@ -79,6 +80,7 @@ impl Debug for NegotiatedVideoTransport {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("NegotiatedVideoTransport")
+            .field("video_codec", &self.video_codec)
             .field("feedback", &self.feedback.borrow())
             .field("has_audio_sender", &self.audio_sender.is_some())
             .field("minimum_bitrate", &self.minimum_bitrate)
