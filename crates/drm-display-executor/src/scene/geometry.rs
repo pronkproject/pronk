@@ -6,6 +6,7 @@ use std::num::NonZeroU32;
 pub enum GeometryError {
     EmptyExtent,
     SourceOutsideImage,
+    FractionalSource,
 }
 
 impl std::fmt::Display for GeometryError {
@@ -13,6 +14,9 @@ impl std::fmt::Display for GeometryError {
         formatter.write_str(match self {
             Self::EmptyExtent => "image extent must be nonzero",
             Self::SourceOutsideImage => "source rectangle exceeds its image",
+            Self::FractionalSource => {
+                "integral rendering does not accept fractional source coordinates"
+            }
         })
     }
 }
@@ -52,6 +56,20 @@ pub struct SourceRect {
 }
 
 impl SourceRect {
+    /// Decode DRM-style unsigned 16.16 source x, y, width and height exactly.
+    ///
+    /// Fractional origins and extents are unsupported, not rounded or truncated.
+    /// The resulting crop is checked against the actual source image. Output
+    /// scaling, rotation, pixel format and source authority remain separate
+    /// validation obligations; accepting a crop does not accept an entire plane.
+    pub fn from_fixed_16_16(image: Extent, source: [u32; 4]) -> Result<Self, GeometryError> {
+        if source.iter().any(|value| value & 0xffff != 0) {
+            return Err(GeometryError::FractionalSource);
+        }
+        let [x, y, width, height] = source.map(|value| value >> 16);
+        Self::new(image, [x, y], Extent::new(width, height)?)
+    }
+
     pub fn new(image: Extent, origin: [u32; 2], extent: Extent) -> Result<Self, GeometryError> {
         if u64::from(origin[0]) + u64::from(extent.width()) > u64::from(image.width())
             || u64::from(origin[1]) + u64::from(extent.height()) > u64::from(image.height())
