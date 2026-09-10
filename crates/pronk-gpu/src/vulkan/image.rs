@@ -7,8 +7,8 @@ use ash::vk;
 
 use super::device::{native, unsupported, Device, DeviceInner};
 
-const FORMAT: vk::Format = vk::Format::B8G8R8A8_UNORM;
-const USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::from_raw(
+pub(super) const FORMAT: vk::Format = vk::Format::B8G8R8A8_UNORM;
+pub(super) const USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::from_raw(
     vk::ImageUsageFlags::TRANSFER_SRC.as_raw() | vk::ImageUsageFlags::TRANSFER_DST.as_raw(),
 );
 
@@ -53,7 +53,12 @@ impl Device {
         height: NonZeroU32,
         modifier: u64,
     ) -> io::Result<Image> {
-        self.check_image(width.get(), height.get(), modifier)?;
+        self.check_image(
+            width.get(),
+            height.get(),
+            modifier,
+            vk::ExternalMemoryFeatureFlags::EXPORTABLE,
+        )?;
         let modifiers = [modifier];
         let mut tiling =
             vk::ImageDrmFormatModifierListCreateInfoEXT::default().drm_format_modifiers(&modifiers);
@@ -156,7 +161,13 @@ impl Device {
         Ok(image)
     }
 
-    fn check_image(&self, width: u32, height: u32, modifier: u64) -> io::Result<()> {
+    pub(super) fn check_image(
+        &self,
+        width: u32,
+        height: u32,
+        modifier: u64,
+        sharing: vk::ExternalMemoryFeatureFlags,
+    ) -> io::Result<()> {
         let instance = self.inner.instance();
         let physical = self.inner.physical;
         let mut list = vk::DrmFormatModifierPropertiesListEXT::default();
@@ -206,10 +217,10 @@ impl Device {
             || !memory
                 .external_memory_properties
                 .external_memory_features
-                .contains(vk::ExternalMemoryFeatureFlags::EXPORTABLE)
+                .contains(sharing)
         {
             return Err(unsupported(
-                "image dimensions or DMA-BUF export are unsupported",
+                "image dimensions or requested DMA-BUF sharing are unsupported",
             ));
         }
         Ok(())
