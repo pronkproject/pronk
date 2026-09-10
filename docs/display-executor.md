@@ -22,6 +22,13 @@ access lifetimes. A native backend must separately enforce device limits and
 checked conversion into its own coordinate types. No assumption that all
 unsigned image coordinates fit a signed native offset is implied.
 
+`SourceRect::from_fixed_16_16` accepts DRM-style unsigned source coordinates
+only when all four values are exactly integral. It rejects fractional origins
+and sizes, then checks nonempty dimensions and image bounds. It does not
+round unsupported inputs into a different image. This is a coordinate adapter,
+not a scene protocol or authorization check: destination scaling and rotation
+still require independent profile validation.
+
 The model intentionally has no implicit fixed-point truncation, scaling,
 rotation, blend or color-pipeline behavior. A protocol adapter must reject
 unsupported input rather than silently interpreting it as an integral copy.
