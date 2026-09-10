@@ -7,14 +7,33 @@ layout(set = 0, binding = 1, rgba32f) uniform image2D destination_image;
 layout(push_constant) uniform Parameters {
     uint pixel_mode;
     uint plane_alpha;
+    uvec2 crop_origin;
+    uvec2 crop_extent;
+    uvec2 transformed_origin;
+    uvec2 destination_origin;
+    uvec2 visible_extent;
+    uint transform_flags;
 } parameters;
 
 void main() {
-    ivec2 position = ivec2(gl_GlobalInvocationID.xy);
-    if (any(greaterThanEqual(position, imageSize(destination_image))))
+    uvec2 invocation = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(invocation, parameters.visible_extent)))
         return;
-
-    vec4 source = imageLoad(source_image, position);
+    uvec2 local = parameters.transformed_origin + invocation;
+    uvec2 extent = parameters.crop_extent;
+    uint rotation = parameters.transform_flags & 3;
+    if (rotation == 1)
+        local = uvec2(extent.x - 1 - local.y, local.x);
+    else if (rotation == 2)
+        local = extent - 1 - local;
+    else if (rotation == 3)
+        local = uvec2(local.y, extent.y - 1 - local.x);
+    if ((parameters.transform_flags & 4) != 0)
+        local.x = extent.x - 1 - local.x;
+    if ((parameters.transform_flags & 8) != 0)
+        local.y = extent.y - 1 - local.y;
+    ivec2 position = ivec2(parameters.destination_origin + invocation);
+    vec4 source = imageLoad(source_image, ivec2(parameters.crop_origin + local));
     vec3 destination = imageLoad(destination_image, position).rgb;
     float plane = float(parameters.plane_alpha) / 65535.0;
     float pixel = parameters.pixel_mode == 0 ? 1.0 : source.a;

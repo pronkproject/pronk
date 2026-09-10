@@ -1,16 +1,22 @@
-//! Whole-image blending operates only on completed, non-exportable pixels.
+//! Blending operates only on completed, non-exportable pixels.
 
 use std::io;
 use std::sync::Arc;
 
 use ash::vk;
-use drm_display_executor::scene::blend::{Blend, PixelBlend};
+use drm_display_executor::scene::{
+    blend::Blend,
+    geometry::{Extent, SourceRect},
+    transform::Transform,
+};
 
 use super::PrivateImage;
 use crate::vulkan::device::unsupported;
 use crate::vulkan::submission::Job;
 
+mod geometry;
 mod pipeline;
+use geometry::Parameters;
 use pipeline::Pipeline;
 
 /// The unchanged source and blended private destination after GPU completion.
@@ -39,17 +45,61 @@ impl PrivateImage {
     /// bit-identical integer reference. No geometry, scaling, gamma or color
     /// management is applied. Errors return neither image for reuse.
     pub fn blend_waited(self, source: PrivateImage, blend: Blend) -> io::Result<BlendedImages> {
-        if !Arc::ptr_eq(&self.device, &source.device)
-            || self.extent() != source.extent()
-            || !self.initialized
-            || !source.initialized
-        {
+        if self.extent() != source.extent() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "private blending needs initialized matching images on one device",
+                "whole-image blending needs equal extents",
             ));
         }
-        let groups = [self.width.get().div_ceil(8), self.height.get().div_ceil(8)];
+        let extent = Extent::new(source.width.get(), source.height.get())
+            .expect("private extent is nonzero");
+        let crop = SourceRect::new(extent, [0, 0], extent).expect("whole source crop is valid");
+        self.blend_region_waited(source, crop, [0, 0], Transform::default(), blend)
+    }
+
+    /// Blend an integral source crop at an unscaled output placement.
+    ///
+    /// Source-axis reflection precedes counter-clockwise rotation. Clipping is
+    /// resolved with checked integer geometry before dispatch; invisible crops
+    /// return both images unchanged without submission. Only affected pixels
+    /// receive opaque alpha. The caller should omit invisible source acquisition
+    /// before reaching this private-image operation.
+    ///
+    /// Initialization, device, lifetime and precision requirements are those of
+    /// [`Self::blend_waited`]. Fractional crops and filtering are not supported.
+    pub fn blend_region_waited(
+        self,
+        source: PrivateImage,
+        crop: SourceRect,
+        placement: [i32; 2],
+        transform: Transform,
+        blend: Blend,
+    ) -> io::Result<BlendedImages> {
+        if !Arc::ptr_eq(&self.device, &source.device) || !self.initialized || !source.initialized {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private blending needs initialized images on one device",
+            ));
+        }
+        let source_extent = Extent::new(source.width.get(), source.height.get())
+            .expect("private extent is nonzero");
+        let output_extent =
+            Extent::new(self.width.get(), self.height.get()).expect("private extent is nonzero");
+        let Some(parameters) = Parameters::new(
+            source_extent,
+            output_extent,
+            crop,
+            placement,
+            transform,
+            blend,
+        )?
+        else {
+            return Ok(BlendedImages {
+                source,
+                destination: self,
+            });
+        };
+        let groups = parameters.groups;
         // SAFETY: The image retains the physical device and its instance.
         let queues = unsafe {
             self.device
@@ -89,17 +139,11 @@ impl PrivateImage {
                 .destination
                 .barrier(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE),
         ];
-        let mode: u32 = match blend.pixel {
-            PixelBlend::None => 0,
-            PixelBlend::Premultiplied => 1,
-            PixelBlend::Coverage => 2,
-        };
-        let mut parameters = [0u8; 8];
-        parameters[..4].copy_from_slice(&mode.to_ne_bytes());
-        parameters[4..].copy_from_slice(&u32::from(blend.plane_alpha).to_ne_bytes());
+        let parameters = parameters.bytes();
         // SAFETY: Distinct, initialized private images outlive their views and
         // pipeline through the native job. Dispatch covers each destination
-        // pixel once; the shader bounds-checks partial edge workgroups. Both
+        // visible pixel once; checked clipping bounds source coordinates and
+        // the shader bounds-checks partial edge workgroups. Both
         // descriptors and push constants match the checked-in shader interface.
         unsafe {
             job.device.raw.cmd_pipeline_barrier(

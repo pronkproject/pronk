@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use ash::vk;
 
+use super::geometry::PARAMETER_SIZE;
 use super::PrivateImage;
 use crate::vulkan::device::{native, DeviceInner};
 
@@ -86,14 +87,14 @@ impl Pipeline {
         let push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .offset(0)
-            .size(8)];
+            .size(PARAMETER_SIZE as u32)];
         let layout = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&layouts)
             .push_constant_ranges(&push);
         let words = ash::util::read_spv(&mut Cursor::new(include_bytes!("shader.spv")))?;
         let shader = vk::ShaderModuleCreateInfo::default().code(&words);
         // SAFETY: The descriptor set has no pending users. The shader has two
-        // formatted storage images and two u32 push constants; no optional
+        // formatted storage images and checked scalar push constants; no optional
         // device feature is required by its Vulkan 1.1 SPIR-V instructions.
         unsafe {
             raw.update_descriptor_sets(&writes, &[]);
@@ -128,7 +129,7 @@ impl Pipeline {
         &self,
         raw: &ash::Device,
         command: vk::CommandBuffer,
-        parameters: &[u8; 8],
+        parameters: &[u8; PARAMETER_SIZE],
     ) {
         unsafe {
             raw.cmd_bind_pipeline(command, vk::PipelineBindPoint::COMPUTE, self.pipeline);
