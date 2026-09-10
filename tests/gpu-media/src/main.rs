@@ -1,6 +1,7 @@
 //! Generated images through the real source actor on an explicitly supplied graph.
 
 mod consumer;
+mod decode;
 mod encoded;
 mod source;
 

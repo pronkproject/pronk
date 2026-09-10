@@ -1454,6 +1454,7 @@ dependencies = [
  "futures-util",
  "gstreamer",
  "gstreamer-app",
+ "gstreamer-video",
  "pronk",
  "pronk-gpu",
  "pronk-pipewire",

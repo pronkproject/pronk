@@ -101,13 +101,14 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
         .context("link private video ports")?;
     let consumer_socket = socket.to_owned();
     let consumer_name = identity.node_name.clone();
+    let consumer_render_node = render_node.clone();
     let mut consumer = tokio::task::spawn_blocking(move || {
         Consumer::start(
             &consumer_socket,
             &consumer_name,
             modifier,
             FRAMES,
-            &render_node,
+            &consumer_render_node,
             mode,
         )
     })
@@ -228,6 +229,12 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
         "not every image was rewritten: {uses:?}"
     );
     eprintln!("PASS: {published} generated frames, {} encoded, per-slot uses {uses:?}, first input retained through six outputs", encoded.len());
+    if mode == Mode::VaH264 {
+        tokio::task::spawn_blocking(move || {
+            crate::decode::verify(encoded.into_frames(), &render_node)
+        })
+        .await??;
+    }
     Ok(())
 }
 

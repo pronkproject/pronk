@@ -9,6 +9,10 @@ pub struct Encoded {
 }
 
 impl Encoded {
+    pub fn into_frames(self) -> Vec<Vec<u8>> {
+        self.frames
+    }
+
     pub fn len(&self) -> usize {
         self.frames.len()
     }
@@ -102,6 +106,6 @@ mod tests {
         encoded
             .push(&sample(&[0, 0, 1, 1], 33_333_433, false))
             .unwrap();
-        assert_eq!(encoded.len(), 2);
+        assert_eq!(encoded.into_frames().len(), 2);
     }
 }

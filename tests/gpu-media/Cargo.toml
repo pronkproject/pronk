@@ -19,6 +19,7 @@ anyhow.workspace = true
 futures-util.workspace = true
 gstreamer.workspace = true
 gstreamer-app.workspace = true
+gstreamer-video.workspace = true
 pronk = { path = "../../crates/pronk" }
 pronk-gpu = { path = "../../crates/pronk-gpu" }
 pronk-pipewire = { path = "../../crates/pronk-pipewire" }
