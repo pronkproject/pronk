@@ -1,14 +1,16 @@
 use std::collections::{HashSet, VecDeque};
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
+use drm_display_executor::scheduler::source_use::{ClosedUse, SourceUse};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use pronk::gpu_output::{GpuOutput, OutputEvent, OutputReady};
+use pronk_dmabuf::Completion;
 use pronk_gpu::output_pool::OutputPool;
-use pronk_gpu::vulkan::{Device, OpaqueLayer};
+use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{
     PipeWireRemote, VideoBuffer, VideoBufferLayout, VideoBufferStorage, VideoDamage, VideoFrame,
     VideoSourceActor, VideoSourceConfig, VideoSourceGeneration,
@@ -17,6 +19,7 @@ use pronk_pipewire::{
 use crate::consumer::{self, Consumer, Event, Mode};
 use crate::encoded::Encoded;
 use crate::pattern::{self, FRAMES, HEIGHT, WIDTH};
+use crate::render;
 
 const SLOTS: usize = 4;
 
@@ -165,36 +168,23 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 let input = incoming.take().context("producer image is in flight")?;
                 let worker = Arc::clone(&worker);
                 let scene = pattern::scene(published);
-                let (input, copied) = tokio::task::spawn_blocking(move || -> Result<_> {
-                    ensure!(
-                        input.len() == scene.len(),
-                        "source allocation count differs from scene"
-                    );
-                    let mut originals = Vec::with_capacity(scene.len());
-                    let mut layers = Vec::with_capacity(scene.len());
-                    for (input, plane) in input.into_iter().zip(scene) {
-                        let (input, producer) = input.clear_waited(plane.color)?;
-                        // SAFETY: Matching native physical-device/driver identities,
-                        // exact allocator metadata and identical image profile. The
-                        // clear completed foreign GENERAL release; no source writer
-                        // runs until the imported read completes.
-                        let source = unsafe {
-                            worker.import_source(input.export()?, input.layout(), producer)
-                        }?;
-                        layers.push(OpaqueLayer::new(source, plane.crop, plane.placement));
-                        originals.push(input);
-                    }
-                    let (private, _read_done) =
-                        private.compose_opaque_waited(layers, pattern::BACKGROUND)?;
-                    let input = originals
-                        .into_iter()
-                        .map(|input| input.clear_waited([255; 3]).map(|result| result.0))
-                        .collect::<std::io::Result<Vec<_>>>()?;
-                    let mut copied = image.copy_from_waited(private)?;
-                    copied.source = copied.source.clear_waited([0, 0, 0])?.0;
-                    Ok((input, copied))
-                })
-                .await??;
+                let source_use = SourceUse::new(NonZeroUsize::new(1).unwrap())?;
+                let submission = source_use.begin()?;
+                let read = tokio::task::spawn_blocking(move || {
+                    render::read_sources(&worker, input, private, scene, submission)
+                });
+                source_use.close();
+                let stage = read.await??;
+                let ClosedUse::Released(records) = source_use.finish()? else {
+                    anyhow::bail!("source submission accounting failed");
+                };
+                ensure!(
+                    records.len() == 1 && records[0].completion()? == Some(Completion::Success),
+                    "source use lacks its waited native read completion"
+                );
+                drop(records);
+                let (input, copied) =
+                    tokio::task::spawn_blocking(move || stage.copy_output(image)).await??;
                 incoming = Some(input);
                 staging = Some(copied.source);
                 images[slot] = Some(copied.destination);

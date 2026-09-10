@@ -1463,6 +1463,7 @@ dependencies = [
  "gstreamer-video",
  "libc",
  "pronk",
+ "pronk-dmabuf",
  "pronk-gpu",
  "pronk-pipewire",
  "tokio",

@@ -23,6 +23,7 @@ gstreamer-app.workspace = true
 gstreamer-video.workspace = true
 libc = "=0.2.189"
 pronk = { path = "../../crates/pronk" }
+pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
 pronk-gpu = { path = "../../crates/pronk-gpu" }
 pronk-pipewire = { path = "../../crates/pronk-pipewire" }
 tokio.workspace = true

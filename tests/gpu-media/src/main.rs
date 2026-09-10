@@ -4,6 +4,7 @@ mod consumer;
 mod decode;
 mod encoded;
 mod pattern;
+mod render;
 mod sandbox;
 mod source;
 
