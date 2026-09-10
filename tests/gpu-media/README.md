@@ -96,10 +96,13 @@ After source shutdown and native retirement, a separate test oracle decodes
 the twenty access units on the selected GPU. It maps only decoded oracle
 images and verifies every RGB pixel, in order, with a six-level channel
 tolerance for conversion and codec rounding. It also requires exactly twenty
-images and decoder end-of-stream. Matching pixels after both source and staging
-rewrites detect reads that incorrectly outlive those copy boundaries. CPU
-readback belongs to this oracle, not to
-the capture-to-encoder path. Encoded access units are ordinary CPU-owned bytes.
+images and decoder end-of-stream. Every publication has a distinct RGB color;
+tests require disjoint tolerance ranges between all twenty colors and the
+black/white overwrite values. A stale image must fail even if its sequence
+metadata is current. Matching pixels after both source and staging rewrites
+detect reads that incorrectly outlive those copy boundaries. CPU readback
+belongs to this oracle, not to the capture-to-encoder path. Encoded access units
+are ordinary CPU-owned bytes.
 
 ## Transient sandbox experiment
 
