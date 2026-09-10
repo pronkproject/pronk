@@ -221,7 +221,39 @@ copies into private storage, overwrites the originals and checks every stored
 channel for transparent, intermediate and opaque alpha. It qualifies byte
 preservation, not GPU alpha blending.
 
-## Waited copies from executor-owned staging
+## Non-exportable rendering intermediates
+
+`Device::allocate_private` creates an exclusively owned `PrivateImage` with
+optimal tiling and RGBA32 floating-point storage. The precise storage-image and
+blit capabilities and extent are queried before allocation. It has no DMA-BUF
+export, clone, native handle or CPU mapping API, and the allocation enables no
+external-memory handle types. Keeping private rendering storage distinct from
+shared `Image` allocations makes accidental downstream publication unavailable
+through the safe interface.
+
+The initial operations are whole-image opaque `clear_waited` and
+`copy_into_waited` into an equally sized shared image on the same device.
+They consume their owners until native completion. Private storage keeps local
+queue ownership; only the shared destination participates in foreign ownership
+and reservation-fence enrollment. Uninitialized or mismatched sources fail
+before waiting for destination reuse. The output conversion uses a nearest
+format blit without scaling or color-space processing.
+
+Destination reuse may block the output operation, so compositor-source claims
+must have ended before it starts. The private image retains neither raw-source
+imports nor deferred readers. Its type excludes competing external users of
+the private allocation; the caller still excludes competing accesses to the
+shared destination. This is not a universal guarantee about other GPU workloads
+or native-driver scheduling on the same physical device.
+
+RGBA32 uses sixteen bytes per pixel, four times the packed shared-output
+storage before native alignment. It is a shader-intermediate profile, not a
+qualified production memory-bandwidth or media-cadence choice. Future blending
+will need its own shader, precision and performance checks. Native tests cover
+non-square images, device-owner teardown, independent private reuse, complete
+output pixels and rejection of unsupported extents or invalid copies.
+
+## Waited copies from exportable executor-owned staging
 
 `destination.copy_from_waited(source)` copies a complete initialized image into
 a separate same-size allocation on the same Vulkan device. Both image owners
