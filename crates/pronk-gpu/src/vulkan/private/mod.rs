@@ -10,6 +10,7 @@ use super::device::DeviceInner;
 mod allocation;
 mod clear;
 mod output;
+mod source;
 
 pub use output::PrivateCopy;
 
