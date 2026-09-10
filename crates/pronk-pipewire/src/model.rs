@@ -8,7 +8,7 @@ use crate::{
 enum Ownership {
     Unbound,
     ServerOwned {
-        frame_submitted: bool,
+        sequence: Option<u64>,
         expected_release: Option<NonZeroU64>,
     },
     Available,
@@ -31,6 +31,7 @@ pub(crate) enum BufferReturn {
     },
     Released {
         buffer_id: NonZeroU32,
+        sequence: u64,
     },
 }
 
@@ -75,7 +76,7 @@ impl BufferTracker {
         }
         slot.transport = Some(transport);
         slot.ownership = Ownership::ServerOwned {
-            frame_submitted: false,
+            sequence: None,
             expected_release: None,
         };
         Ok(())
@@ -119,7 +120,7 @@ impl BufferTracker {
             _ => {}
         }
         slot.ownership = Ownership::ServerOwned {
-            frame_submitted: true,
+            sequence: Some(frame.sequence),
             expected_release: frame.acquire_point,
         };
         Ok(())
@@ -131,11 +132,11 @@ impl BufferTracker {
         actual_release: Option<NonZeroU64>,
     ) -> Result<BufferReturn, VideoSourceRuntimeError> {
         let slot = self.slot_mut(buffer_id)?;
-        let (frame_submitted, expected_release) = match slot.ownership {
+        let (sequence, expected_release) = match slot.ownership {
             Ownership::ServerOwned {
-                frame_submitted,
+                sequence,
                 expected_release,
-            } => (frame_submitted, expected_release),
+            } => (sequence, expected_release),
             _ => return Err(VideoSourceRuntimeError::InvalidOwnership(buffer_id.get())),
         };
         if expected_release != actual_release {
@@ -146,12 +147,15 @@ impl BufferTracker {
             });
         }
         slot.ownership = Ownership::Available;
-        match (frame_submitted, slot.transport) {
-            (false, Some(transport)) => Ok(BufferReturn::Initial {
+        match (sequence, slot.transport) {
+            (None, Some(transport)) => Ok(BufferReturn::Initial {
                 buffer_id,
                 transport,
             }),
-            (true, Some(_)) => Ok(BufferReturn::Released { buffer_id }),
+            (Some(sequence), Some(_)) => Ok(BufferReturn::Released {
+                buffer_id,
+                sequence,
+            }),
             (_, None) => Err(VideoSourceRuntimeError::InvalidOwnership(buffer_id.get())),
         }
     }
@@ -168,6 +172,29 @@ impl BufferTracker {
 mod tests {
     use super::*;
     use crate::VideoDamage;
+
+    #[test]
+    fn release_retains_each_submitted_sequence_including_zero() {
+        let mut tracker = tracker(false);
+        let id = nonzero32(7);
+        tracker.bind(id, PipeWireBufferTransport::Waited).unwrap();
+        assert!(matches!(
+            tracker.returned(id, None).unwrap(),
+            BufferReturn::Initial { .. }
+        ));
+        for sequence in [0, 99, u64::MAX] {
+            let mut submitted = frame(None);
+            submitted.sequence = sequence;
+            tracker.publish(submitted).unwrap();
+            assert_eq!(
+                tracker.returned(id, None).unwrap(),
+                BufferReturn::Released {
+                    buffer_id: id,
+                    sequence,
+                }
+            );
+        }
+    }
 
     fn nonzero32(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
@@ -240,7 +267,8 @@ mod tests {
         assert_eq!(
             tracker.returned(nonzero32(7), Some(nonzero64(5))).unwrap(),
             BufferReturn::Released {
-                buffer_id: nonzero32(7)
+                buffer_id: nonzero32(7),
+                sequence: 12,
             }
         );
     }
@@ -260,7 +288,8 @@ mod tests {
         assert_eq!(
             tracker.returned(nonzero32(7), None).unwrap(),
             BufferReturn::Released {
-                buffer_id: nonzero32(7)
+                buffer_id: nonzero32(7),
+                sequence: 12,
             }
         );
     }

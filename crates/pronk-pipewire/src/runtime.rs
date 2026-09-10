@@ -1060,7 +1060,13 @@ fn process_returned_buffers(
                 buffer_id,
                 transport,
             },
-            BufferReturn::Released { buffer_id } => VideoSourceEvent::BufferReleased { buffer_id },
+            BufferReturn::Released {
+                buffer_id,
+                sequence,
+            } => VideoSourceEvent::BufferReleased {
+                buffer_id,
+                sequence,
+            },
         };
         state.emit(event)?;
     }

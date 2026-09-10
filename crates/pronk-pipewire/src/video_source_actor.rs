@@ -662,7 +662,7 @@ fn handle_source_event<S>(
                 transport,
             }))
         }
-        Some(VideoSourceEvent::BufferReleased { buffer_id }) => {
+        Some(VideoSourceEvent::BufferReleased { buffer_id, .. }) => {
             let state = active.buffers.get_mut(&buffer_id).ok_or(
                 VideoSourceActorRuntimeError::InvalidBufferEvent {
                     event: "release",
@@ -770,7 +770,7 @@ mod tests {
         events: mpsc::Receiver<VideoSourceEvent>,
         control: mpsc::Sender<VideoSourceEvent>,
         release: FakeRelease,
-        pending_release: Mutex<Vec<NonZeroU32>>,
+        pending_release: Mutex<Vec<VideoFrame>>,
         log: Arc<Mutex<Vec<String>>>,
     }
 
@@ -842,6 +842,7 @@ mod tests {
                         self.control
                             .send(VideoSourceEvent::BufferReleased {
                                 buffer_id: frame.buffer_id,
+                                sequence: frame.sequence,
                             })
                             .await
                             .map_err(|_| fake_source_closed())?;
@@ -850,7 +851,7 @@ mod tests {
                         self.pending_release
                             .lock()
                             .expect("fake pending-release mutex poisoned")
-                            .push(frame.buffer_id);
+                            .push(frame);
                     }
                     FakeRelease::PublishFailure => {
                         return Err(VideoSourceError::Runtime(VideoSourceRuntimeError::Stream(
@@ -885,9 +886,12 @@ mod tests {
                         std::mem::take(&mut *pending)
                     }
                 };
-                for buffer_id in pending {
+                for frame in pending {
                     self.control
-                        .send(VideoSourceEvent::BufferReleased { buffer_id })
+                        .send(VideoSourceEvent::BufferReleased {
+                            buffer_id: frame.buffer_id,
+                            sequence: frame.sequence,
+                        })
                         .await
                         .map_err(|_| fake_source_closed())?;
                 }
@@ -1223,6 +1227,7 @@ mod tests {
             control
                 .send(VideoSourceEvent::BufferReleased {
                     buffer_id: nonzero32(1),
+                    sequence: frame(nonzero32(1)).sequence,
                 })
                 .await
                 .unwrap();

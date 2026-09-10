@@ -237,6 +237,8 @@ pub enum VideoSourceEvent {
         /// must still establish native reader completion before overwriting GPU
         /// storage; this event is not itself a GPU fence.
         buffer_id: NonZeroU32,
+        /// Sequence retained from the submitted frame, not consumer metadata.
+        sequence: u64,
     },
     Failed(VideoSourceRuntimeError),
     Stopped,
