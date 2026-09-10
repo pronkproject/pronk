@@ -26,10 +26,52 @@ pub fn placement(sequence: u32) -> [i32; 2] {
     }
 }
 
+#[cfg(test)]
 pub fn visible(sequence: u32) -> CopyRegion {
     source_crop()
         .clip_to(placement(sequence), Extent::new(WIDTH, HEIGHT).unwrap())
         .unwrap()
+}
+
+#[derive(Clone, Copy)]
+pub struct Plane {
+    pub crop: SourceRect,
+    pub placement: [i32; 2],
+    pub color: [u8; 3],
+}
+
+impl Plane {
+    pub fn visible(self) -> CopyRegion {
+        self.crop
+            .clip_to(self.placement, Extent::new(WIDTH, HEIGHT).unwrap())
+            .unwrap()
+    }
+}
+
+/// Base plane, overlay and cursor-sized top plane, all with opaque pixels.
+pub fn scene(sequence: u32) -> [Plane; 3] {
+    let base = Plane {
+        crop: source_crop(),
+        placement: placement(sequence),
+        color: color(sequence),
+    };
+    let full = |width, height| {
+        let extent = Extent::new(width, height).unwrap();
+        SourceRect::new(extent, [0, 0], extent).unwrap()
+    };
+    [
+        base,
+        Plane {
+            crop: full(640, 480),
+            placement: [640, 320],
+            color: color((sequence + 7) % FRAMES),
+        },
+        Plane {
+            crop: full(128, 128),
+            placement: [608 + (sequence % 3) as i32 * 64, 288],
+            color: color((sequence + 13) % FRAMES),
+        },
+    ]
 }
 
 pub fn color(sequence: u32) -> [u8; 3] {
@@ -91,4 +133,5 @@ mod tests {
             assert!(destination[1] + size[1] <= HEIGHT);
         }
     }
+
 }

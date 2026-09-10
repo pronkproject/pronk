@@ -7,7 +7,7 @@ use anyhow::{ensure, Context, Result};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_video::{self as video, prelude::*};
 
-use crate::pattern::{self, color, FRAMES, HEIGHT, TOLERANCE, WIDTH};
+use crate::pattern::{self, FRAMES, HEIGHT, TOLERANCE, WIDTH};
 
 struct Pipeline(gst::Pipeline);
 
@@ -84,20 +84,28 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
         )?;
         let stride = usize::try_from(frame.plane_stride()[0])?;
         let pixels = frame.plane_data(0)?;
-        let foreground = color(index as u32);
-        let background = pattern::BACKGROUND;
-        let region = pattern::visible(index as u32);
-        let [left, top] = region.destination();
-        let right = left + region.extent().width();
-        let bottom = top + region.extent().height();
+        let regions = pattern::scene(index as u32).map(|plane| {
+            let region = plane.visible();
+            let [left, top] = region.destination();
+            (
+                left..left + region.extent().width(),
+                top..top + region.extent().height(),
+                plane.color,
+            )
+        });
         for y in 0..HEIGHT as usize {
             let row = pixels
                 .get(y * stride..y * stride + WIDTH as usize * 4)
                 .context("short decoded plane")?;
             for (x, pixel) in row.chunks_exact(4).enumerate() {
-                let visible =
-                    (left..right).contains(&(x as u32)) && (top..bottom).contains(&(y as u32));
-                let expected = if visible { foreground } else { background };
+                let expected = regions
+                    .iter()
+                    .rev()
+                    .find_map(|(horizontal, vertical, color)| {
+                        (horizontal.contains(&(x as u32)) && vertical.contains(&(y as u32)))
+                            .then_some(*color)
+                    })
+                    .unwrap_or(pattern::BACKGROUND);
                 let actual = [pixel[2], pixel[1], pixel[0]];
                 ensure!(
                     actual

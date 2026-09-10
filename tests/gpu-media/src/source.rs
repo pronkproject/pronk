@@ -8,7 +8,7 @@ use anyhow::{ensure, Context, Result};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use pronk::gpu_output::{GpuOutput, OutputEvent, OutputReady};
 use pronk_gpu::output_pool::OutputPool;
-use pronk_gpu::vulkan::Device;
+use pronk_gpu::vulkan::{Device, OpaqueLayer};
 use pronk_pipewire::{
     PipeWireRemote, VideoBuffer, VideoBufferLayout, VideoBufferStorage, VideoDamage, VideoFrame,
     VideoSourceActor, VideoSourceConfig, VideoSourceGeneration,
@@ -16,7 +16,7 @@ use pronk_pipewire::{
 
 use crate::consumer::{self, Consumer, Event, Mode};
 use crate::encoded::Encoded;
-use crate::pattern::{self, color, FRAMES, HEIGHT, WIDTH};
+use crate::pattern::{self, FRAMES, HEIGHT, WIDTH};
 
 const SLOTS: usize = 4;
 
@@ -49,7 +49,16 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 })
                 .collect::<Result<Vec<_>>>()?;
             let staging = device.allocate(nz(WIDTH), nz(HEIGHT), modifier)?;
-            let incoming = producer.allocate(nz(WIDTH), nz(HEIGHT), modifier)?;
+            let incoming = pattern::scene(0)
+                .into_iter()
+                .map(|plane| {
+                    producer.allocate(
+                        nz(plane.crop.image().width()),
+                        nz(plane.crop.image().height()),
+                        modifier,
+                    )
+                })
+                .collect::<std::io::Result<Vec<_>>>()?;
             Ok((device, images, staging, incoming))
         })
         .await??;
@@ -150,28 +159,37 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 let slot = id.get() as usize - 1;
                 let permit = output.claim(id)?;
                 let image = images[slot].take().context("missing writable image")?;
-                let rgb = color(published);
                 let private = staging
                     .take()
                     .context("private staging image is in flight")?;
                 let input = incoming.take().context("producer image is in flight")?;
                 let worker = Arc::clone(&worker);
-                let placement = pattern::placement(published);
+                let scene = pattern::scene(published);
                 let (input, copied) = tokio::task::spawn_blocking(move || -> Result<_> {
-                    let (input, producer) = input.clear_waited(rgb)?;
-                    // SAFETY: Matching native physical-device/driver identities,
-                    // exact allocator metadata and identical image profile. The
-                    // clear completed foreign GENERAL release; no source writer
-                    // runs until the imported read completes.
-                    let source =
-                        unsafe { worker.import_source(input.export()?, input.layout(), producer) }?;
-                    let (private, _read_done) = source.copy_region_into_waited(
-                        private,
-                        pattern::source_crop(),
-                        placement,
-                        pattern::BACKGROUND,
-                    )?;
-                    let input = input.clear_waited([255, 255, 255])?.0;
+                    ensure!(
+                        input.len() == scene.len(),
+                        "source allocation count differs from scene"
+                    );
+                    let mut originals = Vec::with_capacity(scene.len());
+                    let mut layers = Vec::with_capacity(scene.len());
+                    for (input, plane) in input.into_iter().zip(scene) {
+                        let (input, producer) = input.clear_waited(plane.color)?;
+                        // SAFETY: Matching native physical-device/driver identities,
+                        // exact allocator metadata and identical image profile. The
+                        // clear completed foreign GENERAL release; no source writer
+                        // runs until the imported read completes.
+                        let source = unsafe {
+                            worker.import_source(input.export()?, input.layout(), producer)
+                        }?;
+                        layers.push(OpaqueLayer::new(source, plane.crop, plane.placement));
+                        originals.push(input);
+                    }
+                    let (private, _read_done) =
+                        private.compose_opaque_waited(layers, pattern::BACKGROUND)?;
+                    let input = originals
+                        .into_iter()
+                        .map(|input| input.clear_waited([255; 3]).map(|result| result.0))
+                        .collect::<std::io::Result<Vec<_>>>()?;
                     let mut copied = image.copy_from_waited(private)?;
                     copied.source = copied.source.clear_waited([0, 0, 0])?.0;
                     Ok((input, copied))
