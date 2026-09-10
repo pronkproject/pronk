@@ -28,8 +28,9 @@ pub struct ImageLayout {
 /// Exporting storage does not authorize publication of uninitialized pixels or
 /// change the recipient scope. Keep graphics resources through native completion.
 pub struct Image {
-    device: Arc<DeviceInner>,
-    raw: vk::Image,
+    pub(super) device: Arc<DeviceInner>,
+    pub(super) raw: vk::Image,
+    pub(super) external: bool,
     memory: vk::DeviceMemory,
     layout: ImageLayout,
 }
@@ -74,6 +75,7 @@ impl Device {
         let mut image = Image {
             device: Arc::clone(&self.inner),
             raw,
+            external: false,
             memory: vk::DeviceMemory::null(),
             layout: ImageLayout {
                 width,
@@ -231,8 +233,9 @@ impl Image {
 
 impl Drop for Image {
     fn drop(&mut self) {
-        // SAFETY: There is no submission API. Image destruction precedes freeing
-        // its dedicated memory; the retained device outlives both operations.
+        // SAFETY: A submitted job owns its image through native completion.
+        // Image destruction precedes freeing dedicated memory; the retained
+        // device outlives both operations.
         unsafe {
             self.device.raw.destroy_image(self.raw, None);
             self.device.raw.free_memory(self.memory, None);
