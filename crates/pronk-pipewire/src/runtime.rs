@@ -705,14 +705,9 @@ fn format_parameter(
     refresh_hz: NonZeroU32,
     layout: crate::VideoBufferLayout,
 ) -> Result<Vec<u8>, VideoSourceRuntimeError> {
-    if layout.storage != crate::VideoBufferStorage::MappableLinear {
-        return Err(VideoSourceRuntimeError::UnsupportedFormat);
-    }
-    // This producer allocates linear, CPU-mappable DMA-BUFs. Omitting the DRM
-    // modifier lets consumers that copy out of the DMA-BUF expose ordinary
-    // system-memory raw caps downstream; a modifier would require GStreamer to
-    // preserve the memory:DMABuf feature all the way through the graph.
-    let object = spa::pod::object!(
+    // Only the CPU-copy profile omits the modifier. Explicit GPU layouts keep
+    // their memory:DMABuf negotiation, including an explicitly linear image.
+    let mut object = spa::pod::object!(
         SpaTypes::ObjectParamFormat,
         spa::param::ParamType::EnumFormat,
         spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
@@ -735,6 +730,13 @@ fn format_parameter(
             }
         ),
     );
+    if let crate::VideoBufferStorage::DrmModifier { modifier, .. } = layout.storage {
+        object.properties.push(spa::pod::property!(
+            FormatProperties::VideoModifier,
+            Long,
+            modifier as i64
+        ));
+    }
     serialize_value(&Value::Object(object))
 }
 
@@ -759,7 +761,7 @@ fn negotiate_buffers(
     if media_type != MediaType::Video
         || media_subtype != MediaSubtype::Raw
         || info.format() != VideoFormat::BGRx
-        || info.flags().contains(VideoFlags::MODIFIER)
+        || !storage_matches(&info, layout.storage)
         || info.size().width != layout.width.get()
         || info.size().height != layout.height.get()
         || info.framerate().num != state.config.refresh_hz.get()
@@ -780,6 +782,15 @@ fn negotiate_buffers(
     stream
         .update_params(&mut pods)
         .map_err(|error| pipewire_error("update source buffer parameters", error))
+}
+
+fn storage_matches(info: &VideoInfoRaw, storage: crate::VideoBufferStorage) -> bool {
+    match storage {
+        crate::VideoBufferStorage::MappableLinear => !info.flags().contains(VideoFlags::MODIFIER),
+        crate::VideoBufferStorage::DrmModifier { modifier, .. } => {
+            info.flags().contains(VideoFlags::MODIFIER) && info.modifier() == modifier
+        }
+    }
 }
 
 fn buffer_parameters(state: &ThreadState) -> Result<Vec<Vec<u8>>, VideoSourceRuntimeError> {
@@ -1269,18 +1280,49 @@ mod tests {
         assert_eq!(info.size().width, 1920);
         assert_eq!(info.size().height, 1080);
         assert!(!info.flags().contains(VideoFlags::MODIFIER));
+    }
 
-        let non_linear = crate::VideoBufferLayout {
-            storage: crate::VideoBufferStorage::DrmModifier {
-                modifier: 1,
-                offset: 0,
-            },
-            ..layout
-        };
-        assert!(matches!(
-            format_parameter(NonZeroU32::new(60).unwrap(), non_linear),
-            Err(VideoSourceRuntimeError::UnsupportedFormat)
-        ));
+    #[test]
+    fn explicit_modifiers_round_trip_without_accepting_an_implicit_layout() {
+        for modifier in [0, 0x0100_0000_0000_0009, 0x8100_0000_0000_0009] {
+            let storage = crate::VideoBufferStorage::DrmModifier {
+                modifier,
+                offset: 4096,
+            };
+            let layout = crate::VideoBufferLayout {
+                width: NonZeroU32::new(16).unwrap(),
+                height: NonZeroU32::new(8).unwrap(),
+                pitch: NonZeroU32::new(64).unwrap(),
+                size: NonZeroU64::new(8192).unwrap(),
+                storage,
+            };
+            let bytes = format_parameter(NonZeroU32::new(30).unwrap(), layout).unwrap();
+            let mut info = VideoInfoRaw::new();
+            info.parse(Pod::from_bytes(&bytes).unwrap()).unwrap();
+            assert!(storage_matches(&info, storage));
+            assert!(!storage_matches(
+                &info,
+                crate::VideoBufferStorage::MappableLinear
+            ));
+            assert!(!storage_matches(
+                &info,
+                crate::VideoBufferStorage::DrmModifier {
+                    modifier: modifier ^ 1,
+                    offset: 4096,
+                }
+            ));
+
+            let bytes = format_parameter(
+                NonZeroU32::new(30).unwrap(),
+                crate::VideoBufferLayout {
+                    storage: crate::VideoBufferStorage::MappableLinear,
+                    ..layout
+                },
+            )
+            .unwrap();
+            info.parse(Pod::from_bytes(&bytes).unwrap()).unwrap();
+            assert!(!storage_matches(&info, storage));
+        }
     }
 
     #[test]
