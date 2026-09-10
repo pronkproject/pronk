@@ -42,6 +42,9 @@ into one of four persistent output images and overwritten black before output
 publication. Only those four output allocations are registered with PipeWire.
 Private input and composition allocations are created before source admission
 and reused across frames; they have no export API or external reuse dependency.
+A single immutable blend program is created alongside that storage and retained
+across every layer and frame. Each native operation still owns its own image
+views and descriptors; source-use accounting retains no shader program state.
 
 The base source selects a 1856x1024 crop starting at (32,16), placed over a
 black 1920x1080 background. Placements cycle through (-32,16), (32,-16) and
