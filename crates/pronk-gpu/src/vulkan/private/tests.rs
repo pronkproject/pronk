@@ -3,6 +3,7 @@ use crate::vulkan::{test_support::readback, Device};
 use pronk_dmabuf::Completion;
 
 mod blend;
+mod geometry;
 
 fn device() -> (Device, u64) {
     let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
