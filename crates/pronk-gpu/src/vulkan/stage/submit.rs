@@ -8,13 +8,14 @@ use std::sync::Arc;
 use ash::vk;
 use pronk_dmabuf::{export_dependencies, import_completion, Access, Completion, SyncFile};
 
+use super::geometry::Transfer;
 use crate::vulkan::image::ImageState;
 use crate::vulkan::submission::{require_success, Job};
 use crate::vulkan::{Image, SourceImage};
 
 pub(super) fn copy_waited(
     destination: Image,
-    sources: Vec<(SourceImage, vk::ImageCopy)>,
+    sources: Vec<(SourceImage, Transfer)>,
     background: Option<[u8; 3]>,
 ) -> io::Result<(Image, SyncFile)> {
     let output = destination.export()?;
@@ -115,14 +116,25 @@ pub(super) fn copy_waited(
                     &[],
                 );
             }
-            job.device.raw.cmd_copy_image(
-                command,
-                source.raw,
-                vk::ImageLayout::GENERAL,
-                destination.raw,
-                vk::ImageLayout::GENERAL,
-                &[*region],
-            );
+            match region {
+                Transfer::Copy(region) => job.device.raw.cmd_copy_image(
+                    command,
+                    source.raw,
+                    vk::ImageLayout::GENERAL,
+                    destination.raw,
+                    vk::ImageLayout::GENERAL,
+                    &[*region],
+                ),
+                Transfer::Blit(region) => job.device.raw.cmd_blit_image(
+                    command,
+                    source.raw,
+                    vk::ImageLayout::GENERAL,
+                    destination.raw,
+                    vk::ImageLayout::GENERAL,
+                    &[*region],
+                    vk::Filter::NEAREST,
+                ),
+            }
         }
         job.device.raw.cmd_pipeline_barrier(
             command,

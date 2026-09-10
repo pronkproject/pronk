@@ -3,13 +3,14 @@
 use std::io;
 
 use drm_display_executor::scene::geometry::SourceRect;
+use drm_display_executor::scene::transform::Transform;
 use pronk_dmabuf::SyncFile;
 
 use super::{Image, SourceImage};
 
 mod geometry;
 mod submit;
-use geometry::Copy;
+use geometry::{Copy, Transfer};
 use submit::copy_waited;
 
 impl SourceImage {
@@ -59,7 +60,11 @@ impl SourceImage {
     }
 
     fn copy_waited(self, destination: Image, copy: Copy) -> io::Result<(Image, SyncFile)> {
-        copy_waited(destination, vec![(self, copy.region)], copy.background)
+        copy_waited(
+            destination,
+            vec![(self, Transfer::Copy(copy.region))],
+            copy.background,
+        )
     }
 }
 
@@ -71,6 +76,7 @@ pub struct OpaqueLayer {
     source: SourceImage,
     crop: SourceRect,
     placement: [i32; 2],
+    transform: Transform,
 }
 
 impl OpaqueLayer {
@@ -81,7 +87,15 @@ impl OpaqueLayer {
             source,
             crop,
             placement,
+            transform: Transform::default(),
         }
+    }
+
+    /// Select reflection or a half turn. Quarter turns are rejected by
+    /// composition before producer waits; the source crop is never scaled.
+    pub fn with_transform(mut self, transform: Transform) -> Self {
+        self.transform = transform;
+        self
     }
 }
 
@@ -106,14 +120,14 @@ impl Image {
         let sources = layers
             .into_iter()
             .map(|layer| {
-                let copy = Copy::placed(
+                let transfer = Transfer::placed(
                     layer.source.layout(),
                     self.layout(),
                     layer.crop,
                     layer.placement,
-                    background,
+                    layer.transform,
                 )?;
-                Ok((layer.source, copy.region))
+                Ok((layer.source, transfer))
             })
             .collect::<io::Result<Vec<_>>>()?;
         copy_waited(self, sources, Some(background))
