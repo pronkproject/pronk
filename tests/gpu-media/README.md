@@ -62,10 +62,19 @@ The transport consumer requires DMA-BUF memory and never maps raw pixels.
 
 Each three-source operation reserves a `SourceUse<SyncFile>` submission permit
 before dispatch. The coordinator closes admission while the blocking source
-stage runs; that stage records the actual native read completion. The normal
-terminal result and its waited fence are checked before dispatching the separate
-output-copy stage or overwriting originals. Source and output operations live
-in a renderer helper separate from PipeWire publication scheduling.
+stage runs; that stage records the actual native read completion immediately
+after submission. The blocking worker retains pending imports and private
+storage while the coordinator collects the normal terminal result. Only then
+does the coordinator allow the worker to wait for successful pixels, overwrite
+the originals and copy private storage to output. Native execution does not
+wait for that permission: all work represented by the reported fence has
+already been submitted. The fence may have signaled before collection on a
+fast GPU, but collection does not require that outcome.
+
+Pending native owners remain on the blocking worker even when coordination
+fails. Channel closure prevents output work and runs native retirement there,
+not on the Tokio runtime thread. Source and output operations live in a renderer
+helper separate from PipeWire publication scheduling.
 The one-record budget is per admitted operation, not a one-frame transport
 limit. No executor ioctl or kernel release message is exercised here; this
 connects the trusted accounting library to actual generated-source GPU work.
