@@ -960,14 +960,17 @@ unsafe fn configure_spa_data(
         ));
     }
     datas[0].type_ = spa::sys::SPA_DATA_DmaBuf;
-    datas[0].flags = spa::sys::SPA_DATA_FLAG_READABLE | spa::sys::SPA_DATA_FLAG_MAPPABLE;
+    datas[0].flags = spa::sys::SPA_DATA_FLAG_READABLE;
+    if descriptor.layout.storage == crate::VideoBufferStorage::MappableLinear {
+        datas[0].flags |= spa::sys::SPA_DATA_FLAG_MAPPABLE;
+    }
     datas[0].fd = descriptor.dma_buf.as_raw_fd() as i64;
     datas[0].mapoffset = 0;
     datas[0].maxsize = descriptor.layout.size.get() as u32;
     datas[0].data = std::ptr::null_mut();
     let chunk = unsafe { &mut *datas[0].chunk };
-    chunk.offset = 0;
-    chunk.size = descriptor.layout.size.get() as u32;
+    chunk.offset = descriptor.layout.storage.offset();
+    chunk.size = descriptor.layout.size.get() as u32 - chunk.offset;
     chunk.stride = descriptor.layout.pitch.get() as i32;
 
     if transport == PipeWireBufferTransport::SyncTimeline {
@@ -1125,8 +1128,8 @@ unsafe fn fill_frame(
         ));
     }
     let chunk = unsafe { &mut *data.chunk };
-    chunk.offset = 0;
-    chunk.size = descriptor.layout.size.get() as u32;
+    chunk.offset = descriptor.layout.storage.offset();
+    chunk.size = descriptor.layout.size.get() as u32 - chunk.offset;
     chunk.stride = descriptor.layout.pitch.get() as i32;
     Ok(())
 }
@@ -1278,6 +1281,84 @@ mod tests {
             format_parameter(NonZeroU32::new(60).unwrap(), non_linear),
             Err(VideoSourceRuntimeError::UnsupportedFormat)
         ));
+    }
+
+    #[test]
+    fn native_data_preserves_plane_offsets_on_every_publication() {
+        for storage in [
+            crate::VideoBufferStorage::MappableLinear,
+            crate::VideoBufferStorage::DrmModifier {
+                modifier: 0,
+                offset: 4096,
+            },
+            crate::VideoBufferStorage::DrmModifier {
+                modifier: 0x0100_0000_0000_0009,
+                offset: 4096,
+            },
+        ] {
+            let descriptor = VideoBuffer {
+                id: NonZeroU32::new(1).unwrap(),
+                dma_buf: std::fs::File::open("/dev/null").unwrap().into(),
+                layout: crate::VideoBufferLayout {
+                    width: NonZeroU32::new(16).unwrap(),
+                    height: NonZeroU32::new(8).unwrap(),
+                    pitch: NonZeroU32::new(64).unwrap(),
+                    size: NonZeroU64::new(8192).unwrap(),
+                    storage,
+                },
+                timelines: None,
+            };
+            // Backing descriptors are not touched by these metadata-only helpers.
+            let mut chunk: spa::sys::spa_chunk = unsafe { std::mem::zeroed() };
+            let mut data: spa::sys::spa_data = unsafe { std::mem::zeroed() };
+            data.chunk = &mut chunk;
+            let mut spa: spa::sys::spa_buffer = unsafe { std::mem::zeroed() };
+            spa.n_datas = 1;
+            spa.datas = &mut data;
+            unsafe { configure_spa_data(&mut spa, &descriptor, PipeWireBufferTransport::Waited) }
+                .unwrap();
+            assert_eq!(chunk.offset, storage.offset());
+            assert_eq!(chunk.size, 8192 - storage.offset());
+            assert_eq!(data.maxsize, 8192);
+            assert_eq!(data.mapoffset, 0);
+            assert_eq!(
+                data.flags & spa::sys::SPA_DATA_FLAG_MAPPABLE != 0,
+                storage == crate::VideoBufferStorage::MappableLinear
+            );
+            assert_eq!(
+                data.flags & spa::sys::SPA_DATA_FLAG_READWRITE,
+                spa::sys::SPA_DATA_FLAG_READABLE
+            );
+
+            let mut raw: pw::sys::pw_buffer = unsafe { std::mem::zeroed() };
+            raw.buffer = &mut spa;
+            let frame = VideoFrame {
+                buffer_id: descriptor.id,
+                sequence: 1,
+                pts_ns: 1,
+                damage: crate::VideoDamage {
+                    x: 0,
+                    y: 0,
+                    width: descriptor.layout.width,
+                    height: descriptor.layout.height,
+                },
+                discontinuity: false,
+                acquire_point: None,
+            };
+            chunk.offset = 0;
+            chunk.size = 0;
+            unsafe {
+                fill_frame(
+                    &mut raw,
+                    &descriptor,
+                    Some(PipeWireBufferTransport::Waited),
+                    frame,
+                )
+            }
+            .unwrap();
+            assert_eq!(chunk.offset, storage.offset());
+            assert_eq!(chunk.size, 8192 - storage.offset());
+        }
     }
 
     #[test]
