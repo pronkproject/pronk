@@ -1,5 +1,6 @@
 //! Integer reference arithmetic in the selected encoded RGB domain.
 
+use crate::scene::blend::{Blend, PixelBlend};
 use crate::scene::format::PackedRgbFormat;
 
 const MAX: u64 = u16::MAX as u64;
@@ -24,11 +25,24 @@ impl Rgb {
         (Self::from_bytes(rgb), alpha)
     }
 
-    pub(super) fn blend_premultiplied(&mut self, source: Self, alpha: u16) {
+    pub(super) fn blend(&mut self, source: Self, alpha: u16, blend: Blend) {
+        let plane = u64::from(blend.plane_alpha);
+        let alpha = match blend.pixel {
+            PixelBlend::None => MAX,
+            PixelBlend::Premultiplied | PixelBlend::Coverage => u64::from(alpha),
+        };
+        let source_weight = match blend.pixel {
+            PixelBlend::Coverage => plane * alpha,
+            PixelBlend::None | PixelBlend::Premultiplied => plane * MAX,
+        };
+        let denominator = MAX * MAX;
+        let destination_weight = denominator - plane * alpha;
         for (destination, source) in self.0.iter_mut().zip(source.0) {
+            // Each term is at most MAX^3; both fit u64 even for malformed
+            // premultiplied pixels. Round only after applying both alphas.
             let numerator =
-                u64::from(source) * MAX + u64::from(*destination) * (MAX - u64::from(alpha));
-            *destination = ((numerator + MAX / 2) / MAX).min(MAX) as u16;
+                u64::from(source) * source_weight + u64::from(*destination) * destination_weight;
+            *destination = ((numerator + denominator / 2) / denominator).min(MAX) as u16;
         }
     }
 

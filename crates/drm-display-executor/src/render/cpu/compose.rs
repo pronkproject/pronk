@@ -1,4 +1,4 @@
-//! Initial identity-color, premultiplied RGB reference composition.
+//! Identity-color RGB reference composition with explicit plane blending.
 
 use std::collections::TryReserveError;
 
@@ -6,11 +6,12 @@ use super::{
     image::{Image, ImageMut},
     pixel::Rgb,
 };
+use crate::scene::blend::Blend;
 use crate::scene::geometry::{Extent, GeometryError, SourceRect};
 
-/// One integral, unscaled, unrotated layer with a fully opaque plane-wide alpha.
+/// One integral, unscaled, unrotated layer with explicit blending policy.
 ///
-/// Formats carrying pixel alpha are interpreted as premultiplied. Source
+/// The default is premultiplied pixel alpha and fully opaque plane alpha. Source
 /// pixels must be in the same encoded RGB domain as the background and output;
 /// this profile performs no color-space conversion or lookup-table processing.
 #[derive(Clone, Copy)]
@@ -18,6 +19,7 @@ pub struct Layer<'a> {
     image: Image<'a>,
     source: SourceRect,
     destination: [i32; 2],
+    blend: Blend,
 }
 
 impl<'a> Layer<'a> {
@@ -31,7 +33,14 @@ impl<'a> Layer<'a> {
             source: SourceRect::new(image.layout().extent(), source, extent)?,
             image,
             destination,
+            blend: Blend::default(),
         })
+    }
+
+    /// Select blending without changing image encoding or validated geometry.
+    pub fn with_blend(mut self, blend: Blend) -> Self {
+        self.blend = blend;
+        self
     }
 }
 
@@ -80,7 +89,7 @@ pub fn compose(
                     [source[0], source[1], source[2], source[3]],
                     layer.image.layout().format(),
                 );
-                destination.blend_premultiplied(source, alpha);
+                destination.blend(source, alpha, layer.blend);
             }
         }
         let pixels = output.row(y).expect("validated output row");
