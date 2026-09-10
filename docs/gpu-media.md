@@ -117,6 +117,50 @@ The adapter is implemented but the running media path does not instantiate it
 yet. Graphics allocation, rendering and live source-generation setup remain
 integration work; neither the pool nor the adapter enables GPU media defaults.
 
+## Optional Vulkan allocation
+
+`pronk-gpu`'s `vulkan` feature provides a native device and image allocator.
+It is disabled by default and has no dependency on PipeWire or capture policy.
+`Device::open` matches the opened render node's device numbers against Vulkan
+DRM properties, rather than selecting the first enumerated GPU. Vulkan opens
+its own native descriptors; selecting a node does not make the driver adopt a
+brokered fd or establish that it will run inside an installed service sandbox.
+
+The backend requires Vulkan 1.1, external DMA-BUF memory, DRM modifiers with
+their image-format-list dependency, foreign ownership, and importable/exportable
+binary sync files. Each allocation additionally checks the selected modifier's
+single-plane blit support, exportability and dimensions. Unsupported requests
+fail without falling back to linear storage or another device. Modifier choice
+must be negotiated with the intended importer; allocator support alone does
+not qualify an encoder or a PipeWire consumer.
+
+Images use dedicated device-local memory. Their immutable `ImageLayout` reports
+B8G8R8A8 dimensions, modifier, plane offset, pitch and allocation size directly
+from Vulkan. Images retain their device and loader; exported DMA-BUFs retain
+backing storage after image destruction. No image is mapped for CPU access.
+Allocation and export do not initialize pixels or establish producer completion.
+Do not publish a newly allocated image until rendering has initialized it.
+Keep each allocation within one compatible recipient scope for its lifetime.
+
+Run the optional native allocation checks with explicit hardware selection:
+
+```sh
+PRONK_GPU_RENDER_NODE=/dev/dri/renderD128 \
+PRONK_GPU_MODIFIER=0100000000000009 \
+cargo test -p pronk-gpu --features vulkan --test vulkan_images -- --ignored
+```
+
+The node and hexadecimal modifier above are the Lunar Lake development tuple,
+not portable defaults. The tests check four distinct exported images, alias
+rejection by the output pool, close-on-exec descriptors, device/image/storage
+lifetimes and rejection without fallback. `vulkan_device` separately tests
+selection and repeated device teardown. These tests do not submit rendering,
+read pixels, run PipeWire or qualify media performance. Vulkan validation layers
+may be enabled through the usual loader environment for the opt-in tests.
+
+The allocation flow follows the [Vulkan DRM modifier extension](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_image_drm_format_modifier.html).
+Device selection uses [Vulkan DRM device properties](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceDrmPropertiesEXT.html).
+
 ## Current scope
 
 Existing application and live-test callers select `MappableLinear`; they do
