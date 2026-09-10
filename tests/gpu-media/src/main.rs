@@ -3,6 +3,7 @@
 mod consumer;
 mod decode;
 mod encoded;
+mod sandbox;
 mod source;
 
 use std::path::PathBuf;
@@ -30,6 +31,9 @@ fn main() -> Result<()> {
     };
     anyhow::ensure!(args.next().is_none(), "unexpected argument");
     let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16)?;
+    if sandbox::verify(&node)? {
+        return Ok(());
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
