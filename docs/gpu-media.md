@@ -253,6 +253,21 @@ will need its own shader, precision and performance checks. Native tests cover
 non-square images, device-owner teardown, independent private reuse, complete
 output pixels and rejection of unsupported extents or invalid copies.
 
+`SourceImage::copy_into_private_waited` acquires a whole imported source into
+same-sized private storage. It waits for explicit producer completion and the
+source's reservation writers, then submits a packed-to-floating-point blit.
+Any exported native completion is enrolled as a source reader. Successful
+return waits for native completion and destroys the import before exposing the
+private image; it does not expose an early accounting record. No shared output
+allocation or downstream destination dependency participates in that operation.
+Source authority and exclusion of source pixel reuse remain caller duties.
+
+The native regression exercises all 256 values in each color and alpha channel
+through source-to-private-to-output conversion. It overwrites and destroys each
+producer allocation before allocating the shared output, then checks every
+output pixel. That qualifies whole-image channel preservation on the selected
+device, not shader blending, color conversion or asynchronous source accounting.
+
 ## Waited copies from exportable executor-owned staging
 
 `destination.copy_from_waited(source)` copies a complete initialized image into
