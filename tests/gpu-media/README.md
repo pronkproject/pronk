@@ -35,10 +35,13 @@ Three generated single-memory-plane modifier images belong to a separate
 producer Vulkan device instance: a 1920x1080 base, a 640x480 overlay and a
 128x128 cursor-sized top plane. The worker checks matching physical-device
 and driver identities, imports each source use with exact allocator metadata
-and its explicit producer fence, and copies into available private staging.
-It then overwrites every original source white before copying staging into one
-of four persistent output images, and overwrites staging black before output
+and its explicit producer fence, and copies into independently allocated,
+non-exportable floating-point input images. It then overwrites every original
+source white before shader composition. The composed private image is converted
+into one of four persistent output images and overwritten black before output
 publication. Only those four output allocations are registered with PipeWire.
+Private input and composition allocations are created before source admission
+and reused across frames; they have no export API or external reuse dependency.
 
 The base source selects a 1856x1024 crop starting at (32,16), placed over a
 black 1920x1080 background. Placements cycle through (-32,16), (32,-16) and
@@ -47,8 +50,9 @@ independent geometry model supplies expected visible rectangles; unit tests
 check those against literal source and destination coordinates. The overlay
 starts at (640,320), and the top plane moves between (608,288), (672,288) and
 (736,288), overlapping both the overlay and exposed base. Layers have distinct
-frame-dependent colors and opaque alpha. Native copies are submitted in
-bottom-to-top order with one completion covering all source reads.
+frame-dependent colors and opaque alpha. Private source copies have independent
+native completion records. The compute shader blends their completed pixels in
+bottom-to-top order, exercising cropped placement without retaining the imports.
 
 The twenty-publication sequence exercises source-to-private-to-output copying
 and reuse without a real compositor source or capture grant. Source-reading
@@ -60,23 +64,26 @@ releases before sample disposal or while that sample is held fail the test.
 All four images must be rewritten, and every sequence must arrive once in order.
 The transport consumer requires DMA-BUF memory and never maps raw pixels.
 
-Each three-source operation reserves a `SourceUse<SyncFile>` submission permit
-before dispatch. The coordinator closes admission while the blocking source
-stage runs; that stage records the actual native read completion immediately
-after submission. The blocking worker retains pending imports and private
-storage while the coordinator collects the normal terminal result. Only then
+Each three-source operation reserves three `SourceUse<Option<SyncFile>>`
+submission permits before dispatch, one per source copy. `None` denotes the
+native already-completed sentinel, not future work or omitted accounting.
+The coordinator closes admission while the blocking source stage runs; that
+stage records each actual native read immediately after submission. The
+blocking worker retains pending imports and private storage while the
+coordinator collects the normal terminal result. Only then
 does the coordinator allow the worker to wait for successful pixels, overwrite
-the originals and copy private storage to output. Native execution does not
-wait for that permission: all work represented by the reported fence has
-already been submitted. The fence may have signaled before collection on a
+the originals, blend private inputs and convert composed storage to output.
+Native execution does not wait for that permission: all work represented by
+the reported fences has already been submitted. A fence may have signaled before collection on a
 fast GPU, but collection does not require that outcome.
 
 Pending native owners remain on the blocking worker even when coordination
 fails. Channel closure prevents output work and runs native retirement there,
 not on the Tokio runtime thread. Source and output operations live in a renderer
 helper separate from PipeWire publication scheduling.
-The one-record budget is per admitted operation, not a one-frame transport
-limit. No executor ioctl or kernel release message is exercised here; this
+The three-record budget matches the fixture's source-copy operations, not a
+frame or transport limit. No executor ioctl or kernel release message is
+exercised here; this
 connects the trusted accounting library to actual generated-source GPU work.
 
 Successful output reports publication count and per-slot uses. Thirty-fps

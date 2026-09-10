@@ -498,6 +498,15 @@ edges, one-pixel footprints and quarter-turn rejection. See the
 
 ## Current scope
 
+The generated-image media harness uses the non-exportable shader path. Three
+source copies report independent native completion before private pixels are
+collected. Originals are overwritten before private shader composition, and the
+composed image is overwritten after conversion into shared output. The scene
+still uses opaque layers; alpha modes and orthogonal transforms are qualified
+by the separate native-versus-reference tests. The harness retains its private
+PipeWire transport, hardware-encoder and transient-sandbox checks without
+enabling the production renderer or claiming delivered frame rate.
+
 Existing casting callers select `MappableLinear`; they do not opt into GPU
 layouts automatically. The generated-image harness joins a separate producer's
 source import, private staging, exported output reuse and hardware encoding for
