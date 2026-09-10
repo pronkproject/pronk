@@ -60,6 +60,16 @@ releases before sample disposal or while that sample is held fail the test.
 All four images must be rewritten, and every sequence must arrive once in order.
 The transport consumer requires DMA-BUF memory and never maps raw pixels.
 
+Each three-source operation reserves a `SourceUse<SyncFile>` submission permit
+before dispatch. The coordinator closes admission while the blocking source
+stage runs; that stage records the actual native read completion. The normal
+terminal result and its waited fence are checked before dispatching the separate
+output-copy stage or overwriting originals. Source and output operations live
+in a renderer helper separate from PipeWire publication scheduling.
+The one-record budget is per admitted operation, not a one-frame transport
+limit. No executor ioctl or kernel release message is exercised here; this
+connects the trusted accounting library to actual generated-source GPU work.
+
 Successful output reports publication count and per-slot uses. Thirty-fps
 timestamps are fixture configuration, not a measurement of delivered cadence.
 The default `raw` profile does not inspect pixel contents. Neither profile
