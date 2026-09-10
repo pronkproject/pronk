@@ -1,0 +1,28 @@
+[package]
+name = "pronk-gpu-media-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+native = ["pronk-gpu/vulkan"]
+
+[[bin]]
+name = "pronk-gpu-media-test"
+path = "src/main.rs"
+required-features = ["native"]
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+pronk = { path = "../../crates/pronk" }
+pronk-gpu = { path = "../../crates/pronk-gpu" }
+pronk-pipewire = { path = "../../crates/pronk-pipewire" }
+tokio.workspace = true
+
+[lints]
+workspace = true

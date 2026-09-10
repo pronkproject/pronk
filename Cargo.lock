@@ -1447,6 +1447,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pronk-gpu-media-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "gstreamer",
+ "gstreamer-app",
+ "pronk",
+ "pronk-gpu",
+ "pronk-pipewire",
+ "tokio",
+]
+
+[[package]]
 name = "pronk-media"
 version = "0.1.0"
 dependencies = [
