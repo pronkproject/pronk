@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "output": { "width": 2, "height": 3, "background": [3, 4, 5] },
+  "sources": [{
+    "width": 3, "height": 2, "format": "XB24", "offset": 0, "stride": 12,
+    "bytes": [
+      255, 0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0,
+      255, 255, 0, 0, 0, 255, 255, 0, 255, 0, 255, 0
+    ]
+  }],
+  "layers": [{
+    "source": 0, "crop_16_16": [0, 0, 196608, 131072], "position": [0, 0],
+    "pixel_blend": "none", "plane_alpha": 65535,
+    "rotation": 90, "reflect_x": true, "reflect_y": false
+  }]
+}
