@@ -134,4 +134,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scene_layers_have_distinct_colors_and_known_overlap() {
+        for sequence in 0..FRAMES {
+            let [base, overlay, cursor] = scene(sequence);
+            assert_eq!(base.visible(), visible(sequence));
+            assert_eq!(overlay.crop.image(), Extent::new(640, 480).unwrap());
+            assert_eq!(overlay.visible().destination(), [640, 320]);
+            assert_eq!(overlay.visible().extent(), Extent::new(640, 480).unwrap());
+            assert_eq!(cursor.crop.image(), Extent::new(128, 128).unwrap());
+            assert_eq!(
+                cursor.visible().destination(),
+                [608 + sequence % 3 * 64, 288]
+            );
+            assert_eq!(cursor.visible().extent(), Extent::new(128, 128).unwrap());
+            assert!(separated(base.color, overlay.color));
+            assert!(separated(base.color, cursor.color));
+            assert!(separated(overlay.color, cursor.color));
+            // The cursor intersects both the overlay and exposed base pixels.
+            let [x, y] = cursor.visible().destination();
+            assert!(x + 128 > 640 && x < 1280);
+            assert!(y < 320 && y + cursor.visible().extent().height() > 320);
+        }
+    }
 }
