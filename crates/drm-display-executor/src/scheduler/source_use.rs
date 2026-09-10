@@ -159,6 +159,14 @@ impl<F> Drop for SourceUse<F> {
 /// A single-use permit tied to its originating controller by shared ownership.
 /// Dropping it unresolved records terminal failure, never successful cancellation.
 ///
+/// ```compile_fail
+/// use drm_display_executor::scheduler::source_use::SourceUse;
+/// use std::num::NonZeroUsize;
+/// let owner = SourceUse::<u32>::new(NonZeroUsize::new(1).unwrap()).unwrap();
+/// let permit = owner.begin().unwrap();
+/// permit.submitted(7);
+/// permit.cancel_unsubmitted();
+/// ```
 #[must_use = "resolve the submission permit or deliberately abandon the source use"]
 pub struct Submission<F> {
     shared: Arc<Shared<F>>,
