@@ -1,3 +1,5 @@
+use super::submit::require_available;
+use pronk_dmabuf::Completion;
 use std::num::NonZeroU32;
 
 use super::*;

@@ -1,19 +1,16 @@
 //! A source-reading copy accepts only an independently available destination.
 
 use std::io;
-use std::os::fd::{AsFd, AsRawFd};
-use std::sync::Arc;
 
-use ash::vk;
 use drm_display_executor::scene::geometry::SourceRect;
-use pronk_dmabuf::{export_dependencies, import_completion, Access, Completion, SyncFile};
+use pronk_dmabuf::SyncFile;
 
-use super::image::ImageState;
-use super::submission::{require_success, Job};
 use super::{Image, SourceImage};
 
 mod geometry;
+mod submit;
 use geometry::Copy;
+use submit::copy_waited;
 
 impl SourceImage {
     /// Read this use into independently available private staging storage.
@@ -62,142 +59,64 @@ impl SourceImage {
     }
 
     fn copy_waited(self, destination: Image, copy: Copy) -> io::Result<(Image, SyncFile)> {
-        if !Arc::ptr_eq(&self.device, &destination.device) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "staging copy needs one Vulkan device",
-            ));
-        }
-        let output = destination.export()?;
-        let src = nix::sys::stat::fstat(self.fd.as_raw_fd())?;
-        let dst = nix::sys::stat::fstat(output.as_raw_fd())?;
-        if src.st_dev == dst.st_dev && src.st_ino == dst.st_ino {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "staging must not alias the source allocation",
-            ));
-        }
-        require_available(export_dependencies(output.as_fd(), Access::Write)?.completion()?)?;
-        require_success(
-            SyncFile::from_fd(self.producer.as_fd().try_clone_to_owned()?)?.wait_blocking()?,
-        )?;
-        require_success(export_dependencies(self.fd.as_fd(), Access::Read)?.wait_blocking()?)?;
-        let mut job = Job::new(Arc::clone(&self.device), (self, destination))?;
-        let (source, destination) = job.resources();
-        let command = job.command();
-        let range = destination.color_range();
-        let source_acquire = vk::ImageMemoryBarrier::default()
-            .image(source.raw)
-            .old_layout(vk::ImageLayout::GENERAL)
-            .new_layout(vk::ImageLayout::GENERAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
-            .dst_queue_family_index(job.device.queue_family)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .subresource_range(range);
-        let source_release = vk::ImageMemoryBarrier::default()
-            .image(source.raw)
-            .old_layout(vk::ImageLayout::GENERAL)
-            .new_layout(vk::ImageLayout::GENERAL)
-            .src_queue_family_index(job.device.queue_family)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
-            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .subresource_range(range);
-        let acquire = [
-            source_acquire,
-            destination.acquire_barrier(vk::AccessFlags::TRANSFER_WRITE),
-        ];
-        let release = [
-            source_release,
-            destination.release_barrier(vk::AccessFlags::TRANSFER_WRITE),
-        ];
-        // SAFETY: Valid imported source region, distinct owned destination and
-        // completed native dependencies. The job retains both allocations; the
-        // caller excludes external reuse throughout reading and foreign release.
-        unsafe {
-            job.device.raw.cmd_pipeline_barrier(
-                command,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &acquire,
-            );
-            if let Some(rgb) = copy.background {
-                let color = vk::ClearColorValue {
-                    float32: [
-                        f32::from(rgb[0]) / 255.0,
-                        f32::from(rgb[1]) / 255.0,
-                        f32::from(rgb[2]) / 255.0,
-                        1.0,
-                    ],
-                };
-                job.device.raw.cmd_clear_color_image(
-                    command,
-                    destination.raw,
-                    vk::ImageLayout::GENERAL,
-                    &color,
-                    &[range],
-                );
-                // Order the background write before the overlapping copy write.
-                let clear_done = vk::MemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
-                job.device.raw.cmd_pipeline_barrier(
-                    command,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[clear_done],
-                    &[],
-                    &[],
-                );
-            }
-            job.device.raw.cmd_copy_image(
-                command,
-                source.raw,
-                vk::ImageLayout::GENERAL,
-                destination.raw,
-                vk::ImageLayout::GENERAL,
-                &[copy.region],
-            );
-            job.device.raw.cmd_pipeline_barrier(
-                command,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &release,
-            );
-        }
-        job.submit()?;
-        let completion = job.export_completion()?;
-        if let Some(sync) = &completion {
-            import_completion(job.resources().0.fd.as_fd(), Access::Read, sync)?;
-            import_completion(output.as_fd(), Access::Write, sync)?;
-        }
-        let (source, mut destination) = job.finish()?;
-        drop(source);
-        let completion = match completion {
-            Some(sync) => sync,
-            None => export_dependencies(output.as_fd(), Access::Write)?,
-        };
-        require_success(
-            SyncFile::from_fd(completion.as_fd().try_clone_to_owned()?)?.wait_blocking()?,
-        )?;
-        destination.state = ImageState::Released;
-        Ok((destination, completion))
+        copy_waited(destination, vec![(self, copy.region)], copy.background)
     }
 }
 
-fn require_available(completion: Option<Completion>) -> io::Result<()> {
-    match completion {
-        Some(completion) => require_success(completion),
-        None => Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "private staging destination still has native users",
-        )),
+/// An owned source use and a requested opaque, integral plane placement.
+///
+/// Pixels must have opaque alpha and share the destination's encoded RGB
+/// domain. This is a copy profile, not alpha blending or color conversion.
+pub struct OpaqueLayer {
+    source: SourceImage,
+    crop: SourceRect,
+    placement: [i32; 2],
+}
+
+impl OpaqueLayer {
+    /// Retain a source and requested crop; composition validates their match
+    /// and visibility against the actual destination before any producer wait.
+    pub fn new(source: SourceImage, crop: SourceRect, placement: [i32; 2]) -> Self {
+        Self {
+            source,
+            crop,
+            placement,
+        }
+    }
+}
+
+impl Image {
+    /// Compose distinct imported allocations in bottom-to-top order.
+    ///
+    /// Private destination availability is checked before any producer wait.
+    /// Every source import is retained through native completion and destroyed
+    /// before successful return. One completion covers all source reads and the
+    /// private write, without including later output or encoder dependencies.
+    ///
+    /// The caller excludes external destination submissions and source reuse,
+    /// and retains source authority until completion. Run on a blocking worker.
+    /// Aliased allocations, mismatched devices, invalid crops and fully invisible
+    /// layers are rejected before producer waits. Omit invisible source uses;
+    /// an empty list initializes the background without reading any source.
+    pub fn compose_opaque_waited(
+        self,
+        layers: Vec<OpaqueLayer>,
+        background: [u8; 3],
+    ) -> io::Result<(Image, SyncFile)> {
+        let sources = layers
+            .into_iter()
+            .map(|layer| {
+                let copy = Copy::placed(
+                    layer.source.layout(),
+                    self.layout(),
+                    layer.crop,
+                    layer.placement,
+                    background,
+                )?;
+                Ok((layer.source, copy.region))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        copy_waited(self, sources, Some(background))
     }
 }
 

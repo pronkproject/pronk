@@ -1,3 +1,4 @@
+use pronk_dmabuf::Completion;
 use std::num::NonZeroU32;
 
 use drm_display_executor::{
