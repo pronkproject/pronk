@@ -108,3 +108,38 @@ remain unsupported there. See [native profile restrictions](gpu-media.md).
 Tests use literal non-square rotation patterns, all reflection/rotation
 combinations over small dimensions, unsigned coordinate limits and a clipped
 rotated crop surrounded by sentinel pixels. Output padding remains untouched.
+
+## Trusted source-use submission accounting
+
+`scheduler::source_use` coordinates one already-authorized source use across
+worker submission threads. `SourceUse::begin` reserves a single-use permit and
+record capacity before entering a native acceptance path. `close` permanently
+stops new admission, while permits issued earlier remain unresolved until they
+report materialized native completion or explicitly cancel unsubmitted work.
+The mutex orders admission, closure and accounting; native submission, fence
+waiting, transport and record destruction do not run under that mutex.
+
+`finish` returns only after admission is closed and every issued permit is
+resolved. A normal `ClosedUse::Released` supplies the complete reported record
+set without waiting for GPU completion. Dropping an unresolved permit instead
+makes failure sticky: `ClosedUse::Failed` supplies only known records and must
+never be sent as a complete normal release. Controller loss and abandoned
+native acceptance still require terminal protocol failure and best-effort
+cleanup; the gate does not recover unreported GPU work after a crash.
+
+The record budget includes both outstanding permits and retained records. It
+applies to one use, not the global capture, encoder or network queue depth.
+Canceling an unsubmitted permit returns its unused capacity; reported records
+remain until that use closes. Repeated output from a composed scene belongs to
+private-image storage rather than an indefinitely growing source use.
+
+The generic record type allows device-free protocol tests; a native adapter
+must supply actual submitted-work completion, never a future userspace response.
+The trusted worker must route every relevant submit through the gate and stop
+using cached imports after release. These types do not revoke DMA-BUF mappings,
+intercept native ioctls or establish capture authority. Transport identities and
+serialization of the terminal result remain the owner's responsibility.
+
+Tests cover closure/admission races, unresolved permits, per-use capacity,
+abandonment, independent controllers and record destruction outside the lock.
+A compile-fail example prevents resolving one permit twice.
