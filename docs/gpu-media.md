@@ -233,6 +233,49 @@ extent mismatches and distinct Vulkan devices. CPU mapping remains confined to
 the shared test oracle. Those tests use locally allocated images; they do not
 qualify foreign-source import or the complete capture/staging pipeline.
 
+## Imported sources and private-stage admission
+
+`Device::import_source` imports a fixed single-plane B8G8R8A8 transfer image
+using a source DMA-BUF and its separately retained producer sync file. Import
+is deliberately an unsafe Rust boundary: its caller must establish compatible
+same-physical-GPU allocation metadata, native layout/ownership release, and
+source-read authority. A valid descriptor and numeric bounds do not prove
+those cross-API facts. No native-driver access-control extension is required.
+
+The importer checks descriptor type, backing size, plane bounds and native
+format/modifier support before binding compatible imported memory. Linear rows
+are checked with overflow handling; tiled extents remain the native driver's
+responsibility. Vulkan receives a duplicate fd, whose ownership transfers only
+after successful memory allocation. The Rust source owner retains its own fd,
+producer fence, image, imported memory and device through native reading.
+
+`SourceImage` is distinct from writable `Image`: it has no clear operation or
+conversion into an output allocation. `copy_into_waited` consumes one source
+use and copies into a same-device, same-size private destination. It rejects
+aliased backing storage and queries destination completion without waiting.
+Pending destination work returns `WouldBlock` before source-producer waiting
+or reading. The caller still must exclude racing external access; a completed
+reservation snapshot does not provide exclusivity.
+
+After admission, the operation waits for the explicit producer and current
+native writer dependencies, preserving failed-completion status. Submitted
+completion covers only source reads and private-stage writes. Successful return
+destroys the source import and returns the staging image and checked completion;
+the higher layer remains responsible for the corresponding source-use release.
+Errors retain accepted native work through cleanup, not through a fabricated
+successful completion. Indeterminate native failures keep best-effort worker-loss
+semantics rather than claiming revocation of retained descriptors.
+
+The native tests use two Vulkan devices on the selected physical GPU, then
+overwrite the original source before copying private storage to output. They
+also test imported backing surviving producer-device destruction and alias
+rejection. The pending-destination predicate has a deterministic unit test;
+that is not a real unsignaled native-reader stall experiment. The import remains
+unqualified for arbitrary compositor formats, modifiers, GPUs or source policy.
+
+Native ownership follows the Vulkan [memory-fd import contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkImportMemoryFdInfoKHR.html)
+and [explicit modifier layout contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageDrmFormatModifierExplicitCreateInfoEXT.html).
+
 ## Current scope
 
 Existing casting callers select `MappableLinear`; they do not opt into GPU
