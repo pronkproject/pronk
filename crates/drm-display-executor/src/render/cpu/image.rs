@@ -110,6 +110,15 @@ impl<'a> Image<'a> {
 }
 
 /// Exclusive writable pixels, borrowed for the lifetime of the view.
+///
+/// ```compile_fail
+/// use drm_display_executor::render::cpu::image::ImageMut;
+/// fn conflicting_rows(image: &mut ImageMut<'_>) {
+///     let first = image.row(0).unwrap();
+///     let second = image.row(0).unwrap();
+///     first[0] = second[0];
+/// }
+/// ```
 pub struct ImageMut<'a> {
     bytes: &'a mut [u8],
     layout: LinearLayout,
