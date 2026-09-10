@@ -3,7 +3,11 @@ use drm_display_executor::{
         compose::{compose, Layer},
         image::{Image, ImageMut, LinearLayout},
     },
-    scene::{format::PackedRgbFormat as Format, geometry::Extent},
+    scene::{
+        blend::{Blend, PixelBlend},
+        format::PackedRgbFormat as Format,
+        geometry::Extent,
+    },
 };
 
 fn extent(width: u32, height: u32) -> Extent {
@@ -110,6 +114,79 @@ fn nonpremultiplied_out_of_range_sums_saturate_instead_of_wrapping() {
             Format::Argb8888
         ),
         [255; 4]
+    );
+}
+
+#[test]
+fn plane_blend_modes_match_normalized_equations() {
+    let modes = [
+        PixelBlend::None,
+        PixelBlend::Premultiplied,
+        PixelBlend::Coverage,
+    ];
+    for pixel in modes {
+        for plane_alpha in [0, 1, 257, 12345, 32768, 65534, 65535] {
+            for alpha in 0..=255 {
+                let bytes = [17, 91, 203, alpha];
+                for format in [Format::Argb8888, Format::Xrgb8888] {
+                    let layer =
+                        pixel_layer(&bytes, format).with_blend(Blend { pixel, plane_alpha });
+                    let result = render_pixel([71, 151, 239], &[layer], Format::Xrgb8888);
+                    let opacity = f64::from(plane_alpha) / 65535.0;
+                    let alpha = if format == Format::Xrgb8888 {
+                        1.0
+                    } else {
+                        f64::from(alpha) / 255.0
+                    };
+                    let mut expected = [0, 0, 0, 255];
+                    for (index, background) in [239, 151, 71].into_iter().enumerate() {
+                        let source = f64::from(bytes[index]) / 255.0;
+                        let background = f64::from(background) / 255.0;
+                        let value = match pixel {
+                            PixelBlend::None => opacity * source + (1.0 - opacity) * background,
+                            PixelBlend::Premultiplied => {
+                                opacity * source + (1.0 - opacity * alpha) * background
+                            }
+                            PixelBlend::Coverage => {
+                                opacity * alpha * source + (1.0 - opacity * alpha) * background
+                            }
+                        };
+                        let normalized = (value * 65535.0).round().clamp(0.0, 65535.0);
+                        expected[index] = (normalized / 257.0).round() as u8;
+                    }
+                    assert_eq!(
+                        result, expected,
+                        "{pixel:?} plane={plane_alpha} alpha={alpha} format={format:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pixel_interpretation_is_not_selected_by_format() {
+    let bytes = [0, 0, 128, 128];
+    let layer = pixel_layer(&bytes, Format::Argb8888);
+    let render = |pixel| {
+        render_pixel(
+            [0, 0, 255],
+            &[layer.with_blend(Blend {
+                pixel,
+                plane_alpha: u16::MAX,
+            })],
+            Format::Argb8888,
+        )
+    };
+    assert_eq!(render(PixelBlend::None), [0, 0, 128, 255]);
+    assert_eq!(render(PixelBlend::Premultiplied), [127, 0, 128, 255]);
+    assert_eq!(render(PixelBlend::Coverage), [127, 0, 64, 255]);
+    assert_eq!(
+        Blend::default(),
+        Blend {
+            pixel: PixelBlend::Premultiplied,
+            plane_alpha: u16::MAX
+        }
     );
 }
 
