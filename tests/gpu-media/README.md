@@ -12,7 +12,7 @@ sh tests/gpu-media/run-private.sh /dev/dri/renderD128 0100000000000009
 
 That tuple names the Lunar Lake development device, not a portable default.
 Requirements include the Rust toolchain, Vulkan shared-image support, PipeWire,
-`pw-link`, GStreamer with its PipeWire plugin, `timeout` and `rg`. Native
+`pw-link`, GStreamer with its PipeWire plugin, `timeout`, `jq` and `rg`. Native
 device access is required; do not build Cargo artifacts as root. The binary
 requires the `native` feature and is not built by ordinary workspace commands.
 
@@ -89,3 +89,45 @@ images and verifies every RGB pixel, in order, with a six-level channel
 tolerance for conversion and codec rounding. It also requires exactly twenty
 images and decoder end-of-stream. CPU readback belongs to this oracle, not to
 the capture-to-encoder path. Encoded access units are ordinary CPU-owned bytes.
+
+## Transient sandbox experiment
+
+Append `sandbox` to run the compiled fixture in a collected transient user
+service. Cargo and the private PipeWire server remain outside the sandbox:
+
+```sh
+LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
+    sh tests/gpu-media/run-private.sh /dev/dri/renderD128 \
+    0100000000000009 va-h264 sandbox
+```
+
+The service retains memory-execution restrictions, the system-service syscall
+filter, no-new-privileges and a private device namespace. It binds only the
+selected render node, with a narrow device allow rule, and the private fixture
+socket directory. The process has no effective capabilities, IPv4 or IPv6
+socket access, primary DRM nodes or user-home access. It uses private temporary
+storage for plugin and shader caches. Only explicitly supplied VA-driver
+environment overrides are forwarded; the host launcher's validation-layer
+environment is not forwarded by this wrapper.
+
+Before opening Vulkan, the fixture checks its effective process flags, memory
+execution policy, network denial and visible DRM nodes. The following control
+uses the same restrictions without binding or allowing the render node:
+
+```sh
+sh tests/gpu-media/run-private.sh /dev/dri/renderD128 \
+    0100000000000009 raw sandbox-denied
+```
+
+That control succeeds only when the restrictions hold and selected-device
+access is denied; it deliberately does not create a GPU or media graph. Both
+variants require a working user service manager and the relevant sandbox
+support. Unsupported restrictions are failures, not permission to run on the
+host instead. Unit runtime and stop limits bound foreign-library hangs.
+
+This is a deployment-feasibility experiment, not the installed backend. The
+fixture combines generated-image production and encoding in one non-networked
+process, uses the development socket policy, and has no capture/executor
+capabilities. It does not qualify the eventual process split, system-service
+identity, shader-based composition, device-reset recovery or receiver traffic.
+No installed service unit is edited or restarted.
