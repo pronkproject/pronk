@@ -91,6 +91,16 @@ connects the trusted accounting library to actual generated-source GPU work.
 
 Successful output reports publication count and per-slot uses. Thirty-fps
 timestamps are fixture configuration, not a measurement of delivered cadence.
+The renderer also reports nearest-rank p50/p95/max host durations over the
+successful frames. Generated-source submission includes fixture clears,
+producer waits and native read submission. Remaining-source wait starts only
+after accounting collection; it excludes the coordinator's intervening delay.
+Private composition includes background initialization and shader operations;
+shared-output copying includes any destination wait. Test-only source and
+composed-image overwrites have a separate total. Those intervals are not GPU
+timestamps, a full source-retention interval, or end-to-end presentation timing.
+The twenty-frame sample includes startup effects. Device, modifier, validation
+layers and media profile must be recorded before comparing runs.
 The default `raw` profile does not inspect pixel contents. Neither profile
 qualifies receiver behavior, an unsignaled native-reader stall, device loss,
 installed service permissions or production private-node policy. Frame metadata
