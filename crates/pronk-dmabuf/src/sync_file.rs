@@ -24,6 +24,14 @@ impl SyncFile {
         Ok(Self(fd))
     }
 
+    /// Query native completion without waiting or consuming the descriptor.
+    ///
+    /// `None` means submitted work is pending. Errors are not completion
+    /// evidence, and failed completion does not establish valid pixels.
+    pub fn completion(&self) -> io::Result<Option<Completion>> {
+        status(self.0.as_fd())
+    }
+
     /// Wait without blocking a Tokio worker. Errors are not successful pixels.
     ///
     /// Dropping the future closes its descriptor; it does not cancel native

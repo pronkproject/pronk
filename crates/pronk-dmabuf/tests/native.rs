@@ -34,6 +34,7 @@ async fn empty_reservation_roundtrip() {
     let buffer = unsafe { OwnedFd::from_raw_fd(raw) };
     for access in [Access::Read, Access::Write, Access::ReadWrite] {
         let fence = export_dependencies(buffer.as_fd(), access).unwrap();
+        assert_eq!(fence.completion().unwrap(), Some(Completion::Success));
         let flags = fcntl(fence.as_fd().as_raw_fd(), FcntlArg::F_GETFD).unwrap();
         assert!(FdFlag::from_bits_retain(flags).contains(FdFlag::FD_CLOEXEC));
         let invalid_buffer = std::fs::File::open("/dev/null").unwrap();
