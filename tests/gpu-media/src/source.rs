@@ -51,7 +51,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                         .map_err(Into::into)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let staging = device.allocate(nz(WIDTH), nz(HEIGHT), modifier)?;
+            let staging = render::PrivateStorage::allocate(&device)?;
             let incoming = pattern::scene(0)
                 .into_iter()
                 .map(|plane| {
@@ -168,12 +168,15 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 let input = incoming.take().context("producer image is in flight")?;
                 let worker = Arc::clone(&worker);
                 let scene = pattern::scene(published);
-                let source_use = SourceUse::new(NonZeroUsize::new(1).unwrap())?;
-                let submission = source_use.begin()?;
+                let source_use = SourceUse::new(NonZeroUsize::new(scene.len()).unwrap())?;
+                let submissions = (0..scene.len())
+                    .map(|_| source_use.begin())
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 let (submitted, ready) = tokio::sync::oneshot::channel();
                 let (resume, collect) = std::sync::mpsc::channel();
                 let read = tokio::task::spawn_blocking(move || {
-                    let stage = render::submit_sources(&worker, input, private, scene, submission)?;
+                    let stage =
+                        render::submit_sources(&worker, input, private, scene, submissions)?;
                     submitted
                         .send(())
                         .map_err(|_| anyhow::anyhow!("source coordinator closed"))?;
@@ -191,22 +194,24 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     anyhow::bail!("source submission accounting failed");
                 };
                 ensure!(
-                    records.len() == 1,
-                    "source use lacks its submitted native read completion"
+                    records.len() == scene.len(),
+                    "source use lacks a submitted native read completion"
                 );
                 resume
                     .send(())
                     .context("source worker closed before retirement")?;
-                let (input, copied) = read.await??;
-                ensure!(
-                    records[0].completion()? == Some(Completion::Success),
-                    "retired source read did not complete successfully"
-                );
+                let rendered = read.await??;
+                for record in records.iter().flatten() {
+                    ensure!(
+                        record.completion()? == Some(Completion::Success),
+                        "retired source read did not complete successfully"
+                    );
+                }
                 drop(records);
-                incoming = Some(input);
-                staging = Some(copied.source);
-                images[slot] = Some(copied.destination);
-                let pending = output.submitted(permit, copied.completion)?;
+                incoming = Some(rendered.originals);
+                staging = Some(rendered.private);
+                images[slot] = Some(rendered.output);
+                let pending = output.submitted(permit, rendered.completion)?;
                 let OutputReady::Publish(permit) = output.complete(pending.wait().await)? else {
                     anyhow::bail!("missing publish permit")
                 };
