@@ -56,6 +56,45 @@ must keep storage unavailable until native completion is established. None of
 these operations belongs on the PipeWire loop or makes returned-buffer events
 equivalent to native completion.
 
+## Destination pool ownership
+
+`pronk-gpu::output_pool::OutputPool` owns a bounded, distinct set of destination
+DMA-BUF descriptors. It has no dependency on PipeWire, capture grants, or KMS.
+Each slot follows the native and transport ownership sequence:
+
+```text
+prepare -> reader wait -> claim -> submit -> producer wait -> publish
+              ^                                                |
+              +---------------- transport return --------------+
+```
+
+`prepare_initial` establishes native completion before the first claim.
+`claim` issues a single-use write permit only for a writable slot. `submitted`
+imports the actual native write fence and returns an independent asynchronous
+wait. Successful completion yields a publication permit; `publish` transfers
+ownership before the caller attempts a transport handoff. Keep its publication
+handle even if the handoff acknowledgement is lost. Only an authoritative
+release or quiesced transport permits `returned`, which starts a native reader
+wait rather than immediately allowing another write.
+
+Waits carry pool identity, slot and use serial without borrowing the pool, so
+one retained or pending destination does not prevent another from progressing.
+Errors quarantine slots. Dropping handles or waits never recycles storage.
+Graphics command/image lifetime and shutdown remain executor responsibilities;
+closing an allocation descriptor or abandoning a wait is not GPU cancellation.
+
+The pool owns output storage only. Do not attach compositor-source leases to
+its pending waits. In the reference staged path, copy the compositor source
+into independent private storage before copying to an exported destination.
+If private storage is exhausted, capture demand remains source-unbound.
+Recipients and authorization scope must remain fixed for the pool's lifetime;
+new pool identities never justify cross-authorization backing-storage reuse.
+
+The pool API is implemented and tested independently; the application does not
+yet wire it to a graphics allocator, renderer, or PipeWire event adapter.
+That adapter must correlate release events to the exact active publication,
+not infer ownership from a reusable slot number alone.
+
 ## Current scope
 
 Existing application and live-test callers select `MappableLinear`; they do
@@ -74,3 +113,11 @@ Run `cargo test -p pronk-dmabuf` for synchronization unit tests. With access to
 `cargo test -p pronk-dmabuf --test native -- --ignored` for actual kernel
 export/import, close-on-exec, and completed-fence waits on an empty allocation.
 That opt-in test does not exercise unsignaled GPU work or hardware failures.
+
+Run `cargo test -p pronk-gpu` for destination ownership and compile-fail tests.
+`cargo test -p pronk-gpu --test native_pool -- --ignored` requires system-heap
+access and exercises actual fence ioctls over repeated pool cycles. It holds
+one destination across other slots' reuse and checks cancellation retention.
+Those tests use completed no-op fences, not real producer or consumer GPU jobs.
+Where elevated access is necessary, build as the normal user and run only the
+generated native test executable with sudo.
