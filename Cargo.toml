@@ -19,6 +19,7 @@ members = [
     "crates/pronkctl",
     "tests/backend-activation",
     "tests/castkms-live",
+    "tests/executor-replay",
     "tests/gpu-media",
 ]
 

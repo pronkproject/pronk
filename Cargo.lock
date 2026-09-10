@@ -397,6 +397,16 @@ name = "drm-display-executor"
 version = "0.1.0"
 
 [[package]]
+name = "drm-executor-replay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "drm-display-executor",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
