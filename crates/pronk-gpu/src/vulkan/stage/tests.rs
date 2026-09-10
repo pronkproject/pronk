@@ -101,3 +101,76 @@ fn source_copy_rejects_aliasing_its_destination() {
         matches!(source.copy_into_waited(image), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
     );
 }
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn submitted_stage_separates_accounting_from_private_pixel_access() {
+    use drm_display_executor::scene::geometry::{Extent, SourceRect};
+    use drm_display_executor::scheduler::source_use::{ClosedUse, SourceUse};
+    use std::num::NonZeroUsize;
+    use std::os::fd::AsFd;
+
+    let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
+    let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("select hex modifier");
+    let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16).unwrap();
+    let device = Device::open(node).unwrap();
+    let size = NonZeroU32::new(64).unwrap();
+    let extent = Extent::new(64, 64).unwrap();
+    let crop = SourceRect::new(extent, [0, 0], extent).unwrap();
+    let (source, producer) = device
+        .allocate(size, size, modifier)
+        .unwrap()
+        .clear_waited([17, 85, 204])
+        .unwrap();
+    // SAFETY: Exact same-device layout and completed foreign release. The
+    // original is retained without another writer until native reads finish.
+    let imported =
+        unsafe { device.import_source(source.export().unwrap(), source.layout(), producer) }
+            .unwrap();
+    let owner = SourceUse::new(NonZeroUsize::new(1).unwrap()).unwrap();
+    let permit = owner.begin().unwrap();
+    owner.close();
+    let pending = device
+        .allocate(size, size, modifier)
+        .unwrap()
+        .submit_opaque(vec![OpaqueLayer::new(imported, crop, [0, 0])], [0; 3])
+        .unwrap();
+    permit.submitted(
+        SyncFile::from_fd(pending.completion().as_fd().try_clone_to_owned().unwrap()).unwrap(),
+    );
+    let ClosedUse::Released(records) = owner.finish().unwrap() else {
+        panic!("submitted stage did not close normally")
+    };
+    assert_eq!(records.len(), 1);
+    // Completion may already have signaled on a fast GPU. Accounting does not
+    // require either outcome and does not extract the pending private image.
+    let (private, completed) = pending.wait().unwrap();
+    assert_eq!(completed.completion().unwrap(), Some(Completion::Success));
+    assert_eq!(records[0].completion().unwrap(), Some(Completion::Success));
+    let _source = source.clear_waited([255; 3]).unwrap().0;
+    let (_, pixels) = readback(private);
+    assert!(pixels
+        .chunks_exact(4)
+        .all(|pixel| pixel == [204, 85, 17, 255]));
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn dropping_pending_private_composition_retires_its_record() {
+    use std::os::fd::AsFd;
+
+    let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
+    let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("select hex modifier");
+    let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16).unwrap();
+    let device = Device::open(node).unwrap();
+    let size = NonZeroU32::new(64).unwrap();
+    let pending = device
+        .allocate(size, size, modifier)
+        .unwrap()
+        .submit_opaque(Vec::new(), [17, 85, 204])
+        .unwrap();
+    let completion =
+        SyncFile::from_fd(pending.completion().as_fd().try_clone_to_owned().unwrap()).unwrap();
+    drop(pending);
+    assert_eq!(completion.completion().unwrap(), Some(Completion::Success));
+}
