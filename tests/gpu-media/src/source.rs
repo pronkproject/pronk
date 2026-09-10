@@ -16,8 +16,8 @@ use pronk_pipewire::{
 
 use crate::consumer::{self, Consumer, Event, Mode};
 use crate::encoded::Encoded;
+use crate::pattern::{color, FRAMES};
 
-const FRAMES: u32 = 20;
 const SLOTS: usize = 4;
 
 pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Result<()> {
@@ -150,11 +150,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 let slot = id.get() as usize - 1;
                 let permit = output.claim(id)?;
                 let image = images[slot].take().context("missing writable image")?;
-                let rgb = match published % 3 {
-                    0 => [255, 0, 0],
-                    1 => [0, 255, 0],
-                    _ => [0, 0, 255],
-                };
+                let rgb = color(published);
                 let private = staging
                     .take()
                     .context("private staging image is in flight")?;

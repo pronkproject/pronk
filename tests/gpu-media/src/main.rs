@@ -3,6 +3,7 @@
 mod consumer;
 mod decode;
 mod encoded;
+mod pattern;
 mod sandbox;
 mod source;
 

@@ -7,6 +7,8 @@ use anyhow::{ensure, Context, Result};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_video::{self as video, prelude::*};
 
+use crate::pattern::{color, FRAMES, TOLERANCE};
+
 struct Pipeline(gst::Pipeline);
 
 impl Drop for Pipeline {
@@ -16,6 +18,10 @@ impl Drop for Pipeline {
 }
 
 pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
+    ensure!(
+        frames.len() == FRAMES as usize,
+        "unexpected fixture frame count"
+    );
     let pipeline = Pipeline(gst::parse::launch(
         "appsrc name=source format=time ! h264parse ! vah264dec name=decoder ! vapostproc name=convert ! video/x-raw,format=BGRA ! appsink name=sink sync=false enable-last-sample=false",
     )?.downcast::<gst::Pipeline>().map_err(|_| anyhow::anyhow!("decode pipeline"))?);
@@ -78,8 +84,8 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
         )?;
         let stride = usize::try_from(frame.plane_stride()[0])?;
         let pixels = frame.plane_data(0)?;
-        let mut expected = [0u8; 3];
-        expected[2 - index % 3] = 255;
+        let [r, g, b] = color(index as u32);
+        let expected = [b, g, r];
         for y in 0..1080 {
             let row = pixels
                 .get(y * stride..y * stride + 1920 * 4)
@@ -89,7 +95,7 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
                     pixel[..3]
                         .iter()
                         .zip(expected)
-                        .all(|(actual, expected)| actual.abs_diff(expected) <= 6),
+                        .all(|(actual, expected)| actual.abs_diff(expected) <= TOLERANCE),
                     "decoded frame {index} has incorrect pixels"
                 );
             }
