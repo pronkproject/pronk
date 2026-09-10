@@ -6,6 +6,10 @@ not open DRM nodes, import DMA-BUFs, own capture grants or publish PipeWire
 frames. Native storage and completion remain in `pronk-gpu`; application
 supervision and capability routing remain outside the rendering model.
 
+The [offline replay tool](../tests/executor-replay/README.md) turns saved test
+scenes into inspectable PPM images without a display or GPU. Its JSON adapter
+is separate from both this dependency-free model and the executor protocol.
+
 ## Initial geometry profile
 
 `scene::geometry` describes integral, unscaled, unrotated pixel placement.
