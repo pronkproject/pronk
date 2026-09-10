@@ -31,8 +31,13 @@ video ports concurrently with GStreamer startup, which may wait for the link.
 No installed WirePlumber policy, service unit or casting session is changed.
 This fixture does not qualify the production classified connection policy.
 
-Four persistent, single-plane 1920x1080 modifier images are rewritten with
-changing colors and published twenty times. Native rendering and allocation
+One private, single-plane 1920x1080 modifier image is cleared with changing
+colors and copied into four persistent output images for twenty publications.
+Only the four output allocations are registered with PipeWire. The private
+image returns after native copy completion and is reused for the next frame;
+destination waits never retain a compositor-source lease. The fixture has no
+compositor source and does not yet exercise source-to-private-image copying.
+Native rendering and allocation
 run on blocking workers, not on the PipeWire loop. Returned buffers pass through
 the real source actor, publication correlation and native reuse checks before
 another write. The first received sample is retained through six arrivals;
