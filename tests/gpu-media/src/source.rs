@@ -27,19 +27,22 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
     let render_node = node.to_owned();
     let node = node.to_owned();
     // Allocation and native initialization run outside the runtime and PW loop.
-    let mut images = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (mut images, staging) = tokio::task::spawn_blocking(move || -> Result<_> {
         let device = Device::open(node)?;
         eprintln!("GPU: {}", device.name());
-        (0..SLOTS)
+        let images = (0..SLOTS)
             .map(|_| {
                 device
                     .allocate(nz(1920), nz(1080), modifier)
                     .map(Some)
                     .map_err(Into::into)
             })
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        let staging = device.allocate(nz(1920), nz(1080), modifier)?;
+        Ok((images, staging))
     })
     .await??;
+    let mut staging = Some(staging);
     let mut exports = Vec::new();
     let mut buffers = Vec::new();
     let ids: Vec<_> = (1..=SLOTS as u32).map(nz).collect();
@@ -140,10 +143,17 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     1 => [0, 255, 0],
                     _ => [0, 0, 255],
                 };
-                let (image, fence) =
-                    tokio::task::spawn_blocking(move || image.clear_waited(rgb)).await??;
-                images[slot] = Some(image);
-                let pending = output.submitted(permit, fence)?;
+                let private = staging
+                    .take()
+                    .context("private staging image is in flight")?;
+                let copied = tokio::task::spawn_blocking(move || -> Result<_> {
+                    let private = private.clear_waited(rgb)?.0;
+                    Ok(image.copy_from_waited(private)?)
+                })
+                .await??;
+                staging = Some(copied.source);
+                images[slot] = Some(copied.destination);
+                let pending = output.submitted(permit, copied.completion)?;
                 let OutputReady::Publish(permit) = output.complete(pending.wait().await)? else {
                     anyhow::bail!("missing publish permit")
                 };
