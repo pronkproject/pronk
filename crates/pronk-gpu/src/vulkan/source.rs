@@ -15,6 +15,13 @@ use super::{Device, ImageLayout};
 ///
 /// This type has no clear, output-publication or writable-image conversion API.
 /// It does not represent a capture grant or revoke other copies of the source fd.
+///
+/// ```compile_fail
+/// use pronk_gpu::vulkan::SourceImage;
+/// fn overwrite(source: SourceImage) {
+///     source.clear_waited([0, 0, 0]);
+/// }
+/// ```
 pub struct SourceImage {
     pub(super) device: Arc<DeviceInner>,
     pub(super) raw: vk::Image,
@@ -208,5 +215,44 @@ impl Drop for SourceImage {
             self.device.raw.destroy_image(self.raw, None);
             self.device.raw.free_memory(self.memory, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::num::NonZeroU32;
+
+    #[test]
+    fn backing_may_include_native_allocation_rounding() {
+        assert!(validate_backing(4096, 4096).is_ok());
+        assert!(validate_backing(4096, 8192).is_ok());
+        assert!(validate_backing(4096, 4095).is_err());
+        assert!(validate_backing(4096, -1).is_err());
+    }
+
+    #[test]
+    fn source_layout_bounds_do_not_invent_tiled_extents() {
+        let mut layout = ImageLayout {
+            width: NonZeroU32::new(16).unwrap(),
+            height: NonZeroU32::new(8).unwrap(),
+            modifier: 0,
+            offset: 0,
+            pitch: 64,
+            allocation_size: 512,
+        };
+        assert!(validate_layout(layout).is_ok());
+        layout.allocation_size = 511;
+        assert!(validate_layout(layout).is_err());
+        layout.modifier = 0x0100_0000_0000_0009;
+        assert!(validate_layout(layout).is_ok());
+        layout.offset = 511;
+        assert!(validate_layout(layout).is_err());
+        layout.offset = 0;
+        layout.pitch = 0;
+        assert!(validate_layout(layout).is_err());
+        layout.modifier = 0;
+        layout.pitch = u64::MAX;
+        assert!(validate_layout(layout).is_err());
     }
 }
