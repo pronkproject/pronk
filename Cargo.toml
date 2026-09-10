@@ -9,6 +9,7 @@ members = [
     "crates/pronk-chromiacast",
     "crates/pronk-core",
     "crates/pronk-dbus",
+    "crates/pronk-dmabuf",
     "crates/pronk-media",
     "crates/pronk-pipewire",
     "crates/pronk-systemd",

@@ -1,0 +1,183 @@
+use std::io;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+
+use tokio::io::unix::AsyncFd;
+
+/// Completion of submitted work, separately from the validity of its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completion {
+    Success,
+    /// The native work ended with a negative Linux error code.
+    Failed(i32),
+}
+
+/// An owned descriptor validated as a Linux sync file.
+///
+/// Callers must supply completion for submitted work, not a promise to submit
+/// later. Descriptor validation establishes its type, not submission policy.
+#[derive(Debug)]
+pub struct SyncFile(OwnedFd);
+
+impl SyncFile {
+    pub fn from_fd(fd: OwnedFd) -> io::Result<Self> {
+        status(fd.as_fd())?;
+        Ok(Self(fd))
+    }
+
+    /// Wait without blocking a Tokio worker. Errors are not successful pixels.
+    ///
+    /// Dropping the future closes its descriptor; it does not cancel native
+    /// work or authorize reuse of storage still accessed by that work.
+    pub async fn wait(self) -> io::Result<Completion> {
+        wait_with_status(self.0, status).await
+    }
+
+    pub fn into_fd(self) -> OwnedFd {
+        self.0
+    }
+}
+
+impl AsFd for SyncFile {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct FileInfo {
+    name: [u8; 32],
+    status: i32,
+    flags: u32,
+    num_fences: u32,
+    pad: u32,
+    sync_fence_info: u64,
+}
+
+nix::ioctl_readwrite!(file_info, b'>', 4, FileInfo);
+
+fn status(fd: BorrowedFd<'_>) -> io::Result<Option<Completion>> {
+    let mut info = FileInfo::default();
+    // SAFETY: The writable UAPI structure lives through the ioctl. A zero
+    // fence count requests aggregate status without a userspace array.
+    unsafe { file_info(fd.as_raw_fd(), &mut info) }?;
+    decode_status(info.status)
+}
+
+fn decode_status(status: i32) -> io::Result<Option<Completion>> {
+    match status {
+        0 => Ok(None),
+        1 => Ok(Some(Completion::Success)),
+        error if error < 0 => Ok(Some(Completion::Failed(error))),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid sync-file status",
+        )),
+    }
+}
+
+async fn wait_with_status(
+    fd: OwnedFd,
+    mut query: impl FnMut(BorrowedFd<'_>) -> io::Result<Option<Completion>>,
+) -> io::Result<Completion> {
+    let fd = AsyncFd::new(fd)?;
+    loop {
+        if let Some(completion) = query(fd.get_ref().as_fd())? {
+            return Ok(completion);
+        }
+        let mut readiness = fd.readable().await?;
+        if let Some(completion) = query(fd.get_ref().as_fd())? {
+            return Ok(completion);
+        }
+        readiness.clear_ready();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn uapi_layout() {
+        assert_eq!(std::mem::size_of::<FileInfo>(), 56);
+        assert_eq!(std::mem::offset_of!(FileInfo, sync_fence_info), 48);
+    }
+
+    #[test]
+    fn completion_is_not_pixel_success() {
+        assert_eq!(decode_status(0).unwrap(), None);
+        assert_eq!(decode_status(1).unwrap(), Some(Completion::Success));
+        assert_eq!(decode_status(-5).unwrap(), Some(Completion::Failed(-5)));
+        assert!(decode_status(2).is_err());
+    }
+
+    #[test]
+    fn readable_socket_is_not_a_sync_file() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(&[1]).unwrap();
+        assert!(SyncFile::from_fd(reader.into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_rechecks_native_status_after_readiness() {
+        for completion in [Completion::Success, Completion::Failed(-5)] {
+            let (reader, mut writer) = UnixStream::pair().unwrap();
+            reader.set_nonblocking(true).unwrap();
+            writer.write_all(&[1]).unwrap();
+            let mut calls = 0;
+            let result = wait_with_status(reader.into(), |_| {
+                calls += 1;
+                Ok((calls > 1).then_some(completion))
+            })
+            .await
+            .unwrap();
+            assert_eq!(result, completion);
+            assert_eq!(calls, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn query_failure_is_not_completion() {
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let error = wait_with_status(reader.into(), |_| Err(io::Error::from_raw_os_error(5)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(5));
+    }
+
+    #[tokio::test]
+    async fn already_completed_fence_does_not_need_readiness() {
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let completion = wait_with_status(reader.into(), |_| Ok(Some(Completion::Failed(-5))))
+            .await
+            .unwrap();
+        assert_eq!(completion, Completion::Failed(-5));
+    }
+
+    #[tokio::test]
+    async fn pending_wait_yields_and_releases_its_descriptor_on_drop() {
+        use std::future::{poll_fn, Future};
+        use std::io::Read;
+        use std::task::Poll;
+
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let mut wait = Box::pin(wait_with_status(reader.into(), |_| Ok(None)));
+        poll_fn(|cx| {
+            assert!(wait.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            writer.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(wait);
+        assert_eq!(writer.read(&mut [0]).unwrap(), 0);
+    }
+}
