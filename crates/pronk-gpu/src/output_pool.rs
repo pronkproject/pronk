@@ -321,3 +321,6 @@ impl OutputPool {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
+
+#[cfg(test)]
+mod tests;
