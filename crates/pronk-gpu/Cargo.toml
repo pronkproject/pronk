@@ -10,5 +10,8 @@ publish = false
 nix.workspace = true
 pronk-dmabuf = { path = "../pronk-dmabuf" }
 
+[dev-dependencies]
+tokio.workspace = true
+
 [lints]
 workspace = true
