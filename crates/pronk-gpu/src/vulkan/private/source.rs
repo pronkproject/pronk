@@ -11,6 +11,9 @@ use super::PrivateImage;
 use crate::vulkan::submission::{require_success, Job};
 use crate::vulkan::SourceImage;
 
+mod pending;
+pub use pending::PendingPrivateRead;
+
 impl SourceImage {
     /// Read the entire source into same-sized, non-exportable private storage.
     ///
@@ -25,6 +28,16 @@ impl SourceImage {
     /// Errors return neither image for reuse. Run on a blocking graphics worker.
     /// This waited API does not expose an early source-accounting record.
     pub fn copy_into_private_waited(self, destination: PrivateImage) -> io::Result<PrivateImage> {
+        self.submit_private_copy(destination)?.wait()
+    }
+
+    /// Submit a source read into non-exportable private storage.
+    ///
+    /// Validation and producer waits follow [`Self::copy_into_private_waited`].
+    /// Return exposes a native completion record without waiting for the copy.
+    /// The pending owner retains both images until native retirement; it must
+    /// remain on a blocking graphics worker because drop may wait for GPU work.
+    pub fn submit_private_copy(self, destination: PrivateImage) -> io::Result<PendingPrivateRead> {
         if !Arc::ptr_eq(&self.device, &destination.device)
             || (self.layout().width, self.layout().height) != destination.extent()
         {
@@ -110,12 +123,6 @@ impl SourceImage {
         if let Some(sync) = &completion {
             import_completion(job.resources().0.fd.as_fd(), Access::Read, sync)?;
         }
-        let (source, mut destination) = job.finish()?;
-        if let Some(sync) = completion {
-            require_success(sync.wait_blocking()?)?;
-        }
-        drop(source);
-        destination.initialized = true;
-        Ok(destination)
+        Ok(PendingPrivateRead::new(job, completion))
     }
 }
