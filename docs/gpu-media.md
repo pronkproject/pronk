@@ -130,6 +130,12 @@ DRM properties, rather than selecting the first enumerated GPU. Vulkan opens
 its own native descriptors; selecting a node does not make the driver adopt a
 brokered fd or establish that it will run inside an installed service sandbox.
 
+`Device::identity` returns Vulkan physical-device and driver UUIDs for
+compatibility checks between separate instances. Equality does not qualify a
+format, modifier or external-memory handle, and these values are not a stable
+product-level device identifier. Native device tests compare nonzero identities
+across repeated opens of the selected node.
+
 The backend requires Vulkan 1.1, external DMA-BUF memory, DRM modifiers with
 their image-format-list dependency, foreign ownership, and importable/exportable
 binary sync files. Each allocation additionally checks the selected modifier's
