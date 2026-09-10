@@ -9,15 +9,15 @@ use ash::vk;
 use pronk_dmabuf::{export_dependencies, import_completion, Access, Completion, SyncFile};
 
 use super::geometry::Transfer;
-use crate::vulkan::image::ImageState;
+use super::PendingStage;
 use crate::vulkan::submission::{require_success, Job};
 use crate::vulkan::{Image, SourceImage};
 
-pub(super) fn copy_waited(
+pub(super) fn submit(
     destination: Image,
     sources: Vec<(SourceImage, Transfer)>,
     background: Option<[u8; 3]>,
-) -> io::Result<(Image, SyncFile)> {
+) -> io::Result<PendingStage> {
     let output = destination.export()?;
     let dst = nix::sys::stat::fstat(output.as_raw_fd())?;
     let mut allocations = HashSet::new();
@@ -154,15 +154,11 @@ pub(super) fn copy_waited(
         }
         import_completion(output.as_fd(), Access::Write, sync)?;
     }
-    let (sources, mut destination) = job.finish()?;
-    drop(sources);
     let completion = match completion {
         Some(sync) => sync,
         None => export_dependencies(output.as_fd(), Access::Write)?,
     };
-    require_success(SyncFile::from_fd(completion.as_fd().try_clone_to_owned()?)?.wait_blocking()?)?;
-    destination.state = ImageState::Released;
-    Ok((destination, completion))
+    Ok(PendingStage::new(job, completion))
 }
 
 pub(super) fn require_available(completion: Option<Completion>) -> io::Result<()> {

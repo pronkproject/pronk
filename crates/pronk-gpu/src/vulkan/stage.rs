@@ -9,9 +9,11 @@ use pronk_dmabuf::SyncFile;
 use super::{Image, SourceImage};
 
 mod geometry;
+mod pending;
 mod submit;
 use geometry::{Copy, Transfer};
-use submit::copy_waited;
+pub use pending::PendingStage;
+use submit::submit;
 
 impl SourceImage {
     /// Read this use into independently available private staging storage.
@@ -60,11 +62,12 @@ impl SourceImage {
     }
 
     fn copy_waited(self, destination: Image, copy: Copy) -> io::Result<(Image, SyncFile)> {
-        copy_waited(
+        submit(
             destination,
             vec![(self, Transfer::Copy(copy.region))],
             copy.background,
-        )
+        )?
+        .wait()
     }
 }
 
@@ -117,6 +120,21 @@ impl Image {
         layers: Vec<OpaqueLayer>,
         background: [u8; 3],
     ) -> io::Result<(Image, SyncFile)> {
+        self.submit_opaque(layers, background)?.wait()
+    }
+
+    /// Submit private composition and return its native completion record.
+    ///
+    /// Validation and producer waits use the same blocking-worker contract as
+    /// [`Self::compose_opaque_waited`]. Return does not wait for the submitted
+    /// composition to finish. The returned owner retains all source imports
+    /// and private storage, exposing pixels only after successful native wait.
+    /// Its record covers accepted source reads, not later output operations.
+    pub fn submit_opaque(
+        self,
+        layers: Vec<OpaqueLayer>,
+        background: [u8; 3],
+    ) -> io::Result<PendingStage> {
         let sources = layers
             .into_iter()
             .map(|layer| {
@@ -130,7 +148,7 @@ impl Image {
                 Ok((layer.source, transfer))
             })
             .collect::<io::Result<Vec<_>>>()?;
-        copy_waited(self, sources, Some(background))
+        submit(self, sources, Some(background))
     }
 }
 

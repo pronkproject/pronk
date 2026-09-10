@@ -15,4 +15,4 @@ pub use copy::CopiedImages;
 pub use device::{Device, DeviceIdentity};
 pub use image::{Image, ImageLayout};
 pub use source::SourceImage;
-pub use stage::OpaqueLayer;
+pub use stage::{OpaqueLayer, PendingStage};
