@@ -3,6 +3,7 @@ use crate::vulkan::{test_support::readback, Device};
 use pronk_dmabuf::Completion;
 
 mod blend;
+mod gamma;
 mod geometry;
 mod pending;
 mod program;
