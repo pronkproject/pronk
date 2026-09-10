@@ -34,9 +34,9 @@ pub use remote_provider::{
 };
 pub use types::{
     ConfigurationError, PipeWireBufferTransport, PipeWireRemote, VideoBuffer, VideoBufferLayout,
-    VideoDamage, VideoFrame, VideoNodeIdentity, VideoSourceConfig, VideoSourceEvent,
-    VideoSourceRuntimeError, VideoSyncTimelines, MAX_FRAME_DIMENSION, MAX_IDENTITY_STRING_BYTES,
-    MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
+    VideoBufferStorage, VideoDamage, VideoFrame, VideoNodeIdentity, VideoSourceConfig,
+    VideoSourceEvent, VideoSourceRuntimeError, VideoSyncTimelines, MAX_FRAME_DIMENSION,
+    MAX_IDENTITY_STRING_BYTES, MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
 };
 pub use video_source_actor::{
     VideoSourceActor, VideoSourceActorError, VideoSourceActorEvent, VideoSourceActorRuntimeError,

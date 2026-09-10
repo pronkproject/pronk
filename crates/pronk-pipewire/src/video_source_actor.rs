@@ -1383,7 +1383,7 @@ mod tests {
                 height: nonzero32(480),
                 pitch: nonzero32(2560),
                 size: nonzero64(1_228_800),
-                modifier: 0,
+                storage: crate::VideoBufferStorage::MappableLinear,
             },
             timelines: Some(VideoSyncTimelines {
                 ready: File::open("/dev/null").unwrap().into(),

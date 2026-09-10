@@ -705,7 +705,7 @@ fn format_parameter(
     refresh_hz: NonZeroU32,
     layout: crate::VideoBufferLayout,
 ) -> Result<Vec<u8>, VideoSourceRuntimeError> {
-    if layout.modifier != 0 {
+    if layout.storage != crate::VideoBufferStorage::MappableLinear {
         return Err(VideoSourceRuntimeError::UnsupportedFormat);
     }
     // This producer allocates linear, CPU-mappable DMA-BUFs. Omitting the DRM
@@ -1255,7 +1255,7 @@ mod tests {
             height: NonZeroU32::new(1080).unwrap(),
             pitch: NonZeroU32::new(7680).unwrap(),
             size: NonZeroU64::new(8_294_400).unwrap(),
-            modifier: 0,
+            storage: crate::VideoBufferStorage::MappableLinear,
         };
         let bytes = format_parameter(NonZeroU32::new(60).unwrap(), layout).unwrap();
         let pod = Pod::from_bytes(&bytes).unwrap();
@@ -1268,7 +1268,10 @@ mod tests {
         assert!(!info.flags().contains(VideoFlags::MODIFIER));
 
         let non_linear = crate::VideoBufferLayout {
-            modifier: 1,
+            storage: crate::VideoBufferStorage::DrmModifier {
+                modifier: 1,
+                offset: 0,
+            },
             ..layout
         };
         assert!(matches!(
@@ -1289,7 +1292,7 @@ mod tests {
             height: NonZeroU32::new(1080).unwrap(),
             pitch: NonZeroU32::new(7680).unwrap(),
             size: NonZeroU64::new(8_294_400).unwrap(),
-            modifier: 0,
+            storage: crate::VideoBufferStorage::MappableLinear,
         };
         let bytes = format_parameter(NonZeroU32::new(60).unwrap(), layout).unwrap();
         let pod = Pod::from_bytes(&bytes).unwrap();

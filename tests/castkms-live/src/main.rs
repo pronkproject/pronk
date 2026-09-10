@@ -1157,6 +1157,10 @@ fn start_pipewire_gate_generation(
         let timelines = exported
             .timelines
             .context("explicit PipeWire export has no sync timelines")?;
+        ensure!(
+            exported.layout.modifier == 0,
+            "CPU capture requires linear storage"
+        );
         video_buffers.push(VideoBuffer {
             id: exported.buffer_id,
             dma_buf: exported.dma_buf,
@@ -1165,7 +1169,7 @@ fn start_pipewire_gate_generation(
                 height: exported.layout.height,
                 pitch: exported.layout.pitch,
                 size: exported.layout.size,
-                modifier: exported.layout.modifier,
+                storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
             },
             timelines: Some(VideoSyncTimelines {
                 ready: timelines.ready,

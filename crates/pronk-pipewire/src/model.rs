@@ -183,7 +183,7 @@ mod tests {
             height: nonzero32(1080),
             pitch: nonzero32(7680),
             size: nonzero64(8_294_400),
-            modifier: 0,
+            storage: crate::VideoBufferStorage::MappableLinear,
         }
     }
 

@@ -97,7 +97,7 @@ fn video_buffer(id: u32) -> anyhow::Result<VideoBuffer> {
             height: nonzero32(180),
             pitch: nonzero32(1_280),
             size: nonzero64(230_400),
-            modifier: 0,
+            storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
         },
         timelines: None,
     })

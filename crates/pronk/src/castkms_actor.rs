@@ -1277,6 +1277,12 @@ fn export_video_buffers(
                     "explicit buffer has no sync timelines",
                 )
             })?;
+            if exported.layout.modifier != 0 {
+                return Err(KernelDisplayError::new(
+                    "export CastKMS capture buffer",
+                    "CPU capture requires linear storage",
+                ));
+            }
             Ok(VideoBuffer {
                 id: exported.buffer_id,
                 dma_buf: exported.dma_buf,
@@ -1285,7 +1291,7 @@ fn export_video_buffers(
                     height: exported.layout.height,
                     pitch: exported.layout.pitch,
                     size: exported.layout.size,
-                    modifier: exported.layout.modifier,
+                    storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
                 },
                 timelines: Some(VideoSyncTimelines {
                     ready: timelines.ready,

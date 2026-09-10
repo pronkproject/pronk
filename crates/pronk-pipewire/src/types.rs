@@ -9,12 +9,35 @@ pub const MAX_FRAME_DIMENSION: u32 = 8192;
 pub const MAX_IDENTITY_STRING_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoBufferStorage {
+    /// Linear XRGB8888 storage suitable for the existing CPU-copy consumer.
+    MappableLinear,
+    /// Single-plane XRGB8888 storage described by the allocating graphics API.
+    ///
+    /// Even modifier zero is explicit here. The transport does not promise CPU
+    /// mapping or derive a tiled allocation's extent from pitch and height.
+    /// The caller must obtain a valid single-memory-plane layout from its
+    /// graphics API; modifiers requiring auxiliary planes are not supported.
+    DrmModifier { modifier: u64, offset: u32 },
+}
+
+impl VideoBufferStorage {
+    pub(crate) fn offset(self) -> u32 {
+        match self {
+            Self::MappableLinear => 0,
+            Self::DrmModifier { offset, .. } => offset,
+        }
+    }
+}
+
+/// A caller-validated XRGB8888 allocation; `size` includes any plane offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoBufferLayout {
     pub width: NonZeroU32,
     pub height: NonZeroU32,
     pub pitch: NonZeroU32,
     pub size: NonZeroU64,
-    pub modifier: u64,
+    pub storage: VideoBufferStorage,
 }
 
 #[derive(Debug)]
@@ -101,15 +124,34 @@ fn validate_layout(layout: VideoBufferLayout) -> Result<(), ConfigurationError> 
     if width > MAX_FRAME_DIMENSION || height > MAX_FRAME_DIMENSION {
         return Err(ConfigurationError::FrameDimensions { width, height });
     }
-    if layout.modifier != 0 {
-        return Err(ConfigurationError::NonlinearModifier(layout.modifier));
-    }
-    if layout.pitch.get() < width.saturating_mul(4) || layout.pitch.get() > i32::MAX as u32 {
+    if layout.pitch.get() > i32::MAX as u32 {
         return Err(ConfigurationError::InvalidPitch(layout.pitch.get()));
     }
-    let minimum_size = u64::from(layout.pitch.get()) * u64::from(height);
-    if layout.size.get() < minimum_size || layout.size.get() > i32::MAX as u64 {
+    if layout.size.get() > i32::MAX as u64 {
         return Err(ConfigurationError::InvalidSize(layout.size.get()));
+    }
+    let offset = u64::from(layout.storage.offset());
+    if offset >= layout.size.get() {
+        return Err(ConfigurationError::InvalidOffset(layout.storage.offset()));
+    }
+    let linear = match layout.storage {
+        VideoBufferStorage::MappableLinear => true,
+        VideoBufferStorage::DrmModifier { modifier, .. } => {
+            // DRM_FORMAT_MOD_INVALID is a negotiation sentinel, not an image layout.
+            if modifier == 0x00ff_ffff_ffff_ffff {
+                return Err(ConfigurationError::InvalidModifier(modifier));
+            }
+            modifier == 0
+        }
+    };
+    if linear {
+        if layout.pitch.get() < width * 4 {
+            return Err(ConfigurationError::InvalidPitch(layout.pitch.get()));
+        }
+        let minimum_size = offset + u64::from(layout.pitch.get()) * u64::from(height);
+        if layout.size.get() < minimum_size {
+            return Err(ConfigurationError::InvalidSize(layout.size.get()));
+        }
     }
     Ok(())
 }
@@ -128,8 +170,10 @@ pub enum ConfigurationError {
     DuplicateBufferId(u32),
     #[error("frame dimensions {width}x{height} exceed the supported bound")]
     FrameDimensions { width: u32, height: u32 },
-    #[error("only the linear modifier is currently supported; got {0:#x}")]
-    NonlinearModifier(u64),
+    #[error("DRM modifier {0:#x} is not a concrete image layout")]
+    InvalidModifier(u64),
+    #[error("video plane offset {0} is outside its allocation")]
+    InvalidOffset(u32),
     #[error("video buffer pitch {0} is invalid")]
     InvalidPitch(u32),
     #[error("video buffer size {0} is invalid")]
@@ -189,6 +233,9 @@ pub enum VideoSourceEvent {
         transport: PipeWireBufferTransport,
     },
     BufferReleased {
+        /// PipeWire no longer retains this use. In waited transport, the caller
+        /// must still establish native reader completion before overwriting GPU
+        /// storage; this event is not itself a GPU fence.
         buffer_id: NonZeroU32,
     },
     Failed(VideoSourceRuntimeError),
