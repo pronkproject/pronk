@@ -50,3 +50,26 @@ producer completion or cache coherency, and do not enable CPU fallback in the
 casting service. Their purpose is a deterministic rendering reference with
 checked ordinary storage access. Tests verify address limits, exact row bounds,
 padding preservation and exclusive borrowing without a GPU.
+
+## Initial RGB composition reference
+
+`render::cpu::compose` places validated layers over an opaque RGB background,
+in caller-supplied bottom-to-top order. Each `Layer` validates its crop against
+the actual input view. The profile uses integral placement without rotation or
+scaling, premultiplied pixel alpha, fully opaque plane-wide alpha and identity
+color processing. XRGB/XBGR padding never participates as pixel alpha.
+
+The reference expands byte components to 16-bit normalized integers, rounds
+each blend at that precision and converts to bytes only after all layers.
+Premultiplied sums outside the normalized range saturate. Output alpha (or its
+X byte) is written as opaque. Source channels, background and destination are
+assumed to share one encoded RGB domain: no implicit linearization, lookup table,
+matrix or transfer-function conversion is performed. This implements a bounded
+subset of the [DRM plane blend contract](https://docs.kernel.org/gpu/drm-kms.html#plane-composition-properties),
+not full color-pipeline parity.
+
+One scratch row is reserved before output writes. Reported allocation failure
+therefore leaves output untouched. Successful return ends ordinary slice reads
+and writes; it is not by itself DMA-BUF cache maintenance or a native fence.
+No production fallback is enabled. Tests cover channel order, alpha, stacking,
+intermediate precision, clipping, background fill and untouched output padding.
