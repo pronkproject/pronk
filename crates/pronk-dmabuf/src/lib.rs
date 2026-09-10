@@ -7,5 +7,5 @@
 mod reservation;
 mod sync_file;
 
-pub use reservation::{export_dependencies, Access};
+pub use reservation::{export_dependencies, import_completion, Access};
 pub use sync_file::{Completion, SyncFile};

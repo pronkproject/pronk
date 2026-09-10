@@ -19,6 +19,7 @@ struct Transfer {
 }
 
 nix::ioctl_readwrite!(export_sync_file, b'b', 2, Transfer);
+nix::ioctl_write_ptr!(import_sync_file, b'b', 3, Transfer);
 
 /// Snapshot already-enrolled dependencies for the owner's next access.
 ///
@@ -43,6 +44,26 @@ pub fn export_dependencies(buffer: BorrowedFd<'_>, access: Access) -> io::Result
     // SAFETY: A successful export returns a new descriptor owned by the caller.
     let fd = unsafe { OwnedFd::from_raw_fd(transfer.fd) };
     SyncFile::from_fd(fd)
+}
+
+/// Enroll actual submitted completion for later implicitly synchronized users.
+///
+/// Failure does not cancel submitted work. Keep the allocation unavailable to
+/// consumers until another native completion path establishes safe access.
+/// The borrowed fence remains owned by the caller on success and failure.
+pub fn import_completion(
+    buffer: BorrowedFd<'_>,
+    access: Access,
+    completion: &SyncFile,
+) -> io::Result<()> {
+    let transfer = Transfer {
+        flags: access as u32,
+        fd: completion.as_fd().as_raw_fd(),
+    };
+    // SAFETY: Both borrowed descriptors and the initialized UAPI argument live
+    // through the ioctl; the kernel takes its own reference to the fence.
+    unsafe { import_sync_file(buffer.as_raw_fd(), &transfer) }?;
+    Ok(())
 }
 
 #[cfg(test)]
