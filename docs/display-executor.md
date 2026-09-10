@@ -94,6 +94,33 @@ intermediate precision, clipping, background fill and untouched output padding.
 Blend tests compare all pixel-alpha byte values and selected plane-alpha
 boundaries against independently evaluated normalized equations.
 
+## Post-composition lookup tables
+
+`compose` retains identity output color. `compose_with_output_color` accepts
+an explicit `scene::color::OutputColor`; its optional gamma table operates on
+the completed 16-bit RGB blend result before byte encoding, including uncovered
+background. It never changes alpha. This is the post-composition gamma stage,
+not per-plane color processing or a complete degamma/matrix/gamma pipeline.
+
+`Lut` borrows 1–65536 uniformly spaced RGB entries. Empty tables are rejected;
+absence means identity and one entry means a constant color. Each channel uses
+exact rational interpolation across the normalized 16-bit domain and rounds
+once to the nearest 16-bit value. Endpoints select the first and last entries
+exactly. Descending and nonmonotonic tables are supported; no identity-ramp
+shortcut silently removes a supplied table.
+
+The stage ordering follows the C CastKMS composition path and the
+[DRM gamma property](https://docs.kernel.org/gpu/drm-kms.html#color-management-properties).
+The interpolation arithmetic is an explicit reference choice, not a claim of
+bit-for-bit equivalence to the C helper's fixed-point approximations or to a
+particular hardware LUT. C differential comparison and native color precision
+qualification remain separate work. The Vulkan copy/blit profile still accepts
+only identity color and must not silently ignore a requested gamma stage.
+
+Tests evaluate every 16-bit input against independent normalized equations at
+six table sizes, and cover constants, endpoints, padding, post-blend ordering,
+background and preserving intermediate precision until the color stage.
+
 ## Orthogonal source transforms
 
 `scene::transform` describes source-axis reflection followed by counter-clockwise
