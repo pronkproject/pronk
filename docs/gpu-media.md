@@ -113,9 +113,10 @@ snapshot and reports individual failures without skipping the remaining slots.
 Stopped generations never accept new claims or publications. The immutable
 recipient scope and executor-owned graphics resource lifetimes still apply.
 
-The adapter is implemented but the running media path does not instantiate it
-yet. Graphics allocation, rendering and live source-generation setup remain
-integration work; neither the pool nor the adapter enables GPU media defaults.
+The installed media path does not instantiate the adapter yet. The opt-in
+[generated GPU transport harness](../tests/gpu-media/README.md) connects it to
+the Vulkan allocator/producer and a real source generation on a private graph.
+Neither the harness nor the adapter enables GPU media defaults.
 
 ## Optional Vulkan allocation
 
