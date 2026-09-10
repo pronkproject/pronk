@@ -282,6 +282,32 @@ unqualified for arbitrary compositor formats, modifiers, GPUs or source policy.
 Native ownership follows the Vulkan [memory-fd import contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkImportMemoryFdInfoKHR.html)
 and [explicit modifier layout contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageDrmFormatModifierExplicitCreateInfoEXT.html).
 
+## Submission records before private pixels
+
+`Image::submit_opaque` returns a `PendingStage` after native submission and
+completion enrollment, without waiting for the composition to finish. Its
+borrowed sync file represents accepted GPU work. A worker can duplicate that
+descriptor into source-use accounting and close submission admission before
+waiting for pixels. There is no userspace promise hidden inside the record.
+
+The pending owner retains all source imports, command resources and private
+storage. It exposes no image that another operation could reuse. Consuming it
+with `wait` checks native completion, destroys the imports and returns the
+initialized private image. The existing `compose_opaque_waited` operation uses
+the same submission path followed immediately by that wait.
+
+Both submission and retirement belong on a blocking graphics worker: submission
+still waits for native producers, and dropping a pending owner waits for accepted
+work. Returning a record early is not a nonblocking rendering API or a guarantee
+that a fast GPU remains busy at return. Device loss and indeterminate wait errors
+retain the same cleanup rules described above.
+
+The native tests collect a closed source-use record set while the private image
+remains inside its pending owner, then wait, rewrite the original source and
+verify the private pixels. A separate test drops pending composition and checks
+that its retained record has completed. Neither test forces a GPU stall or
+claims crash-proof submission accounting.
+
 ## Placed source copies
 
 `SourceImage::copy_region_into_waited` extends private staging to a visible
