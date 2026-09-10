@@ -1,6 +1,7 @@
 //! Generated images through the real source actor on an explicitly supplied graph.
 
 mod consumer;
+mod encoded;
 mod source;
 
 use std::path::PathBuf;
@@ -20,6 +21,12 @@ fn main() -> Result<()> {
         .context("missing modifier")?
         .into_string()
         .map_err(|_| anyhow::anyhow!("modifier is not UTF-8"))?;
+    let mode = match args.next().as_deref() {
+        None => consumer::Mode::Raw,
+        Some(mode) if mode == "raw" => consumer::Mode::Raw,
+        Some(mode) if mode == "va-h264" => consumer::Mode::VaH264,
+        _ => anyhow::bail!("profile must be raw or va-h264"),
+    };
     anyhow::ensure!(args.next().is_none(), "unexpected argument");
     let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -28,7 +35,7 @@ fn main() -> Result<()> {
     let result = runtime.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(30),
-            source::run(&socket, &node, modifier),
+            source::run(&socket, &node, modifier, mode),
         )
         .await
         .context("GPU transport test timed out")?

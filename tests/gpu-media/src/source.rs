@@ -13,16 +13,18 @@ use pronk_pipewire::{
     VideoSourceActor, VideoSourceConfig, VideoSourceGeneration,
 };
 
-use crate::consumer::{self, Consumer};
+use crate::consumer::{self, Consumer, Event, Mode};
+use crate::encoded::Encoded;
 
 const FRAMES: u32 = 20;
 const SLOTS: usize = 4;
 
-pub async fn run(socket: &Path, node: &Path, modifier: u64) -> Result<()> {
+pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Result<()> {
     ensure!(
         std::env::var_os("PIPEWIRE_REMOTE").as_deref() == Some(socket.as_os_str()),
         "development remote must match the explicitly supplied private socket"
     );
+    let render_node = node.to_owned();
     let node = node.to_owned();
     // Allocation and native initialization run outside the runtime and PW loop.
     let mut images = tokio::task::spawn_blocking(move || -> Result<_> {
@@ -50,7 +52,10 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64) -> Result<()> {
             dma_buf: image.export()?,
             timelines: None,
             layout: VideoBufferLayout {
-                format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
+                format: match mode {
+                    Mode::Raw => pronk_pipewire::VideoPixelFormat::Xrgb8888,
+                    Mode::VaH264 => pronk_pipewire::VideoPixelFormat::Argb8888,
+                },
                 width: layout.width,
                 height: layout.height,
                 pitch: NonZeroU32::new(layout.pitch.try_into()?).context("zero pitch")?,
@@ -97,7 +102,14 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64) -> Result<()> {
     let consumer_socket = socket.to_owned();
     let consumer_name = identity.node_name.clone();
     let mut consumer = tokio::task::spawn_blocking(move || {
-        Consumer::start(&consumer_socket, &consumer_name, modifier, FRAMES)
+        Consumer::start(
+            &consumer_socket,
+            &consumer_name,
+            modifier,
+            FRAMES,
+            &render_node,
+            mode,
+        )
     })
     .await??;
     let link = link.wait_with_output().await?;
@@ -110,10 +122,13 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64) -> Result<()> {
     let mut writable: VecDeque<NonZeroU32> = VecDeque::new();
     let mut published = 0;
     let mut received = HashSet::new();
-    let mut held = None;
+    let mut held: Option<gstreamer::Buffer> = None;
+    let mut encoded = Encoded::default();
     let mut uses = [0u32; SLOTS];
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    while received.len() < FRAMES as usize {
+    while received.len() < FRAMES as usize
+        || (mode == Mode::VaH264 && encoded.len() < FRAMES as usize)
+    {
         if published < FRAMES {
             if let Some(id) = writable.pop_front() {
                 let slot = id.get() as usize - 1;
@@ -173,13 +188,21 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64) -> Result<()> {
                     OutputReady::Publish(_) => anyhow::bail!("unexpected publication"),
                 }
             }
-            sample = consumer.next() => {
-                let sample = sample?;
-                let seq = consumer::sequence(&sample)?;
-                ensure!(seq == received.len() as u64, "out-of-order source sequence {seq}");
-                ensure!(seq < u64::from(FRAMES) && received.insert(seq), "duplicate or invalid source sequence {seq}");
-                if held.is_none() && received.len() == 1 { held = Some(sample); }
-                if received.len() == 6 { held = None; }
+            event = consumer.next() => {
+                match event? {
+                    Event::Input(buffer) => {
+                        let seq = consumer::sequence(&buffer)?;
+                        ensure!(seq == received.len() as u64, "out-of-order source sequence {seq}");
+                        ensure!(seq < u64::from(FRAMES) && received.insert(seq), "duplicate or invalid source sequence {seq}");
+                        if held.is_none() && received.len() == 1 { held = Some(buffer); }
+                        if mode == Mode::Raw && received.len() == 6 { held = None; }
+                    }
+                    Event::Encoded(sample) => {
+                        encoded.push(&sample)?;
+                        if encoded.len() == 6 { held = None; }
+                    }
+                    Event::Error(error) => anyhow::bail!(error),
+                }
             }
             _ = tick.tick() => consumer.check()?,
         }
@@ -204,7 +227,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64) -> Result<()> {
         uses.iter().all(|count| *count > 1),
         "not every image was rewritten: {uses:?}"
     );
-    eprintln!("PASS: {published} generated frames, per-slot uses {uses:?}, first sample retained through six arrivals");
+    eprintln!("PASS: {published} generated frames, {} encoded, per-slot uses {uses:?}, first input retained through six outputs", encoded.len());
     Ok(())
 }
 
