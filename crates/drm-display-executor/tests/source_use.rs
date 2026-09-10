@@ -147,3 +147,77 @@ fn outstanding_permit_retains_accounting_after_controller_drop() {
     });
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn concurrent_finish_takes_the_complete_record_set_once() {
+    for _ in 0..64 {
+        let owner = gate(2);
+        owner.begin().unwrap().submitted(11);
+        owner.begin().unwrap().submitted(22);
+        owner.close();
+        let start = Barrier::new(3);
+        std::thread::scope(|scope| {
+            let finish = || {
+                start.wait();
+                owner.finish()
+            };
+            let first = scope.spawn(finish);
+            let second = scope.spawn(finish);
+            start.wait();
+            let results = [first.join().unwrap(), second.join().unwrap()];
+            let mut winners = 0;
+            let mut consumed = 0;
+            for result in results {
+                match result {
+                    Ok(ClosedUse::Released(records)) => {
+                        assert_eq!(records, [11, 22]);
+                        winners += 1;
+                    }
+                    Err(GateError::AlreadyFinished) => consumed += 1,
+                    _ => panic!("unexpected concurrent finish result"),
+                }
+            }
+            assert_eq!((winners, consumed), (1, 1));
+        });
+    }
+}
+
+#[test]
+fn last_resolution_and_finish_preserve_terminal_failure() {
+    for abandon in [false, true] {
+        for _ in 0..64 {
+            let owner = gate(2);
+            let last = owner.begin().unwrap();
+            if abandon {
+                drop(owner.begin().unwrap());
+            }
+            owner.close();
+            let start = Barrier::new(2);
+            std::thread::scope(|scope| {
+                let resolve = scope.spawn(|| {
+                    start.wait();
+                    last.submitted(17);
+                });
+                start.wait();
+                let result = owner.finish();
+                resolve.join().unwrap();
+                let result = match result {
+                    Err(GateError::UnresolvedSubmissions) => owner.finish(),
+                    result => result,
+                };
+                match result.unwrap() {
+                    ClosedUse::Released(records) => {
+                        assert!(!abandon);
+                        assert_eq!(records, [17]);
+                    }
+                    ClosedUse::Failed(records) => {
+                        assert!(abandon);
+                        assert_eq!(records, [17]);
+                    }
+                }
+                assert!(matches!(owner.finish(), Err(GateError::AlreadyFinished)));
+                assert!(matches!(owner.begin(), Err(GateError::AdmissionClosed)));
+            });
+        }
+    }
+}
