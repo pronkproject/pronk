@@ -1280,6 +1280,8 @@ dependencies = [
  "pronk-backend-protocol",
  "pronk-core",
  "pronk-dbus",
+ "pronk-dmabuf",
+ "pronk-gpu",
  "pronk-pipewire",
  "thiserror 2.0.20",
  "tokio",

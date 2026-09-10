@@ -19,6 +19,8 @@ pronk-backend-host = { path = "../pronk-backend-host" }
 pronk-backend-protocol = { path = "../pronk-backend-protocol" }
 pronk-core = { path = "../pronk-core" }
 pronk-dbus = { path = "../pronk-dbus" }
+pronk-dmabuf = { path = "../pronk-dmabuf" }
+pronk-gpu = { path = "../pronk-gpu" }
 pronk-pipewire = { path = "../pronk-pipewire" }
 thiserror.workspace = true
 tokio.workspace = true
