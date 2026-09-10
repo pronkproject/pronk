@@ -123,3 +123,6 @@ fn require_success(completion: Completion) -> io::Result<()> {
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests;
