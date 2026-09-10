@@ -1,0 +1,34 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba32f) uniform image2D pixels;
+layout(set = 0, binding = 1, std430) readonly buffer GammaTable {
+    uvec4 entries[];
+};
+layout(push_constant) uniform Parameters {
+    uint width;
+    uint height;
+    uint count;
+} params;
+
+uint sample_channel(uint value, uint channel) {
+    // count <= 65536 keeps position and the rounded weighted sum in uint32.
+    uint position = value * (params.count - 1);
+    uint index = position / 65535;
+    uint fraction = position % 65535;
+    uint next = min(index + 1, params.count - 1);
+    return (entries[index][channel] * (65535 - fraction)
+          + entries[next][channel] * fraction + 32767) / 65535;
+}
+
+void main() {
+    uvec2 point = gl_GlobalInvocationID.xy;
+    if (point.x >= params.width || point.y >= params.height)
+        return;
+    vec4 pixel = imageLoad(pixels, ivec2(point));
+    uvec3 input_value = uvec3(floor(clamp(pixel.rgb, 0.0, 1.0) * 65535.0 + 0.5));
+    uvec3 result;
+    for (uint channel = 0; channel < 3; ++channel)
+        result[channel] = sample_channel(input_value[channel], channel);
+    imageStore(pixels, ivec2(point), vec4(vec3(result) / 65535.0, pixel.a));
+}

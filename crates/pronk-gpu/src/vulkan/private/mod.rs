@@ -10,10 +10,12 @@ use super::device::DeviceInner;
 mod allocation;
 mod blend;
 mod clear;
+mod gamma;
 mod output;
 mod source;
 
 pub use blend::{BlendedImages, Blender};
+pub use gamma::Gamma;
 pub use output::PrivateCopy;
 pub use source::PendingPrivateRead;
 
