@@ -31,19 +31,24 @@ video ports concurrently with GStreamer startup, which may wait for the link.
 No installed WirePlumber policy, service unit or casting session is changed.
 This fixture does not qualify the production classified connection policy.
 
-One generated, single-plane 1920x1080 modifier image belongs to a separate
-producer Vulkan device instance. The worker checks matching physical-device
+Three generated single-memory-plane modifier images belong to a separate
+producer Vulkan device instance: a 1920x1080 base, a 640x480 overlay and a
+128x128 cursor-sized top plane. The worker checks matching physical-device
 and driver identities, imports each source use with exact allocator metadata
 and its explicit producer fence, and copies into available private staging.
-It then overwrites the original source white before copying staging into one
+It then overwrites every original source white before copying staging into one
 of four persistent output images, and overwrites staging black before output
 publication. Only those four output allocations are registered with PipeWire.
 
-Each source use selects a 1856x1024 crop starting at (32,16), placed over a
+The base source selects a 1856x1024 crop starting at (32,16), placed over a
 black 1920x1080 background. Placements cycle through (-32,16), (32,-16) and
 (64,32), exercising left clipping, top clipping and an inset rectangle. The
 independent geometry model supplies expected visible rectangles; unit tests
-check those against literal source and destination coordinates.
+check those against literal source and destination coordinates. The overlay
+starts at (640,320), and the top plane moves between (608,288), (672,288) and
+(736,288), overlapping both the overlay and exposed base. Layers have distinct
+frame-dependent colors and opaque alpha. Native copies are submitted in
+bottom-to-top order with one completion covering all source reads.
 
 The twenty-publication sequence exercises source-to-private-to-output copying
 and reuse without a real compositor source or capture grant. Source-reading
@@ -109,7 +114,8 @@ resampling filters. It also requires exactly twenty
 images and decoder end-of-stream. Every publication has a distinct RGB color;
 tests require disjoint tolerance ranges between all twenty colors and the
 black/white overwrite values. A stale image must fail even if its sequence
-metadata is current. Pixels outside each visible crop must remain black.
+metadata is current. At each coordinate, the topmost visible layer supplies the
+expected color; pixels outside all visible layers must remain black.
 Matching pixels after both source and staging rewrites
 detect reads that incorrectly outlive those copy boundaries. CPU readback
 belongs to this oracle, not to the capture-to-encoder path. Encoded access units
