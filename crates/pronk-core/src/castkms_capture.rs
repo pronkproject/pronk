@@ -218,9 +218,14 @@ impl ImplicitCaptureFence {
             user_data,
             fence,
         } = self;
-        let fence = AsyncFd::new(fence)?;
-        let readiness = fence.readable().await?;
-        drop(readiness);
+        match pronk_dmabuf::SyncFile::from_fd(fence)?.wait().await? {
+            pronk_dmabuf::Completion::Success => {}
+            pronk_dmabuf::Completion::Failed(error) => {
+                return Err(std::io::Error::from_raw_os_error(
+                    error.checked_neg().unwrap_or(nix::libc::EIO),
+                ));
+            }
+        }
         Ok(CaptureReady {
             stream_id,
             buffer_id,
@@ -2866,7 +2871,7 @@ mod tests {
     }
 
     #[test]
-    fn implicit_fence_wait_uses_tokio_readiness_and_preserves_identity() {
+    fn implicit_fence_wait_rejects_readable_non_fence_descriptors() {
         let (reader, mut writer) = UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
         writer.write_all(&[1]).unwrap();
@@ -2880,11 +2885,7 @@ mod tests {
             .enable_io()
             .build()
             .unwrap();
-        let ready = runtime.block_on(fence.wait()).unwrap();
-        assert_eq!(ready.stream_id(), nonzero32(STREAM_ID));
-        assert_eq!(ready.buffer_id(), nonzero32(BUFFER_ID));
-        assert_eq!(ready.user_data(), nonzero64(USER_DATA));
-        assert_eq!(ready.ready_point(), None);
+        assert!(runtime.block_on(fence.wait()).is_err());
     }
 
     #[test]

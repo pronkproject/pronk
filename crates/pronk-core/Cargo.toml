@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 castkms-sys = { path = "../castkms-sys" }
 nix.workspace = true
+pronk-dmabuf = { path = "../pronk-dmabuf" }
 pronk-userns = { path = "../pronk-userns" }
 sha2.workspace = true
 thiserror.workspace = true

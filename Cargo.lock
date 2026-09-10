@@ -1397,6 +1397,7 @@ dependencies = [
  "async-trait",
  "castkms-sys",
  "nix 0.29.0",
+ "pronk-dmabuf",
  "pronk-userns",
  "sha2",
  "thiserror 2.0.20",
