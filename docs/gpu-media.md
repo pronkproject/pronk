@@ -161,6 +161,45 @@ may be enabled through the usual loader environment for the opt-in tests.
 The allocation flow follows the [Vulkan DRM modifier extension](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_image_drm_format_modifier.html).
 Device selection uses [Vulkan DRM device properties](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceDrmPropertiesEXT.html).
 
+## Waited GPU frame generation
+
+`Image::clear_waited` initializes a generated frame with opaque RGB pixels using
+GPU commands. It consumes the image until completion, snapshots native reuse
+dependencies, acquires foreign ownership when needed, clears the entire image,
+and releases it for foreign consumers. Actual submitted completion is enrolled
+as a native writer before publication. The returned image and checked sync file
+can drive the output pool's submitted/producer-completion transition.
+
+Run that synchronous operation on a dedicated blocking graphics worker, such
+as a bounded `spawn_blocking` task, never on a PipeWire loop or Tokio runtime
+worker. It owns no compositor sources. The caller must hold exclusive output
+ownership across snapshot, submission and completion enrollment; neither the
+Rust image owner nor a reservation snapshot excludes competing external users.
+Do not start one task per queued capture request: bound outstanding graphics
+work by independently available output storage.
+
+Command ownership lives separately from the clear operation. A native job owns
+its command pool, binary semaphore, fence and operation resources. Queue host
+access is serialized only during submission, not through completion waits.
+Resources return only after the accepted job finishes. Error cleanup waits for
+accepted work; device loss permits teardown but does not validate pixels. If a
+native wait repeatedly fails without establishing retirement or device loss,
+the exceptional path retains resources until process exit. That is not a normal
+reuse or cancellation result. A worker crash still has best-effort semantics.
+
+Vulkan may export `-1` for already-completed binary synchronization. That case
+does not become an invalid owned descriptor: after native completion, the
+operation returns a materialized reservation snapshot for the pool handoff.
+No userspace-dependent future completion is put into a native fence.
+
+With the explicit device/modifier environment above, run
+`cargo test -p pronk-gpu --features vulkan --lib -- --include-ignored` for
+native job ownership and changing-color rendering checks. Pixel readback uses
+GPU copies into CPU-visible storage solely as a test oracle, checking every
+pixel and alpha across repeated foreign handoffs. The generated-frame producer
+itself does not map raw pixels. These tests do not run a media graph, simulate
+device loss, or qualify an unsignaled downstream-reader stall.
+
 ## Current scope
 
 Existing application and live-test callers select `MappableLinear`; they do
