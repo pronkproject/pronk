@@ -39,6 +39,12 @@ It then overwrites the original source white before copying staging into one
 of four persistent output images, and overwrites staging black before output
 publication. Only those four output allocations are registered with PipeWire.
 
+Each source use selects a 1856x1024 crop starting at (32,16), placed over a
+black 1920x1080 background. Placements cycle through (-32,16), (32,-16) and
+(64,32), exercising left clipping, top clipping and an inset rectangle. The
+independent geometry model supplies expected visible rectangles; unit tests
+check those against literal source and destination coordinates.
+
 The twenty-publication sequence exercises source-to-private-to-output copying
 and reuse without a real compositor source or capture grant. Source-reading
 completion precedes downstream destination waits. Native rendering and
@@ -95,11 +101,16 @@ H.264 dependency parser or Chromecast receiver qualification.
 After source shutdown and native retirement, a separate test oracle decodes
 the twenty access units on the selected GPU. It maps only decoded oracle
 images and verifies every RGB pixel, in order, with a six-level channel
-tolerance for conversion and codec rounding. It also requires exactly twenty
+tolerance for conversion and codec rounding, including rectangle edges. Its
+test-only NV12-to-RGB conversion explicitly uses nearest-neighbor interpolation
+to preserve the sharp-edged fixture's chroma boundaries. The encoder conversion
+retains its default interpolation; the oracle does not qualify other decoder
+resampling filters. It also requires exactly twenty
 images and decoder end-of-stream. Every publication has a distinct RGB color;
 tests require disjoint tolerance ranges between all twenty colors and the
 black/white overwrite values. A stale image must fail even if its sequence
-metadata is current. Matching pixels after both source and staging rewrites
+metadata is current. Pixels outside each visible crop must remain black.
+Matching pixels after both source and staging rewrites
 detect reads that incorrectly outlive those copy boundaries. CPU readback
 belongs to this oracle, not to the capture-to-encoder path. Encoded access units
 are ordinary CPU-owned bytes.
