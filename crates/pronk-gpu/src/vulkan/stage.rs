@@ -203,3 +203,6 @@ fn require_available(completion: Option<Completion>) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod region_tests;
