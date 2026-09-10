@@ -37,14 +37,29 @@ producer Vulkan device instance: a 1920x1080 base, a 640x480 overlay and a
 and driver identities, imports each source use with exact allocator metadata
 and its explicit producer fence, and copies into independently allocated,
 non-exportable floating-point input images. It then overwrites every original
-source white before shader composition. The composed private image is converted
-into one of four persistent output images and overwritten black before output
-publication. Only those four output allocations are registered with PipeWire.
+source white before shader composition. A third Vulkan device owns the four
+persistent output images; none of those allocations is imported on the source
+worker. The composed private image is converted into a fresh packed bridge
+allocation. Its exported descriptor remains internal to the renderer, and its
+source-side Vulkan image and memory owners are destroyed before the output
+device imports it. The output device copies the bridge into a persistent output
+image and destroys the import after completion. The private composition image
+is overwritten black before publication. Only the four output allocations are
+registered with PipeWire.
 Private input and composition allocations are created before source admission
 and reused across frames; they have no export API or external reuse dependency.
 A single immutable blend program is created alongside that storage and retained
 across every layer and frame. Each native operation still owns its own image
 views and descriptors; source-use accounting retains no shader program state.
+
+The internal bridge adds an allocation and a GPU transfer per frame. Its backing
+storage survives the source-side owner through the retained DMA-BUF descriptor,
+without retaining a compositor-source import. Separate logical devices and
+owner destruction establish the application-side boundary, not a portable proof
+of native virtual-memory unbind completion or isolation from reservation,
+eviction and scheduling dependencies. Those require driver-specific observation
+and stalled-consumer tests. Shared GPU execution time remains shared even when
+buffer lifetimes are independent.
 
 The base source selects a 1856x1024 crop starting at (32,16), placed over a
 black 1920x1080 background. Placements cycle through (-32,16), (32,-16) and
@@ -96,7 +111,8 @@ successful frames. Generated-source submission includes fixture clears,
 producer waits and native read submission. Remaining-source wait starts only
 after accounting collection; it excludes the coordinator's intervening delay.
 Private composition includes background initialization and shader operations;
-shared-output copying includes any destination wait. Test-only source and
+shared-output copying includes bridge allocation, format conversion, device
+handoff, final copying and any destination wait. Test-only source and
 composed-image overwrites have a separate total. Those intervals are not GPU
 timestamps, a full source-retention interval, or end-to-end presentation timing.
 The twenty-frame sample includes startup effects. Device, modifier, validation
@@ -199,5 +215,5 @@ This is a deployment-feasibility experiment, not the installed backend. The
 fixture combines generated-image production and encoding in one non-networked
 process, uses the development socket policy, and has no capture/executor
 capabilities. It does not qualify the eventual process split, system-service
-identity, shader-based composition, device-reset recovery or receiver traffic.
+identity, arbitrary compositor scenes, device-reset recovery or receiver traffic.
 No installed service unit is edited or restarted.
