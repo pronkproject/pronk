@@ -7,9 +7,10 @@ use super::{
     pixel::Rgb,
 };
 use crate::scene::blend::Blend;
-use crate::scene::geometry::{Extent, GeometryError, SourceRect};
+use crate::scene::geometry::{CopyRegion, Extent, GeometryError, SourceRect};
+use crate::scene::transform::Transform;
 
-/// One integral, unscaled, unrotated layer with explicit blending policy.
+/// One integral, unscaled layer with explicit orthogonal transform and blending.
 ///
 /// The default is premultiplied pixel alpha and fully opaque plane alpha. Source
 /// pixels must be in the same encoded RGB domain as the background and output;
@@ -20,6 +21,7 @@ pub struct Layer<'a> {
     source: SourceRect,
     destination: [i32; 2],
     blend: Blend,
+    transform: Transform,
 }
 
 impl<'a> Layer<'a> {
@@ -34,6 +36,7 @@ impl<'a> Layer<'a> {
             image,
             destination,
             blend: Blend::default(),
+            transform: Transform::default(),
         })
     }
 
@@ -41,6 +44,36 @@ impl<'a> Layer<'a> {
     pub fn with_blend(mut self, blend: Blend) -> Self {
         self.blend = blend;
         self
+    }
+
+    /// Select source-axis reflection and rotation without scaling the crop.
+    pub fn with_transform(mut self, transform: Transform) -> Self {
+        self.transform = transform;
+        self
+    }
+
+    fn visible(&self, output: Extent) -> Option<CopyRegion> {
+        let transformed = self.transform.extent(self.source.extent());
+        // Region source coordinates belong to the transformed crop grid,
+        // not the original image. sample() applies the inverse transform.
+        SourceRect::new(transformed, [0, 0], transformed)
+            .expect("complete transformed crop")
+            .clip_to(self.destination, output)
+    }
+
+    fn sample(&self, transformed: [u32; 2]) -> (Rgb, u16) {
+        let local = self
+            .transform
+            .source_at(self.source.extent(), transformed)
+            .expect("visible transformed pixel");
+        let [ox, oy] = self.source.origin();
+        let pixels = self.image.row(oy + local[1]).expect("validated source row");
+        let start = (ox + local[0]) as usize * 4;
+        let source = &pixels[start..start + 4];
+        Rgb::read(
+            [source[0], source[1], source[2], source[3]],
+            self.image.layout().format(),
+        )
     }
 }
 
@@ -69,7 +102,7 @@ pub fn compose(
     for y in 0..extent.height() {
         row.fill(Rgb::from_bytes(background));
         for layer in layers {
-            let Some(region) = layer.source.clip_to(layer.destination, extent) else {
+            let Some(region) = layer.visible(extent) else {
                 continue;
             };
             let [dx, dy] = region.destination();
@@ -77,18 +110,10 @@ pub fn compose(
                 continue;
             }
             let sy = region.source()[1] + (y - dy);
-            let pixels = layer.image.row(sy).expect("validated source row");
-            let start = region.source()[0] as usize * 4;
             let count = region.extent().width() as usize;
-            let pixels = &pixels[start..start + count * 4];
-            for (destination, source) in row[dx as usize..dx as usize + count]
-                .iter_mut()
-                .zip(pixels.chunks_exact(4))
+            for (index, destination) in row[dx as usize..dx as usize + count].iter_mut().enumerate()
             {
-                let (source, alpha) = Rgb::read(
-                    [source[0], source[1], source[2], source[3]],
-                    layer.image.layout().format(),
-                );
+                let (source, alpha) = layer.sample([region.source()[0] + index as u32, sy]);
                 destination.blend(source, alpha, layer.blend);
             }
         }
