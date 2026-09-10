@@ -1,6 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
@@ -27,22 +28,33 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
     let render_node = node.to_owned();
     let node = node.to_owned();
     // Allocation and native initialization run outside the runtime and PW loop.
-    let (mut images, staging) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let device = Device::open(node)?;
-        eprintln!("GPU: {}", device.name());
-        let images = (0..SLOTS)
-            .map(|_| {
-                device
-                    .allocate(nz(1920), nz(1080), modifier)
-                    .map(Some)
-                    .map_err(Into::into)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let staging = device.allocate(nz(1920), nz(1080), modifier)?;
-        Ok((images, staging))
-    })
-    .await??;
+    let (worker, mut images, staging, incoming) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let device = Arc::new(Device::open(&node)?);
+            let producer = Device::open(&node)?;
+            let identity = device.identity();
+            ensure!(
+                identity == producer.identity()
+                    && identity.device != [0; 16]
+                    && identity.driver != [0; 16],
+                "producer and worker native identities do not match"
+            );
+            eprintln!("GPU: {}", device.name());
+            let images = (0..SLOTS)
+                .map(|_| {
+                    device
+                        .allocate(nz(1920), nz(1080), modifier)
+                        .map(Some)
+                        .map_err(Into::into)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let staging = device.allocate(nz(1920), nz(1080), modifier)?;
+            let incoming = producer.allocate(nz(1920), nz(1080), modifier)?;
+            Ok((device, images, staging, incoming))
+        })
+        .await??;
     let mut staging = Some(staging);
+    let mut incoming = Some(incoming);
     let mut exports = Vec::new();
     let mut buffers = Vec::new();
     let ids: Vec<_> = (1..=SLOTS as u32).map(nz).collect();
@@ -146,11 +158,24 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 let private = staging
                     .take()
                     .context("private staging image is in flight")?;
-                let copied = tokio::task::spawn_blocking(move || -> Result<_> {
-                    let private = private.clear_waited(rgb)?.0;
-                    Ok(image.copy_from_waited(private)?)
+                let input = incoming.take().context("producer image is in flight")?;
+                let worker = Arc::clone(&worker);
+                let (input, copied) = tokio::task::spawn_blocking(move || -> Result<_> {
+                    let (input, producer) = input.clear_waited(rgb)?;
+                    // SAFETY: Matching native physical-device/driver identities,
+                    // exact allocator metadata and identical image profile. The
+                    // clear completed foreign GENERAL release; no source writer
+                    // runs until the imported read completes.
+                    let source =
+                        unsafe { worker.import_source(input.export()?, input.layout(), producer) }?;
+                    let (private, _read_done) = source.copy_into_waited(private)?;
+                    let input = input.clear_waited([255, 255, 255])?.0;
+                    let mut copied = image.copy_from_waited(private)?;
+                    copied.source = copied.source.clear_waited([0, 0, 0])?.0;
+                    Ok((input, copied))
                 })
                 .await??;
+                incoming = Some(input);
                 staging = Some(copied.source);
                 images[slot] = Some(copied.destination);
                 let pending = output.submitted(permit, copied.completion)?;
