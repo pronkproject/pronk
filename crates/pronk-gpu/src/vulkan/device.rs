@@ -15,6 +15,15 @@ pub struct Device {
     pub(super) inner: Arc<DeviceInner>,
 }
 
+/// Vulkan identities for physical-device and driver compatibility checks.
+///
+/// Equality does not qualify a particular external format, modifier or handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceIdentity {
+    pub device: [u8; vk::UUID_SIZE],
+    pub driver: [u8; vk::UUID_SIZE],
+}
+
 struct Instance {
     raw: ash::Instance,
     // Keep the dynamically loaded function pointers valid until instance teardown.
@@ -31,6 +40,23 @@ pub(super) struct DeviceInner {
 }
 
 impl Device {
+    /// Physical-device and driver UUIDs for external-image compatibility checks.
+    pub fn identity(&self) -> DeviceIdentity {
+        let mut identity = vk::PhysicalDeviceIDProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut identity);
+        // SAFETY: This retained physical device supports the Vulkan 1.1 query;
+        // the initialized output chain lives until the call returns.
+        unsafe {
+            self.inner
+                .instance()
+                .get_physical_device_properties2(self.inner.physical, &mut properties)
+        };
+        DeviceIdentity {
+            device: identity.device_uuid,
+            driver: identity.driver_uuid,
+        }
+    }
+
     /// Diagnostic name of the device selected by render-node identity.
     pub fn name(&self) -> String {
         // SAFETY: The physical device belongs to the retained live instance.
