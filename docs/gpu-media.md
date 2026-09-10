@@ -40,11 +40,27 @@ bridge. Layout support alone does not establish that synchronization path.
 Returning a buffer also does not revoke its exported storage. Pools must not
 reuse backing allocations across incompatible recipient authorization scopes.
 
+`pronk-dmabuf` provides the native synchronization primitives independently of
+the capture protocol and PipeWire. `export_dependencies` snapshots the native
+dependencies for an intended read, write, or read/write access. Write access
+waits for both existing readers and writers. After submission,
+`import_completion` enrolls the actual native completion for implicit users.
+The caller must exclude competing submissions throughout snapshot, submission,
+and import; these separate ioctls are not an atomic ownership transaction.
+
+`SyncFile::wait` uses asynchronous readiness plus native completion status.
+`Completion::Failed` means work ended without valid output. An ioctl or wait
+error is not completion evidence. Dropping a wait does not cancel GPU work,
+and a failed completion import does not undo submission. The allocation owner
+must keep storage unavailable until native completion is established. None of
+these operations belongs on the PipeWire loop or makes returned-buffer events
+equivalent to native completion.
+
 ## Current scope
 
 Existing application and live-test callers select `MappableLinear`; they do
 not opt into GPU layouts automatically. Hardware encoding, GPU allocation,
-native reuse-fence handling and service render-node access remain separate
+native reuse-fence integration and service render-node access remain separate
 integration work. The default software media graph and installed service
 sandboxes are unchanged. A transport-level modifier test is not qualification
 of the complete private PipeWire, encoder or receiver path.
@@ -52,3 +68,9 @@ of the complete private PipeWire, encoder or receiver path.
 Run `cargo test -p pronk-pipewire --lib` for layout-boundary, modifier-negotiation,
 native metadata and existing ownership tests. The metadata tests use ordinary
 descriptors without GPU access; they do not qualify a particular GPU modifier.
+
+Run `cargo test -p pronk-dmabuf` for synchronization unit tests. With access to
+`/dev/dma_heap/system`, run
+`cargo test -p pronk-dmabuf --test native -- --ignored` for actual kernel
+export/import, close-on-exec, and completed-fence waits on an empty allocation.
+That opt-in test does not exercise unsignaled GPU work or hardware failures.
