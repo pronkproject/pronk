@@ -56,11 +56,18 @@ padding preservation and exclusive borrowing without a GPU.
 `render::cpu::compose` places validated layers over an opaque RGB background,
 in caller-supplied bottom-to-top order. Each `Layer` validates its crop against
 the actual input view. The profile uses integral placement without rotation or
-scaling, premultiplied pixel alpha, fully opaque plane-wide alpha and identity
-color processing. XRGB/XBGR padding never participates as pixel alpha.
+scaling and identity color processing. `scene::blend` independently describes
+pixel interpretation and normalized 16-bit plane-wide alpha. A layer defaults
+to premultiplied pixel alpha and fully opaque plane alpha; `with_blend` selects
+DRM's None, Pre-multiplied or Coverage equation explicitly. None ignores pixel
+alpha, while Coverage multiplies source colors by it. XRGB/XBGR padding never
+participates as pixel alpha, making all three modes equivalent for those formats.
 
 The reference expands byte components to 16-bit normalized integers, rounds
 each blend at that precision and converts to bytes only after all layers.
+Plane and pixel alpha participate in one widened numerator before rounding;
+their product is not first quantized back to 16 bits. Zero plane alpha leaves
+the background unchanged even for malformed premultiplied source colors.
 Premultiplied sums outside the normalized range saturate. Output alpha (or its
 X byte) is written as opaque. Source channels, background and destination are
 assumed to share one encoded RGB domain: no implicit linearization, lookup table,
@@ -73,3 +80,5 @@ therefore leaves output untouched. Successful return ends ordinary slice reads
 and writes; it is not by itself DMA-BUF cache maintenance or a native fence.
 No production fallback is enabled. Tests cover channel order, alpha, stacking,
 intermediate precision, clipping, background fill and untouched output padding.
+Blend tests compare all pixel-alpha byte values and selected plane-alpha
+boundaries against independently evaluated normalized equations.
