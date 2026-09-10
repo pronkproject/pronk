@@ -18,6 +18,9 @@ pub struct CopiedImages {
     pub completion: SyncFile,
 }
 
+#[cfg(test)]
+mod tests;
+
 impl Image {
     /// Copy a complete initialized image into this same-sized destination.
     ///
