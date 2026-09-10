@@ -5,9 +5,10 @@ use std::os::fd::AsFd;
 use std::sync::Arc;
 
 use ash::vk;
-use pronk_dmabuf::{export_dependencies, import_completion, Access, Completion, SyncFile};
+use pronk_dmabuf::{export_dependencies, import_completion, Access, SyncFile};
 
-use super::submission::Job;
+use super::image::ImageState;
+use super::submission::{require_success, Job};
 use super::Image;
 
 impl Image {
@@ -26,38 +27,9 @@ impl Image {
         let mut job = Job::new(Arc::clone(&self.device), self)?;
         let command = job.command();
         let image = job.resources();
-        let range = vk::ImageSubresourceRange::default()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .level_count(1)
-            .layer_count(1);
-        let acquire = vk::ImageMemoryBarrier::default()
-            .image(image.raw)
-            .old_layout(if image.external {
-                vk::ImageLayout::GENERAL
-            } else {
-                vk::ImageLayout::UNDEFINED
-            })
-            .new_layout(vk::ImageLayout::GENERAL)
-            .src_queue_family_index(if image.external {
-                vk::QUEUE_FAMILY_FOREIGN_EXT
-            } else {
-                vk::QUEUE_FAMILY_IGNORED
-            })
-            .dst_queue_family_index(if image.external {
-                job.device.queue_family
-            } else {
-                vk::QUEUE_FAMILY_IGNORED
-            })
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(range);
-        let release = vk::ImageMemoryBarrier::default()
-            .image(image.raw)
-            .old_layout(vk::ImageLayout::GENERAL)
-            .new_layout(vk::ImageLayout::GENERAL)
-            .src_queue_family_index(job.device.queue_family)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .subresource_range(range);
+        let range = image.color_range();
+        let acquire = image.acquire_barrier(vk::AccessFlags::TRANSFER_WRITE);
+        let release = image.release_barrier(vk::AccessFlags::TRANSFER_WRITE);
         let color = vk::ClearColorValue {
             float32: [
                 f32::from(rgb[0]) / 255.0,
@@ -110,17 +82,8 @@ impl Image {
         };
         let check = SyncFile::from_fd(completion.as_fd().try_clone_to_owned()?)?;
         require_success(check.wait_blocking()?)?;
-        image.external = true;
+        image.state = ImageState::Released;
         Ok((image, completion))
-    }
-}
-
-fn require_success(completion: Completion) -> io::Result<()> {
-    match completion {
-        Completion::Success => Ok(()),
-        Completion::Failed(error) => Err(io::Error::other(format!(
-            "native GPU dependency failed: {error}"
-        ))),
     }
 }
 

@@ -5,9 +5,18 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use ash::vk;
-use pronk_dmabuf::SyncFile;
+use pronk_dmabuf::{Completion, SyncFile};
 
 use super::device::{native, DeviceInner};
+
+pub(super) fn require_success(completion: Completion) -> io::Result<()> {
+    match completion {
+        Completion::Success => Ok(()),
+        Completion::Failed(error) => Err(io::Error::other(format!(
+            "native GPU dependency failed: {error}"
+        ))),
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {

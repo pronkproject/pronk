@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::vulkan::Device;
+use pronk_dmabuf::Completion;
 use std::num::NonZeroU32;
 
 #[test]

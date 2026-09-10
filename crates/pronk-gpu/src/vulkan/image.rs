@@ -23,6 +23,13 @@ pub struct ImageLayout {
     pub allocation_size: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ImageState {
+    Uninitialized,
+    /// Initialized contents in GENERAL layout with foreign queue ownership.
+    Released,
+}
+
 /// Dedicated exportable storage. Pixels are undefined until a producer writes it.
 ///
 /// Exporting storage does not authorize publication of uninitialized pixels or
@@ -30,7 +37,7 @@ pub struct ImageLayout {
 pub struct Image {
     pub(super) device: Arc<DeviceInner>,
     pub(super) raw: vk::Image,
-    pub(super) external: bool,
+    pub(super) state: ImageState,
     memory: vk::DeviceMemory,
     layout: ImageLayout,
 }
@@ -75,7 +82,7 @@ impl Device {
         let mut image = Image {
             device: Arc::clone(&self.inner),
             raw,
-            external: false,
+            state: ImageState::Uninitialized,
             memory: vk::DeviceMemory::null(),
             layout: ImageLayout {
                 width,
@@ -210,6 +217,53 @@ impl Device {
 }
 
 impl Image {
+    pub(super) fn color_range(&self) -> vk::ImageSubresourceRange {
+        vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1)
+    }
+
+    pub(super) fn acquire_barrier(
+        &self,
+        access: vk::AccessFlags,
+    ) -> vk::ImageMemoryBarrier<'static> {
+        let (layout, from, to) = match self.state {
+            ImageState::Uninitialized => (
+                vk::ImageLayout::UNDEFINED,
+                vk::QUEUE_FAMILY_IGNORED,
+                vk::QUEUE_FAMILY_IGNORED,
+            ),
+            ImageState::Released => (
+                vk::ImageLayout::GENERAL,
+                vk::QUEUE_FAMILY_FOREIGN_EXT,
+                self.device.queue_family,
+            ),
+        };
+        vk::ImageMemoryBarrier::default()
+            .image(self.raw)
+            .old_layout(layout)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(from)
+            .dst_queue_family_index(to)
+            .dst_access_mask(access)
+            .subresource_range(self.color_range())
+    }
+
+    pub(super) fn release_barrier(
+        &self,
+        access: vk::AccessFlags,
+    ) -> vk::ImageMemoryBarrier<'static> {
+        vk::ImageMemoryBarrier::default()
+            .image(self.raw)
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(self.device.queue_family)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
+            .src_access_mask(access)
+            .subresource_range(self.color_range())
+    }
+
     pub fn layout(&self) -> ImageLayout {
         self.layout
     }
