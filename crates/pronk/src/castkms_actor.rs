@@ -1287,6 +1287,7 @@ fn export_video_buffers(
                 id: exported.buffer_id,
                 dma_buf: exported.dma_buf,
                 layout: VideoBufferLayout {
+                    format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
                     width: exported.layout.width,
                     height: exported.layout.height,
                     pitch: exported.layout.pitch,

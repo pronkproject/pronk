@@ -712,7 +712,11 @@ fn format_parameter(
         spa::param::ParamType::EnumFormat,
         spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
         spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
-        spa::pod::property!(FormatProperties::VideoFormat, Id, VideoFormat::BGRx),
+        spa::pod::property!(
+            FormatProperties::VideoFormat,
+            Id,
+            pixel_format(layout.format)
+        ),
         spa::pod::property!(
             FormatProperties::VideoSize,
             Rectangle,
@@ -760,7 +764,7 @@ fn negotiate_buffers(
     let layout = state.buffers[0].descriptor.layout;
     if media_type != MediaType::Video
         || media_subtype != MediaSubtype::Raw
-        || info.format() != VideoFormat::BGRx
+        || info.format() != pixel_format(layout.format)
         || !storage_matches(&info, layout.storage)
         || info.size().width != layout.width.get()
         || info.size().height != layout.height.get()
@@ -782,6 +786,13 @@ fn negotiate_buffers(
     stream
         .update_params(&mut pods)
         .map_err(|error| pipewire_error("update source buffer parameters", error))
+}
+
+fn pixel_format(format: crate::VideoPixelFormat) -> VideoFormat {
+    match format {
+        crate::VideoPixelFormat::Xrgb8888 => VideoFormat::BGRx,
+        crate::VideoPixelFormat::Argb8888 => VideoFormat::BGRA,
+    }
 }
 
 fn storage_matches(info: &VideoInfoRaw, storage: crate::VideoBufferStorage) -> bool {
@@ -1271,6 +1282,7 @@ mod tests {
     #[test]
     fn linear_cpu_format_does_not_force_dmabuf_caps_downstream() {
         let layout = crate::VideoBufferLayout {
+            format: crate::VideoPixelFormat::Xrgb8888,
             width: NonZeroU32::new(1920).unwrap(),
             height: NonZeroU32::new(1080).unwrap(),
             pitch: NonZeroU32::new(7680).unwrap(),
@@ -1296,6 +1308,7 @@ mod tests {
                 offset: 4096,
             };
             let layout = crate::VideoBufferLayout {
+                format: crate::VideoPixelFormat::Xrgb8888,
                 width: NonZeroU32::new(16).unwrap(),
                 height: NonZeroU32::new(8).unwrap(),
                 pitch: NonZeroU32::new(64).unwrap(),
@@ -1348,6 +1361,7 @@ mod tests {
                 id: NonZeroU32::new(1).unwrap(),
                 dma_buf: std::fs::File::open("/dev/null").unwrap().into(),
                 layout: crate::VideoBufferLayout {
+                    format: crate::VideoPixelFormat::Xrgb8888,
                     width: NonZeroU32::new(16).unwrap(),
                     height: NonZeroU32::new(8).unwrap(),
                     pitch: NonZeroU32::new(64).unwrap(),
@@ -1417,6 +1431,7 @@ mod tests {
         ));
 
         let layout = crate::VideoBufferLayout {
+            format: crate::VideoPixelFormat::Xrgb8888,
             width: NonZeroU32::new(1920).unwrap(),
             height: NonZeroU32::new(1080).unwrap(),
             pitch: NonZeroU32::new(7680).unwrap(),
@@ -1429,5 +1444,39 @@ mod tests {
             classify_format_change(Some(pod)),
             FormatChange::Negotiated(_)
         ));
+    }
+
+    #[test]
+    fn packed_alpha_format_is_preserved_with_each_storage_profile() {
+        for storage in [
+            crate::VideoBufferStorage::MappableLinear,
+            crate::VideoBufferStorage::DrmModifier {
+                modifier: 0,
+                offset: 0,
+            },
+            crate::VideoBufferStorage::DrmModifier {
+                modifier: 0x0100_0000_0000_0009,
+                offset: 0,
+            },
+        ] {
+            for format in [
+                crate::VideoPixelFormat::Xrgb8888,
+                crate::VideoPixelFormat::Argb8888,
+            ] {
+                let layout = crate::VideoBufferLayout {
+                    format,
+                    width: NonZeroU32::new(16).unwrap(),
+                    height: NonZeroU32::new(8).unwrap(),
+                    pitch: NonZeroU32::new(64).unwrap(),
+                    size: NonZeroU64::new(512).unwrap(),
+                    storage,
+                };
+                let bytes = format_parameter(NonZeroU32::new(30).unwrap(), layout).unwrap();
+                let mut info = VideoInfoRaw::new();
+                info.parse(Pod::from_bytes(&bytes).unwrap()).unwrap();
+                assert_eq!(info.format(), pixel_format(format));
+                assert!(storage_matches(&info, storage));
+            }
+        }
     }
 }

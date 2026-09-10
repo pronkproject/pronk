@@ -1434,11 +1434,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_generation_cannot_mix_packed_pixel_formats() {
+        let mut request = generation(1);
+        request.buffers[1].layout.format = crate::VideoPixelFormat::Argb8888;
+        assert!(matches!(
+            request.config.validate(&request.buffers),
+            Err(crate::ConfigurationError::LayoutMismatch(1))
+        ));
+        request.buffers[0].layout.format = crate::VideoPixelFormat::Argb8888;
+        assert!(request.config.validate(&request.buffers).is_ok());
+    }
+
     fn video_buffer(id: u32) -> VideoBuffer {
         VideoBuffer {
             id: nonzero32(id),
             dma_buf: File::open("/dev/null").unwrap().into(),
             layout: VideoBufferLayout {
+                format: crate::VideoPixelFormat::Xrgb8888,
                 width: nonzero32(640),
                 height: nonzero32(480),
                 pitch: nonzero32(2560),

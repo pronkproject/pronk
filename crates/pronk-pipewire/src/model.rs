@@ -206,6 +206,7 @@ mod tests {
 
     fn layout() -> VideoBufferLayout {
         VideoBufferLayout {
+            format: crate::VideoPixelFormat::Xrgb8888,
             width: nonzero32(1920),
             height: nonzero32(1080),
             pitch: nonzero32(7680),

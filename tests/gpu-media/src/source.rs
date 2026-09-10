@@ -50,6 +50,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64) -> Result<()> {
             dma_buf: image.export()?,
             timelines: None,
             layout: VideoBufferLayout {
+                format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
                 width: layout.width,
                 height: layout.height,
                 pitch: NonZeroU32::new(layout.pitch.try_into()?).context("zero pitch")?,

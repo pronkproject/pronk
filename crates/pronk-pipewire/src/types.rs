@@ -8,11 +8,19 @@ pub const MAX_VIDEO_BUFFERS: usize = 64;
 pub const MAX_FRAME_DIMENSION: u32 = 8192;
 pub const MAX_IDENTITY_STRING_BYTES: usize = 256;
 
+/// Byte layout of the single packed pixel plane, independent of its modifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoPixelFormat {
+    Xrgb8888,
+    /// The producer supplies meaningful alpha, including opaque alpha for video.
+    Argb8888,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoBufferStorage {
-    /// Linear XRGB8888 storage suitable for the existing CPU-copy consumer.
+    /// Linear packed storage suitable for CPU mapping.
     MappableLinear,
-    /// Single-plane XRGB8888 storage described by the allocating graphics API.
+    /// Single-plane packed storage described by the allocating graphics API.
     ///
     /// Even modifier zero is explicit here. The transport does not promise CPU
     /// mapping or derive a tiled allocation's extent from pitch and height.
@@ -30,9 +38,10 @@ impl VideoBufferStorage {
     }
 }
 
-/// A caller-validated XRGB8888 allocation; `size` includes any plane offset.
+/// A caller-validated packed allocation; `size` includes any plane offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoBufferLayout {
+    pub format: VideoPixelFormat,
     pub width: NonZeroU32,
     pub height: NonZeroU32,
     pub pitch: NonZeroU32,
@@ -290,6 +299,7 @@ mod layout_tests {
 
     fn layout(storage: VideoBufferStorage) -> VideoBufferLayout {
         VideoBufferLayout {
+            format: crate::VideoPixelFormat::Xrgb8888,
             width: NonZeroU32::new(16).unwrap(),
             height: NonZeroU32::new(8).unwrap(),
             pitch: NonZeroU32::new(64).unwrap(),

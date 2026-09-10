@@ -93,6 +93,7 @@ fn video_buffer(id: u32) -> anyhow::Result<VideoBuffer> {
             .context("open placeholder video descriptor")?
             .into(),
         layout: VideoBufferLayout {
+            format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
             width: nonzero32(320),
             height: nonzero32(180),
             pitch: nonzero32(1_280),

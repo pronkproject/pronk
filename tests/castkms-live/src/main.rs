@@ -1165,6 +1165,7 @@ fn start_pipewire_gate_generation(
             id: exported.buffer_id,
             dma_buf: exported.dma_buf,
             layout: VideoBufferLayout {
+                format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
                 width: exported.layout.width,
                 height: exported.layout.height,
                 pitch: exported.layout.pitch,
