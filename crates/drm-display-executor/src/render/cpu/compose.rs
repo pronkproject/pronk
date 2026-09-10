@@ -1,4 +1,4 @@
-//! Identity-color RGB reference composition with explicit plane blending.
+//! RGB reference composition with explicit plane blending and output color.
 
 use std::collections::TryReserveError;
 
@@ -7,6 +7,7 @@ use super::{
     pixel::Rgb,
 };
 use crate::scene::blend::Blend;
+use crate::scene::color::OutputColor;
 use crate::scene::geometry::{CopyRegion, Extent, GeometryError, SourceRect};
 use crate::scene::transform::Transform;
 
@@ -92,6 +93,19 @@ pub fn compose(
     background: [u8; 3],
     layers: &[Layer<'_>],
 ) -> Result<(), TryReserveError> {
+    compose_with_output_color(output, background, layers, OutputColor::default())
+}
+
+/// Compose with an explicit post-blend color stage before byte quantization.
+///
+/// Geometry, blending, scratch allocation and storage lifetime follow [`compose`].
+/// The color stage applies to background pixels too and never changes alpha.
+pub fn compose_with_output_color(
+    output: &mut ImageMut<'_>,
+    background: [u8; 3],
+    layers: &[Layer<'_>],
+    color: OutputColor<'_>,
+) -> Result<(), TryReserveError> {
     let layout = output.layout();
     let extent = layout.extent();
     let mut row = Vec::new();
@@ -119,7 +133,7 @@ pub fn compose(
         }
         let pixels = output.row(y).expect("validated output row");
         for (destination, source) in pixels.chunks_exact_mut(4).zip(&row) {
-            destination.copy_from_slice(&source.write(layout.format()));
+            destination.copy_from_slice(&source.output_color(color).write(layout.format()));
         }
     }
     Ok(())

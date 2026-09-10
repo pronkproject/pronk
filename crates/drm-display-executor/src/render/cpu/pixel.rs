@@ -1,6 +1,7 @@
 //! Integer reference arithmetic in the selected encoded RGB domain.
 
 use crate::scene::blend::{Blend, PixelBlend};
+use crate::scene::color::OutputColor;
 use crate::scene::format::PackedRgbFormat;
 
 const MAX: u64 = u16::MAX as u64;
@@ -52,5 +53,9 @@ impl Rgb {
             PackedRgbFormat::Xrgb8888 | PackedRgbFormat::Argb8888 => [b, g, r, 255],
             PackedRgbFormat::Xbgr8888 | PackedRgbFormat::Abgr8888 => [r, g, b, 255],
         }
+    }
+
+    pub(super) fn output_color(self, color: OutputColor<'_>) -> Self {
+        Self(color.apply(self.0))
     }
 }
