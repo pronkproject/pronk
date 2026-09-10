@@ -204,6 +204,35 @@ pixel and alpha across repeated foreign handoffs. The generated-frame producer
 itself does not map raw pixels. These tests do not run a media graph, simulate
 device loss, or qualify an unsignaled downstream-reader stall.
 
+## Waited copies from executor-owned staging
+
+`destination.copy_from_waited(source)` copies a complete initialized image into
+a separate same-size allocation on the same Vulkan device. Both image owners
+move into the native job. Successful completion returns `CopiedImages`, with
+the source, destination and a checked native completion for publication. The
+operation rejects an uninitialized source, mismatched dimensions or another
+device before recording GPU commands. It performs no scaling, blending or CPU
+pixel transfer.
+
+The caller must own exclusive native access across dependency snapshot and
+completion enrollment. The source is executor-owned staging, never a retained
+compositor-source lease: destination reuse may block this operation. A prior
+source-to-private-stage operation must already have completed and released the
+compositor source. Native completion is enrolled as a reader of the staging
+allocation and a writer of the destination; it is not a promise of future
+userspace submission.
+
+Run copies on a bounded blocking graphics worker, as with clear operations.
+Errors do not return either image for reuse. The submitted job retains both
+allocations through native cleanup, including errors after submission. The
+existing worker-loss and indeterminate-wait rules still apply.
+
+The explicit native unit tests verify repeated copies, then rewrite the source
+before reading every destination pixel. They also reject undefined sources,
+extent mismatches and distinct Vulkan devices. CPU mapping remains confined to
+the shared test oracle. Those tests use locally allocated images; they do not
+qualify foreign-source import or the complete capture/staging pipeline.
+
 ## Current scope
 
 Existing casting callers select `MappableLinear`; they do not opt into GPU
