@@ -18,6 +18,7 @@ pub(crate) struct Output {
     pub width: u32,
     pub height: u32,
     pub background: [u8; 3],
+    pub gamma: Option<Vec<[u16; 3]>>,
 }
 
 #[derive(Deserialize)]

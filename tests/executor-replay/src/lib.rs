@@ -7,11 +7,12 @@ mod ppm;
 
 use anyhow::{bail, ensure, Context, Result};
 use drm_display_executor::render::cpu::{
-    compose::{compose, Layer},
+    compose::{compose_with_output_color, Layer},
     image::{Image, ImageMut, LinearLayout},
 };
 use drm_display_executor::scene::{
     blend::Blend,
+    color::{Lut, OutputColor},
     format::PackedRgbFormat,
     geometry::{Extent, SourceRect},
     transform::{Rotation, Transform},
@@ -39,6 +40,9 @@ pub fn render(input: &[u8]) -> Result<Rendered> {
     ensure!(fixture.version == 1, "unsupported fixture version");
     ensure!(fixture.sources.len() <= 64, "too many fixture sources");
     ensure!(fixture.layers.len() <= 256, "too many fixture layers");
+    let color = OutputColor {
+        gamma: fixture.output.gamma.as_deref().map(Lut::new).transpose()?,
+    };
     let extent = Extent::new(fixture.output.width, fixture.output.height)?;
     let stride = usize::try_from(extent.width())?
         .checked_mul(4)
@@ -97,10 +101,11 @@ pub fn render(input: &[u8]) -> Result<Rendered> {
     let mut pixels = Vec::new();
     pixels.try_reserve_exact(layout.required_bytes())?;
     pixels.resize(layout.required_bytes(), 0);
-    compose(
+    compose_with_output_color(
         &mut ImageMut::new(&mut pixels, layout)?,
         fixture.output.background,
         &layers,
+        color,
     )?;
     Ok(Rendered {
         width: extent.width(),
