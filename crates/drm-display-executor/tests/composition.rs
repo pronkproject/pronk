@@ -7,6 +7,7 @@ use drm_display_executor::{
         blend::{Blend, PixelBlend},
         format::PackedRgbFormat as Format,
         geometry::Extent,
+        transform::{Rotation, Transform},
     },
 };
 
@@ -188,6 +189,46 @@ fn pixel_interpretation_is_not_selected_by_format() {
             plane_alpha: u16::MAX
         }
     );
+}
+
+#[test]
+fn rotated_crop_clips_in_output_space_without_reading_outside_crop() {
+    let mut bytes = [0u8; 4 * 5 * 4];
+    // Only the selected 2x3 crop carries red-channel labels; its border is white.
+    for pixel in bytes.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[255; 4]);
+    }
+    for y in 0..3 {
+        for x in 0..2 {
+            let offset = ((y + 1) * 4 + x + 1) * 4;
+            bytes[offset..offset + 4].copy_from_slice(&[0, 0, (y * 2 + x + 1) as u8, 255]);
+        }
+    }
+    let source = Image::new(&bytes, layout(4, 5, Format::Argb8888)).unwrap();
+    let layer = Layer::new(source, [1, 1], extent(2, 3), [-1, 1])
+        .unwrap()
+        .with_transform(Transform {
+            rotation: Rotation::Rotate90,
+            reflect_x: true,
+            reflect_y: false,
+        });
+    let output_layout = LinearLayout::new(extent(3, 4), Format::Argb8888, 2, 16).unwrap();
+    let mut result = [0x99; 62];
+    compose(
+        &mut ImageMut::new(&mut result, output_layout).unwrap(),
+        [17, 0, 0],
+        &[layer],
+    )
+    .unwrap();
+    let view = Image::new(&result, output_layout).unwrap();
+    let red: Vec<_> = (0..4)
+        .flat_map(|y| view.row(y).unwrap().chunks_exact(4).map(|pixel| pixel[2]))
+        .collect();
+    assert_eq!(red, [17, 17, 17, 3, 5, 17, 4, 6, 17, 17, 17, 17]);
+    assert_eq!(&result[..2], &[0x99; 2]);
+    for start in [14, 30, 46] {
+        assert_eq!(&result[start..start + 4], &[0x99; 4]);
+    }
 }
 
 #[test]
