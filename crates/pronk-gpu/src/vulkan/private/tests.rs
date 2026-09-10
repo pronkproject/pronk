@@ -4,6 +4,7 @@ use pronk_dmabuf::Completion;
 
 mod blend;
 mod geometry;
+mod pending;
 
 fn device() -> (Device, u64) {
     let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
