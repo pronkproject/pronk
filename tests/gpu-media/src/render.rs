@@ -4,7 +4,7 @@ use anyhow::{ensure, Result};
 use drm_display_executor::scene::{blend::Blend, transform::Transform};
 use drm_display_executor::scheduler::source_use::Submission;
 use pronk_dmabuf::SyncFile;
-use pronk_gpu::vulkan::{Blender, Device, Image, PendingPrivateRead, PrivateImage};
+use pronk_gpu::vulkan::{Blender, Device, Gamma, Image, PendingPrivateRead, PrivateImage};
 use std::num::NonZeroU32;
 use std::os::fd::AsFd;
 use std::time::Instant;
@@ -20,6 +20,7 @@ pub struct SubmittedRead {
     pending: Vec<(PendingPrivateRead, Plane)>,
     output: PrivateImage,
     blender: Blender,
+    gamma: Gamma,
     timing: Timings,
 }
 
@@ -28,6 +29,7 @@ pub struct PrivateStorage {
     inputs: Vec<PrivateImage>,
     output: PrivateImage,
     blender: Blender,
+    gamma: Gamma,
 }
 
 impl PrivateStorage {
@@ -44,10 +46,12 @@ impl PrivateStorage {
             .collect::<std::io::Result<Vec<_>>>()?;
         let output = worker.allocate_private(nz(pattern::WIDTH), nz(pattern::HEIGHT))?;
         let blender = worker.create_blender()?;
+        let gamma = worker.create_gamma(&pattern::GAMMA)?;
         Ok(Self {
             inputs,
             output,
             blender,
+            gamma,
         })
     }
 }
@@ -101,6 +105,7 @@ pub fn submit_sources(
         pending,
         output: private.output,
         blender: private.blender,
+        gamma: private.gamma,
         timing: Timings {
             submission: started.elapsed(),
             ..Timings::default()
@@ -154,6 +159,9 @@ impl SubmittedRead {
         }
         timing.composition = started.elapsed();
         let started = Instant::now();
+        private = self.gamma.apply_waited(private)?;
+        timing.color = started.elapsed();
+        let started = Instant::now();
         // Only an internal bridge crosses Vulkan devices. The exported capture
         // destination is allocated and accessed exclusively by the output side.
         let layout = output.layout();
@@ -174,6 +182,7 @@ impl SubmittedRead {
             inputs,
             output: copied.source.clear_waited([0; 3])?,
             blender: self.blender,
+            gamma: self.gamma,
         };
         timing.overwrites += started.elapsed();
         Ok(Rendered {

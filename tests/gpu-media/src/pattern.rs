@@ -1,5 +1,6 @@
 //! Frame-specific fixture pixels, separated by more than codec tolerance.
 
+use drm_display_executor::scene::color::Lut;
 use drm_display_executor::scene::geometry::{CopyRegion, Extent, SourceRect};
 
 pub const FRAMES: u32 = 20;
@@ -7,6 +8,15 @@ pub const TOLERANCE: u8 = 6;
 pub const WIDTH: u32 = 1920;
 pub const HEIGHT: u32 = 1080;
 pub const BACKGROUND: [u8; 3] = [0; 3];
+pub const GAMMA: [[u16; 3]; 2] = [[0, 65535, 0], [65535, 0, 65535]];
+
+/// Reference output after the fixture's green-channel inversion.
+pub fn output_color(rgb: [u8; 3]) -> [u8; 3] {
+    Lut::new(&GAMMA)
+        .unwrap()
+        .sample(rgb.map(|value| u16::from(value) * 257))
+        .map(|value| ((u32::from(value) + 128) / 257) as u8)
+}
 
 pub fn source_crop() -> SourceRect {
     SourceRect::new(
@@ -103,6 +113,23 @@ mod tests {
             assert!(separated(rgb, [255, 255, 255]));
             for earlier in 0..index {
                 assert!(separated(rgb, color(earlier)));
+            }
+        }
+    }
+
+    #[test]
+    fn output_gamma_preserves_frame_distinction_and_detects_overwrites() {
+        assert_eq!(output_color([0; 3]), [0, 255, 0]);
+        assert_eq!(output_color([255; 3]), [255, 0, 255]);
+        assert_eq!(output_color([17, 23, 41]), [17, 232, 41]);
+        for index in 0..FRAMES {
+            let rgb = output_color(color(index));
+            assert!(separated(rgb, color(index)), "identity color must fail");
+            for corrupted in [[0; 3], [255; 3], output_color([255; 3])] {
+                assert!(separated(rgb, corrupted));
+            }
+            for earlier in 0..index {
+                assert!(separated(rgb, output_color(color(earlier))));
             }
         }
     }

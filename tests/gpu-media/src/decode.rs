@@ -90,9 +90,10 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
             (
                 left..left + region.extent().width(),
                 top..top + region.extent().height(),
-                plane.color,
+                pattern::output_color(plane.color),
             )
         });
+        let background = pattern::output_color(pattern::BACKGROUND);
         for y in 0..HEIGHT as usize {
             let row = pixels
                 .get(y * stride..y * stride + WIDTH as usize * 4)
@@ -105,7 +106,7 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
                         (horizontal.contains(&(x as u32)) && vertical.contains(&(y as u32)))
                             .then_some(*color)
                     })
-                    .unwrap_or(pattern::BACKGROUND);
+                    .unwrap_or(background);
                 let actual = [pixel[2], pixel[1], pixel[0]];
                 ensure!(
                     actual

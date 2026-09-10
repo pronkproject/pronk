@@ -9,6 +9,7 @@ pub struct Timings {
     // Remaining read wait after the coordinator collects accounting.
     pub retirement: Duration,
     pub composition: Duration,
+    pub color: Duration,
     pub output: Duration,
     // Fixture-only source and composed-image corruption controls.
     pub overwrites: Duration,
@@ -33,6 +34,7 @@ impl Report {
             ),
             ("remaining-source-wait", |t: &Timings| t.retirement),
             ("private-composition", |t: &Timings| t.composition),
+            ("private-gamma", |t: &Timings| t.color),
             ("shared-output-copy", |t: &Timings| t.output),
             ("test-overwrites", |t: &Timings| t.overwrites),
         ] {
