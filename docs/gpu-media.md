@@ -333,6 +333,22 @@ Native tests compare three overlapping clipped planes with the CPU reference
 in both stacking orders after every source is overwritten and staging is
 reused. They also cover empty composition and duplicate-import rejection.
 
+`OpaqueLayer::with_transform` additionally selects source-axis reflection or
+a half turn. The native adapter clips in transformed crop coordinates and
+uses nearest-neighbor blits with reversed source edges as needed. It performs
+no scaling; 90/270-degree rotations return `Unsupported` before producer waits.
+Default identity layers retain the literal copy path. Both images use the same
+UNORM format and the allocator's required blit capabilities; no sRGB conversion
+or shader pipeline is introduced.
+
+Blit coordinate rounding is implementation-dependent in Vulkan, so the native
+profile is qualified by pixel comparison on the selected GPU/modifier tuple,
+not by assuming arbitrary blits are byte-identical copies. The nonuniform crop
+test covers all supported reflection/half-turn combinations and three clipped
+placements after source and staging reuse. Geometry tests check reversed pixel
+edges, one-pixel footprints and quarter-turn rejection. See the
+[Vulkan blit contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBlitImage.html).
+
 ## Current scope
 
 Existing casting callers select `MappableLinear`; they do not opt into GPU

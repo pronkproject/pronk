@@ -101,8 +101,9 @@ The crop origin is added only after that inverse transform.
 CPU layers select the policy with `with_transform`; the default is identity.
 Output clipping happens in the transformed crop's coordinate space. Neither
 rotation nor reflection permits reading outside the validated original crop.
-The model does not implicitly enable transforms in native GPU copies, which
-remain restricted to the documented unrotated profile.
+The model does not implicitly enable transforms in native GPU operations.
+The native adapter separately qualifies mirrored/half-turn blits; quarter turns
+remain unsupported there. See [native profile restrictions](gpu-media.md).
 
 Tests use literal non-square rotation patterns, all reflection/rotation
 combinations over small dimensions, unsigned coordinate limits and a clipped
