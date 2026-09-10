@@ -376,8 +376,9 @@ arbitrary composed scenes bit-identical to the CPU blend implementation.
 The shader lives under `crates/pronk-gpu/src/vulkan/private/gamma`; run
 `bash crates/pronk-gpu/tests/check-gamma-shader.sh` with glslang 16.3.0 to verify
 the checked-in Vulkan 1.1 module. Normal builds do not invoke a shader compiler.
-The generated media fixture still selects identity color, independently of
-these native color-operation checks.
+The generated media fixture uses a two-entry green-inversion table after
+composition and verifies decoded colors against the CPU reference. That
+integrated curve is independent of the broader native table-size checks.
 
 ## Waited copies from exportable executor-owned staging
 
@@ -550,7 +551,8 @@ The generated-image media harness uses the non-exportable shader path. Three
 source copies report independent native completion before private pixels are
 collected. Originals are overwritten before private shader composition, and the
 composed image is overwritten after conversion into shared output. The scene
-still uses opaque layers; alpha modes and orthogonal transforms are qualified
+still uses opaque layers, followed by post-composition green inversion;
+alpha modes and orthogonal transforms are qualified
 by the separate native-versus-reference tests. The harness retains its private
 PipeWire transport, hardware-encoder and transient-sandbox checks without
 enabling the production renderer or claiming delivered frame rate.

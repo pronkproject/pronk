@@ -51,6 +51,11 @@ and reused across frames; they have no export API or external reuse dependency.
 A single immutable blend program is created alongside that storage and retained
 across every layer and frame. Each native operation still owns its own image
 views and descriptors; source-use accounting retains no shader program state.
+A separately retained gamma program inverts the green channel after blending,
+including the uncovered background. Its two-entry table is uploaded once before
+source admission. The decoded-image oracle applies the CPU reference table to
+expected colors; leaving color unchanged, reading overwritten sources, or
+publishing overwritten private storage cannot satisfy those expectations.
 
 The internal bridge adds an allocation and a GPU transfer per frame. Its backing
 storage survives the source-side owner through the retained DMA-BUF descriptor,
@@ -110,7 +115,8 @@ The renderer also reports nearest-rank p50/p95/max host durations over the
 successful frames. Generated-source submission includes fixture clears,
 producer waits and native read submission. Remaining-source wait starts only
 after accounting collection; it excludes the coordinator's intervening delay.
-Private composition includes background initialization and shader operations;
+Private composition includes background initialization and blend operations.
+Private gamma measures the subsequent color operation separately;
 shared-output copying includes bridge allocation, format conversion, device
 handoff, final copying and any destination wait. Test-only source and
 composed-image overwrites have a separate total. Those intervals are not GPU
