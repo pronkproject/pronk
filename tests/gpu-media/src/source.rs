@@ -31,13 +31,15 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
     let render_node = node.to_owned();
     let node = node.to_owned();
     // Allocation and native initialization run outside the runtime and PW loop.
-    let (worker, mut images, staging, incoming) =
+    let (worker, output_worker, mut images, staging, incoming) =
         tokio::task::spawn_blocking(move || -> Result<_> {
             let device = Arc::new(Device::open(&node)?);
             let producer = Device::open(&node)?;
+            let output_worker = Arc::new(Device::open(&node)?);
             let identity = device.identity();
             ensure!(
                 identity == producer.identity()
+                    && identity == output_worker.identity()
                     && identity.device != [0; 16]
                     && identity.driver != [0; 16],
                 "producer and worker native identities do not match"
@@ -45,7 +47,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             eprintln!("GPU: {}", device.name());
             let images = (0..SLOTS)
                 .map(|_| {
-                    device
+                    output_worker
                         .allocate(nz(WIDTH), nz(HEIGHT), modifier)
                         .map(Some)
                         .map_err(Into::into)
@@ -62,7 +64,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     )
                 })
                 .collect::<std::io::Result<Vec<_>>>()?;
-            Ok((device, images, staging, incoming))
+            Ok((device, output_worker, images, staging, incoming))
         })
         .await??;
     let mut staging = Some(staging);
@@ -168,6 +170,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     .context("private staging image is in flight")?;
                 let input = incoming.take().context("producer image is in flight")?;
                 let worker = Arc::clone(&worker);
+                let output_worker = Arc::clone(&output_worker);
                 let scene = pattern::scene(published);
                 let source_use = SourceUse::new(NonZeroUsize::new(scene.len()).unwrap())?;
                 let submissions = (0..scene.len())
@@ -184,7 +187,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     collect
                         .recv()
                         .context("source accounting was not collected")?;
-                    stage.copy_output(image)
+                    stage.copy_output(&worker, &output_worker, image)
                 });
                 source_use.close();
                 if ready.await.is_err() {

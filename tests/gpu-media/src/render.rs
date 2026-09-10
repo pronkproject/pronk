@@ -112,7 +112,16 @@ impl SubmittedRead {
     /// The coordinator resolves source-use accounting before starting this
     /// retirement and output operation. Native reading must finish successfully
     /// before original reuse or copying completed private pixels downstream.
-    pub fn copy_output(self, output: Image) -> Result<Rendered> {
+    pub fn copy_output(
+        self,
+        worker: &Device,
+        output_worker: &Device,
+        output: Image,
+    ) -> Result<Rendered> {
+        ensure!(
+            worker.identity() == output_worker.identity(),
+            "source and output devices differ"
+        );
         let mut timing = self.timing;
         let started = Instant::now();
         let layers = self
@@ -145,7 +154,20 @@ impl SubmittedRead {
         }
         timing.composition = started.elapsed();
         let started = Instant::now();
-        let copied = private.copy_into_waited(output)?;
+        // Only an internal bridge crosses Vulkan devices. The exported capture
+        // destination is allocated and accessed exclusively by the output side.
+        let layout = output.layout();
+        let bridge = worker.allocate(layout.width, layout.height, layout.modifier)?;
+        let copied = private.copy_into_waited(bridge)?;
+        let bridge_fd = copied.destination.export()?;
+        let bridge_layout = copied.destination.layout();
+        drop(copied.destination);
+        // SAFETY: Exact allocator metadata and matching physical/driver identity.
+        // The bridge has completed foreign release and is not shared with any
+        // consumer. Its source-side Vulkan image and memory owners are gone.
+        let bridge =
+            unsafe { output_worker.import_source(bridge_fd, bridge_layout, copied.completion) }?;
+        let (output, completion) = bridge.copy_into_waited(output)?;
         timing.output = started.elapsed();
         let started = Instant::now();
         let private = PrivateStorage {
@@ -157,8 +179,8 @@ impl SubmittedRead {
         Ok(Rendered {
             originals: input,
             private,
-            output: copied.destination,
-            completion: copied.completion,
+            output,
+            completion,
             timing,
         })
     }
