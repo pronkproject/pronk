@@ -71,4 +71,24 @@ mod tests {
         color(FRAMES);
     }
 
+    #[test]
+    fn placed_crops_have_known_clipped_source_and_output_rectangles() {
+        assert_eq!(source_crop().origin(), [32, 16]);
+        assert_eq!(source_crop().extent(), Extent::new(1856, 1024).unwrap());
+        let expected = [
+            ([64, 16], [0, 16], [1824, 1024]),
+            ([32, 32], [32, 0], [1856, 1008]),
+            ([32, 16], [64, 32], [1856, 1024]),
+        ];
+        for sequence in 0..FRAMES {
+            let region = visible(sequence);
+            let (source, destination, size) = expected[sequence as usize % 3];
+            assert_eq!(region.source(), source);
+            assert_eq!(region.destination(), destination);
+            assert_eq!([region.extent().width(), region.extent().height()], size);
+            assert!(size[0] * size[1] < WIDTH * HEIGHT);
+            assert!(destination[0] + size[0] <= WIDTH);
+            assert!(destination[1] + size[1] <= HEIGHT);
+        }
+    }
 }
