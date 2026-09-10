@@ -1,0 +1,28 @@
+#version 450
+
+// Build: glslangValidator -V --target-env vulkan1.1 shader.comp -o shader.spv
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba32f) readonly uniform image2D source_image;
+layout(set = 0, binding = 1, rgba32f) uniform image2D destination_image;
+layout(push_constant) uniform Parameters {
+    uint pixel_mode;
+    uint plane_alpha;
+} parameters;
+
+void main() {
+    ivec2 position = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(position, imageSize(destination_image))))
+        return;
+
+    vec4 source = imageLoad(source_image, position);
+    vec3 destination = imageLoad(destination_image, position).rgb;
+    float plane = float(parameters.plane_alpha) / 65535.0;
+    float pixel = parameters.pixel_mode == 0 ? 1.0 : source.a;
+    float source_weight = parameters.pixel_mode == 2 ? pixel * plane : plane;
+    vec3 color = source.rgb * source_weight + destination * (1.0 - pixel * plane);
+    // Keep normalized 16-bit intermediate color, matching the reference's
+    // precision policy. Native floating-point arithmetic is qualified with
+    // an explicit tolerance, not assumed bit-identical to integer evaluation.
+    color = floor(clamp(color, 0.0, 1.0) * 65535.0 + 0.5) / 65535.0;
+    imageStore(destination_image, position, vec4(color, 1.0));
+}

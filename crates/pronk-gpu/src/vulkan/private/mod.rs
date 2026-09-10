@@ -8,10 +8,12 @@ use ash::vk;
 use super::device::DeviceInner;
 
 mod allocation;
+mod blend;
 mod clear;
 mod output;
 mod source;
 
+pub use blend::BlendedImages;
 pub use output::PrivateCopy;
 
 const FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
