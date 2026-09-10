@@ -13,7 +13,7 @@ mod clear;
 mod output;
 mod source;
 
-pub use blend::BlendedImages;
+pub use blend::{BlendedImages, Blender};
 pub use output::PrivateCopy;
 pub use source::PendingPrivateRead;
 

@@ -13,11 +13,58 @@ use drm_display_executor::scene::{
 use super::PrivateImage;
 use crate::vulkan::device::unsupported;
 use crate::vulkan::submission::Job;
+use crate::vulkan::Device;
 
+mod bindings;
 mod geometry;
 mod pipeline;
+use bindings::Bindings;
 use geometry::Parameters;
-use pipeline::Pipeline;
+use pipeline::Program;
+
+/// Reusable immutable compute program for one logical graphics device.
+///
+/// Clones share only compiled shader state. Every operation creates independent
+/// image views and descriptors and retains them through native completion.
+/// This owner retains the device; no device-owned cache retains it in return.
+#[derive(Clone)]
+pub struct Blender {
+    program: Arc<Program>,
+}
+
+impl Device {
+    /// Create a reusable private-image blend program before frame processing.
+    pub fn create_blender(&self) -> io::Result<Blender> {
+        Ok(Blender {
+            program: Arc::new(Program::new(Arc::clone(&self.inner))?),
+        })
+    }
+}
+
+impl Blender {
+    /// Blend a crop using the lifetime, geometry and precision contract of
+    /// [`PrivateImage::blend_region_waited`], without recreating the program.
+    /// Both images must belong to this program's logical device. Calls may run
+    /// on separate blocking workers with independently owned images.
+    pub fn blend_region_waited(
+        &self,
+        destination: PrivateImage,
+        source: PrivateImage,
+        crop: SourceRect,
+        placement: [i32; 2],
+        transform: Transform,
+        blend: Blend,
+    ) -> io::Result<BlendedImages> {
+        destination.blend_with(
+            Some(Arc::clone(&self.program)),
+            source,
+            crop,
+            placement,
+            transform,
+            blend,
+        )
+    }
+}
 
 /// The unchanged source and blended private destination after GPU completion.
 pub struct BlendedImages {
@@ -27,7 +74,7 @@ pub struct BlendedImages {
 
 struct Resources {
     // Native views are destroyed before the images they reference.
-    pipeline: Pipeline,
+    bindings: Bindings,
     source: PrivateImage,
     destination: PrivateImage,
 }
@@ -75,7 +122,25 @@ impl PrivateImage {
         transform: Transform,
         blend: Blend,
     ) -> io::Result<BlendedImages> {
-        if !Arc::ptr_eq(&self.device, &source.device) || !self.initialized || !source.initialized {
+        self.blend_with(None, source, crop, placement, transform, blend)
+    }
+
+    fn blend_with(
+        self,
+        program: Option<Arc<Program>>,
+        source: PrivateImage,
+        crop: SourceRect,
+        placement: [i32; 2],
+        transform: Transform,
+        blend: Blend,
+    ) -> io::Result<BlendedImages> {
+        if !Arc::ptr_eq(&self.device, &source.device)
+            || !self.initialized
+            || !source.initialized
+            || program
+                .as_ref()
+                .is_some_and(|program| !Arc::ptr_eq(&program.device, &self.device))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "private blending needs initialized images on one device",
@@ -100,34 +165,18 @@ impl PrivateImage {
             });
         };
         let groups = parameters.groups;
-        // SAFETY: The image retains the physical device and its instance.
-        let queues = unsafe {
-            self.device
-                .instance()
-                .get_physical_device_queue_family_properties(self.device.physical)
+        let program = match program {
+            Some(program) => program,
+            None => Arc::new(Program::new(Arc::clone(&self.device))?),
         };
-        let limits = unsafe {
-            self.device
-                .instance()
-                .get_physical_device_properties(self.device.physical)
-        }
-        .limits;
-        if !queues[self.device.queue_family as usize]
-            .queue_flags
-            .contains(vk::QueueFlags::COMPUTE)
-            || limits.max_compute_work_group_size[0] < 8
-            || limits.max_compute_work_group_size[1] < 8
-            || limits.max_compute_work_group_invocations < 64
-            || groups[0] > limits.max_compute_work_group_count[0]
-            || groups[1] > limits.max_compute_work_group_count[1]
-        {
+        if groups[0] > program.max_groups[0] || groups[1] > program.max_groups[1] {
             return Err(unsupported("private blend dispatch is unsupported"));
         }
-        let pipeline = Pipeline::new(&source, &self)?;
+        let bindings = Bindings::new(program, &source, &self)?;
         let mut job = Job::new(
             Arc::clone(&self.device),
             Resources {
-                pipeline,
+                bindings,
                 source,
                 destination: self,
             },
@@ -155,20 +204,18 @@ impl PrivateImage {
                 &[],
                 &barriers,
             );
-            resources
-                .pipeline
-                .bind(&job.device.raw, job.command(), &parameters);
+            resources.bindings.bind(job.command(), &parameters);
             job.device
                 .raw
                 .cmd_dispatch(job.command(), groups[0], groups[1], 1);
         }
         job.submit()?;
         let Resources {
-            pipeline,
+            bindings,
             source,
             destination,
         } = job.finish()?;
-        drop(pipeline);
+        drop(bindings);
         Ok(BlendedImages {
             source,
             destination,
