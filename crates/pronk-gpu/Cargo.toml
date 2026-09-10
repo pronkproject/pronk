@@ -8,10 +8,11 @@ publish = false
 
 [features]
 default = []
-vulkan = ["dep:ash"]
+vulkan = ["dep:ash", "dep:drm-display-executor"]
 
 [dependencies]
 ash = { version = "=0.38.0", optional = true }
+drm-display-executor = { path = "../drm-display-executor", optional = true }
 nix.workspace = true
 pronk-dmabuf = { path = "../pronk-dmabuf" }
 
