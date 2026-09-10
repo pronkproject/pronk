@@ -22,6 +22,16 @@ impl Image {
     /// The returned native completion is ready for the output-pool handoff. No
     /// CPU pixel mapping is performed. Use `spawn_blocking` from async callers.
     pub fn clear_waited(self, rgb: [u8; 3]) -> io::Result<(Self, SyncFile)> {
+        self.clear_rgba_waited([rgb[0], rgb[1], rgb[2], 255])
+    }
+
+    /// Fill the image with explicit RGBA channel values, without premultiplying.
+    ///
+    /// Exclusive native access, dependency waits and blocking-worker requirements
+    /// are identical to [`Self::clear_waited`]. The selected alpha is stored
+    /// literally; successful completion does not make these pixels opaque or
+    /// suitable for an opaque-only composition or media profile.
+    pub fn clear_rgba_waited(self, rgba: [u8; 4]) -> io::Result<(Self, SyncFile)> {
         let buffer = self.export()?;
         require_success(export_dependencies(buffer.as_fd(), Access::Write)?.wait_blocking()?)?;
         let mut job = Job::new(Arc::clone(&self.device), self)?;
@@ -31,12 +41,7 @@ impl Image {
         let acquire = image.acquire_barrier(vk::AccessFlags::TRANSFER_WRITE);
         let release = image.release_barrier(vk::AccessFlags::TRANSFER_WRITE);
         let color = vk::ClearColorValue {
-            float32: [
-                f32::from(rgb[0]) / 255.0,
-                f32::from(rgb[1]) / 255.0,
-                f32::from(rgb[2]) / 255.0,
-                1.0,
-            ],
+            float32: rgba.map(|channel| f32::from(channel) / 255.0),
         };
         // SAFETY: The recording command buffer and image belong to this device.
         // Exclusive caller ownership and the completed reservation snapshot permit
