@@ -90,10 +90,32 @@ If private storage is exhausted, capture demand remains source-unbound.
 Recipients and authorization scope must remain fixed for the pool's lifetime;
 new pool identities never justify cross-authorization backing-storage reuse.
 
-The pool API is implemented and tested independently; the application does not
-yet wire it to a graphics allocator, renderer, or PipeWire event adapter.
-That adapter must correlate release events to the exact active publication,
-not infer ownership from a reusable slot number alone.
+The application-side `GpuOutput` adapter maps the pool to one immutable
+`VideoNodeIdentity` and its registered buffer IDs. Source release events carry
+the sequence retained from the submitted frame, not writable consumer metadata.
+The source actor checks that sequence against its submitted use before emitting
+a generation-scoped release. `GpuOutput` requires strictly increasing frame
+sequences, so buffer ID, sequence and generation identify the active publication.
+
+Call `begin_publish` before submitting its returned frame to `VideoSourceActor`.
+The adapter retains the publication even if that handoff's acknowledgement is
+lost. `handle_event` returns native waits for initial availability and matching
+releases; the caller drives those waits asynchronously and applies their results
+through `complete`. Stale-generation events are ignored; wrong-use releases are
+rejected without consuming the active publication. The initial adapter accepts
+waited transport only, not PipeWire synchronization timelines.
+
+After joining the source loop, pass its stop report to `stopped`. A matching
+generation-failure event has the same effect. Retirement includes all locally
+held publications, even when the actor already queued their release events and
+therefore omitted them from its reclaim list. It attempts each native reader
+snapshot and reports individual failures without skipping the remaining slots.
+Stopped generations never accept new claims or publications. The immutable
+recipient scope and executor-owned graphics resource lifetimes still apply.
+
+The adapter is implemented but the running media path does not instantiate it
+yet. Graphics allocation, rendering and live source-generation setup remain
+integration work; neither the pool nor the adapter enables GPU media defaults.
 
 ## Current scope
 
@@ -121,3 +143,10 @@ one destination across other slots' reuse and checks cancellation retention.
 Those tests use completed no-op fences, not real producer or consumer GPU jobs.
 Where elevated access is necessary, build as the normal user and run only the
 generated native test executable with sudo.
+
+Run `cargo test -p pronk-pipewire --lib` and `cargo test -p pronk --lib` for
+release-sequence and adapter guards. Run
+`cargo test -p pronk --test gpu_output_native -- --ignored` for the adapter
+with real system-heap fence exchange and synthetic actor events. It checks
+old releases after republication and shutdown
+after an unacknowledged handoff. It does not run a PipeWire graph or GPU job.
