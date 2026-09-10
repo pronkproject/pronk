@@ -274,9 +274,19 @@ device, not shader blending, color conversion or asynchronous source accounting.
 over another. It accepts the reference renderer's `Blend` policy: ignored pixel
 alpha, premultiplied alpha or coverage alpha, plus normalized 16-bit plane alpha.
 The compute shader keeps encoded RGB, rounds intermediate color to normalized
-16-bit precision and writes opaque output alpha. It performs no placement,
-scaling, gamma or color-space conversion. Source imports must already have
+16-bit precision and writes opaque output alpha. The whole-image convenience
+operation performs no placement, scaling, gamma or color-space conversion.
+Source imports must already have
 retired; neither image is exported or carries downstream reuse dependencies.
+
+`blend_region_waited` accepts a checked integral crop, signed output placement
+and every orthogonal rotation/reflection combination from the reference model.
+Source-axis reflection precedes counter-clockwise rotation. Rust clips the
+transformed crop to the output using widened integer arithmetic, and passes
+bounded unsigned source, destination and visible coordinates to the shader.
+Fully invisible crops return both images unchanged without submission; callers
+should omit invisible source acquisition earlier. Only affected pixels receive
+opaque alpha. Cropping changes no source lifetime and does not imply scaling.
 
 Each operation queries compute queue and dispatch limits and owns both images,
 their views, descriptors and pipeline through native completion. Source and
@@ -292,6 +302,9 @@ of RGB error permitted and exact alpha. That is an explicit floating-point
 qualification tolerance, not a claim of bit-identical arithmetic or arbitrary
 stack-depth error bounds. Tests also retain and inspect unchanged source pixels
 and reject uninitialized images, mismatched dimensions and different devices.
+An asymmetric alpha-bearing source pattern exercises all sixteen orthogonal
+transform combinations at clipped, one-pixel and extreme offscreen placements.
+Each output is compared with the CPU renderer after the producer is destroyed.
 
 The readable compute shader and compiled SPIR-V module live together under
 `crates/pronk-gpu/src/vulkan/private/blend`. Normal builds use the checked-in
