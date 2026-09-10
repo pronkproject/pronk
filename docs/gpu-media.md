@@ -262,6 +262,22 @@ private image; it does not expose an early accounting record. No shared output
 allocation or downstream destination dependency participates in that operation.
 Source authority and exclusion of source pixel reuse remain caller duties.
 
+`submit_private_copy` splits that operation into accepted work and successful
+pixel access. Its `PendingPrivateRead` retains the import and private image,
+exposing an optional native completion record immediately after submission and
+source-reader enrollment. `None` specifically represents Vulkan's already
+completed SYNC_FD sentinel: no pending dependency remains, rather than a promise
+to supply a fence later. `Some` can be duplicated for trusted source-use
+accounting without extracting the private image. Both outcomes require a
+successful `wait` before private pixels are returned. Drop may block on native
+retirement, so the pending owner stays on a blocking graphics worker.
+
+Native tests close and collect a trusted source use before extracting private
+pixels, then overwrite the original before output conversion. They also check
+retirement when the pending owner is dropped. A fast GPU may complete before
+the observation; these tests do not claim forced unsignaled execution or crash
+recovery. A compile-fail example keeps pending work out of the output API.
+
 The native regression exercises all 256 values in each color and alpha channel
 through source-to-private-to-output conversion. It overwrites and destroys each
 producer allocation before allocating the shared output, then checks every
