@@ -268,6 +268,40 @@ producer allocation before allocating the shared output, then checks every
 output pixel. That qualifies whole-image channel preservation on the selected
 device, not shader blending, color conversion or asynchronous source accounting.
 
+### Private shader blending
+
+`PrivateImage::blend_waited` blends one completed, equally sized private image
+over another. It accepts the reference renderer's `Blend` policy: ignored pixel
+alpha, premultiplied alpha or coverage alpha, plus normalized 16-bit plane alpha.
+The compute shader keeps encoded RGB, rounds intermediate color to normalized
+16-bit precision and writes opaque output alpha. It performs no placement,
+scaling, gamma or color-space conversion. Source imports must already have
+retired; neither image is exported or carries downstream reuse dependencies.
+
+Each operation queries compute queue and dispatch limits and owns both images,
+their views, descriptors and pipeline through native completion. Source and
+destination are uniquely owned and cannot alias through the safe interface.
+The pipeline is currently constructed for each operation: no throughput or
+pipeline-cache claim follows from these correctness tests. Resource teardown
+uses the same native job owner and device-loss handling as the transfer path.
+
+Native tests compare all three blend modes, six pixel-alpha values, six plane
+alpha values and a mixed three-layer stack against the integer CPU reference.
+Every pixel is checked on a non-workgroup-aligned extent, with at most one byte
+of RGB error permitted and exact alpha. That is an explicit floating-point
+qualification tolerance, not a claim of bit-identical arithmetic or arbitrary
+stack-depth error bounds. Tests also retain and inspect unchanged source pixels
+and reject uninitialized images, mismatched dimensions and different devices.
+
+The readable compute shader and compiled SPIR-V module live together under
+`crates/pronk-gpu/src/vulkan/private/blend`. Normal builds use the checked-in
+module without invoking a shader compiler. The artifact was generated with
+glslang 16.3.0 targeting Vulkan 1.1; its source records the regeneration command.
+Run `bash crates/pronk-gpu/tests/check-blend-shader.sh` with that compiler to
+verify byte-identical regeneration. A compiler upgrade requires explicit
+artifact review and renewed native qualification. The native binding and
+dispatch checks follow the [Vulkan compute dispatch contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDispatch.html).
+
 ## Waited copies from exportable executor-owned staging
 
 `destination.copy_from_waited(source)` copies a complete initialized image into
