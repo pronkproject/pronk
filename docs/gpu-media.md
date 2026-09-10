@@ -180,6 +180,12 @@ and releases it for foreign consumers. Actual submitted completion is enrolled
 as a native writer before publication. The returned image and checked sync file
 can drive the output pool's submitted/producer-completion transition.
 
+`Image::clear_rgba_waited` uses the same ownership and synchronization path
+with an explicit stored alpha value. It does not premultiply RGB or infer a
+blend equation. That supplies native alpha fixtures without CPU pixel writes;
+such images do not satisfy an opaque-only composition or media contract unless
+the chosen alpha is opaque. The RGB-only entry point still writes alpha 255.
+
 Run that synchronous operation on a dedicated blocking graphics worker, such
 as a bounded `spawn_blocking` task, never on a PipeWire loop or Tokio runtime
 worker. It owns no compositor sources. The caller must hold exclusive output
@@ -209,6 +215,11 @@ GPU copies into CPU-visible storage solely as a test oracle, checking every
 pixel and alpha across repeated foreign handoffs. The generated-frame producer
 itself does not map raw pixels. These tests do not run a media graph, simulate
 device loss, or qualify an unsignaled downstream-reader stall.
+
+An explicit-alpha case imports images from a separate matching Vulkan device,
+copies into private storage, overwrites the originals and checks every stored
+channel for transparent, intermediate and opaque alpha. It qualifies byte
+preservation, not GPU alpha blending.
 
 ## Waited copies from executor-owned staging
 
