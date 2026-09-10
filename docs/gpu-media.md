@@ -282,6 +282,30 @@ unqualified for arbitrary compositor formats, modifiers, GPUs or source policy.
 Native ownership follows the Vulkan [memory-fd import contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkImportMemoryFdInfoKHR.html)
 and [explicit modifier layout contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageDrmFormatModifierExplicitCreateInfoEXT.html).
 
+## Placed source copies
+
+`SourceImage::copy_region_into_waited` extends private staging to a visible
+integral crop, using `drm-display-executor` geometry. It validates the crop's
+source dimensions, clips signed placement against the output, and checks native
+signed-offset conversions. Mismatched or fully offscreen input is rejected
+before source waiting or submission; an offscreen plane should not acquire a
+source use just to clear its background.
+
+The operation clears opaque background pixels before copying the visible
+region, with an explicit transfer-write dependency between those commands.
+It retains the same independent-destination check, producer validity and source
+completion contract as whole-image staging. Copied bytes, including alpha, are
+preserved: it is not blending or color conversion. Using it as an opaque plane
+requires opaque pixels in the same encoded RGB domain. Other visual profiles
+must not silently take this copy path.
+
+The native crop test generates a nonuniform source on the GPU and compares
+three clipped placements with the CPU reference, after source and staging
+rewrites. Only test-oracle readback maps pixels. The normal GPU unit command
+includes deterministic geometry checks; the opt-in native command runs the
+pixel comparison. Synchronization validation may be enabled with
+`VK_LAYER_VALIDATE_SYNC=1` in addition to enabling the validation layer.
+
 ## Current scope
 
 Existing casting callers select `MappableLinear`; they do not opt into GPU
