@@ -1,4 +1,4 @@
-# Generated GPU frames through PipeWire
+# Generated GPU frames through PipeWire and hardware encoding
 
 This opt-in harness connects the real Rust Vulkan producer, output pool,
 `GpuOutput` adapter and `VideoSourceActor` to a GStreamer PipeWire consumer.
@@ -38,12 +38,54 @@ the real source actor, publication correlation and native reuse checks before
 another write. The first received sample is retained through six arrivals;
 releases before sample disposal or while that sample is held fail the test.
 All four images must be rewritten, and every sequence must arrive once in order.
-The consumer requires DMA-BUF memory and never maps raw pixels.
+The transport consumer requires DMA-BUF memory and never maps raw pixels.
 
 Successful output reports publication count and per-slot uses. Thirty-fps
 timestamps are fixture configuration, not a measurement of delivered cadence.
-The harness does not inspect pixel contents, run an encoder or receiver, prove
-an unsignaled native-reader stall, or simulate device loss. The Vulkan unit
-test provides the separate generated-pixel readback oracle. Frame metadata and
-DMA-BUF memory checks here do not establish that every library or driver avoids
+The default `raw` profile does not inspect pixel contents. Neither profile
+qualifies receiver behavior, an unsignaled native-reader stall, device loss,
+installed service permissions or production private-node policy. Frame metadata
+and memory-type checks do not establish that every library or driver avoids
 all internal CPU access.
+
+## Hardware H.264 profile
+
+An optional `va-h264` profile runs the same Rust producer and real private
+PipeWire transport through `vapostproc` and `vah264enc`. It requires those VA
+plugins, `h264parse`, `vah264dec` and a VA driver supporting the requested
+modifier. The selected render node must match the conversion, encoding and
+decoding elements; another GPU is not silently accepted.
+
+For the tested Fedora/Lunar Lake installation, the codec-capable VA driver
+is selected explicitly:
+
+```sh
+LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
+    sh tests/gpu-media/run-private.sh /dev/dri/renderD128 \
+    0100000000000009 va-h264
+```
+
+These driver paths are machine-specific. The wrapper uses a fresh GStreamer
+registry in each log directory so plugin discovery reflects the chosen driver.
+Missing codec support or incompatible formats fail the test; there is no
+software-encoder fallback.
+
+This profile describes the Vulkan image as ARGB with producer-written opaque
+alpha. On this device VA conversion accepts tiled ARGB but not tiled XRGB;
+the raw profile retains XRGB. Conversion must produce independent VA-memory
+NV12 images before encoding. A held input remains retained through six encoded
+outputs, so a successful run exercises subsequent publications while that
+input is unavailable for rewriting.
+
+The encoder disables B-frames, requests constrained-baseline byte-stream access
+units, and supplies parameter sets with keyframes. Validation checks the caps,
+decode timestamps no later than presentation, exact fixture presentation
+intervals and IDR/SPS/PPS presence on keyframes. These checks are not a full
+H.264 dependency parser or Chromecast receiver qualification.
+
+After source shutdown and native retirement, a separate test oracle decodes
+the twenty access units on the selected GPU. It maps only decoded oracle
+images and verifies every RGB pixel, in order, with a six-level channel
+tolerance for conversion and codec rounding. It also requires exactly twenty
+images and decoder end-of-stream. CPU readback belongs to this oracle, not to
+the capture-to-encoder path. Encoded access units are ordinary CPU-owned bytes.

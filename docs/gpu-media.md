@@ -1,7 +1,8 @@
 # GPU media integration
 
 The PipeWire producer accepts two explicit storage descriptions for one
-XRGB8888 memory plane:
+packed memory plane. `VideoPixelFormat` separately selects XRGB8888 or
+ARGB8888; producers selecting alpha must supply meaningful alpha values:
 
 - `VideoBufferStorage::MappableLinear` preserves the existing CastKMS CPU
   capture path. The plane begins at offset zero, its modifier is linear, and
@@ -17,7 +18,7 @@ XRGB8888 memory plane:
 before the plane. PipeWire receives that whole size as `maxsize`, with the
 plane's offset and the remaining allocation extent in its chunk. Every frame
 publication restores those values. Pools require identical complete layouts,
-including storage kind and offset.
+including pixel format, storage kind and offset.
 
 For linear storage, validation checks pitch and complete rows after the
 offset. For other modifiers, pitch times height is not a valid allocation-size
@@ -25,7 +26,7 @@ formula. The caller must obtain a valid, single-memory-plane description from
 its graphics API and the receiving API must support importing it. The transport
 checks dimensions, signed PipeWire field bounds and offset containment; it
 does not validate vendor-specific tiling. Auxiliary memory planes and other
-pixel formats are not supported by this initial adapter.
+pixel formats beyond those two are not supported by this initial adapter.
 
 ## Ownership and synchronization
 
@@ -116,6 +117,8 @@ recipient scope and executor-owned graphics resource lifetimes still apply.
 The installed media path does not instantiate the adapter yet. The opt-in
 [generated GPU transport harness](../tests/gpu-media/README.md) connects it to
 the Vulkan allocator/producer and a real source generation on a private graph.
+Its optional VA H.264 profile converts into native NV12 storage, checks encoded
+access units and verifies their decoded pixels in a separate CPU-readback oracle.
 Neither the harness nor the adapter enables GPU media defaults.
 
 ## Optional Vulkan allocation
@@ -203,10 +206,11 @@ device loss, or qualify an unsignaled downstream-reader stall.
 
 ## Current scope
 
-Existing application and live-test callers select `MappableLinear`; they do
-not opt into GPU layouts automatically. Hardware encoding, GPU allocation,
-native reuse-fence integration and service render-node access remain separate
-integration work. The default software media graph and installed service
+Existing casting callers select `MappableLinear`; they do not opt into GPU
+layouts automatically. The generated-image harness joins allocation, native
+reuse and hardware encoding for one explicit test tuple. Compositor-source
+composition and installed service render-node access remain separate integration
+work. The default software media graph and installed service
 sandboxes are unchanged. A transport-level modifier test is not qualification
 of the complete private PipeWire, encoder or receiver path.
 
