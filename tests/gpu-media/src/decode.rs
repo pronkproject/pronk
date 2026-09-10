@@ -7,7 +7,7 @@ use anyhow::{ensure, Context, Result};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_video::{self as video, prelude::*};
 
-use crate::pattern::{color, FRAMES, TOLERANCE};
+use crate::pattern::{self, color, FRAMES, HEIGHT, TOLERANCE, WIDTH};
 
 struct Pipeline(gst::Pipeline);
 
@@ -23,7 +23,7 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
         "unexpected fixture frame count"
     );
     let pipeline = Pipeline(gst::parse::launch(
-        "appsrc name=source format=time ! h264parse ! vah264dec name=decoder ! vapostproc name=convert ! video/x-raw,format=BGRA ! appsink name=sink sync=false enable-last-sample=false",
+        "appsrc name=source format=time ! h264parse ! vah264dec name=decoder ! vapostproc name=convert interpolation-method=nearest-neighbor ! video/x-raw,format=BGRA ! appsink name=sink sync=false enable-last-sample=false",
     )?.downcast::<gst::Pipeline>().map_err(|_| anyhow::anyhow!("decode pipeline"))?);
     for name in ["decoder", "convert"] {
         let path = pipeline
@@ -73,8 +73,8 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
             .context("missing decoded image")?;
         let info = video::VideoInfo::from_caps(sample.caps().context("decoded caps")?)?;
         ensure!(
-            info.width() == 1920
-                && info.height() == 1080
+            info.width() == WIDTH
+                && info.height() == HEIGHT
                 && info.format() == video::VideoFormat::Bgra,
             "unexpected decoded layout"
         );
@@ -84,19 +84,27 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
         )?;
         let stride = usize::try_from(frame.plane_stride()[0])?;
         let pixels = frame.plane_data(0)?;
-        let [r, g, b] = color(index as u32);
-        let expected = [b, g, r];
-        for y in 0..1080 {
+        let foreground = color(index as u32);
+        let background = pattern::BACKGROUND;
+        let region = pattern::visible(index as u32);
+        let [left, top] = region.destination();
+        let right = left + region.extent().width();
+        let bottom = top + region.extent().height();
+        for y in 0..HEIGHT as usize {
             let row = pixels
-                .get(y * stride..y * stride + 1920 * 4)
+                .get(y * stride..y * stride + WIDTH as usize * 4)
                 .context("short decoded plane")?;
-            for pixel in row.chunks_exact(4) {
+            for (x, pixel) in row.chunks_exact(4).enumerate() {
+                let visible =
+                    (left..right).contains(&(x as u32)) && (top..bottom).contains(&(y as u32));
+                let expected = if visible { foreground } else { background };
+                let actual = [pixel[2], pixel[1], pixel[0]];
                 ensure!(
-                    pixel[..3]
-                        .iter()
+                    actual
+                        .into_iter()
                         .zip(expected)
-                        .all(|(actual, expected)| actual.abs_diff(expected) <= TOLERANCE),
-                    "decoded frame {index} has incorrect pixels"
+                        .all(|(a, b)| a.abs_diff(b) <= TOLERANCE),
+                    "decoded frame {index} pixel {x},{y}: actual {actual:?}, expected {expected:?}"
                 );
             }
         }

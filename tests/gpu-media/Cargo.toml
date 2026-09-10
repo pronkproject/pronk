@@ -16,6 +16,7 @@ required-features = ["native"]
 
 [dependencies]
 anyhow.workspace = true
+drm-display-executor = { path = "../../crates/drm-display-executor" }
 futures-util.workspace = true
 gstreamer.workspace = true
 gstreamer-app.workspace = true

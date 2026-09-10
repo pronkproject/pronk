@@ -8,6 +8,8 @@ use gst::prelude::*;
 use gstreamer as gst;
 use tokio::sync::mpsc;
 
+use crate::pattern::{HEIGHT, WIDTH};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Raw,
@@ -48,7 +50,7 @@ impl Consumer {
             format!("{fourcc}:0x{modifier:016x}")
         };
         let caps = format!(
-            "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width=1920,height=1080,framerate=30/1"
+            "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={WIDTH},height={HEIGHT},framerate=30/1"
         );
         let encoding = match mode {
             Mode::Raw => "",
@@ -91,13 +93,17 @@ impl Consumer {
                 })
                 .context("install native input probe")?;
             let check = send.clone();
+            let reported_caps = std::sync::atomic::AtomicBool::new(false);
             pipeline
                 .by_name("convert")
                 .unwrap()
                 .static_pad("src")
                 .context("conversion pad")?
-                .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                .add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
                     if let Some(gst::PadProbeData::Buffer(buffer)) = &info.data {
+                        if !reported_caps.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            eprintln!("VA conversion caps: {:?}", pad.current_caps());
+                        }
                         if buffer.n_memory() == 0
                             || !buffer
                                 .iter_memories()

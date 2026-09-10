@@ -16,7 +16,7 @@ use pronk_pipewire::{
 
 use crate::consumer::{self, Consumer, Event, Mode};
 use crate::encoded::Encoded;
-use crate::pattern::{color, FRAMES};
+use crate::pattern::{self, color, FRAMES, HEIGHT, WIDTH};
 
 const SLOTS: usize = 4;
 
@@ -43,13 +43,13 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             let images = (0..SLOTS)
                 .map(|_| {
                     device
-                        .allocate(nz(1920), nz(1080), modifier)
+                        .allocate(nz(WIDTH), nz(HEIGHT), modifier)
                         .map(Some)
                         .map_err(Into::into)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let staging = device.allocate(nz(1920), nz(1080), modifier)?;
-            let incoming = producer.allocate(nz(1920), nz(1080), modifier)?;
+            let staging = device.allocate(nz(WIDTH), nz(HEIGHT), modifier)?;
+            let incoming = producer.allocate(nz(WIDTH), nz(HEIGHT), modifier)?;
             Ok((device, images, staging, incoming))
         })
         .await??;
@@ -156,6 +156,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     .context("private staging image is in flight")?;
                 let input = incoming.take().context("producer image is in flight")?;
                 let worker = Arc::clone(&worker);
+                let placement = pattern::placement(published);
                 let (input, copied) = tokio::task::spawn_blocking(move || -> Result<_> {
                     let (input, producer) = input.clear_waited(rgb)?;
                     // SAFETY: Matching native physical-device/driver identities,
@@ -164,7 +165,12 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     // runs until the imported read completes.
                     let source =
                         unsafe { worker.import_source(input.export()?, input.layout(), producer) }?;
-                    let (private, _read_done) = source.copy_into_waited(private)?;
+                    let (private, _read_done) = source.copy_region_into_waited(
+                        private,
+                        pattern::source_crop(),
+                        placement,
+                        pattern::BACKGROUND,
+                    )?;
                     let input = input.clear_waited([255, 255, 255])?.0;
                     let mut copied = image.copy_from_waited(private)?;
                     copied.source = copied.source.clear_waited([0, 0, 0])?.0;
@@ -187,8 +193,8 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                         damage: VideoDamage {
                             x: 0,
                             y: 0,
-                            width: nz(1920),
-                            height: nz(1080),
+                            width: nz(WIDTH),
+                            height: nz(HEIGHT),
                         },
                         discontinuity: published == 0,
                         acquire_point: None,

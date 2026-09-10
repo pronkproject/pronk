@@ -1456,6 +1456,7 @@ name = "pronk-gpu-media-test"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "drm-display-executor",
  "futures-util",
  "gstreamer",
  "gstreamer-app",

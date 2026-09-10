@@ -1,7 +1,36 @@
 //! Frame-specific fixture pixels, separated by more than codec tolerance.
 
+use drm_display_executor::scene::geometry::{CopyRegion, Extent, SourceRect};
+
 pub const FRAMES: u32 = 20;
 pub const TOLERANCE: u8 = 6;
+pub const WIDTH: u32 = 1920;
+pub const HEIGHT: u32 = 1080;
+pub const BACKGROUND: [u8; 3] = [0; 3];
+
+pub fn source_crop() -> SourceRect {
+    SourceRect::new(
+        Extent::new(WIDTH, HEIGHT).unwrap(),
+        [32, 16],
+        Extent::new(1856, 1024).unwrap(),
+    )
+    .unwrap()
+}
+
+pub fn placement(sequence: u32) -> [i32; 2] {
+    assert!(sequence < FRAMES, "fixture sequence exceeds color domain");
+    match sequence % 3 {
+        0 => [-32, 16],
+        1 => [32, -16],
+        _ => [64, 32],
+    }
+}
+
+pub fn visible(sequence: u32) -> CopyRegion {
+    source_crop()
+        .clip_to(placement(sequence), Extent::new(WIDTH, HEIGHT).unwrap())
+        .unwrap()
+}
 
 pub fn color(sequence: u32) -> [u8; 3] {
     assert!(sequence < FRAMES, "fixture sequence exceeds color domain");
@@ -41,4 +70,5 @@ mod tests {
     fn out_of_range_sequence_does_not_wrap_to_an_earlier_color() {
         color(FRAMES);
     }
+
 }
