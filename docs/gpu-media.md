@@ -248,8 +248,7 @@ or native-driver scheduling on the same physical device.
 
 RGBA32 uses sixteen bytes per pixel, four times the packed shared-output
 storage before native alignment. It is a shader-intermediate profile, not a
-qualified production memory-bandwidth or media-cadence choice. Future blending
-will need its own shader, precision and performance checks. Native tests cover
+qualified production memory-bandwidth or media-cadence choice. Native tests cover
 non-square images, device-owner teardown, independent private reuse, complete
 output pixels and rejection of unsupported extents or invalid copies.
 
@@ -343,6 +342,42 @@ Run `bash crates/pronk-gpu/tests/check-blend-shader.sh` with that compiler to
 verify byte-identical regeneration. A compiler upgrade requires explicit
 artifact review and renewed native qualification. The native binding and
 dispatch checks follow the [Vulkan compute dispatch contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdDispatch.html).
+
+### Post-composition gamma
+
+`Device::create_gamma` prepares an immutable table and shader for one logical
+device. It accepts the reference model's 1..=65536 uniformly spaced RGB entries,
+including singleton constants and descending tables. Setup uploads only color
+metadata into a non-exportable device-local storage buffer; no raw frame is
+mapped. Native storage limits are checked, and unsupported tables fail without
+resampling or falling back to CPU rendering. The buffer uses sixteen bytes per
+entry before allocation alignment and command-storage overhead.
+
+`Gamma::apply_waited` consumes an initialized private image and applies that
+table in place after composition, before packed output conversion. Input RGB is
+rounded to normalized 16-bit values; unsigned integer interpolation follows the
+reference's rational position and half-up rounding. The table-size bound keeps
+both the position product and rounded weighted sum within 32 bits. Output stays
+at normalized 16-bit precision and alpha is unchanged. No degamma, color matrix,
+transfer-function inference or per-plane color management is implied.
+
+The shader and table are immutable and cloneable; image views and descriptor
+sets belong to individual native jobs. Jobs retain every resource through
+completion, and errors return no image for reuse. The program retains its device
+without a device-owned reverse reference. There is no source import or downstream
+destination dependency in the gamma operation.
+
+Native tests check every byte input at six table sizes, including the maximum,
+against reference output with exact byte comparisons. Separate checks cover
+imported alpha after producer destruction, invalid tables, wrong-device and
+uninitialized images, and concurrent program reuse after the original owners
+are dropped. Those cases do not exhaust all 16-bit intermediate values or prove
+arbitrary composed scenes bit-identical to the CPU blend implementation.
+The shader lives under `crates/pronk-gpu/src/vulkan/private/gamma`; run
+`bash crates/pronk-gpu/tests/check-gamma-shader.sh` with glslang 16.3.0 to verify
+the checked-in Vulkan 1.1 module. Normal builds do not invoke a shader compiler.
+The generated media fixture still selects identity color, independently of
+these native color-operation checks.
 
 ## Waited copies from exportable executor-owned staging
 
