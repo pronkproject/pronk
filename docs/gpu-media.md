@@ -306,6 +306,33 @@ includes deterministic geometry checks; the opt-in native command runs the
 pixel comparison. Synchronization validation may be enabled with
 `VK_LAYER_VALIDATE_SYNC=1` in addition to enabling the validation layer.
 
+## Multiple opaque source planes
+
+`Image::compose_opaque_waited` accepts owned `OpaqueLayer` inputs in explicit
+bottom-to-top order. Each layer supplies one imported source, crop and signed
+placement. It validates the complete list before any producer wait and requires
+distinct backing allocations across all sources and private destination.
+Repeated imports of one allocation are rejected even for disjoint crops;
+sharing one source across several planes is not part of this initial profile.
+
+The destination must already be independently available. Native producer waits
+then precede one submitted job that owns all inputs, clears the background,
+and orders each visible copy after preceding destination writes. Its completion
+is enrolled for every source read and the private write. All source imports
+are destroyed before returning initialized private storage. Downstream copies
+and reuse remain separate; no encoder dependency is added to those source reads.
+
+An empty list clears only the background. Omit fully invisible layers before
+acquiring source uses; supplied invisible or mismatched crops are errors.
+Opaque alpha and a shared encoded RGB domain remain caller requirements. The
+API does not apply the reference renderer's selectable alpha equations, scale
+images or convert colors. Accepted native work retains its resources through
+completion on failure paths just as in single-source staging.
+
+Native tests compare three overlapping clipped planes with the CPU reference
+in both stacking orders after every source is overwritten and staging is
+reused. They also cover empty composition and duplicate-import rejection.
+
 ## Current scope
 
 Existing casting callers select `MappableLinear`; they do not opt into GPU
