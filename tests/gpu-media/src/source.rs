@@ -153,6 +153,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
     let mut held: Option<gstreamer::Buffer> = None;
     let mut encoded = Encoded::default();
     let mut uses = [0u32; SLOTS];
+    let mut timing = render::Report::default();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     while received.len() < FRAMES as usize
         || (mode == Mode::VaH264 && encoded.len() < FRAMES as usize)
@@ -201,6 +202,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     .send(())
                     .context("source worker closed before retirement")?;
                 let rendered = read.await??;
+                timing.push(rendered.timing);
                 for record in records.iter().flatten() {
                     ensure!(
                         record.completion()? == Some(Completion::Success),
@@ -297,6 +299,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
         "not every image was rewritten: {uses:?}"
     );
     eprintln!("PASS: {published} generated frames, {} encoded, per-slot uses {uses:?}, first input retained through six outputs", encoded.len());
+    timing.print();
     if mode == Mode::VaH264 {
         tokio::task::spawn_blocking(move || {
             crate::decode::verify(encoded.into_frames(), &render_node)

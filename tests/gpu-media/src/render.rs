@@ -7,6 +7,10 @@ use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{Blender, Device, Image, PendingPrivateRead, PrivateImage};
 use std::num::NonZeroU32;
 use std::os::fd::AsFd;
+use std::time::Instant;
+
+mod timing;
+pub use timing::{Report, Timings};
 
 use crate::pattern::{self, Plane};
 
@@ -16,6 +20,7 @@ pub struct SubmittedRead {
     pending: Vec<(PendingPrivateRead, Plane)>,
     output: PrivateImage,
     blender: Blender,
+    timing: Timings,
 }
 
 /// Independently available allocations, prepared before acquiring source uses.
@@ -52,6 +57,7 @@ pub struct Rendered {
     pub private: PrivateStorage,
     pub output: Image,
     pub completion: SyncFile,
+    pub timing: Timings,
 }
 
 pub fn submit_sources(
@@ -61,6 +67,7 @@ pub fn submit_sources(
     scene: [Plane; 3],
     permits: Vec<Submission<Option<SyncFile>>>,
 ) -> Result<SubmittedRead> {
+    let started = Instant::now();
     ensure!(
         input.len() == scene.len()
             && private.inputs.len() == scene.len()
@@ -94,6 +101,10 @@ pub fn submit_sources(
         pending,
         output: private.output,
         blender: private.blender,
+        timing: Timings {
+            submission: started.elapsed(),
+            ..Timings::default()
+        },
     })
 }
 
@@ -102,16 +113,22 @@ impl SubmittedRead {
     /// retirement and output operation. Native reading must finish successfully
     /// before original reuse or copying completed private pixels downstream.
     pub fn copy_output(self, output: Image) -> Result<Rendered> {
+        let mut timing = self.timing;
+        let started = Instant::now();
         let layers = self
             .pending
             .into_iter()
             .map(|(pending, plane)| pending.wait().map(|image| (image, plane)))
             .collect::<std::io::Result<Vec<_>>>()?;
+        timing.retirement = started.elapsed();
+        let started = Instant::now();
         let input = self
             .originals
             .into_iter()
             .map(|input| input.clear_waited([255; 3]).map(|result| result.0))
             .collect::<std::io::Result<Vec<_>>>()?;
+        timing.overwrites = started.elapsed();
+        let started = Instant::now();
         let mut private = self.output.clear_waited(pattern::BACKGROUND)?;
         let mut inputs = Vec::with_capacity(layers.len());
         for (source, plane) in layers {
@@ -126,17 +143,23 @@ impl SubmittedRead {
             inputs.push(result.source);
             private = result.destination;
         }
+        timing.composition = started.elapsed();
+        let started = Instant::now();
         let copied = private.copy_into_waited(output)?;
+        timing.output = started.elapsed();
+        let started = Instant::now();
         let private = PrivateStorage {
             inputs,
             output: copied.source.clear_waited([0; 3])?,
             blender: self.blender,
         };
+        timing.overwrites += started.elapsed();
         Ok(Rendered {
             originals: input,
             private,
             output: copied.destination,
             completion: copied.completion,
+            timing,
         })
     }
 }
