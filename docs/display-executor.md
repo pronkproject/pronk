@@ -29,7 +29,7 @@ round unsupported inputs into a different image. This is a coordinate adapter,
 not a scene protocol or authorization check: destination scaling and rotation
 still require independent profile validation.
 
-The model intentionally has no implicit fixed-point truncation, scaling,
+The crop model has no implicit fixed-point truncation, scaling,
 rotation, blend or color-pipeline behavior. A protocol adapter must reject
 unsupported input rather than silently interpreting it as an integral copy.
 It is not a kernel ABI or a complete scene packet yet.
@@ -62,8 +62,8 @@ padding preservation and exclusive borrowing without a GPU.
 
 `render::cpu::compose` places validated layers over an opaque RGB background,
 in caller-supplied bottom-to-top order. Each `Layer` validates its crop against
-the actual input view. The profile uses integral placement without rotation or
-scaling and identity color processing. `scene::blend` independently describes
+the actual input view. The profile uses integral placement without scaling
+and identity color processing. `scene::blend` independently describes
 pixel interpretation and normalized 16-bit plane-wide alpha. A layer defaults
 to premultiplied pixel alpha and fully opaque plane alpha; `with_blend` selects
 DRM's None, Pre-multiplied or Coverage equation explicitly. None ignores pixel
@@ -89,3 +89,21 @@ No production fallback is enabled. Tests cover channel order, alpha, stacking,
 intermediate precision, clipping, background fill and untouched output padding.
 Blend tests compare all pixel-alpha byte values and selected plane-alpha
 boundaries against independently evaluated normalized equations.
+
+## Orthogonal source transforms
+
+`scene::transform` describes source-axis reflection followed by counter-clockwise
+quarter-turn rotation, matching DRM's ordering. Quarter turns swap crop width
+and height. `source_at` maps a transformed crop coordinate back to its original
+local pixel, rejecting out-of-bounds coordinates without sampling or filtering.
+The crop origin is added only after that inverse transform.
+
+CPU layers select the policy with `with_transform`; the default is identity.
+Output clipping happens in the transformed crop's coordinate space. Neither
+rotation nor reflection permits reading outside the validated original crop.
+The model does not implicitly enable transforms in native GPU copies, which
+remain restricted to the documented unrotated profile.
+
+Tests use literal non-square rotation patterns, all reflection/rotation
+combinations over small dimensions, unsigned coordinate limits and a clipped
+rotated crop surrounded by sentinel pixels. Output padding remains untouched.
