@@ -304,12 +304,21 @@ Fully invisible crops return both images unchanged without submission; callers
 should omit invisible source acquisition earlier. Only affected pixels receive
 opaque alpha. Cropping changes no source lifetime and does not imply scaling.
 
-Each operation queries compute queue and dispatch limits and owns both images,
-their views, descriptors and pipeline through native completion. Source and
-destination are uniquely owned and cannot alias through the safe interface.
-The pipeline is currently constructed for each operation: no throughput or
-pipeline-cache claim follows from these correctness tests. Resource teardown
-uses the same native job owner and device-loss handling as the transfer path.
+Each operation validates dispatch limits and owns both images, their views and
+descriptors through native completion. Source and destination are uniquely
+owned and cannot alias through the safe interface. Resource teardown uses the
+same native job owner and device-loss handling as the transfer path.
+
+`Device::create_blender` creates an explicitly owned reusable compute program.
+`Blender::blend_region_waited` shares only immutable shader and layout state;
+each call creates distinct views and descriptor storage for its images. Clones
+may serve independent blocking workers. Accepted jobs retain the program, and
+the program retains its logical device, without a device-to-program reference
+cycle. Queue capability and local workgroup checks happen during creation;
+image identity and dispatch bounds remain per-operation checks. The
+`PrivateImage` convenience methods still create a temporary program, so callers
+that need reuse keep a `Blender`. This is not a general pipeline-cache or
+throughput qualification.
 
 Native tests compare all three blend modes, six pixel-alpha values, six plane
 alpha values and a mixed three-layer stack against the integer CPU reference.
@@ -321,6 +330,10 @@ and reject uninitialized images, mismatched dimensions and different devices.
 An asymmetric alpha-bearing source pattern exercises all sixteen orthogonal
 transform combinations at clipped, one-pixel and extreme offscreen placements.
 Each output is compared with the CPU renderer after the producer is destroyed.
+Three concurrent native workers also reuse one program across distinct images,
+with the original device facade and program owner dropped before they finish.
+Their descriptors remain independent across repeated output verification;
+matching images from a different program device are rejected.
 
 The readable compute shader and compiled SPIR-V module live together under
 `crates/pronk-gpu/src/vulkan/private/blend`. Normal builds use the checked-in
