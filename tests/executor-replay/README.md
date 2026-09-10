@@ -21,10 +21,15 @@ the reference renderer's opaque output alpha is omitted.
 
 ## Fixture contract
 
-The files in `fixtures/` are small, complete examples. Every field is required;
-unknown fields and versions other than `1` are rejected.
+The files in `fixtures/` are small, complete examples. Fields are required
+except the optional output gamma table; unknown fields and versions other than
+`1` are rejected.
 
 - `output` gives nonzero `width`, `height` and an opaque RGB `background`.
+  Optional `gamma` is an array of 1–65536 normalized 16-bit RGB entries,
+  uniformly spaced across the input domain. Missing or `null` means identity;
+  an empty array is invalid and one entry means a constant color. It is applied
+  after blending, before byte encoding, with the reference interpolation rule.
 - `sources` contain explicit dimensions, `format`, byte `offset`, row `stride`
   and initialized `bytes`. `XR24`/`AR24` use B,G,R,X/A byte order;
   `XB24`/`AB24` use R,G,B,X/A. X bytes never supply alpha. Leading and row
@@ -38,8 +43,9 @@ unknown fields and versions other than `1` are rejected.
 - `reflect_x` and `reflect_y` reflect the cropped source axes before
   counter-clockwise `rotation` of 0, 90, 180 or 270 degrees. There is no scaling.
 
-All colors share one encoded RGB domain. There is no color-space conversion,
-YUV, sampling filter, native synchronization or modifier interpretation. The
+Inputs and blending share one encoded RGB domain. Apart from the explicit
+output table, there is no color-space conversion, YUV, sampling filter, native
+synchronization or modifier interpretation. The
 [renderer model](../../docs/display-executor.md) defines the supported blend
 equations and rounding behavior.
 
@@ -51,9 +57,10 @@ workloads with a guaranteed execution-time budget.
 ## Checks
 
 The corpus compares complete PPM output against literal RGB expectations for
-padded source crops, negative placement, stacked alpha and reflected quarter
-turns. It also rejects invalid layouts, missing sources, unsupported transforms,
-fractional crops and excessive sizes, and checks output writer errors.
+padded source crops, negative placement, stacked alpha, reflected quarter
+turns and post-blend gamma. It also rejects invalid layouts, missing sources,
+unsupported transforms, fractional crops, excessive sizes and invalid color
+tables, and checks identity defaults and output writer errors.
 
 JSON parsing and file output stay in this test package. The
 `drm-display-executor` model remains dependency-free; native resource ownership
