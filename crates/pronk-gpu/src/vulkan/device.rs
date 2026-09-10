@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ash::vk;
 
@@ -25,6 +25,8 @@ pub(super) struct DeviceInner {
     pub(super) raw: ash::Device,
     instance: Instance,
     pub(super) physical: vk::PhysicalDevice,
+    pub(super) queue_family: u32,
+    pub(super) submission: Mutex<()>,
     _render_node: File,
 }
 
@@ -155,6 +157,8 @@ impl Device {
                     raw,
                     instance,
                     physical,
+                    queue_family: queue as u32,
+                    submission: Mutex::new(()),
                     _render_node: node,
                 }),
             });
@@ -173,8 +177,8 @@ impl DeviceInner {
 
 impl Drop for DeviceInner {
     fn drop(&mut self) {
-        // SAFETY: Child resources retain an Arc to this device. No submission
-        // entry point exists yet, so no commands can be pending at destruction.
+        // SAFETY: Child resources retain an Arc to this device. Submitted jobs
+        // retain their resources until completion or device loss permits teardown.
         unsafe { self.raw.destroy_device(None) };
     }
 }
