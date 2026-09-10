@@ -2,6 +2,7 @@
 set -eu
 render_node=${1:?render node required}
 modifier=${2:?hexadecimal DRM modifier required}
+profile=${3:-raw}
 test_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_dir=$(CDPATH= cd -- "$test_dir/../.." && pwd)
 cargo build --locked --manifest-path "$project_dir/Cargo.toml" \
@@ -22,11 +23,11 @@ while [ ! -S "$gpu_runtime_dir/pronk-gpu-test" ]; do
     sleep 0.05
 done
 echo "Private graph: $gpu_runtime_dir"
-if PIPEWIRE_REMOTE="$gpu_runtime_dir/pronk-gpu-test" \
+if PIPEWIRE_REMOTE="$gpu_runtime_dir/pronk-gpu-test" GST_REGISTRY="$gpu_runtime_dir/gst-registry.bin" \
 timeout --signal=TERM --kill-after=5 45 \
 cargo run --locked --manifest-path "$project_dir/Cargo.toml" \
     -p pronk-gpu-media-test --features native -- \
-    "$gpu_runtime_dir/pronk-gpu-test" "$render_node" "$modifier" \
+    "$gpu_runtime_dir/pronk-gpu-test" "$render_node" "$modifier" "$profile" \
     > "$gpu_runtime_dir/client.log" 2>&1; then
     cat "$gpu_runtime_dir/client.log"
 else
