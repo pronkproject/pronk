@@ -281,3 +281,99 @@ pub enum VideoSourceRuntimeError {
     #[error("PipeWire source loop panicked")]
     ThreadPanicked,
 }
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn layout(storage: VideoBufferStorage) -> VideoBufferLayout {
+        VideoBufferLayout {
+            width: NonZeroU32::new(16).unwrap(),
+            height: NonZeroU32::new(8).unwrap(),
+            pitch: NonZeroU32::new(64).unwrap(),
+            size: NonZeroU64::new(512).unwrap(),
+            storage,
+        }
+    }
+
+    #[test]
+    fn linear_profiles_require_complete_rows_after_the_offset() {
+        for storage in [
+            VideoBufferStorage::MappableLinear,
+            VideoBufferStorage::DrmModifier {
+                modifier: 0,
+                offset: 0,
+            },
+        ] {
+            let mut image = layout(storage);
+            assert!(validate_layout(image).is_ok());
+            image.size = NonZeroU64::new(511).unwrap();
+            assert!(matches!(
+                validate_layout(image),
+                Err(ConfigurationError::InvalidSize(511))
+            ));
+            image.size = NonZeroU64::new(512).unwrap();
+            image.pitch = NonZeroU32::new(63).unwrap();
+            assert!(matches!(
+                validate_layout(image),
+                Err(ConfigurationError::InvalidPitch(63))
+            ));
+        }
+        let mut image = layout(VideoBufferStorage::DrmModifier {
+            modifier: 0,
+            offset: 64,
+        });
+        assert!(matches!(
+            validate_layout(image),
+            Err(ConfigurationError::InvalidSize(512))
+        ));
+        image.size = NonZeroU64::new(576).unwrap();
+        assert!(validate_layout(image).is_ok());
+    }
+
+    #[test]
+    fn opaque_layouts_validate_transport_bounds_without_inventing_linear_extents() {
+        let mut image = layout(VideoBufferStorage::DrmModifier {
+            modifier: 0x0100_0000_0000_0009,
+            offset: 64,
+        });
+        // Only the graphics API interprets the modifier's byte geometry.
+        image.pitch = NonZeroU32::new(16).unwrap();
+        image.size = NonZeroU64::new(128).unwrap();
+        assert!(validate_layout(image).is_ok());
+        image.size = NonZeroU64::new(64).unwrap();
+        assert!(matches!(
+            validate_layout(image),
+            Err(ConfigurationError::InvalidOffset(64))
+        ));
+        image.size = NonZeroU64::new(i32::MAX as u64 + 1).unwrap();
+        assert!(matches!(
+            validate_layout(image),
+            Err(ConfigurationError::InvalidSize(_))
+        ));
+        image.size = NonZeroU64::new(512).unwrap();
+        image.pitch = NonZeroU32::new(i32::MAX as u32 + 1).unwrap();
+        assert!(matches!(
+            validate_layout(image),
+            Err(ConfigurationError::InvalidPitch(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_modifier_and_oversized_dimensions_are_rejected() {
+        let mut image = layout(VideoBufferStorage::DrmModifier {
+            modifier: 0x00ff_ffff_ffff_ffff,
+            offset: 0,
+        });
+        assert!(matches!(
+            validate_layout(image),
+            Err(ConfigurationError::InvalidModifier(_))
+        ));
+        image.storage = VideoBufferStorage::MappableLinear;
+        image.width = NonZeroU32::new(MAX_FRAME_DIMENSION + 1).unwrap();
+        assert!(matches!(
+            validate_layout(image),
+            Err(ConfigurationError::FrameDimensions { .. })
+        ));
+    }
+}
