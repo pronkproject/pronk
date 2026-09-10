@@ -32,6 +32,14 @@ impl SyncFile {
         wait_with_status(self.0, status).await
     }
 
+    /// Wait on a dedicated blocking worker, checking native completion status.
+    ///
+    /// Never call from a PipeWire loop or an asynchronous runtime worker. There
+    /// is no timeout: abandoning the wait would not cancel the submitted work.
+    pub fn wait_blocking(self) -> io::Result<Completion> {
+        wait_blocking_with_status(self.0, status)
+    }
+
     pub fn into_fd(self) -> OwnedFd {
         self.0
     }
@@ -93,11 +101,73 @@ async fn wait_with_status(
     }
 }
 
+fn wait_blocking_with_status(
+    fd: OwnedFd,
+    mut query: impl FnMut(BorrowedFd<'_>) -> io::Result<Option<Completion>>,
+) -> io::Result<Completion> {
+    loop {
+        if let Some(completion) = query(fd.as_fd())? {
+            return Ok(completion);
+        }
+        let mut poll = nix::libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: One initialized poll descriptor remains live through the call.
+        let result = unsafe { nix::libc::poll(&mut poll, 1, -1) };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if let Some(completion) = query(fd.as_fd())? {
+            return Ok(completion);
+        }
+        if poll.revents & (nix::libc::POLLERR | nix::libc::POLLHUP | nix::libc::POLLNVAL) != 0 {
+            return Err(io::Error::other(
+                "sync file polling failed without completion",
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn blocking_wait_checks_completion_after_readiness() {
+        for completion in [Completion::Success, Completion::Failed(-5)] {
+            let (reader, mut writer) = UnixStream::pair().unwrap();
+            writer.write_all(&[1]).unwrap();
+            let mut queries = 0;
+            assert_eq!(
+                wait_blocking_with_status(reader.into(), |_| {
+                    queries += 1;
+                    Ok((queries == 2).then_some(completion))
+                })
+                .unwrap(),
+                completion
+            );
+            assert_eq!(queries, 2);
+        }
+    }
+
+    #[test]
+    fn blocking_wait_rejects_query_errors_and_unexplained_hangup() {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(writer);
+        assert!(wait_blocking_with_status(reader.into(), |_| Ok(None)).is_err());
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        assert!(
+            wait_blocking_with_status(reader.into(), |_| Err(io::Error::other("query"))).is_err()
+        );
+    }
 
     #[test]
     fn uapi_layout() {
