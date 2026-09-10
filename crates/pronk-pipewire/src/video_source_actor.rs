@@ -78,6 +78,7 @@ pub enum VideoSourceActorEvent {
     BufferReleased {
         media_generation: NonZeroU64,
         buffer_id: NonZeroU32,
+        sequence: u64,
     },
     GenerationFailed {
         identity: VideoNodeIdentity,
@@ -325,7 +326,7 @@ impl ManagedSource for VideoSource {
 enum ActorBufferState {
     AwaitingInitial,
     Available,
-    Submitted,
+    Submitted(u64),
 }
 
 struct ActiveGeneration<S> {
@@ -358,7 +359,7 @@ impl<S> ActiveGeneration<S> {
     fn has_submitted_buffers(&self) -> bool {
         self.buffers
             .values()
-            .any(|state| *state == ActorBufferState::Submitted)
+            .any(|state| matches!(state, ActorBufferState::Submitted(_)))
     }
 
     fn arm_return_trigger(&mut self) {
@@ -383,7 +384,9 @@ impl<S> ActiveGeneration<S> {
         let mut reclaimed_buffers = self
             .buffers
             .iter()
-            .filter_map(|(id, state)| (*state == ActorBufferState::Submitted).then_some(*id))
+            .filter_map(|(id, state)| {
+                (matches!(state, ActorBufferState::Submitted(_))).then_some(*id)
+            })
             .collect::<Vec<_>>();
         reclaimed_buffers.sort_unstable();
         VideoSourceStopReport {
@@ -627,7 +630,7 @@ async fn publish_frame<S: ManagedSource>(
     // Crossing the source call is an ownership handoff. Record it before
     // awaiting the acknowledgement so a closed reply channel cannot make a
     // possibly queued buffer look caller-owned in the stop report.
-    *state = ActorBufferState::Submitted;
+    *state = ActorBufferState::Submitted(frame.sequence);
     active.arm_return_trigger();
     active.source.publish(frame).await?;
     Ok(())
@@ -662,14 +665,17 @@ fn handle_source_event<S>(
                 transport,
             }))
         }
-        Some(VideoSourceEvent::BufferReleased { buffer_id, .. }) => {
+        Some(VideoSourceEvent::BufferReleased {
+            buffer_id,
+            sequence,
+        }) => {
             let state = active.buffers.get_mut(&buffer_id).ok_or(
                 VideoSourceActorRuntimeError::InvalidBufferEvent {
                     event: "release",
                     buffer_id: buffer_id.get(),
                 },
             )?;
-            if *state != ActorBufferState::Submitted {
+            if *state != ActorBufferState::Submitted(sequence) {
                 return Err(VideoSourceActorRuntimeError::InvalidBufferEvent {
                     event: "release",
                     buffer_id: buffer_id.get(),
@@ -680,6 +686,7 @@ fn handle_source_event<S>(
             Ok(Some(VideoSourceActorEvent::BufferReleased {
                 media_generation: generation,
                 buffer_id,
+                sequence,
             }))
         }
         Some(VideoSourceEvent::Failed(error)) => Err(error.into()),
@@ -735,6 +742,51 @@ mod tests {
 
     use super::*;
     use crate::{VideoBufferLayout, VideoDamage, VideoSyncTimelines};
+
+    #[test]
+    fn release_sequence_must_match_the_submitted_use() {
+        let identity = VideoNodeIdentity {
+            node_name: "sequence-test".into(),
+            object_id: nonzero32(1),
+            object_serial: nonzero64(2),
+            media_generation: nonzero64(3),
+        };
+        let id = nonzero32(1);
+        let mut active = ActiveGeneration::new((), identity, vec![id], Duration::from_millis(5));
+        active.buffers.insert(id, ActorBufferState::Submitted(22));
+        assert!(handle_source_event(
+            &mut active,
+            Some(VideoSourceEvent::BufferReleased {
+                buffer_id: id,
+                sequence: 21,
+            })
+        )
+        .is_err());
+        assert_eq!(active.buffers[&id], ActorBufferState::Submitted(22));
+        assert_eq!(
+            handle_source_event(
+                &mut active,
+                Some(VideoSourceEvent::BufferReleased {
+                    buffer_id: id,
+                    sequence: 22,
+                })
+            )
+            .unwrap(),
+            Some(VideoSourceActorEvent::BufferReleased {
+                media_generation: nonzero64(3),
+                buffer_id: id,
+                sequence: 22,
+            })
+        );
+        assert!(handle_source_event(
+            &mut active,
+            Some(VideoSourceEvent::BufferReleased {
+                buffer_id: id,
+                sequence: 22,
+            })
+        )
+        .is_err());
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum FakeRelease {
@@ -947,6 +999,7 @@ mod tests {
                 Some(VideoSourceActorEvent::BufferReleased {
                     media_generation: nonzero64(1),
                     buffer_id: nonzero32(1),
+                    sequence: frame(nonzero32(1)).sequence,
                 })
             );
             assert!(actor
@@ -1011,6 +1064,7 @@ mod tests {
                     Some(VideoSourceActorEvent::BufferReleased {
                         media_generation: nonzero64(1),
                         buffer_id: nonzero32(1),
+                        sequence: frame(nonzero32(1)).sequence,
                     })
                 );
             }
@@ -1071,6 +1125,7 @@ mod tests {
                     Some(VideoSourceActorEvent::BufferReleased {
                         media_generation: nonzero64(1),
                         buffer_id: expected_buffer,
+                        sequence: frame(expected_buffer).sequence,
                     })
                 );
             }

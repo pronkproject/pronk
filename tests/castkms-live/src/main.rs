@@ -1382,6 +1382,7 @@ fn produce_pipewire_frames(
             VideoSourceActorEvent::BufferReleased {
                 media_generation,
                 buffer_id,
+                sequence: _,
             } => {
                 ensure!(
                     media_generation == generation.stream.mode_generation,

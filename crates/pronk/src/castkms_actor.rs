@@ -1373,6 +1373,7 @@ fn handle_source_event(
         VideoSourceActorEvent::BufferReleased {
             media_generation: _,
             buffer_id,
+            sequence: _,
         } => {
             if !active.transports.contains_key(&buffer_id) {
                 return Err(KernelDisplayError::new(
