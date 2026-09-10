@@ -170,21 +170,39 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 let scene = pattern::scene(published);
                 let source_use = SourceUse::new(NonZeroUsize::new(1).unwrap())?;
                 let submission = source_use.begin()?;
+                let (submitted, ready) = tokio::sync::oneshot::channel();
+                let (resume, collect) = std::sync::mpsc::channel();
                 let read = tokio::task::spawn_blocking(move || {
-                    render::read_sources(&worker, input, private, scene, submission)
+                    let stage = render::submit_sources(&worker, input, private, scene, submission)?;
+                    submitted
+                        .send(())
+                        .map_err(|_| anyhow::anyhow!("source coordinator closed"))?;
+                    collect
+                        .recv()
+                        .context("source accounting was not collected")?;
+                    stage.copy_output(image)
                 });
                 source_use.close();
-                let stage = read.await??;
+                if ready.await.is_err() {
+                    read.await??;
+                    anyhow::bail!("source worker did not report submission");
+                }
                 let ClosedUse::Released(records) = source_use.finish()? else {
                     anyhow::bail!("source submission accounting failed");
                 };
                 ensure!(
-                    records.len() == 1 && records[0].completion()? == Some(Completion::Success),
-                    "source use lacks its waited native read completion"
+                    records.len() == 1,
+                    "source use lacks its submitted native read completion"
+                );
+                resume
+                    .send(())
+                    .context("source worker closed before retirement")?;
+                let (input, copied) = read.await??;
+                ensure!(
+                    records[0].completion()? == Some(Completion::Success),
+                    "retired source read did not complete successfully"
                 );
                 drop(records);
-                let (input, copied) =
-                    tokio::task::spawn_blocking(move || stage.copy_output(image)).await??;
                 incoming = Some(input);
                 staging = Some(copied.source);
                 images[slot] = Some(copied.destination);

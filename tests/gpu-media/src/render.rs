@@ -3,23 +3,24 @@
 use anyhow::{ensure, Result};
 use drm_display_executor::scheduler::source_use::Submission;
 use pronk_dmabuf::SyncFile;
-use pronk_gpu::vulkan::{CopiedImages, Device, Image, OpaqueLayer};
+use pronk_gpu::vulkan::{CopiedImages, Device, Image, OpaqueLayer, PendingStage};
+use std::os::fd::AsFd;
 
 use crate::pattern::{self, Plane};
 
-/// Completed private pixels and the generator's own reusable source allocations.
-pub struct ReadStage {
+/// Accepted reads and generator allocations, retained on the blocking worker.
+pub struct SubmittedRead {
     originals: Vec<Image>,
-    private: Image,
+    pending: PendingStage,
 }
 
-pub fn read_sources(
+pub fn submit_sources(
     worker: &Device,
     input: Vec<Image>,
     private: Image,
     scene: [Plane; 3],
     permit: Submission<SyncFile>,
-) -> Result<ReadStage> {
+) -> Result<SubmittedRead> {
     ensure!(
         input.len() == scene.len(),
         "source allocation count differs from scene"
@@ -35,21 +36,24 @@ pub fn read_sources(
         layers.push(OpaqueLayer::new(source, plane.crop, plane.placement));
         originals.push(input);
     }
-    let (private, read_done) = private.compose_opaque_waited(layers, pattern::BACKGROUND)?;
+    let pending = private.submit_opaque(layers, pattern::BACKGROUND)?;
+    let read_done = SyncFile::from_fd(pending.completion().as_fd().try_clone_to_owned()?)?;
     permit.submitted(read_done);
-    Ok(ReadStage { originals, private })
+    Ok(SubmittedRead { originals, pending })
 }
 
-impl ReadStage {
+impl SubmittedRead {
     /// The coordinator resolves source-use accounting before starting this
-    /// independent output operation. Only generator-owned allocations remain.
+    /// retirement and output operation. Native reading must finish successfully
+    /// before original reuse or copying completed private pixels downstream.
     pub fn copy_output(self, output: Image) -> Result<(Vec<Image>, CopiedImages)> {
+        let (private, _) = self.pending.wait()?;
         let input = self
             .originals
             .into_iter()
             .map(|input| input.clear_waited([255; 3]).map(|result| result.0))
             .collect::<std::io::Result<Vec<_>>>()?;
-        let mut copied = output.copy_from_waited(self.private)?;
+        let mut copied = output.copy_from_waited(private)?;
         copied.source = copied.source.clear_waited([0; 3])?.0;
         Ok((input, copied))
     }
