@@ -56,6 +56,13 @@ pub struct WritePermit(Key);
 #[derive(Debug)]
 pub struct PublishPermit(Key);
 
+impl PublishPermit {
+    /// Identify the destination when validating its transport frame metadata.
+    pub fn slot(&self) -> usize {
+        self.0.slot
+    }
+}
+
 /// Ownership handed to the transport, including an unacknowledged handoff.
 ///
 /// Keep this handle until the transport reports release or is quiesced.
