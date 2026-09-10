@@ -4,7 +4,7 @@ use anyhow::{ensure, Result};
 use drm_display_executor::scene::{blend::Blend, transform::Transform};
 use drm_display_executor::scheduler::source_use::Submission;
 use pronk_dmabuf::SyncFile;
-use pronk_gpu::vulkan::{Device, Image, PendingPrivateRead, PrivateImage};
+use pronk_gpu::vulkan::{Blender, Device, Image, PendingPrivateRead, PrivateImage};
 use std::num::NonZeroU32;
 use std::os::fd::AsFd;
 
@@ -15,12 +15,14 @@ pub struct SubmittedRead {
     originals: Vec<Image>,
     pending: Vec<(PendingPrivateRead, Plane)>,
     output: PrivateImage,
+    blender: Blender,
 }
 
 /// Independently available allocations, prepared before acquiring source uses.
 pub struct PrivateStorage {
     inputs: Vec<PrivateImage>,
     output: PrivateImage,
+    blender: Blender,
 }
 
 impl PrivateStorage {
@@ -36,7 +38,12 @@ impl PrivateStorage {
             })
             .collect::<std::io::Result<Vec<_>>>()?;
         let output = worker.allocate_private(nz(pattern::WIDTH), nz(pattern::HEIGHT))?;
-        Ok(Self { inputs, output })
+        let blender = worker.create_blender()?;
+        Ok(Self {
+            inputs,
+            output,
+            blender,
+        })
     }
 }
 
@@ -86,6 +93,7 @@ pub fn submit_sources(
         originals,
         pending,
         output: private.output,
+        blender: private.blender,
     })
 }
 
@@ -107,7 +115,8 @@ impl SubmittedRead {
         let mut private = self.output.clear_waited(pattern::BACKGROUND)?;
         let mut inputs = Vec::with_capacity(layers.len());
         for (source, plane) in layers {
-            let result = private.blend_region_waited(
+            let result = self.blender.blend_region_waited(
+                private,
                 source,
                 plane.crop,
                 plane.placement,
@@ -121,6 +130,7 @@ impl SubmittedRead {
         let private = PrivateStorage {
             inputs,
             output: copied.source.clear_waited([0; 3])?,
+            blender: self.blender,
         };
         Ok(Rendered {
             originals: input,
