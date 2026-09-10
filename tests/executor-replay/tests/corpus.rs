@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 const OPAQUE: &[u8] = include_bytes!("../fixtures/opaque-crop.json");
 const ALPHA: &[u8] = include_bytes!("../fixtures/alpha-stack.json");
 const TRANSFORM: &[u8] = include_bytes!("../fixtures/reflected-quarter-turn.json");
+const GAMMA: &[u8] = include_bytes!("../fixtures/postblend-gamma.json");
 
 #[test]
 fn saved_scenes_match_literal_rgb_goldens() {
@@ -20,6 +21,7 @@ fn saved_scenes_match_literal_rgb_goldens() {
         &[[0, 255, 0], [0; 3], [0; 3], [255; 3], [0; 3], [0; 3]],
     );
     check(ALPHA, b"P6\n2 1\n255\n", &[[128, 0, 127], [64, 48, 143]]);
+    check(GAMMA, b"P6\n2 1\n255\n", &[[65; 3], [0; 3]]);
     check(
         TRANSFORM,
         b"P6\n2 3\n255\n",
@@ -56,6 +58,9 @@ fn invalid_fixture_contracts_fail_before_output() {
     reject(|v| v["sources"][0]["format"] = json!("NV12"));
     reject(|v| v["output"]["width"] = json!(0));
     reject(|v| v["output"]["width"] = json!(u32::MAX));
+    reject(|v| v["output"]["gamma"] = json!([]));
+    reject(|v| v["output"]["gamma"] = json!([[0, 0, 65536]]));
+    reject(|v| v["output"]["gamma"] = json!(vec![[0; 3]; 65537]));
     reject(|v| {
         v["sources"] = Value::Array(vec![v["sources"][0].clone(); 65]);
     });
@@ -63,6 +68,20 @@ fn invalid_fixture_contracts_fail_before_output() {
         v["layers"] = Value::Array(vec![v["layers"][0].clone(); 257]);
     });
     assert!(render(&vec![b' '; MAX_FIXTURE_BYTES + 1]).is_err());
+}
+
+#[test]
+fn absent_and_null_gamma_preserve_identity() {
+    let mut fixture: Value = serde_json::from_slice(OPAQUE).unwrap();
+    fixture["output"]["gamma"] = Value::Null;
+    let mut expected = Vec::new();
+    render(OPAQUE).unwrap().write_ppm(&mut expected).unwrap();
+    let mut actual = Vec::new();
+    render(&serde_json::to_vec(&fixture).unwrap())
+        .unwrap()
+        .write_ppm(&mut actual)
+        .unwrap();
+    assert_eq!(actual, expected);
 }
 
 #[test]
