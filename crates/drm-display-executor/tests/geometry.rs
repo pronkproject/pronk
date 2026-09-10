@@ -5,6 +5,46 @@ fn extent(width: u32, height: u32) -> Extent {
 }
 
 #[test]
+fn fixed_source_rectangles_preserve_exact_integral_coordinates() {
+    let image = extent(1920, 1080);
+    let crop =
+        SourceRect::from_fixed_16_16(image, [32, 16, 1856, 1024].map(|value| value << 16)).unwrap();
+    assert_eq!(
+        crop,
+        SourceRect::new(image, [32, 16], extent(1856, 1024)).unwrap()
+    );
+    let limit = SourceRect::from_fixed_16_16(
+        extent(65536, 65536),
+        [1 << 16, 1 << 16, 0xffff0000, 0xffff0000],
+    )
+    .unwrap();
+    assert_eq!(limit.origin(), [1, 1]);
+    assert_eq!(limit.extent(), extent(65535, 65535));
+    assert_eq!(
+        SourceRect::from_fixed_16_16(image, [0, 0, 0, 1 << 16]),
+        Err(GeometryError::EmptyExtent)
+    );
+    assert_eq!(
+        SourceRect::from_fixed_16_16(image, [0, 0, 1921 << 16, 1 << 16]),
+        Err(GeometryError::SourceOutsideImage)
+    );
+}
+
+#[test]
+fn every_fractional_source_bit_is_rejected_without_truncation() {
+    for component in 0..4 {
+        for fraction in 0..16 {
+            let mut source = [1 << 16; 4];
+            source[component] |= 1 << fraction;
+            assert_eq!(
+                SourceRect::from_fixed_16_16(extent(4, 4), source),
+                Err(GeometryError::FractionalSource)
+            );
+        }
+    }
+}
+
+#[test]
 fn empty_or_out_of_bounds_sources_are_rejected() {
     assert_eq!(Extent::new(0, 1), Err(GeometryError::EmptyExtent));
     assert_eq!(Extent::new(1, 0), Err(GeometryError::EmptyExtent));
