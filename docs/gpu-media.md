@@ -285,8 +285,10 @@ and [explicit modifier layout contract](https://docs.vulkan.org/refpages/latest/
 ## Current scope
 
 Existing casting callers select `MappableLinear`; they do not opt into GPU
-layouts automatically. The generated-image harness joins allocation, native
-reuse and hardware encoding for one explicit test tuple. Compositor-source
+layouts automatically. The generated-image harness joins a separate producer's
+source import, private staging, exported output reuse and hardware encoding for
+one explicit test tuple. It overwrites source and staging before checking the
+decoded output. Compositor-source
 composition and installed service render-node access remain separate integration
 work. The default software media graph and installed service
 sandboxes are unchanged. A transport-level modifier test is not qualification

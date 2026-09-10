@@ -31,14 +31,18 @@ video ports concurrently with GStreamer startup, which may wait for the link.
 No installed WirePlumber policy, service unit or casting session is changed.
 This fixture does not qualify the production classified connection policy.
 
-One private, single-plane 1920x1080 modifier image is cleared with changing
-colors and copied into four persistent output images for twenty publications.
-Only the four output allocations are registered with PipeWire. The private
-image returns after native copy completion and is reused for the next frame;
-destination waits never retain a compositor-source lease. The fixture has no
-compositor source and does not yet exercise source-to-private-image copying.
-Native rendering and allocation
-run on blocking workers, not on the PipeWire loop. Returned buffers pass through
+One generated, single-plane 1920x1080 modifier image belongs to a separate
+producer Vulkan device instance. The worker checks matching physical-device
+and driver identities, imports each source use with exact allocator metadata
+and its explicit producer fence, and copies into available private staging.
+It then overwrites the original source white before copying staging into one
+of four persistent output images, and overwrites staging black before output
+publication. Only those four output allocations are registered with PipeWire.
+
+The twenty-publication sequence exercises source-to-private-to-output copying
+and reuse without a real compositor source or capture grant. Source-reading
+completion precedes downstream destination waits. Native rendering and
+allocation run on blocking workers, not on the PipeWire loop. Returned buffers pass through
 the real source actor, publication correlation and native reuse checks before
 another write. The first received sample is retained through six arrivals;
 releases before sample disposal or while that sample is held fail the test.
@@ -92,7 +96,9 @@ After source shutdown and native retirement, a separate test oracle decodes
 the twenty access units on the selected GPU. It maps only decoded oracle
 images and verifies every RGB pixel, in order, with a six-level channel
 tolerance for conversion and codec rounding. It also requires exactly twenty
-images and decoder end-of-stream. CPU readback belongs to this oracle, not to
+images and decoder end-of-stream. Matching pixels after both source and staging
+rewrites detect reads that incorrectly outlive those copy boundaries. CPU
+readback belongs to this oracle, not to
 the capture-to-encoder path. Encoded access units are ordinary CPU-owned bytes.
 
 ## Transient sandbox experiment
