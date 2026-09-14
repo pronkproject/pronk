@@ -4,11 +4,13 @@
 //! No operation on this client requires a primary DRM file or exposes source pixels.
 
 mod description;
+mod grant;
 
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 pub use description::{Description, OfferId};
+pub use grant::{create_grant, Control};
 
 /// One owned capture descriptor, without revocation or display-control authority.
 ///
