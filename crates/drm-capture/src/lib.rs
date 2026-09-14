@@ -3,6 +3,7 @@
 //! Capture authority is separate from modesetting, allocation and renderer access.
 //! No operation on this client requires a primary DRM file or exposes source pixels.
 
+mod cancel;
 mod completion;
 mod description;
 mod destination;
