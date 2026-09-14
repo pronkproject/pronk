@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/castkms-sys",
+    "crates/drm-capture",
     "crates/drm-display-executor",
     "crates/pronk",
     "crates/pronk-backend-mock",

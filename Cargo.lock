@@ -393,6 +393,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "drm-capture"
+version = "0.1.0"
+dependencies = [
+ "nix 0.29.0",
+]
+
+[[package]]
 name = "drm-display-executor"
 version = "0.1.0"
 
