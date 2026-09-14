@@ -6,6 +6,7 @@
 mod description;
 mod destination;
 mod grant;
+mod queue;
 mod stream;
 
 use std::io;
@@ -14,6 +15,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 pub use description::{Description, OfferId};
 pub use destination::{Destination, DestinationId, Plane};
 pub use grant::{create_grant, Control};
+pub use queue::RequestId;
 pub use stream::StreamId;
 
 /// One owned capture descriptor, without revocation or display-control authority.
