@@ -198,3 +198,6 @@ fn drain<B: Backend>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
