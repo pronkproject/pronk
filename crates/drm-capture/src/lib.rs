@@ -5,12 +5,14 @@
 
 mod description;
 mod grant;
+mod stream;
 
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 pub use description::{Description, OfferId};
 pub use grant::{create_grant, Control};
+pub use stream::StreamId;
 
 /// One owned capture descriptor, without revocation or display-control authority.
 ///
