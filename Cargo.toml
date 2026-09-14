@@ -8,6 +8,7 @@ members = [
     "crates/pronk-backend-mock",
     "crates/pronk-backend-host",
     "crates/pronk-backend-protocol",
+    "crates/pronk-capture-broker",
     "crates/pronk-chromiacast",
     "crates/pronk-core",
     "crates/pronk-dbus",

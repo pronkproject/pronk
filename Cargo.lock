@@ -1387,6 +1387,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pronk-capture-broker"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "zbus",
+]
+
+[[package]]
 name = "pronk-castkms-live-test"
 version = "0.1.0"
 dependencies = [
