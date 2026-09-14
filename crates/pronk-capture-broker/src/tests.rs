@@ -270,3 +270,25 @@ async fn explicit_release_reports_a_broker_error() {
         .unwrap();
     assert!(matches!(session.release().await, Err(Error::Bus(_))));
 }
+
+#[tokio::test]
+async fn rejecting_a_non_capture_descriptor_releases_the_session() {
+    let mut fixture = Fixture::new(false, false).await;
+    let session = fixture
+        .provider
+        .acquire(target(), CancellationToken::new())
+        .await
+        .unwrap();
+    // The fixture transfers a socket, not an anonymous DRM capture file.
+    assert!(session.into_capture().is_err());
+    notified(&fixture.state.released).await;
+    assert_eq!(
+        fixture.state.releases.lock().unwrap().as_slice(),
+        &[(91, ":1.88".into())]
+    );
+    fixture
+        ._peer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(fixture._peer.read(&mut [0]).unwrap(), 0);
+}

@@ -1,7 +1,7 @@
 //! Session ownership for Mutter's private pixel-only capture broker.
 //!
-//! This transport does not validate image offers or confer display/audio rights.
-//! Keep the session alive while using its descriptor with `drm-capture`. Release
+//! Sessions confer no display/audio rights. Convert a session with
+//! [`Session::into_capture`] to retain its ownership in the DRM client. Release
 //! revokes authority; it does not acknowledge completion of admitted output writes.
 
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -84,6 +84,18 @@ impl Drop for Session {
 }
 
 impl Session {
+    /// Validate the current image offer and move session ownership into the client.
+    ///
+    /// Inactive or unauthorized outputs fail with the kernel's error and request
+    /// session release. Call this after display activation; it does not wait for
+    /// a modeset or reserve the returned offer. Dropping the client requests
+    /// release even if no stream was opened. For observed release, recover the
+    /// session with `Client::into_owner` and call [`Self::release`]. Neither path
+    /// acknowledges completion of outstanding destination writes.
+    pub fn into_capture(self) -> std::io::Result<drm_capture::Client<Self>> {
+        drm_capture::Client::from_owner(self)
+    }
+
     pub async fn release(mut self) -> Result<(), Error> {
         self.capture.take();
         self.release.take();

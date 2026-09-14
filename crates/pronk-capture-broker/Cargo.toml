@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+drm-capture = { path = "../drm-capture" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
