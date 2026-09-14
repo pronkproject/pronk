@@ -1458,6 +1458,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pronk-drm-capture-live-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cc",
+ "drm-capture",
+ "nix 0.29.0",
+ "pkg-config",
+ "pronk-dmabuf",
+]
+
+[[package]]
 name = "pronk-gpu"
 version = "0.1.0"
 dependencies = [

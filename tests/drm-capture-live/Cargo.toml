@@ -1,0 +1,20 @@
+[package]
+name = "pronk-drm-capture-live-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+drm-capture = { path = "../../crates/drm-capture" }
+nix.workspace = true
+pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
+
+[lints]
+workspace = true
