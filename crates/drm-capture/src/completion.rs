@@ -1,5 +1,5 @@
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::Duration;
 
 use nix::errno::Errno;
@@ -45,7 +45,7 @@ struct Dequeue {
 
 nix::ioctl_write_ptr!(dequeue, b'd', 0x06, Dequeue);
 
-impl Client {
+impl<F: AsFd> Client<F> {
     /// Acknowledge one result, or return None without waiting when the queue is empty.
     ///
     /// A successful syscall returns the request slot even when the frame failed.
@@ -66,7 +66,7 @@ impl Client {
             };
             // SAFETY: The input points to the complete writable output, both live
             // through synchronous copyout. The ioctl wrapper does not retry EAGAIN.
-            unsafe { dequeue(self.fd.as_raw_fd(), &input) }.map(|_| ())
+            unsafe { dequeue(self.as_fd().as_raw_fd(), &input) }.map(|_| ())
         })
     }
 }

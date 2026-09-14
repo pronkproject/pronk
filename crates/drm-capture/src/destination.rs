@@ -1,6 +1,6 @@
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
 use crate::Client;
 
@@ -87,7 +87,7 @@ struct Unregister {
 nix::ioctl_write_ptr!(register, b'd', 0x03, Register);
 nix::ioctl_write_ptr!(unregister, b'd', 0x04, Unregister);
 
-impl Client {
+impl<F: AsFd> Client<F> {
     /// Retain checked storage under a strictly increasing registration name.
     ///
     /// Kernel admission validates layout and write access. Success retains its
@@ -102,7 +102,7 @@ impl Client {
         let input = Register::new(id, image)?;
         // SAFETY: Input has no pointers; all borrowed DMA-BUF descriptors remain
         // live through the synchronous call. Inactive entries and flags are zero.
-        unsafe { register(self.fd.as_raw_fd(), &input) }?;
+        unsafe { register(self.as_fd().as_raw_fd(), &input) }?;
         Ok(())
     }
 
@@ -116,7 +116,7 @@ impl Client {
             reserved: 0,
         };
         // SAFETY: The initialized input remains live through the call.
-        unsafe { unregister(self.fd.as_raw_fd(), &input) }?;
+        unsafe { unregister(self.as_fd().as_raw_fd(), &input) }?;
         Ok(())
     }
 }

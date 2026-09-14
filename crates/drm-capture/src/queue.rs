@@ -1,6 +1,6 @@
 use std::io;
 use std::num::NonZeroU64;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
 use crate::{Client, DestinationId, StreamId};
 
@@ -48,7 +48,7 @@ impl Queue {
 
 nix::ioctl_write_ptr!(queue, b'd', 0x05, Queue);
 
-impl Client {
+impl<F: AsFd> Client<F> {
     /// Admit output to exact registered storage, optionally after a native reuse fence.
     ///
     /// The kernel validates a supplied sync-file descriptor and retains its fence
@@ -69,7 +69,7 @@ impl Client {
         let input = Queue::new(stream, request, destination, reuse);
         // SAFETY: Input and any supplied fence descriptor remain live through
         // the call. Successful admission retains kernel references, not fd numbers.
-        unsafe { queue(self.fd.as_raw_fd(), &input) }?;
+        unsafe { queue(self.as_fd().as_raw_fd(), &input) }?;
         Ok(())
     }
 }

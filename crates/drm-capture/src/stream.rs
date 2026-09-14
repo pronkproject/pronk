@@ -1,6 +1,6 @@
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 
 use crate::{Client, OfferId};
 
@@ -37,7 +37,7 @@ struct DestroyStream {
 nix::ioctl_write_ptr!(create, b'd', 0x01, CreateStream);
 nix::ioctl_write_ptr!(destroy, b'd', 0x02, DestroyStream);
 
-impl Client {
+impl<F: AsFd> Client<F> {
     /// Open an offered configuration with independent request capacity.
     ///
     /// Use names greater than every previously admitted stream name. Failure
@@ -56,7 +56,7 @@ impl Client {
             ..Default::default()
         };
         // SAFETY: The complete initialized input remains readable through the call.
-        unsafe { create(self.fd.as_raw_fd(), &input) }?;
+        unsafe { create(self.as_fd().as_raw_fd(), &input) }?;
         Ok(())
     }
 
@@ -72,7 +72,7 @@ impl Client {
             reserved: 0,
         };
         // SAFETY: Input is fully initialized and retained for the synchronous call.
-        unsafe { destroy(self.fd.as_raw_fd(), &input) }?;
+        unsafe { destroy(self.as_fd().as_raw_fd(), &input) }?;
         Ok(())
     }
 }

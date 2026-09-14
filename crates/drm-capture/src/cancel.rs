@@ -1,5 +1,5 @@
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 
 use crate::{Client, RequestId, StreamId};
 
@@ -12,7 +12,7 @@ struct Cancel {
 
 nix::ioctl_write_ptr!(cancel, b'd', 0x07, Cancel);
 
-impl Client {
+impl<F: AsFd> Client<F> {
     /// Request cancellation, without releasing request credit or acknowledging reuse.
     ///
     /// Observe terminal completion or successfully close the stream before
@@ -26,7 +26,7 @@ impl Client {
             reserved: 0,
         };
         // SAFETY: Input is initialized and readable for the synchronous call.
-        unsafe { cancel(self.fd.as_raw_fd(), &input) }?;
+        unsafe { cancel(self.as_fd().as_raw_fd(), &input) }?;
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 
 use crate::Client;
 
@@ -41,12 +41,12 @@ struct Describe {
 
 nix::ioctl_read!(describe, b'd', 0x00, Describe);
 
-impl Client {
+impl<F: AsFd> Client<F> {
     /// Query current permission and the latest configuration without capturing.
     pub fn describe(&self) -> io::Result<Description> {
         let mut output = Describe::default();
         // SAFETY: The initialized output is writable for its complete ABI size.
-        unsafe { describe(self.fd.as_raw_fd(), &mut output) }?;
+        unsafe { describe(self.as_fd().as_raw_fd(), &mut output) }?;
         output.decode()
     }
 }
