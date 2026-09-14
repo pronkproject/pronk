@@ -57,13 +57,14 @@ pub struct Provider {
 
 /// Owns capture and a request to release its broker session.
 ///
-/// Drop requests asynchronous release. The Tokio runtime must remain alive
-/// for cleanup; process/bus-name loss is the broker's fallback if that runtime
-/// stops. No control fd is exposed.
+/// Drop requests asynchronous release. Use [`Self::release`] to observe its
+/// result. The Tokio runtime must remain alive for cleanup; process/bus-name
+/// loss is the broker's fallback if that runtime stops. No control fd is exposed.
 #[derive(Debug)]
 pub struct Session {
     capture: Option<OwnedFd>,
     release: Option<oneshot::Sender<()>>,
+    done: Option<oneshot::Receiver<Result<(), Error>>>,
 }
 
 impl AsFd for Session {
@@ -79,6 +80,18 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.capture.take();
         self.release.take();
+    }
+}
+
+impl Session {
+    pub async fn release(mut self) -> Result<(), Error> {
+        self.capture.take();
+        self.release.take();
+        self.done
+            .take()
+            .expect("live session owns completion")
+            .await
+            .map_err(|_| Error::WorkerStopped)?
     }
 }
 
@@ -177,13 +190,15 @@ async fn run_session(
         }
     };
     let (release, wait_release) = oneshot::channel();
+    let (done, wait_done) = oneshot::channel();
     // A rejected send drops the session here, waking the same cleanup path.
     let _ = send.send(Ok(Session {
         capture: Some(capture.into()),
         release: Some(release),
+        done: Some(wait_done),
     }));
     let _ = wait_release.await;
-    let _ = connection
+    let result = connection
         .call_method(
             Some(owner.as_str()),
             PATH,
@@ -193,6 +208,7 @@ async fn run_session(
         )
         .await
         .and_then(|message| message.body().deserialize::<()>());
+    let _ = done.send(result.map_err(Error::from));
 }
 
 #[cfg(test)]

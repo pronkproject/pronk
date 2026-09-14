@@ -171,12 +171,12 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
         &[(226, 42, 7, 11, ":1.88".into())]
     );
     *fixture.state.owner.lock().unwrap() = ":1.99".into();
-    drop(session);
-    notified(&fixture.state.released).await;
+    session.release().await.unwrap();
     assert_eq!(
         fixture.state.releases.lock().unwrap().as_slice(),
         &[(91, ":1.88".into())]
     );
+    assert_eq!(fixture.provider.slots.available_permits(), 1);
 }
 
 #[tokio::test]
@@ -258,4 +258,15 @@ async fn timed_out_requests_remain_bounded_until_the_reply_is_drained() {
     assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
     fixture.state.gate.as_ref().unwrap().notify_one();
     notified(&fixture.state.released).await;
+}
+
+#[tokio::test]
+async fn explicit_release_reports_a_broker_error() {
+    let fixture = Fixture::new(false, true).await;
+    let session = fixture
+        .provider
+        .acquire(target(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(matches!(session.release().await, Err(Error::Bus(_))));
 }
