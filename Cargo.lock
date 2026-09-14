@@ -1387,6 +1387,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pronk-capture"
+version = "0.1.0"
+dependencies = [
+ "drm-capture",
+ "nix 0.29.0",
+ "pronk-dmabuf",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "pronk-capture-broker"
 version = "0.1.0"
 dependencies = [
