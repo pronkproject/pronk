@@ -4,6 +4,7 @@
 //! No operation on this client requires a primary DRM file or exposes source pixels.
 
 mod description;
+mod destination;
 mod grant;
 mod stream;
 
@@ -11,6 +12,7 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 pub use description::{Description, OfferId};
+pub use destination::{Destination, DestinationId, Plane};
 pub use grant::{create_grant, Control};
 pub use stream::StreamId;
 
