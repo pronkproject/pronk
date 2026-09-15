@@ -32,6 +32,7 @@ impl Bus {
 struct Mutter {
     state: Arc<State>,
     monitor: Mutex<Option<OwnedFd>>,
+    renderer: Mutex<Option<OwnedFd>>,
     capture: Mutex<Option<OwnedFd>>,
 }
 
@@ -44,7 +45,7 @@ impl Mutter {
         crtc: u32,
         connector: u32,
         #[zbus(header)] header: Header<'_>,
-    ) -> zbus::fdo::Result<(BusFd, BusFd, u64)> {
+    ) -> zbus::fdo::Result<(BusFd, BusFd, BusFd, u64)> {
         self.state.requests.lock().unwrap().push((
             major,
             minor,
@@ -68,7 +69,13 @@ impl Mutter {
             .unwrap()
             .take()
             .ok_or_else(|| zbus::fdo::Error::Failed("capture already issued".into()))?;
-        Ok((monitor.into(), capture.into(), 91))
+        let renderer = self
+            .renderer
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| zbus::fdo::Error::Failed("renderer already issued".into()))?;
+        Ok((monitor.into(), renderer.into(), capture.into(), 91))
     }
 
     fn release_display_session(
@@ -93,6 +100,7 @@ impl Mutter {
 struct Fixture {
     _server: zbus::Connection,
     monitor_peer: std::os::unix::net::UnixStream,
+    renderer_peer: std::os::unix::net::UnixStream,
     _peer: std::os::unix::net::UnixStream,
     provider: Provider,
     state: Arc<State>,
@@ -107,6 +115,7 @@ impl Fixture {
             ..State::default()
         });
         let (monitor, monitor_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (renderer, renderer_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (capture, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (server, client) = UnixStream::pair().unwrap();
         let server = Builder::unix_stream(server)
@@ -121,6 +130,7 @@ impl Fixture {
                 Mutter {
                     state: Arc::clone(&state),
                     monitor: Mutex::new(Some(monitor.into())),
+                    renderer: Mutex::new(Some(renderer.into())),
                     capture: Mutex::new(Some(capture.into())),
                 },
             )
@@ -132,6 +142,7 @@ impl Fixture {
         Self {
             _server: server,
             monitor_peer,
+            renderer_peer,
             _peer: peer,
             provider: Provider::new(
                 connection,
@@ -178,6 +189,16 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
     monitor.read_exact(&mut monitor_byte).unwrap();
     assert_eq!(monitor_byte, [0x37]);
     drop(monitor);
+    fixture.renderer_peer.write_all(&[0x41]).unwrap();
+    let renderer_access = session.renderer_access().unwrap();
+    let mut renderer = std::os::unix::net::UnixStream::from(renderer_access.renderer);
+    renderer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut renderer_byte = [0];
+    renderer.read_exact(&mut renderer_byte).unwrap();
+    assert_eq!(renderer_byte, [0x41]);
+    drop(renderer);
     fixture._peer.write_all(&[0x49]).unwrap();
     let capture_access = session.capture_access().unwrap();
     let mut capture = std::os::unix::net::UnixStream::from(capture_access.capture);
@@ -204,6 +225,11 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     assert_eq!(fixture.monitor_peer.read(&mut [0]).unwrap(), 0);
+    fixture
+        .renderer_peer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(fixture.renderer_peer.read(&mut [0]).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -222,6 +248,11 @@ async fn dropping_a_session_requests_release() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     assert_eq!(fixture.monitor_peer.read(&mut [0]).unwrap(), 0);
+    fixture
+        .renderer_peer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(fixture.renderer_peer.read(&mut [0]).unwrap(), 0);
 }
 
 #[tokio::test]

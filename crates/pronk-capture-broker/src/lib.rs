@@ -1,9 +1,9 @@
 //! Session ownership for Mutter's private CastKMS display broker.
 //!
-//! Monitor control and final-image capture arrive as separate descriptors under
-//! one broker lifetime. Sessions confer no primary-node, audio, CEC or raw-plane
-//! access. Release revokes both capabilities; it does not acknowledge completion
-//! of admitted output writes.
+//! Monitor control, renderer control and final-image capture arrive as separate
+//! descriptors under one broker lifetime. Sessions confer no primary-node,
+//! audio or CEC access. Release revokes every capability; it does not acknowledge
+//! completion of admitted output writes.
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -60,7 +60,7 @@ pub struct Provider {
     timeout: Duration,
 }
 
-/// Owns separate monitor and capture capabilities under one broker session.
+/// Owns separate monitor, renderer and capture capabilities under one session.
 ///
 /// Drop requests asynchronous release. Use [`Self::release`] to observe its
 /// result. The Tokio runtime must remain alive for cleanup; process/bus-name
@@ -69,6 +69,7 @@ pub struct Provider {
 pub struct Session {
     id: NonZeroU64,
     monitor: Option<OwnedFd>,
+    renderer: Option<OwnedFd>,
     capture: Option<OwnedFd>,
     release: Option<oneshot::Sender<()>>,
     done: Option<oneshot::Receiver<Result<(), Error>>>,
@@ -84,6 +85,22 @@ pub struct CaptureAccess {
     capture: OwnedFd,
 }
 
+/// Renderer authority derived from a display session's lifetime.
+///
+/// Cloning the underlying file description transfers no revocation authority,
+/// monitor control, final-image capture access or primary-node operations.
+#[derive(Debug)]
+pub struct RendererAccess {
+    renderer: OwnedFd,
+}
+
+impl RendererAccess {
+    /// Open a validated renderer client while retaining the broker session.
+    pub fn open(&self) -> std::io::Result<castkms_renderer::Renderer> {
+        castkms_renderer::Renderer::from_fd(self.renderer.try_clone()?)
+    }
+}
+
 impl CaptureAccess {
     pub fn open(&self) -> std::io::Result<drm_capture::Client> {
         drm_capture::Client::from_fd(self.capture.try_clone()?)
@@ -95,6 +112,13 @@ impl Session {
         self.capture
             .as_ref()
             .expect("live session owns capture")
+            .as_fd()
+    }
+
+    fn renderer(&self) -> BorrowedFd<'_> {
+        self.renderer
+            .as_ref()
+            .expect("live session owns renderer control")
             .as_fd()
     }
     /// Borrow the monitor-control capability without exposing capture through it.
@@ -112,6 +136,12 @@ impl Session {
     pub fn capture_access(&self) -> std::io::Result<CaptureAccess> {
         Ok(CaptureAccess {
             capture: self.capture().try_clone_to_owned()?,
+        })
+    }
+
+    pub fn renderer_access(&self) -> std::io::Result<RendererAccess> {
+        Ok(RendererAccess {
+            renderer: self.renderer().try_clone_to_owned()?,
         })
     }
 
@@ -138,8 +168,18 @@ impl Session {
         self.capture_access()?.open()
     }
 
+    /// Open a renderer client while retaining the display session itself.
+    ///
+    /// Call after display activation because monitor acquisition temporarily
+    /// disconnects the output. The kernel rechecks the current master interval
+    /// and exact enabled output when the client validates its descriptor.
+    pub fn open_renderer(&self) -> std::io::Result<castkms_renderer::Renderer> {
+        self.renderer_access()?.open()
+    }
+
     pub async fn release(mut self) -> Result<(), Error> {
         self.monitor.take();
+        self.renderer.take();
         self.capture.take();
         self.release.take();
         self.done
@@ -153,6 +193,7 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.monitor.take();
+        self.renderer.take();
         self.capture.take();
         self.release.take();
     }
@@ -240,14 +281,15 @@ async fn run_session(
             ),
         )
         .await;
-    let received = result.and_then(|message| message.body().deserialize::<(BusFd, BusFd, u64)>());
-    let (monitor, capture, id) = match received {
-        Ok((monitor, capture, id)) => {
+    let received =
+        result.and_then(|message| message.body().deserialize::<(BusFd, BusFd, BusFd, u64)>());
+    let (monitor, renderer, capture, id) = match received {
+        Ok((monitor, renderer, capture, id)) => {
             let Some(id) = NonZeroU64::new(id) else {
                 let _ = send.send(Err(Error::InvalidSession));
                 return;
             };
-            (monitor, capture, id)
+            (monitor, renderer, capture, id)
         }
         Err(error) => {
             let _ = send.send(Err(error.into()));
@@ -255,6 +297,7 @@ async fn run_session(
         }
     };
     let monitor: OwnedFd = monitor.into();
+    let renderer: OwnedFd = renderer.into();
     let capture: OwnedFd = capture.into();
     let (release, wait_release) = oneshot::channel();
     let (done, wait_done) = oneshot::channel();
@@ -262,6 +305,7 @@ async fn run_session(
     let _ = send.send(Ok(Session {
         id,
         monitor: Some(monitor),
+        renderer: Some(renderer),
         capture: Some(capture),
         release: Some(release),
         done: Some(wait_done),

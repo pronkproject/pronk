@@ -1414,6 +1414,7 @@ dependencies = [
 name = "pronk-capture-broker"
 version = "0.1.0"
 dependencies = [
+ "castkms-renderer",
  "drm-capture",
  "nix 0.29.0",
  "thiserror 2.0.20",
