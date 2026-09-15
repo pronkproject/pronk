@@ -142,11 +142,13 @@ impl OutputSlotPool {
 
 fn validate_inventory(outputs: &[CastKmsOutput]) -> Result<(), OutputReservationError> {
     let mut identities = HashSet::with_capacity(outputs.len());
+    let mut crtcs = HashSet::with_capacity(outputs.len());
     let mut connectors = HashSet::with_capacity(outputs.len());
     for output in outputs {
         if !output.node_path.is_absolute()
             || !output.id.device_path.is_absolute()
             || output.device_major == 0
+            || output.crtc_id == 0
             || output.connector_id == 0
             || output.connector_name.is_empty()
         {
@@ -156,6 +158,9 @@ fn validate_inventory(outputs: &[CastKmsOutput]) -> Result<(), OutputReservation
             return Err(OutputReservationError::InvalidInventory);
         }
         if !connectors.insert((output.id.device_path.clone(), output.connector_id)) {
+            return Err(OutputReservationError::InvalidInventory);
+        }
+        if !crtcs.insert((output.id.device_path.clone(), output.crtc_id)) {
             return Err(OutputReservationError::InvalidInventory);
         }
     }

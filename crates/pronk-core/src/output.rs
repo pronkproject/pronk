@@ -14,10 +14,10 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use castkms_sys::{
-    drm_ioctl_castkms_get_output, drm_ioctl_mode_getconnector, drm_ioctl_mode_getresources,
-    drm_ioctl_version, DrmCastkmsGetOutput, DrmModeCardRes, DrmModeGetConnector, DrmModeModeInfo,
-    DrmVersion, DRM_MODE_CONNECTED, DRM_MODE_CONNECTOR_VIRTUAL, DRM_MODE_DISCONNECTED,
-    DRM_MODE_UNKNOWN_CONNECTION,
+    drm_ioctl_castkms_get_output, drm_ioctl_mode_getconnector, drm_ioctl_mode_getencoder,
+    drm_ioctl_mode_getresources, drm_ioctl_version, DrmCastkmsGetOutput, DrmModeCardRes,
+    DrmModeGetConnector, DrmModeGetEncoder, DrmModeModeInfo, DrmVersion, DRM_MODE_CONNECTED,
+    DRM_MODE_CONNECTOR_VIRTUAL, DRM_MODE_DISCONNECTED, DRM_MODE_UNKNOWN_CONNECTION,
 };
 use nix::errno::Errno;
 use nix::fcntl::OFlag;
@@ -56,6 +56,7 @@ pub struct CastKmsOutput {
     pub node_path: PathBuf,
     pub device_major: u32,
     pub device_minor: u32,
+    pub crtc_id: u32,
     pub connector_id: u32,
     pub connector_name: String,
     pub connection: OutputConnection,
@@ -165,10 +166,10 @@ fn probe_primary_node(
         u32::try_from(major(metadata.rdev())).map_err(|_| CardProbeError::InvalidDeviceNumber)?;
     let device_minor =
         u32::try_from(minor(metadata.rdev())).map_err(|_| CardProbeError::InvalidDeviceNumber)?;
-    let connector_ids = connector_ids(&file)?;
-    let mut outputs = Vec::with_capacity(connector_ids.len());
-    for connector_id in connector_ids {
-        let connector = connector_metadata(&file, connector_id)?;
+    let resources = resource_ids(&file)?;
+    let mut outputs = Vec::with_capacity(resources.connectors.len());
+    for connector_id in resources.connectors {
+        let (connector, encoders) = connector_metadata(&file, connector_id)?;
         if connector.connector_type != DRM_MODE_CONNECTOR_VIRTUAL {
             continue;
         }
@@ -178,6 +179,7 @@ fn probe_primary_node(
             DRM_MODE_UNKNOWN_CONNECTION => OutputConnection::Unknown,
             value => return Err(CardProbeError::UnknownConnection(value)),
         };
+        let crtc_id = resolve_crtc_id(&file, &encoders, &resources.crtcs)?;
         let output_index = query_output_index(&file, connector_id)?;
         outputs.push(CastKmsOutput {
             id: CastKmsOutputId {
@@ -187,6 +189,7 @@ fn probe_primary_node(
             node_path: node_path.to_owned(),
             device_major,
             device_minor,
+            crtc_id,
             connector_id,
             connector_name: format!("Virtual-{}", connector.connector_type_id),
             connection,
@@ -217,7 +220,12 @@ fn is_castkms(file: &File) -> Result<bool, CardProbeError> {
     Ok(&name[..version.name_len] == b"castkms")
 }
 
-fn connector_ids(file: &File) -> Result<Vec<u32>, CardProbeError> {
+struct ResourceIds {
+    crtcs: Vec<u32>,
+    connectors: Vec<u32>,
+}
+
+fn resource_ids(file: &File) -> Result<ResourceIds, CardProbeError> {
     let mut resources = DrmModeCardRes::default();
     // SAFETY: `resources` is a writable standard DRM UAPI structure with no
     // pointers set for this count query.
@@ -225,35 +233,49 @@ fn connector_ids(file: &File) -> Result<Vec<u32>, CardProbeError> {
         .map_err(CardProbeError::Resources)?;
 
     for _ in 0..RESOURCE_RETRIES {
-        let capacity = usize::try_from(resources.count_connectors)
+        let connector_capacity = usize::try_from(resources.count_connectors)
             .map_err(|_| CardProbeError::TooManyConnectors(usize::MAX))?;
-        if capacity > MAX_CASTKMS_OUTPUTS {
-            return Err(CardProbeError::TooManyConnectors(capacity));
+        let crtc_capacity = resources.count_crtcs as usize;
+        if connector_capacity > MAX_CASTKMS_OUTPUTS {
+            return Err(CardProbeError::TooManyConnectors(connector_capacity));
         }
-        if capacity == 0 {
-            return Ok(Vec::new());
+        if crtc_capacity > u32::BITS as usize {
+            return Err(CardProbeError::TooManyCrtcs(crtc_capacity));
         }
-        let mut ids = vec![0_u32; capacity];
-        resources.connector_id_ptr = ids.as_mut_ptr() as u64;
-        resources.count_connectors = capacity as u32;
-        // Do not request unrelated framebuffer, CRTC, or encoder arrays.
+        if connector_capacity == 0 {
+            return Ok(ResourceIds {
+                crtcs: Vec::new(),
+                connectors: Vec::new(),
+            });
+        }
+        let mut connectors = vec![0_u32; connector_capacity];
+        let mut crtcs = vec![0_u32; crtc_capacity];
+        resources.connector_id_ptr = connectors.as_mut_ptr() as u64;
+        resources.crtc_id_ptr = if crtcs.is_empty() {
+            0
+        } else {
+            crtcs.as_mut_ptr() as u64
+        };
+        resources.count_connectors = connector_capacity as u32;
+        resources.count_crtcs = crtc_capacity as u32;
+        // Do not request unrelated framebuffer or encoder arrays.
         resources.fb_id_ptr = 0;
-        resources.crtc_id_ptr = 0;
         resources.encoder_id_ptr = 0;
         resources.count_fbs = 0;
-        resources.count_crtcs = 0;
         resources.count_encoders = 0;
-        // SAFETY: the connector pointer names `capacity` writable u32s and
-        // remains alive through the synchronous ioctl.
+        // SAFETY: both ID pointers name their declared writable arrays and
+        // remain alive through the synchronous ioctl.
         unsafe { drm_ioctl_mode_getresources(file.as_raw_fd(), &mut resources) }
             .map_err(CardProbeError::Resources)?;
-        let actual = resources.count_connectors as usize;
-        if actual <= capacity {
-            ids.truncate(actual);
-            if ids.contains(&0) {
-                return Err(CardProbeError::ZeroConnectorId);
+        let connector_count = resources.count_connectors as usize;
+        let crtc_count = resources.count_crtcs as usize;
+        if connector_count <= connector_capacity && crtc_count <= crtc_capacity {
+            connectors.truncate(connector_count);
+            crtcs.truncate(crtc_count);
+            if connectors.contains(&0) || crtcs.contains(&0) {
+                return Err(CardProbeError::ZeroObjectId);
             }
-            return Ok(ids);
+            return Ok(ResourceIds { crtcs, connectors });
         }
     }
     Err(CardProbeError::UnstableResources)
@@ -262,7 +284,7 @@ fn connector_ids(file: &File) -> Result<Vec<u32>, CardProbeError> {
 fn connector_metadata(
     file: &File,
     connector_id: u32,
-) -> Result<DrmModeGetConnector, CardProbeError> {
+) -> Result<(DrmModeGetConnector, Vec<u32>), CardProbeError> {
     // count_modes=0 can force-probe when this short-lived file happens to be
     // DRM master. Supply one scratch mode so discovery remains observational.
     let mut scratch_mode = DrmModeModeInfo::default();
@@ -273,7 +295,7 @@ fn connector_metadata(
         ..DrmModeGetConnector::default()
     };
     // SAFETY: `connector` and the single scratch mode remain writable through
-    // the synchronous standard DRM ioctl. No other arrays are requested.
+    // the synchronous standard DRM ioctl. This first call counts encoders.
     unsafe { drm_ioctl_mode_getconnector(file.as_raw_fd(), &mut connector) }
         .map_err(CardProbeError::Connector)?;
     if connector.connector_id != connector_id {
@@ -285,7 +307,75 @@ fn connector_metadata(
     if connector.pad != 0 {
         return Err(CardProbeError::ConnectorPadding);
     }
-    Ok(connector)
+    for _ in 0..RESOURCE_RETRIES {
+        let encoder_capacity = connector.count_encoders as usize;
+        if encoder_capacity > MAX_CASTKMS_OUTPUTS {
+            return Err(CardProbeError::TooManyEncoders(encoder_capacity));
+        }
+        let mut encoders = vec![0_u32; encoder_capacity];
+        connector.encoders_ptr = if encoders.is_empty() {
+            0
+        } else {
+            encoders.as_mut_ptr() as u64
+        };
+        connector.count_encoders = encoder_capacity as u32;
+        connector.modes_ptr = (&mut scratch_mode as *mut DrmModeModeInfo) as u64;
+        connector.count_modes = 1;
+        connector.props_ptr = 0;
+        connector.prop_values_ptr = 0;
+        connector.count_props = 0;
+        // SAFETY: the connector, scratch mode and encoder ID array remain
+        // writable through the synchronous standard DRM ioctl. Other array
+        // counts are reset to match their pointers before every retry.
+        unsafe { drm_ioctl_mode_getconnector(file.as_raw_fd(), &mut connector) }
+            .map_err(CardProbeError::Connector)?;
+        if connector.connector_id != connector_id || connector.pad != 0 {
+            return Err(CardProbeError::ConnectorChanged);
+        }
+        let encoder_count = connector.count_encoders as usize;
+        if encoder_count > encoder_capacity {
+            continue;
+        }
+        encoders.truncate(encoder_count);
+        if encoders.is_empty() || encoders.contains(&0) {
+            return Err(CardProbeError::InvalidEncoderList);
+        }
+        return Ok((connector, encoders));
+    }
+    Err(CardProbeError::UnstableResources)
+}
+
+fn resolve_crtc_id(
+    file: &File,
+    encoder_ids: &[u32],
+    crtc_ids: &[u32],
+) -> Result<u32, CardProbeError> {
+    let mut possible_crtcs = 0_u32;
+    for &encoder_id in encoder_ids {
+        let mut encoder = DrmModeGetEncoder {
+            encoder_id,
+            ..DrmModeGetEncoder::default()
+        };
+        // SAFETY: `encoder` is the fixed-width writable standard DRM request.
+        unsafe { drm_ioctl_mode_getencoder(file.as_raw_fd(), &mut encoder) }
+            .map_err(CardProbeError::Encoder)?;
+        if encoder.encoder_id != encoder_id {
+            return Err(CardProbeError::EncoderChanged);
+        }
+        possible_crtcs |= encoder.possible_crtcs;
+    }
+    crtc_id_from_mask(possible_crtcs, crtc_ids)
+}
+
+fn crtc_id_from_mask(mask: u32, crtc_ids: &[u32]) -> Result<u32, CardProbeError> {
+    if mask.count_ones() != 1 {
+        return Err(CardProbeError::AmbiguousCrtc(mask));
+    }
+    crtc_ids
+        .get(mask.trailing_zeros() as usize)
+        .copied()
+        .filter(|id| *id != 0)
+        .ok_or(CardProbeError::InvalidCrtcMask(mask))
 }
 
 fn query_output_index(file: &File, connector_id: u32) -> Result<u32, CardProbeError> {
@@ -310,6 +400,7 @@ fn finish_output_inventory(
 ) -> Result<Vec<CastKmsOutput>, OutputDiscoveryError> {
     outputs.sort_by(|left, right| left.id.cmp(&right.id));
     let mut ids = HashSet::with_capacity(outputs.len());
+    let mut crtcs = HashSet::with_capacity(outputs.len());
     let mut connectors = HashSet::with_capacity(outputs.len());
     for output in &outputs {
         if !ids.insert(output.id.clone()) {
@@ -320,6 +411,13 @@ fn finish_output_inventory(
             return Err(OutputDiscoveryError::DuplicateConnector {
                 device_path: output.id.device_path.clone(),
                 connector_id: output.connector_id,
+            });
+        }
+        let crtc = (output.id.device_path.clone(), output.crtc_id);
+        if !crtcs.insert(crtc) {
+            return Err(OutputDiscoveryError::DuplicateCrtc {
+                device_path: output.id.device_path.clone(),
+                crtc_id: output.crtc_id,
             });
         }
     }
@@ -351,6 +449,8 @@ pub enum OutputDiscoveryError {
         device_path: PathBuf,
         connector_id: u32,
     },
+    #[error("CastKMS device {device_path:?} reported CRTC {crtc_id} twice")]
+    DuplicateCrtc { device_path: PathBuf, crtc_id: u32 },
 }
 
 #[derive(Debug, Error)]
@@ -373,14 +473,30 @@ pub enum CardProbeError {
     TooManyConnectors(usize),
     #[error("CastKMS resource inventory did not stabilize")]
     UnstableResources,
-    #[error("CastKMS reported connector ID zero")]
-    ZeroConnectorId,
+    #[error("CastKMS reported {0} CRTCs; standard encoder masks support at most 32")]
+    TooManyCrtcs(usize),
+    #[error("CastKMS reported a zero CRTC or connector ID")]
+    ZeroObjectId,
     #[error("query DRM connector: {0}")]
     Connector(Errno),
     #[error("connector query returned ID {actual}; expected {expected}")]
     ConnectorIdentity { expected: u32, actual: u32 },
     #[error("connector query returned nonzero padding")]
     ConnectorPadding,
+    #[error("connector identity or padding changed while reading encoders")]
+    ConnectorChanged,
+    #[error("CastKMS connector reported {0} encoders; limit is {MAX_CASTKMS_OUTPUTS}")]
+    TooManyEncoders(usize),
+    #[error("CastKMS connector has no valid encoder IDs")]
+    InvalidEncoderList,
+    #[error("query DRM encoder: {0}")]
+    Encoder(Errno),
+    #[error("encoder identity changed while it was queried")]
+    EncoderChanged,
+    #[error("CastKMS output has ambiguous possible-CRTC mask {0:#x}")]
+    AmbiguousCrtc(u32),
+    #[error("CastKMS output has invalid possible-CRTC mask {0:#x}")]
+    InvalidCrtcMask(u32),
     #[error("connector query returned unknown connection state {0}")]
     UnknownConnection(u32),
     #[error("query stable CastKMS output index: {0}")]
