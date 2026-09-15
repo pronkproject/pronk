@@ -677,6 +677,70 @@ mod tests {
 
     #[test]
     #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+    fn identical_scene_profiles_do_not_share_private_storage() {
+        let (device, modifier) = device();
+        let extent = Extent::new(4, 3).unwrap();
+        let source = SourceRequirements {
+            format: PackedFormat::Bgra8,
+            extent,
+            modifier,
+        };
+        let layers = [LayerRequirements {
+            source,
+            crop: SourceRect::new(extent, [0, 0], extent).unwrap(),
+            destination: DestinationRect {
+                position: [0, 0],
+                extent,
+            },
+            transform: Transform::default(),
+            blend: Blend::default(),
+            color: ColorPipeline::new(&[]),
+        }];
+        let scene = SceneRequirements {
+            output: extent,
+            layers: &layers,
+            color: OutputColor::default(),
+        };
+        let first = SceneComposer::new(&device, scene).unwrap();
+        let second = SceneComposer::new(&device, scene).unwrap();
+        let mut pool = second
+            .create_pool(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        let SceneBuffers {
+            destination,
+            mut sources,
+        } = pool.take().unwrap().unwrap();
+        let serial = NonZeroU64::new(73).unwrap();
+        let mut source = sources
+            .pop()
+            .unwrap()
+            .clear_and_wait([17, 85, 204])
+            .unwrap();
+        source.content_serial = Some(serial);
+        let frames = SceneFrames::new(serial, vec![source]).unwrap();
+
+        let error = first
+            .compose_and_wait(SceneInputs::new(destination, frames, [0; 3]))
+            .err()
+            .unwrap();
+        let SceneCompositionError::Rejected(rejected) = error else {
+            panic!("foreign profile storage reached native work");
+        };
+        let (inputs, _) = rejected.into_parts();
+        let (destination, frames, _) = inputs.into_parts();
+        let (_, frames) = frames.into_parts();
+        let sources = frames.into_iter().map(|frame| frame.buffer).collect();
+        assert!(pool
+            .restore(SceneBuffers {
+                destination,
+                sources,
+            })
+            .is_ok());
+        assert_eq!(pool.available(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires explicit Vulkan GPU and modifier selection"]
     fn rejected_scene_returns_untouched_inputs() {
         let (device, modifier) = device();
         let extent = Extent::new(1, 1).unwrap();
