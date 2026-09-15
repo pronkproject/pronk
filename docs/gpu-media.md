@@ -31,8 +31,9 @@ pixel formats beyond those two are not supported by this initial adapter.
 ## Ownership and synchronization
 
 The layout API does not submit GPU work or allocate buffers. Those operations
-remain with the capture/executor owner, outside the PipeWire loop. In waited
-transport, publication requires the caller to establish producer completion.
+remain with the capture/executor owner, outside the PipeWire loop. In
+ready-before-publish transport, publication requires the caller to establish
+producer completion.
 A `BufferReleased` event reports the end of PipeWire retention, not completion
 of native GPU reads. Before rewriting storage, the owner must establish reader
 completion as well, for example through a qualified DMA-BUF implicit-sync
@@ -104,7 +105,7 @@ lost. `handle_event` returns native waits for initial availability and matching
 releases; the caller drives those waits asynchronously and applies their results
 through `complete`. Stale-generation events are ignored; wrong-use releases are
 rejected without consuming the active publication. The initial adapter accepts
-waited transport only, not PipeWire synchronization timelines.
+ready-before-publish transport only, not PipeWire synchronization timelines.
 
 After joining the source loop, pass its stop report to `stopped`. A matching
 generation-failure event has the same effect. Retirement includes all locally

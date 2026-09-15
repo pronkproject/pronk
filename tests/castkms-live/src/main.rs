@@ -828,7 +828,7 @@ fn main() -> anyhow::Result<()> {
         println!(
             "pipewire_transport={}",
             match pipewire.transport {
-                PipeWireBufferTransport::Waited => "waited",
+                PipeWireBufferTransport::ReadyBeforePublish => "ready-before-publish",
                 PipeWireBufferTransport::SyncTimeline => "sync-timeline",
             }
         );
@@ -1354,7 +1354,7 @@ fn produce_pipewire_frames(
                 discontinuity: event.dropped_frames != 0,
                 acquire_point: match transport {
                     PipeWireBufferTransport::SyncTimeline => Some(acquire_point),
-                    PipeWireBufferTransport::Waited => None,
+                    PipeWireBufferTransport::ReadyBeforePublish => None,
                 },
             };
             runtime

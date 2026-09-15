@@ -73,7 +73,7 @@ async fn publication_survives_until_the_matching_release() {
                 .handle_event(&VideoSourceActorEvent::BufferAvailable {
                     media_generation: identity.media_generation,
                     buffer_id: NonZeroU32::new(buffer).unwrap(),
-                    transport: PipeWireBufferTransport::Waited,
+                    transport: PipeWireBufferTransport::ReadyBeforePublish,
                 })
                 .unwrap(),
             OutputEvent::Available { slot } if slot == (buffer - 1) as usize

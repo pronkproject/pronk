@@ -256,7 +256,7 @@ impl TransportOutput {
                 let slot = self.slot(*buffer_id)?;
                 if slot.available
                     || slot.publication.is_some()
-                    || *transport != PipeWireBufferTransport::Waited
+                    || *transport != PipeWireBufferTransport::ReadyBeforePublish
                 {
                     return Err(invalid("renderer received invalid buffer availability"));
                 }

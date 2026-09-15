@@ -59,7 +59,7 @@ async fn owner() -> GpuOutput {
     let event = VideoSourceActorEvent::BufferAvailable {
         media_generation: identity().media_generation,
         buffer_id: id(),
-        transport: PipeWireBufferTransport::Waited,
+        transport: PipeWireBufferTransport::ReadyBeforePublish,
     };
     let OutputEvent::Wait(wait) = owner.handle_event(&event).unwrap() else {
         panic!("initial wait")

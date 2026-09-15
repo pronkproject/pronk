@@ -224,7 +224,7 @@ pub struct VideoFrame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeWireBufferTransport {
     /// The producer must submit only after readiness is established itself.
-    Waited,
+    ReadyBeforePublish,
     /// PipeWire receives ready/reuse syncobj fds and the exact timeline point.
     SyncTimeline,
 }
@@ -244,9 +244,9 @@ pub enum VideoSourceEvent {
         transport: PipeWireBufferTransport,
     },
     BufferReleased {
-        /// PipeWire no longer retains this use. In waited transport, the caller
-        /// must still establish native reader completion before overwriting GPU
-        /// storage; this event is not itself a GPU fence.
+        /// PipeWire no longer retains this use. In ready-before-publish
+        /// transport, the caller must still establish native reader completion
+        /// before overwriting GPU storage; this event is not itself a GPU fence.
         buffer_id: NonZeroU32,
         /// Sequence retained from the submitted frame, not consumer metadata.
         sequence: u64,
@@ -281,7 +281,7 @@ pub enum VideoSourceRuntimeError {
     InvalidDamage(u32),
     #[error("buffer {0} requires a sync-timeline acquire point")]
     MissingAcquirePoint(u32),
-    #[error("buffer {0} was waited but carries an acquire point")]
+    #[error("ready-before-publish buffer {0} carries an acquire point")]
     UnexpectedAcquirePoint(u32),
     #[error("buffer {buffer_id} returned release point {actual}; expected {expected}")]
     ReleasePointMismatch {

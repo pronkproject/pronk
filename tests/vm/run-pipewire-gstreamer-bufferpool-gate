@@ -239,7 +239,7 @@ done
 for required in \
 	'pipewire_producer_remote=classified-core' \
 	'pipewire_frames_produced=30' \
-	'pipewire_transport=waited' \
+	'pipewire_transport=ready-before-publish' \
 	'pipewire_caller_owned_pool=pass' \
 	'pipewire_exact_node_identity=pass' \
 	'pipewire_dma_buf_metadata=pass' \

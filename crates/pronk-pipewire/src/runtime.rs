@@ -926,7 +926,7 @@ fn add_buffer(
         runtime.descriptor.timelines.as_ref(),
         has_sync_meta,
     ) {
-        (1, _, _) => PipeWireBufferTransport::Waited,
+        (1, _, _) => PipeWireBufferTransport::ReadyBeforePublish,
         (3, Some(_), true) => PipeWireBufferTransport::SyncTimeline,
         _ => {
             return Err(VideoSourceRuntimeError::InvalidPipeWireBuffer(
@@ -1058,7 +1058,7 @@ fn process_returned_buffers(
                 )?;
                 NonZeroU64::new(unsafe { sync.as_ref().release_point })
             }
-            Some(PipeWireBufferTransport::Waited) => None,
+            Some(PipeWireBufferTransport::ReadyBeforePublish) => None,
             None => return Err(VideoSourceRuntimeError::InvalidOwnership(buffer_id.get())),
         };
         let event = match state.tracker.returned(buffer_id, actual_release)? {
@@ -1397,8 +1397,14 @@ mod tests {
             let mut spa: spa::sys::spa_buffer = unsafe { std::mem::zeroed() };
             spa.n_datas = 1;
             spa.datas = &mut data;
-            unsafe { configure_spa_data(&mut spa, &descriptor, PipeWireBufferTransport::Waited) }
-                .unwrap();
+            unsafe {
+                configure_spa_data(
+                    &mut spa,
+                    &descriptor,
+                    PipeWireBufferTransport::ReadyBeforePublish,
+                )
+            }
+            .unwrap();
             assert_eq!(chunk.offset, storage.offset());
             assert_eq!(chunk.size, 8192 - storage.offset());
             assert_eq!(data.maxsize, 8192);
@@ -1433,7 +1439,7 @@ mod tests {
                 fill_frame(
                     &mut raw,
                     &descriptor,
-                    Some(PipeWireBufferTransport::Waited),
+                    Some(PipeWireBufferTransport::ReadyBeforePublish),
                     frame,
                 )
             }

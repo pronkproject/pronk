@@ -172,9 +172,9 @@ impl Output {
                 ..
             } => {
                 let slot = self.slot(*buffer_id)?;
-                if slot.initialized || *transport != PipeWireBufferTransport::Waited {
+                if slot.initialized || *transport != PipeWireBufferTransport::ReadyBeforePublish {
                     return Err(invalid(
-                        "capture requires one waited-transport availability event",
+                        "capture requires one ready-before-publish availability event",
                     ));
                 }
                 slot.initialized = true;

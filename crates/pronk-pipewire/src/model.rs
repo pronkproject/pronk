@@ -112,7 +112,7 @@ impl BufferTracker {
                     frame.buffer_id.get(),
                 ));
             }
-            (PipeWireBufferTransport::Waited, Some(_)) => {
+            (PipeWireBufferTransport::ReadyBeforePublish, Some(_)) => {
                 return Err(VideoSourceRuntimeError::UnexpectedAcquirePoint(
                     frame.buffer_id.get(),
                 ));
@@ -177,7 +177,9 @@ mod tests {
     fn release_retains_each_submitted_sequence_including_zero() {
         let mut tracker = tracker(false);
         let id = nonzero32(7);
-        tracker.bind(id, PipeWireBufferTransport::Waited).unwrap();
+        tracker
+            .bind(id, PipeWireBufferTransport::ReadyBeforePublish)
+            .unwrap();
         assert!(matches!(
             tracker.returned(id, None).unwrap(),
             BufferReturn::Initial { .. }
@@ -275,10 +277,10 @@ mod tests {
     }
 
     #[test]
-    fn waited_transport_rejects_timeline_points() {
+    fn ready_before_publish_transport_rejects_timeline_points() {
         let mut tracker = tracker(true);
         tracker
-            .bind(nonzero32(7), PipeWireBufferTransport::Waited)
+            .bind(nonzero32(7), PipeWireBufferTransport::ReadyBeforePublish)
             .unwrap();
         tracker.returned(nonzero32(7), None).unwrap();
         assert!(matches!(
@@ -299,7 +301,7 @@ mod tests {
     fn ownership_rejects_duplicate_publish_and_out_of_bounds_damage() {
         let mut tracker = tracker(false);
         tracker
-            .bind(nonzero32(7), PipeWireBufferTransport::Waited)
+            .bind(nonzero32(7), PipeWireBufferTransport::ReadyBeforePublish)
             .unwrap();
         tracker.returned(nonzero32(7), None).unwrap();
         let mut invalid = frame(None);

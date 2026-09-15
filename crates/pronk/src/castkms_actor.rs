@@ -1531,13 +1531,13 @@ async fn handle_capture_frame(
         .ok_or_else(|| KernelDisplayError::new("publish captured frame", "zero damage width"))?;
     let damage_height = NonZeroU32::new(frame.damage_height)
         .ok_or_else(|| KernelDisplayError::new("publish captured frame", "zero damage height"))?;
-    if outstanding.transport == PipeWireBufferTransport::Waited {
+    if outstanding.transport == PipeWireBufferTransport::ReadyBeforePublish {
         timeout(CAPTURE_DRAIN_TIMEOUT, outstanding.fence.wait_ready())
             .await
             .map_err(|_| {
                 KernelDisplayError::new(
                     "wait for CastKMS capture readiness",
-                    "timed out before publishing a waited PipeWire buffer",
+                    "timed out before publishing a ready-before-publish PipeWire buffer",
                 )
             })?
             .map_err(|error| {
@@ -1549,7 +1549,7 @@ async fn handle_capture_frame(
         .remove(outstanding_index)
         .expect("capture identity and readiness were validated above");
     let acquire_point = match outstanding.transport {
-        PipeWireBufferTransport::Waited => None,
+        PipeWireBufferTransport::ReadyBeforePublish => None,
         PipeWireBufferTransport::SyncTimeline => outstanding.queue.ready_point,
     };
     let completion = client

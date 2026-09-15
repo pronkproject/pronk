@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         output.handle_event(&VideoSourceActorEvent::BufferAvailable {
             media_generation: generation(2),
             buffer_id: buffer.id,
-            transport: PipeWireBufferTransport::Waited,
+            transport: PipeWireBufferTransport::ReadyBeforePublish,
         })?;
     }
     let first = output.begin_publish(capture(&actor).await?, 0, true)?;

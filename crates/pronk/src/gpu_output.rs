@@ -164,9 +164,11 @@ impl GpuOutput {
                 ..
             } => {
                 let slot = self.index(*buffer_id)?;
-                if self.slots[slot].initialized || *transport != PipeWireBufferTransport::Waited {
+                if self.slots[slot].initialized
+                    || *transport != PipeWireBufferTransport::ReadyBeforePublish
+                {
                     return Err(invalid(
-                        "GPU output requires one waited-transport availability event",
+                        "GPU output requires one ready-before-publish availability event",
                     ));
                 }
                 self.slots[slot].initialized = true;
@@ -281,7 +283,7 @@ mod tests {
         let stale = VideoSourceActorEvent::BufferAvailable {
             media_generation: NonZeroU64::new(2).unwrap(),
             buffer_id: id,
-            transport: PipeWireBufferTransport::Waited,
+            transport: PipeWireBufferTransport::ReadyBeforePublish,
         };
         assert!(matches!(
             owner.handle_event(&stale).unwrap(),
@@ -292,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_transport_is_not_accepted_as_waited_transport() {
+    fn timeline_transport_is_not_accepted_as_ready_before_publish_transport() {
         let id = NonZeroU32::new(1).unwrap();
         let mut owner = GpuOutput::new(identity(), pool(), vec![id]).unwrap();
         let event = VideoSourceActorEvent::BufferAvailable {
