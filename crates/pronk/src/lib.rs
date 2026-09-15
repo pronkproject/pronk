@@ -1,3 +1,4 @@
+pub mod brokered_kernel_display;
 pub mod caller;
 pub mod cast_display_slot;
 pub mod castkms_actor;
