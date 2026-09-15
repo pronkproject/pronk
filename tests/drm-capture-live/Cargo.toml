@@ -44,6 +44,7 @@ path = "src/idle_revoke.rs"
 
 [dependencies]
 anyhow.workspace = true
+pronk-capture-receiver-test = { path = "../capture-receiver" }
 gstreamer.workspace = true
 gstreamer-app.workspace = true
 gstreamer-video.workspace = true
@@ -57,6 +58,7 @@ pronk-pipewire = { path = "../../crates/pronk-pipewire" }
 pronk-media = { path = "../../crates/pronk-media" }
 tokio.workspace = true
 tokio-util.workspace = true
+tracing-subscriber.workspace = true
 zbus.workspace = true
 
 [build-dependencies]

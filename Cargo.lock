@@ -1516,11 +1516,13 @@ dependencies = [
  "pronk-capture",
  "pronk-capture-broker",
  "pronk-capture-pipewire",
+ "pronk-capture-receiver-test",
  "pronk-dmabuf",
  "pronk-media",
  "pronk-pipewire",
  "tokio",
  "tokio-util",
+ "tracing-subscriber",
  "zbus",
 ]
 
