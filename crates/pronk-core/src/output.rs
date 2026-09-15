@@ -2,9 +2,9 @@
 //!
 //! Discovery uses a short-lived ordinary primary-node file only to identify
 //! the driver and enumerate connectors. It never creates a grant, attaches a
-//! monitor, or retains DRM authority. The connector-to-slot mapping comes from
-//! CastKMS's read-only output query because connector type IDs and resource
-//! array positions are not stable UAPI identities.
+//! monitor, or retains DRM authority. CastKMS creates its virtual connectors
+//! in stable output order, so the standard one-based connector type ID maps
+//! directly to the zero-based output index.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -14,10 +14,10 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use castkms_sys::{
-    drm_ioctl_castkms_get_output, drm_ioctl_mode_getconnector, drm_ioctl_mode_getencoder,
-    drm_ioctl_mode_getresources, drm_ioctl_version, DrmCastkmsGetOutput, DrmModeCardRes,
-    DrmModeGetConnector, DrmModeGetEncoder, DrmModeModeInfo, DrmVersion, DRM_MODE_CONNECTED,
-    DRM_MODE_CONNECTOR_VIRTUAL, DRM_MODE_DISCONNECTED, DRM_MODE_UNKNOWN_CONNECTION,
+    drm_ioctl_mode_getconnector, drm_ioctl_mode_getencoder, drm_ioctl_mode_getresources,
+    drm_ioctl_version, DrmModeCardRes, DrmModeGetConnector, DrmModeGetEncoder, DrmModeModeInfo,
+    DrmVersion, DRM_MODE_CONNECTED, DRM_MODE_CONNECTOR_VIRTUAL, DRM_MODE_DISCONNECTED,
+    DRM_MODE_UNKNOWN_CONNECTION,
 };
 use nix::errno::Errno;
 use nix::fcntl::OFlag;
@@ -180,7 +180,7 @@ fn probe_primary_node(
             value => return Err(CardProbeError::UnknownConnection(value)),
         };
         let crtc_id = resolve_crtc_id(&file, &encoders, &resources.crtcs)?;
-        let output_index = query_output_index(&file, connector_id)?;
+        let output_index = output_index_from_connector_type_id(connector.connector_type_id)?;
         outputs.push(CastKmsOutput {
             id: CastKmsOutputId {
                 device_path: device_path.clone(),
@@ -378,21 +378,14 @@ fn crtc_id_from_mask(mask: u32, crtc_ids: &[u32]) -> Result<u32, CardProbeError>
         .ok_or(CardProbeError::InvalidCrtcMask(mask))
 }
 
-fn query_output_index(file: &File, connector_id: u32) -> Result<u32, CardProbeError> {
-    let mut query = DrmCastkmsGetOutput {
-        connector_id,
-        ..DrmCastkmsGetOutput::default()
-    };
-    // SAFETY: `query` exactly matches the checked-in CastKMS UAPI and remains
-    // writable for the synchronous ioctl.
-    unsafe { drm_ioctl_castkms_get_output(file.as_raw_fd(), &mut query) }
-        .map_err(CardProbeError::OutputIndex)?;
-    if query.connector_id != connector_id || query.flags != 0 || query.reserved != 0 {
-        return Err(CardProbeError::InvalidOutputQuery(
-            "identity or reserved fields",
-        ));
+fn output_index_from_connector_type_id(connector_type_id: u32) -> Result<u32, CardProbeError> {
+    let output_index = connector_type_id
+        .checked_sub(1)
+        .ok_or(CardProbeError::InvalidConnectorTypeId(connector_type_id))?;
+    if output_index as usize >= MAX_CASTKMS_OUTPUTS {
+        return Err(CardProbeError::InvalidConnectorTypeId(connector_type_id));
     }
-    Ok(query.output_index)
+    Ok(output_index)
 }
 
 fn finish_output_inventory(
@@ -499,10 +492,8 @@ pub enum CardProbeError {
     InvalidCrtcMask(u32),
     #[error("connector query returned unknown connection state {0}")]
     UnknownConnection(u32),
-    #[error("query stable CastKMS output index: {0}")]
-    OutputIndex(Errno),
-    #[error("CastKMS output-index query returned invalid {0}")]
-    InvalidOutputQuery(&'static str),
+    #[error("CastKMS virtual connector has invalid type ID {0}")]
+    InvalidConnectorTypeId(u32),
 }
 
 #[cfg(test)]
