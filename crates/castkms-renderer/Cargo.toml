@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 castkms-sys = { path = "../castkms-sys" }
+drm-display-executor = { path = "../drm-display-executor" }
 nix.workspace = true
 
 [lints]

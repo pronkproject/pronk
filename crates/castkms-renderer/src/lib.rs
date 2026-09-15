@@ -2,8 +2,15 @@
 //!
 //! A renderer descriptor grants no modesetting or final-image capture access.
 //! Its operations reserve one takeover candidate and optionally copy the most
-//! recent HOST result into independent, read-only storage. Source access and
-//! activation use later protocol stages.
+//! recent HOST result into independent, read-only storage. An active renderer
+//! can claim one source job whose consuming release records how source access
+//! ended.
+
+mod source;
+
+pub use source::{
+    FormatModifier, SourceGeometry, SourceImage, SourceJob, SourcePlane, SourceReleaseError,
+};
 
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
