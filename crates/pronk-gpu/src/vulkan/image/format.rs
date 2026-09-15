@@ -9,12 +9,14 @@ use ash::vk;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackedFormat {
     Bgra8,
+    Rgba8,
 }
 
 impl PackedFormat {
     pub(in crate::vulkan) fn native(self) -> vk::Format {
         match self {
             Self::Bgra8 => vk::Format::B8G8R8A8_UNORM,
+            Self::Rgba8 => vk::Format::R8G8B8A8_UNORM,
         }
     }
 }

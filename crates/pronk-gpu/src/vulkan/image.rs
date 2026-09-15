@@ -46,7 +46,7 @@ pub struct Image {
 }
 
 impl Device {
-    /// Allocate one explicitly selected modifier; never silently choose linear.
+    /// Allocate BGRA storage with an explicitly selected modifier.
     ///
     /// The caller negotiates the modifier with its intended importer. Capability
     /// checks here qualify only this GPU's single-plane transfer usage.
@@ -56,7 +56,21 @@ impl Device {
         height: NonZeroU32,
         modifier: u64,
     ) -> io::Result<Image> {
-        let format = PackedFormat::Bgra8;
+        self.allocate_with_format(PackedFormat::Bgra8, width, height, modifier)
+    }
+
+    /// Allocate the requested packed format and modifier without substitution.
+    ///
+    /// Matching importers must accept the complete reported layout. Native
+    /// capability checks qualify this device's single-plane transfer profile,
+    /// not a renderer scene or output transport's accepted pixel formats.
+    pub fn allocate_with_format(
+        &self,
+        format: PackedFormat,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        modifier: u64,
+    ) -> io::Result<Image> {
         self.check_image(
             format,
             width.get(),

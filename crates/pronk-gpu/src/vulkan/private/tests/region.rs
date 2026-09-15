@@ -3,6 +3,7 @@ use std::io;
 use drm_display_executor::scene::geometry::{Extent, SourceRect};
 
 use super::*;
+use crate::vulkan::PackedFormat;
 
 fn extent(width: u32, height: u32) -> Extent {
     Extent::new(width, height).unwrap()
@@ -11,6 +12,16 @@ fn extent(width: u32, height: u32) -> Extent {
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
 fn cropped_private_reads_scale_and_initialize_every_destination_pixel() {
+    exercise_region_reads(PackedFormat::Bgra8);
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn cropped_rgba_reads_convert_channels_while_scaling_and_padding() {
+    exercise_region_reads(PackedFormat::Rgba8);
+}
+
+fn exercise_region_reads(format: PackedFormat) {
     let (producer, modifier) = device();
     let (worker, _) = device();
     assert_eq!(producer.identity(), worker.identity());
@@ -28,7 +39,7 @@ fn cropped_private_reads_scale_and_initialize_every_destination_pixel() {
         ([3, 4], extent(11, 7), [0, 0], output_size),
     ] {
         let seed = producer
-            .allocate(nz(7), nz(5), modifier)
+            .allocate_with_format(format, nz(7), nz(5), modifier)
             .unwrap()
             .clear_rgba_waited(inner)
             .unwrap();
@@ -40,7 +51,9 @@ fn cropped_private_reads_scale_and_initialize_every_destination_pixel() {
         let full = SourceRect::new(extent(7, 5), [0, 0], extent(7, 5)).unwrap();
         let pattern = imported
             .copy_region_into_waited(
-                producer.allocate(nz(32), nz(24), modifier).unwrap(),
+                producer
+                    .allocate_with_format(format, nz(32), nz(24), modifier)
+                    .unwrap(),
                 full,
                 [4, 3],
                 outer,
