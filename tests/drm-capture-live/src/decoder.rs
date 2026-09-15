@@ -106,7 +106,8 @@ impl Decoder {
                 for channel in 0..3 {
                     ensure!(
                         buffer[y * stride + x * 4 + channel].abs_diff(value) <= 4,
-                        "decoded content mismatch"
+                        "decoded content mismatch at ({x}, {y}) channel {channel}: got {}, expected {value}",
+                        buffer[y * stride + x * 4 + channel]
                     );
                 }
             }
