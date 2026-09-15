@@ -8,9 +8,7 @@ use pronk_gpu::vulkan::{Device, PrivateImage};
 
 /// Maximum number of independently reusable private images in one pool.
 pub const MAX_PRIVATE_BUFFERS: usize = 64;
-/// Maximum unpadded RGBA32 bytes described by one pool request.
-///
-/// Native allocation alignment can consume additional device memory.
+/// Maximum device-memory bytes allocated by one private pool.
 pub const MAX_PRIVATE_POOL_BYTES: u64 = 512 * 1024 * 1024;
 const PRIVATE_PIXEL_BYTES: u64 = 16;
 
@@ -36,10 +34,13 @@ impl PrivatePool {
         available
             .try_reserve_exact(capacity.get())
             .map_err(io::Error::other)?;
+        let mut allocated_bytes = 0;
         for _ in 0..capacity.get() {
+            let image = device.allocate_private(width, height)?;
+            allocated_bytes = account_allocation(allocated_bytes, image.allocation_size())?;
             available.push(PrivateBuffer {
                 identity: Arc::clone(&identity),
-                image: device.allocate_private(width, height)?,
+                image,
             });
         }
         Ok(Self {
@@ -77,6 +78,16 @@ impl PrivatePool {
         self.available.push(buffer);
         Ok(())
     }
+}
+
+fn account_allocation(total: u64, bytes: u64) -> io::Result<u64> {
+    let total = total
+        .checked_add(bytes)
+        .ok_or_else(|| invalid("private pool allocation size overflowed"))?;
+    if total > MAX_PRIVATE_POOL_BYTES {
+        return Err(invalid("private pool exceeds its allocation limit"));
+    }
+    Ok(total)
 }
 
 fn validate_request(
@@ -185,6 +196,20 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn private_pool_policy_rejects_excess_native_allocation() {
+        assert_eq!(
+            account_allocation(MAX_PRIVATE_POOL_BYTES, 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            account_allocation(MAX_PRIVATE_POOL_BYTES - 1, 1).unwrap(),
+            MAX_PRIVATE_POOL_BYTES
         );
     }
 }
