@@ -1,0 +1,70 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba32f) uniform image2D pixels;
+layout(push_constant) uniform Parameters {
+    uvec2 extent;
+    uint64_t coefficients[12];
+} parameters;
+
+struct SignedWide {
+    int64_t high;
+    uint64_t low;
+};
+
+SignedWide add_magnitude(SignedWide value, uint64_t high, uint64_t low, bool negative) {
+    uint64_t previous = value.low;
+    if (negative) {
+        value.low -= low;
+        uint64_t borrow = previous < low ? 1 : 0;
+        value.high -= int64_t(high + borrow);
+    } else {
+        value.low += low;
+        uint64_t carry = value.low < previous ? 1 : 0;
+        value.high += int64_t(high + carry);
+    }
+    return value;
+}
+
+SignedWide add_product(SignedWide value, uint64_t raw, uint input_value) {
+    uint64_t magnitude = raw & 0x7ffffffffffffffful;
+    uint64_t lower = magnitude & 0xfffffffful;
+    uint64_t upper = magnitude >> 32;
+    uint64_t lower_product = lower * uint64_t(input_value);
+    uint64_t upper_product = upper * uint64_t(input_value);
+    uint64_t low = lower_product + (upper_product << 32);
+    uint64_t high = (upper_product >> 32) + (low < lower_product ? 1 : 0);
+    return add_magnitude(value, high, low, (raw >> 63) != 0);
+}
+
+int rounded_channel(SignedWide value) {
+    value = add_magnitude(value, 0, 1ul << 31, false);
+    uint64_t low = (uint64_t(value.high) << 32) | (value.low >> 32);
+    int64_t high = value.high >> 32;
+    if (high > 0 || (high == 0 && low > 0x7ffffffful))
+        return 2147483647;
+    if (high < -1 || (high == -1 && low < 0xffffffff80000000ul))
+        return -2147483647 - 1;
+    return int(low);
+}
+
+void main() {
+    uvec2 point = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(point, parameters.extent)))
+        return;
+    vec4 pixel = imageLoad(pixels, ivec2(point));
+    uvec3 input_value = uvec3(floor(clamp(pixel.rgb, 0.0, 1.0) * 65535.0 + 0.5));
+    ivec3 result;
+    for (uint row = 0; row < 3; ++row) {
+        uint base = row * 4;
+        uint64_t offset = parameters.coefficients[base + 3];
+        SignedWide sum = SignedWide(0, 0);
+        sum = add_magnitude(sum, 0, offset & 0x7ffffffffffffffful, (offset >> 63) != 0);
+        for (uint channel = 0; channel < 3; ++channel)
+            sum = add_product(sum, parameters.coefficients[base + channel], input_value[channel]);
+        result[row] = rounded_channel(sum);
+    }
+    vec3 output_value = vec3(clamp(result, ivec3(0), ivec3(65535))) / 65535.0;
+    imageStore(pixels, ivec2(point), vec4(output_value, pixel.a));
+}

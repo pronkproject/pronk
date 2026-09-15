@@ -11,6 +11,7 @@ mod allocation;
 mod blend;
 mod clear;
 mod gamma;
+mod matrix;
 mod output;
 mod profile;
 mod scene;
@@ -18,6 +19,7 @@ mod source;
 
 pub use blend::{BlendedImages, Blender};
 pub use gamma::Gamma;
+pub use matrix::OutputMatrix;
 pub use output::PrivateCopy;
 pub use profile::{LayerRequirements, SceneRequirements, SourceRequirements};
 pub use scene::{ComposedScene, PrivateLayer};

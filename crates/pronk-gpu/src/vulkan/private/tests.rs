@@ -6,6 +6,7 @@ mod blend;
 mod formats;
 mod gamma;
 mod geometry;
+mod matrix;
 mod pending;
 mod profile;
 mod program;
