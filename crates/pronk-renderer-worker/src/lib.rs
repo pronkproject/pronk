@@ -31,7 +31,7 @@ pub use scene::{
     SceneFrames, SceneInputs, SceneStorageProfile,
 };
 pub use scene_job::{
-    QualifiedSceneJob, QualifySceneJobError, ReleaseSceneJobError, ReleasedSceneReads,
+    QualifiedSceneJob, QualifySceneJobError, ReadyScene, ReleaseSceneJobError, ReleasedSceneReads,
 };
 pub use scene_pool::{
     RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool, MAX_SCENE_LAYERS,

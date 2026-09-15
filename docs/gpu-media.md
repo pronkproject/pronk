@@ -684,11 +684,14 @@ sources or submitted reads.
 
 Only `QualifiedSceneJob::release_submitted` can transfer that merged completion
 to the matching kernel job. A successful release returns `ReleasedSceneReads`,
-whose blocking wait yields ordered frames under the job's content serial. The
-type boundary therefore prevents native pixels from being consumed before the
-kernel accepts their source-read completion. Submission failure is terminal
-for that scene transaction; cleanup retires any accepted native work without
-pretending that a normal aggregate release remains possible.
+whose blocking wait pairs the valid private frames with that job's native
+program as a `ReadyScene`. Its composition operation consumes both together.
+The type boundary therefore prevents native pixels from being consumed before
+the kernel accepts their source-read completion and prevents the frames from
+being composed with another job's operations or a background other than the
+protocol's opaque black. Submission failure is terminal for that scene
+transaction; cleanup retires any accepted native work without pretending that
+a normal aggregate release remains possible.
 
 The version-6 raw scene records are bound, but no production code dequeues or
 parses them into a GPU profile yet. `castkms-renderer` does own and validate the

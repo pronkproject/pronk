@@ -3,7 +3,10 @@
 use std::io;
 use std::os::fd::AsFd;
 
-use crate::{SceneComposer, SceneFrames, SceneSource, SceneStorageProfile, SubmittedSceneReads};
+use crate::{
+    ComposedFrame, SceneComposer, SceneCompositionError, SceneFrames, SceneInputs, SceneSource,
+    SceneStorageProfile, SubmittedSceneReads,
+};
 use castkms_renderer::{SceneJob, SourceReleaseError};
 
 /// A complete-scene job and the only composer qualified from its metadata.
@@ -74,6 +77,7 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
             Ok(()) => Ok(ReleasedSceneReads {
                 reads,
                 content_serial,
+                composer,
             }),
             Err(error) => {
                 let (job, cause) = error.into_parts();
@@ -173,11 +177,42 @@ impl<F: AsFd> std::error::Error for ReleaseSceneJobError<'_, '_, F> {
 pub struct ReleasedSceneReads {
     reads: SubmittedSceneReads,
     content_serial: std::num::NonZeroU64,
+    composer: SceneComposer,
 }
 
 impl ReleasedSceneReads {
-    pub fn wait(self) -> io::Result<SceneFrames> {
-        self.reads.wait(self.content_serial)
+    pub fn wait(self) -> io::Result<ReadyScene> {
+        let frames = self.reads.wait(self.content_serial)?;
+        Ok(ReadyScene {
+            composer: self.composer,
+            frames,
+        })
+    }
+}
+
+/// Private source pixels paired with the native program for their kernel job.
+#[must_use = "compose the released scene or retire its private buffers"]
+pub struct ReadyScene {
+    composer: SceneComposer,
+    frames: SceneFrames,
+}
+
+impl ReadyScene {
+    pub fn composer(&self) -> &SceneComposer {
+        &self.composer
+    }
+
+    pub fn into_parts(self) -> (SceneComposer, SceneFrames) {
+        (self.composer, self.frames)
+    }
+
+    /// Compose the released source stages into an independently ready output.
+    pub fn compose_and_wait(
+        self,
+        destination: crate::PrivateBuffer,
+    ) -> Result<ComposedFrame, SceneCompositionError> {
+        self.composer
+            .compose_and_wait(SceneInputs::new(destination, self.frames, [0; 3]))
     }
 }
 
