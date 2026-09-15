@@ -12,6 +12,7 @@ struct State {
     completed: VecDeque<Completed>,
     busy: bool,
     reject_once: bool,
+    disconnected: bool,
     closes: usize,
 }
 
@@ -41,7 +42,11 @@ impl Backend for Fake {
     }
 
     fn dequeue(&mut self) -> io::Result<Option<Completed>> {
-        Ok(self.shared.state.lock().unwrap().completed.pop_front())
+        let mut state = self.shared.state.lock().unwrap();
+        if state.disconnected {
+            return Err(io::Error::from_raw_os_error(nix::libc::EKEYREVOKED));
+        }
+        Ok(state.completed.pop_front())
     }
 
     fn close(&mut self) -> io::Result<()> {
@@ -87,6 +92,26 @@ fn fixture(count: usize) -> (Actor<File>, Arc<Shared>) {
 
 fn nz(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
+}
+
+#[tokio::test]
+async fn idle_failure_notifies_closure_before_retirement() {
+    let (actor, shared) = fixture(1);
+    {
+        let mut state = shared.state.lock().unwrap();
+        state.disconnected = true;
+        state.busy = true;
+    }
+    tokio::time::timeout(Duration::from_secs(2), actor.closed())
+        .await
+        .unwrap();
+    assert!(shared.state.lock().unwrap().queued.is_empty());
+    assert!(matches!(actor.capture().await, Err(CaptureError::Stopped)));
+    shared.state.lock().unwrap().busy = false;
+    assert_eq!(
+        actor.shutdown().await.unwrap_err().raw_os_error(),
+        Some(nix::libc::EKEYREVOKED)
+    );
 }
 
 async fn notified(notify: &Notify) {

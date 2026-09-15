@@ -204,6 +204,14 @@ impl<F: AsFd + Send + 'static> Actor<F> {
         receive.await.map_err(|_| CaptureError::Stopped)?
     }
 
+    /// Wait until the worker stops accepting commands, including idle failure.
+    ///
+    /// Closure does not establish ended kernel writes. Use `shutdown` to join
+    /// retirement and observe its result. Canceling this wait has no effect.
+    pub async fn closed(&self) {
+        self.commands.closed().await;
+    }
+
     /// Stop admission and drain the kernel stream before returning its owner.
     ///
     /// Timeout is an error, never proof of ended writes. Allocations are dropped,
