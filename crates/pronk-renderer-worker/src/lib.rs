@@ -7,6 +7,7 @@ mod reader;
 mod reads;
 mod scene;
 mod scene_pool;
+mod scene_reads;
 mod source;
 mod submission;
 
@@ -29,6 +30,10 @@ pub use scene::{
 };
 pub use scene_pool::{
     RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool, MAX_SCENE_LAYERS,
+};
+pub use scene_reads::{
+    PrepareSceneReadsError, PreparedSceneReads, RejectedSceneSource, SceneSource,
+    SubmitSceneReadsError, SubmittedSceneReads,
 };
 pub use source::{ImportError, ImportedSource, SourceAlpha};
 pub use submission::{

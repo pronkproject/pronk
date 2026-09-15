@@ -177,6 +177,16 @@ fn source_format(fourcc: u32) -> io::Result<SourceFormat> {
     Ok(SourceFormat { packed, alpha })
 }
 
+pub(crate) fn source_alpha(fourcc: u32, packed: PackedFormat) -> io::Result<SourceAlpha> {
+    let format = source_format(fourcc)?;
+    if format.packed != packed {
+        return Err(invalid(
+            "DRM format does not match the imported source layout",
+        ));
+    }
+    Ok(format.alpha)
+}
+
 fn unsupported(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, message)
 }
@@ -253,5 +263,23 @@ mod tests {
                 io::ErrorKind::Unsupported
             );
         }
+    }
+
+    #[test]
+    fn alpha_semantics_require_the_imported_packed_layout() {
+        assert_eq!(
+            source_alpha(DRM_FORMAT_XRGB8888, PackedFormat::Bgra8).unwrap(),
+            SourceAlpha::Opaque
+        );
+        assert_eq!(
+            source_alpha(DRM_FORMAT_ARGB8888, PackedFormat::Bgra8).unwrap(),
+            SourceAlpha::Channel
+        );
+        assert_eq!(
+            source_alpha(DRM_FORMAT_ARGB8888, PackedFormat::Rgba8)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

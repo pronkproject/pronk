@@ -83,6 +83,28 @@ impl SceneComposer {
         self.layers.get(index).map(|layer| layer.source)
     }
 
+    pub(crate) fn accepts_source_stage(
+        &self,
+        index: usize,
+        source: &pronk_gpu::vulkan::SourceImage,
+        destination: &PrivateBuffer,
+    ) -> bool {
+        let Some(plan) = self.layers.get(index) else {
+            return false;
+        };
+        let layout = source.layout();
+        plan.source
+            == SourceRequirements {
+                format: layout.format,
+                extent: Extent::new(layout.width.get(), layout.height.get())
+                    .expect("source image extents are nonzero"),
+                modifier: layout.modifier,
+            }
+            && source.is_owned_by(&self.device)
+            && destination.is_owned_by(&self.device)
+            && destination.matches_scene(&self.profile, SceneBufferRole::Source(index))
+    }
+
     /// Allocate independently bounded final and source storage for this profile.
     ///
     /// A final image may remain checked out while a smaller set of source

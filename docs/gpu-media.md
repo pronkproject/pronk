@@ -664,11 +664,22 @@ Composition rechecks the nominal profile and exact layer role before applying
 per-layer color, alpha-aware bottom-to-top blending and final output color.
 Structurally identical composers cannot exchange their private buffers.
 
+`PreparedSceneReads` validates the complete ordered import and private-stage
+set before submitting any GPU access. A source's DRM fourcc determines whether
+its fourth channel is padding or pixel alpha and must agree with the imported
+Vulkan layout. Submission copies each complete image into its source-sized
+stage and exposes one merged concrete sync file. After the owning kernel scene
+job accepts that completion, `SubmittedSceneReads::wait` yields ordered frames
+under the job's content serial. Submission failure is terminal for that scene
+transaction; cleanup retires any accepted native work without pretending that
+a normal aggregate release remains possible.
+
 The version-6 raw scene records are bound, but no production code dequeues or
 parses them yet. That adapter must retain the complete packet under one kernel
-job, import all layers against the requirements above, aggregate their concrete
-native completion, release the job once and only then wait for private pixels.
-The older single-source job is not a per-layer substitute for that transaction.
+job, import all layers against the requirements above, transfer the prepared
+aggregate completion, release the job once and only then wait for private
+pixels. The older single-source job is not a per-layer substitute for that
+transaction.
 
 ## Current scope
 
