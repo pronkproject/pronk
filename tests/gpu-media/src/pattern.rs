@@ -2,6 +2,7 @@
 
 use drm_display_executor::scene::color::Lut;
 use drm_display_executor::scene::geometry::{CopyRegion, Extent, SourceRect};
+use pronk_gpu::vulkan::PackedFormat;
 
 pub const FRAMES: u32 = 20;
 pub const TOLERANCE: u8 = 6;
@@ -45,6 +46,7 @@ pub fn visible(sequence: u32) -> CopyRegion {
 
 #[derive(Clone, Copy)]
 pub struct Plane {
+    pub format: PackedFormat,
     pub crop: SourceRect,
     pub placement: [i32; 2],
     pub color: [u8; 3],
@@ -61,6 +63,7 @@ impl Plane {
 /// Base plane, overlay and cursor-sized top plane, all with opaque pixels.
 pub fn scene(sequence: u32) -> [Plane; 3] {
     let base = Plane {
+        format: PackedFormat::Bgr10A2,
         crop: source_crop(),
         placement: placement(sequence),
         color: color(sequence),
@@ -72,11 +75,13 @@ pub fn scene(sequence: u32) -> [Plane; 3] {
     [
         base,
         Plane {
+            format: PackedFormat::Rgba8,
             crop: full(640, 480),
             placement: [640, 320],
             color: color((sequence + 7) % FRAMES),
         },
         Plane {
+            format: PackedFormat::Bgra8,
             crop: full(128, 128),
             placement: [608 + (sequence % 3) as i32 * 64, 288],
             color: color((sequence + 13) % FRAMES),
@@ -165,6 +170,9 @@ mod tests {
     fn scene_layers_have_distinct_colors_and_known_overlap() {
         for sequence in 0..FRAMES {
             let [base, overlay, cursor] = scene(sequence);
+            assert_eq!(base.format, PackedFormat::Bgr10A2);
+            assert_eq!(overlay.format, PackedFormat::Rgba8);
+            assert_eq!(cursor.format, PackedFormat::Bgra8);
             assert_eq!(base.visible(), visible(sequence));
             assert_eq!(overlay.crop.image(), Extent::new(640, 480).unwrap());
             assert_eq!(overlay.visible().destination(), [640, 320]);

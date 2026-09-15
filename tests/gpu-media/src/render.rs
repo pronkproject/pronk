@@ -86,6 +86,10 @@ pub fn submit_sources(
         .zip(private.inputs)
         .zip(permits)
     {
+        ensure!(
+            input.layout().format == plane.format,
+            "source format differs from generated scene"
+        );
         let (input, producer) = input.clear_waited(plane.color)?;
         // SAFETY: Matching native physical-device/driver identities, exact
         // allocator metadata and identical image profile. Clear completed

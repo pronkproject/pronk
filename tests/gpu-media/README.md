@@ -33,7 +33,11 @@ This fixture does not qualify the production classified connection policy.
 
 Three generated single-memory-plane modifier images belong to a separate
 producer Vulkan device instance: a 1920x1080 base, a 640x480 overlay and a
-128x128 cursor-sized top plane. The worker checks matching physical-device
+128x128 cursor-sized top plane. The base uses packed ten-bit BGR with two alpha
+bits, the overlay uses eight-bit RGBA and the top plane uses eight-bit BGRA.
+All fixture pixels are opaque. Exact per-format allocation checks apply to the
+selected modifier; unsupported source tuples fail without format substitution.
+The worker checks matching physical-device
 and driver identities, imports each source use with exact allocator metadata
 and its explicit producer fence, and copies into independently allocated,
 non-exportable floating-point input images. It then overwrites every original
@@ -45,7 +49,8 @@ source-side Vulkan image and memory owners are destroyed before the output
 device imports it. The output device copies the bridge into a persistent output
 image and destroys the import after completion. The private composition image
 is overwritten black before publication. Only the four output allocations are
-registered with PipeWire.
+registered with PipeWire. They remain eight-bit BGRA regardless of source
+precision or channel order; the hardware H.264 profile is not ten-bit or HDR.
 Private input and composition allocations are created before source admission
 and reused across frames; they have no export API or external reuse dependency.
 A single immutable blend program is created alongside that storage and retained

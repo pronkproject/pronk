@@ -57,7 +57,8 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             let incoming = pattern::scene(0)
                 .into_iter()
                 .map(|plane| {
-                    producer.allocate(
+                    producer.allocate_with_format(
+                        plane.format,
                         nz(plane.crop.image().width()),
                         nz(plane.crop.image().height()),
                         modifier,
