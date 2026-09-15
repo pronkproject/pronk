@@ -22,6 +22,8 @@ pub struct Description {
     pub offer: OfferId,
     pub width: NonZeroU32,
     pub height: NonZeroU32,
+    pub refresh_millihz: NonZeroU32,
+    pub mode_flags: u32,
     pub format: u32,
     pub modifier: u64,
     pub max_requests: NonZeroU32,
@@ -33,10 +35,12 @@ struct Describe {
     id: u64,
     width: u32,
     height: u32,
+    refresh_millihz: u32,
+    mode_flags: u32,
     format: u32,
     max_requests: u32,
     modifier: u64,
-    reserved: [u64; 2],
+    reserved: u64,
 }
 
 nix::ioctl_read!(describe, b'd', 0x00, Describe);
@@ -54,13 +58,15 @@ impl<F: AsFd> Client<F> {
 impl Describe {
     fn decode(self) -> io::Result<Description> {
         let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid capture description");
-        if self.reserved != [0; 2] || self.format == 0 || self.modifier == INVALID_MODIFIER {
+        if self.reserved != 0 || self.format == 0 || self.modifier == INVALID_MODIFIER {
             return Err(invalid());
         }
         Ok(Description {
             offer: OfferId(NonZeroU64::new(self.id).ok_or_else(invalid)?),
             width: NonZeroU32::new(self.width).ok_or_else(invalid)?,
             height: NonZeroU32::new(self.height).ok_or_else(invalid)?,
+            refresh_millihz: NonZeroU32::new(self.refresh_millihz).ok_or_else(invalid)?,
+            mode_flags: self.mode_flags,
             format: self.format,
             modifier: self.modifier,
             max_requests: NonZeroU32::new(self.max_requests).ok_or_else(invalid)?,
