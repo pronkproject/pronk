@@ -11,6 +11,7 @@ use ash::vk;
 ///
 /// The loader opens its own native descriptors. The selected node is an identity
 /// check, not a way to make a Vulkan driver adopt a brokered descriptor.
+#[derive(Clone)]
 pub struct Device {
     pub(super) inner: Arc<DeviceInner>,
 }
@@ -40,6 +41,14 @@ pub(super) struct DeviceInner {
 }
 
 impl Device {
+    /// Whether both owners refer to the same logical Vulkan device instance.
+    ///
+    /// Clones share an instance. Separate opens of one render node do not,
+    /// even when their physical-device and driver UUIDs are equal.
+    pub fn is_same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Physical-device and driver UUIDs for external-image compatibility checks.
     pub fn identity(&self) -> DeviceIdentity {
         let mut identity = vk::PhysicalDeviceIDProperties::default();
