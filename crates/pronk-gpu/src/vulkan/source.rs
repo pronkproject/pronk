@@ -203,6 +203,11 @@ impl SourceImage {
         self.layout
     }
 
+    /// Whether this import belongs to the supplied logical device instance.
+    pub fn is_owned_by(&self, device: &Device) -> bool {
+        Arc::ptr_eq(&self.device, &device.inner)
+    }
+
     pub(super) fn wait_for_producer(&self) -> io::Result<()> {
         let Some(producer) = &self.producer else {
             return Ok(());

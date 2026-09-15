@@ -508,7 +508,7 @@ qualify foreign-source import or the complete capture/staging pipeline.
 
 ## Imported sources and private-stage admission
 
-`Device::import_source` imports a fixed single-plane B8G8R8A8 transfer image
+`Device::import_source` imports a checked single-plane packed RGB transfer image
 using a source DMA-BUF and its separately retained producer sync file. Import
 is deliberately an unsafe Rust boundary: its caller must establish compatible
 same-physical-GPU allocation metadata, native layout/ownership release, and
