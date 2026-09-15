@@ -24,7 +24,7 @@ daemon and never connects to the network itself. You control it with the
 > [!IMPORTANT]
 > Pronk is not yet a ready-to-install desktop application. It currently
 > requires a separately built kernel driver and a source build. Session mode
-> additionally requires a compositor with the experimental CastKMS grant
+> additionally requires a compositor with the experimental CastKMS display
 > broker; optional system mode can operate without compositor integration.
 
 ## Contents
@@ -49,14 +49,15 @@ daemon and never connects to the network itself. You control it with the
 To run Pronk in its default session mode, you need:
 
 - a Linux desktop with an active graphical login session;
-- the CastKMS 0.12 kernel driver installed and loaded, with at least one
-  available virtual monitor slot;
-- GNOME Mutter with the `org.gnome.Mutter.CastKms` session-bus grant broker;
+- the Rust CastKMS driver with generic capture and monitor-control support,
+  installed and loaded with at least one available virtual monitor slot;
+- GNOME Mutter with the `org.gnome.Mutter.CastKms` display-session broker;
 - a Google Cast Device on the same network as the computer;
 - systemd user services, PipeWire, and WirePlumber 0.5.15 or newer; and
 - these GStreamer components:
   - for video: `x264enc`, `h264parse`, and `pipewiresrc`;
-  - for optional audio: `opusenc`, `audioconvert`, and `audioresample`.
+  - for optional audio on the legacy system path: `opusenc`, `audioconvert`,
+    and `audioresample`.
 
 Pronk uses systemd to start its processes, PipeWire to move captured media
 between them, and WirePlumber to restrict what each process can access.
@@ -120,9 +121,9 @@ cargo test --workspace --locked
 
 ## Optional system service
 
-The system service is useful when the compositor does not implement the
-CastKMS grant broker. After installing, create the packaged service account
-and private directories, then start the service:
+The system service is useful with the legacy C driver when the compositor does
+not implement the CastKMS display broker. After installing, create the packaged
+service account and private directories, then start the service:
 
 ```sh
 sudo systemd-sysusers /usr/lib/sysusers.d/pronk.conf
@@ -181,9 +182,10 @@ audio makes the first test simpler:
 pronkctl add-display --device chromiacast:<device-id> --no-audio
 ```
 
-Remove `--no-audio` to send audio as well as video. Pronk prints each setup
-stage and waits for the operation to finish. You can press Ctrl-C while setup
-is in progress to request cancellation.
+Session mode currently requires `--no-audio`. Legacy system mode can omit that
+option to send audio as well as video. Pronk prints each setup stage and waits
+for the operation to finish. You can press Ctrl-C while setup is in progress
+to request cancellation.
 
 After setup succeeds, the new monitor appears in your desktop's normal display
 settings. You can arrange it and choose a supported resolution and refresh
@@ -214,7 +216,9 @@ installed, and that PipeWire and WirePlumber were restarted after
 installation. Use `pronkctl list-displays` to check the media state.
 If session setup fails while authorizing the display, verify that Mutter owns
 `org.gnome.Mutter.CastKms` on the session bus and that the loaded CastKMS
-driver exposes capture UAPI 0.12 with the grant-control-fd capability.
+driver exposes the generic capture and monitor-control capabilities. Session
+mode currently accepts video-only requests; use the legacy system path when
+testing audio or CEC.
 
 Pronk can tell when a Device accepts a stream, but the Device does not
 confirm that the television decoded and displayed it. A successful send means
@@ -227,7 +231,7 @@ The media paths are:
 ```text
 desktop compositor
   → CastKMS virtual monitor
-  → grant-scoped video capture
+  → capability-scoped final-image capture
   → Pronk private PipeWire
   → Chromiacast backend
   → Cast Device
@@ -242,13 +246,16 @@ desktop PipeWire
 
 A display is set up as follows:
 
-1. CastKMS creates empty virtual monitor slots. At this point, the desktop does
-   not see a monitor attached to them.
+1. Rust CastKMS exposes a built-in virtual monitor so it remains useful without
+   Pronk. During session setup, Mutter acquires exclusive monitor control and
+   gives Pronk a restricted descriptor used to publish the selected Device's
+   description. Legacy system mode instead starts with detached slots.
 2. The Chromiacast backend discovers Devices on the local network.
 3. When you select a Device, session mode confirms that the request came from
-   the active local graphical session and asks Mutter for permission to use
-   one CastKMS monitor slot. System mode accepts only the `pronk` account and
-   obtains the same connector-scoped rights through its one-shot helper.
+   the active local graphical session and asks Mutter for separate monitor and
+   final-image capture capabilities for one CastKMS slot. System mode accepts
+   only the `pronk` account and obtains the legacy combined rights through its
+   one-shot helper.
 4. The backend authenticates the Device. It then finds video and audio
    formats supported by both the Device and Pronk. The backend gives Pronk
    the information needed to describe the virtual monitor. Device
@@ -261,8 +268,8 @@ A display is set up as follows:
 7. Pronk captures each completed frame. It stores the frame as an `XRGB8888`
    image in a **DMA-BUF**, a graphics buffer that local processes can share
    using an operating-system handle called a file descriptor. Pronk publishes
-   the buffer through a private PipeWire connection. When audio is enabled,
-   Pronk also captures audio sent to that virtual monitor.
+   the buffer through a private PipeWire connection. On the legacy system path,
+   Pronk also captures audio sent to that virtual monitor when audio is enabled.
 8. The backend encodes the captured media and sends it to the Device. If the
    backend or PipeWire restarts, the virtual monitor remains attached and
    streaming starts again with a new media session.
@@ -279,7 +286,7 @@ Pronk deliberately separates responsibilities:
 ## Technical FAQ
 
 The [technical FAQ](docs/faq.md) explains the rationale behind the major design
-choices, including DRM writeback and leases, the CastKMS grant lifetime,
+choices, including DRM writeback and leases, CastKMS capability lifetimes,
 retained framebuffer safety, PipeWire policy, process separation, DMA-BUF
 copies, latency, audio, and modes.
 
@@ -308,40 +315,39 @@ CEC transmit is not reported as successful merely because Pronk accepted it.
 CEC belongs to the attached cast display rather than to one video or audio
 session. It remains available while the monitor route is disabled, across
 ordinary modesets, and while media is replaced. Removing the display, losing
-the grant, or stopping Pronk invalidates the CEC physical address and ends the
-transport. A temporary grant-authority suspension aborts in-flight work; once
-authority returns, a fresh state generation admits new or kernel-retried
-transmits.
+its legacy grant, or stopping Pronk invalidates the CEC physical address and
+ends the transport. A temporary grant-authority suspension aborts in-flight
+work; once authority returns, a fresh state generation admits new or
+kernel-retried transmits.
 
-The CastKMS actor is the sole owner of the grant and CEC file descriptor. The
-translator contains no Cast, D-Bus, or network code, and a backend receives
-only a bounded normalized control operation—never the DRM or CEC descriptor.
+CEC is currently available only through the legacy system path. Its CastKMS
+actor is the sole owner of the grant and CEC file descriptor. The translator
+contains no Cast, D-Bus, or network code, and a backend receives only a bounded
+normalized control operation—never the DRM or CEC descriptor.
 
 ## Capture authorization
 
 Being able to open a graphics device such as `/dev/dri/cardN` does not give a
-process permission to capture CastKMS pixels. CastKMS requires a **grant**. The
-grant is a file descriptor—an operating-system handle—that gives its holder
-specific rights for one virtual monitor slot.
+process permission to control or capture CastKMS pixels. The Rust driver uses
+separate anonymous file capabilities for one virtual monitor and its completed
+images. The legacy C driver uses one connector-scoped grant with a rights mask.
 
 ### Session-mode authorization
 
-Pronk asks Mutter, GNOME's compositor and DRM master, to create a normal grant
-with exactly the rights required by the selected display profile. Mutter
-authorizes the unique session-bus owner of `io.github.pronkproject.Pronk1` and
-returns only the restricted **holder** descriptor. Pronk validates the
-returned metadata against the requested device, connector, stable output
-identity, rights, grant mode, and CastKMS UAPI before using it.
+Pronk asks Mutter, GNOME's compositor and DRM master, to create a display
+session for the selected DRM device, CRTC, and connector. Mutter authorizes the
+unique session-bus owner of `io.github.pronkproject.Pronk1`, then returns one
+monitor-control descriptor and one final-image capture descriptor. Pronk keeps
+monitor control in its display observer and gives only capture access to the
+media pipeline. Neither descriptor confers DRM modesetting authority.
 
-CastKMS also gives Mutter a private **control** descriptor. Closing it revokes
-the grant. The descriptor becomes permanently hung up when the final holder is
-closed, so Mutter can release the disconnected CastKMS card without a second
-userspace lifetime pipe. If Pronk leaves the bus or exits unexpectedly, Mutter
-closes the control descriptor; if Pronk simply finishes with a display, it
-drops the holder and Mutter observes the hangup. Pronk never receives the
-control descriptor or the authority to revoke grants independently of Mutter.
+Mutter retains the revocation endpoints and the broker session identity. If
+Pronk leaves the bus or exits unexpectedly, Mutter revokes both capabilities.
+An orderly removal asks Mutter to release the session after Pronk detaches the
+monitor and stops capture. The kernel arbitrates monitor ownership, so a stale
+connection-state observation cannot authorize two controllers.
 
-Session-mode grant acquisition has no privileged fallback. A missing broker,
+Session-mode acquisition has no privileged fallback. A missing broker,
 rejected request, invalid response, or cancelled operation fails display setup
 and drops any received descriptor. The user service therefore runs with
 `NoNewPrivileges=yes` and cannot start setuid programs.
@@ -422,11 +428,12 @@ a PipeWire socket by path. A Unix socket is an endpoint for communication
 between processes on the same computer. WirePlumber 0.5.15 or newer applies the
 following access rules before either process can use the private graph:
 
-- The main service may publish versioned Pronk video and one audio source made
-  directly from its grant-scoped CastKMS tap. The private media services do not
-  enumerate ALSA hardware and cannot open `/dev/snd`.
+- The main service may publish versioned Pronk video. Legacy system mode may
+  also publish one audio source made directly from its grant-scoped CastKMS
+  tap. The private media services do not enumerate ALSA hardware and cannot
+  open `/dev/snd`.
 - The backend may see only compatible Pronk-private video and kernel-tap audio
-  sources. Each source carries the exact connector, grant, session, and media
+  sources. Each source carries the exact connector, session, and media
   generation identity supplied in the backend protocol.
 - Cameras, microphones, unrelated monitors, and video carrying an unrecognized
   access-rule version remain hidden. Other desktop applications retain their
@@ -475,7 +482,7 @@ See the
 [`D-Bus interface definition`](data/dbus-1/interfaces/io.github.pronkproject.Pronk1.xml)
 for the methods, properties, signals, and data types.
 
-Developers changing grant handling or backend startup should also read:
+Developers changing display authorization or backend startup should also read:
 
 - [`tests/castkms-live/README.md`](tests/castkms-live/README.md)
 - [`tests/backend-activation/README.md`](tests/backend-activation/README.md)
@@ -490,7 +497,8 @@ meson test -C build --print-errorlogs
 
 It covers:
 
-- Mutter and one-shot helper grant requests with strict metadata validation;
+- Mutter display sessions and one-shot helper grants with strict target
+  validation;
 - systemd service and socket definitions;
 - PipeWire connection access and WirePlumber privacy rules;
 - mock and Chromiacast streaming behavior;
@@ -499,8 +507,9 @@ It covers:
 - the public command interface, tested against an isolated copy of the main
   service.
 
-Tests that exercise real grants, Mutter display changes, PipeWire capture, and
-a complete connection to a Device require a graphical virtual machine. See
+Tests that exercise real capabilities, Mutter display changes, PipeWire
+capture, and a complete connection to a Device require a graphical virtual
+machine. See
 [`tests/vm/README.md`](tests/vm/README.md) for setup and usage.
 
 ## License

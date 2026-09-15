@@ -30,8 +30,9 @@ creating additional desktop space is not unique to a DRM connector.
 Pronk chooses the DRM/KMS abstraction so the virtual monitor participates in
 the standard kernel display topology. A compositor can drive it through
 ordinary KMS support, and system-mode Pronk does not require the compositor to
-implement a native virtual-monitor or remote-display API. The tradeoff is the
-host-memory software composition described below. On GNOME, Mutter's native
+implement a native virtual-monitor or remote-display API. The current built-in
+reference renderer has the host-memory tradeoff described below; the userspace
+executor work is intended to provide a GPU path. On GNOME, Mutter's native
 virtual monitor is often the more efficient source for screen casting.
 
 ### Why does selecting a Device require an explicit setup action?
@@ -52,12 +53,12 @@ orderly failure path detaches the monitor instead of leaving a phantom output.
 
 No. CastKMS is a DRM driver, `pronkd` can be a systemd user or system service,
 and backends use a private peer-to-peer D-Bus protocol. Session mode currently
-uses the experimental capture-grant integration in the
+uses the experimental display-session integration in the
 [PronkProject Mutter fork](https://github.com/pronkproject/mutter) and a GNOME
-Settings panel. Upstream Mutter does not provide that grant API. Another
-compositor or display server can implement the same normal-grant interface, or
-Pronk can use optional system mode and its tightly scoped administrative-grant
-helper without display-server integration.
+Settings panel. Upstream Mutter does not provide that broker API. Another
+compositor or display server can broker the same separate monitor and capture
+capabilities, or Pronk can use the legacy C driver in optional system mode with
+its tightly scoped administrative-grant helper.
 
 ## DRM and kernel design
 
@@ -68,10 +69,11 @@ CRTC, planes, modes, vblank cadence, EDID, HDMI audio presentation, and CEC
 adapter. The compositor uses its normal KMS path instead of learning a second
 kind of userspace-only monitor.
 
-The driver also enforces the pixel capability below the session processes.
-Opening the DRM primary node—even from a sandbox with graphics-device
-access—does not authorize capture. Only a connector-scoped grant can attach
-the monitor or read its completed composition.
+The driver also enforces pixel authority below the session processes. Opening
+the DRM primary node—even from a sandbox with graphics-device access—does not
+authorize capture. The Rust path requires separate monitor-control and
+final-image capture capabilities. The legacy C path uses a connector-scoped
+grant with explicit rights.
 
 A compositor-native virtual-output API is another valid design. It would move
 more display, lifetime, and capture behavior into each compositor and would not
@@ -81,13 +83,13 @@ product must use it.
 
 ### Is CastKMS just VKMS with a network protocol in the kernel?
 
-CastKMS is derived from VKMS, but no network protocol is in the kernel. It adds
-durable disconnected output slots, controlled monitor attachment and EDID,
-connector-scoped capture grants, cursor capture, per-attachment HDMI audio,
-and a CEC transport. Pronk and its backend implement PipeWire, encoding, Cast,
-discovery, and network recovery in userspace. The Chromiacast library also
-provides Android TV Remote APIs, but the current Pronk backend does not yet
-configure or use them.
+CastKMS is derived from VKMS, but no network protocol is in the kernel. The
+Rust driver provides an ordinary built-in virtual monitor, exclusive monitor
+control, final-image capture, and a reference renderer. The legacy C driver
+provides controlled monitor attachment, connector-scoped grants, cursor
+capture, per-attachment HDMI audio, and a CEC transport. Pronk and its backend
+implement PipeWire, encoding, Cast, discovery, and network recovery in
+userspace.
 
 The VKMS checksum, configfs, writeback, and fbdev facilities remain optional
 test features and are disabled on the default product device.
@@ -116,24 +118,23 @@ composition. CastKMS capture safety is device-global because every visible
 plane must belong to the current content owner. A lease master cannot create a
 grant whose safety the driver cannot represent.
 
-### Why introduce a driver-private capture UAPI?
+### Why introduce a final-image capture capability?
 
 No existing DRM interface combines these requirements:
 
 - a never-master capability for one connector;
-- independently selectable attachment, EDID, pixels, cursor, and CEC rights;
 - durable authorization across ordinary modesets;
 - mode-generation-scoped streams and registered buffers;
 - synchronous revocation in both lifetime directions; and
 - protection against pixels retained from a previous DRM master.
 
-The current UAPI is explicitly versioned `0.x` so it can change after review.
-The kernel-native capture and authority cores do not depend on DRM file
-descriptors or ioctl IDs; the UAPI is an adapter over those cores. Trusted code
-linked into the driver can use the same rules directly without fabricating a
-UAPI client.
+The Rust path puts final-image capture behind a generic anonymous DRM
+capability rather than another primary-node file. Monitor control and optional
+facilities remain separate authorities. The kernel-native capture and
+authority cores do not depend on file descriptors or ioctl IDs; file
+operations are adapters over those cores.
 
-### Why are there holder and grantor file descriptors?
+### Why does the legacy grant have holder and grantor file descriptors?
 
 The holder descriptor is the capability used by Pronk. The compositor retains
 the grantor descriptor. Closing the final grantor reference synchronously
@@ -147,7 +148,7 @@ ends of a capability, not two copies of the same authority: the grantor cannot
 capture, and the holder cannot independently preserve authority after the
 grantor revokes it.
 
-### Why diverge from the single-descriptor lifetime used by DRM leases?
+### Why does the legacy grant diverge from DRM lease lifetime?
 
 A lease primarily delegates resource ownership in one direction. A CastKMS
 grant has two independent owners with useful terminal information: the
@@ -182,15 +183,16 @@ guessed safe. A no-op commit cannot claim old content.
 
 ### What happens across a modeset?
 
-The grant and monitor attachment survive. A capture stream does not, because
-its CRTC, dimensions, timing, and buffers describe one mode generation.
+The display capability and monitor attachment survive. A capture stream does
+not, because its CRTC, dimensions, timing, and buffers describe one mode
+generation.
 CastKMS completes queued work with a stale-generation result, and Pronk creates
 a replacement stream and buffer set on the same holder descriptor.
 
 That separation is intentional:
 
 ```text
-grant       durable authorization
+capability  durable authorization
 attachment  durable connector state
 stream      one CRTC and mode generation
 buffers     one stream generation and dimensions
@@ -198,20 +200,22 @@ buffers     one stream generation and dimensions
 
 ### Does CastKMS remove connectors when a Device disconnects?
 
-No. The module creates a bounded number of persistent connector objects. An
-unused slot is disconnected; attachment changes its connection state and
-emits ordinary hotplug notification. Revoking the attachment owner disconnects
-the monitor and clears its EDID, but does not remove the DRM connector object.
+No. The module creates a bounded number of persistent connector objects. The
+Rust driver presents an unmanaged built-in monitor until a broker acquires its
+monitor control. During that controlled interval the slot is disconnected or
+attached according to its published description; releasing control restores
+the built-in monitor. Legacy C slots start disconnected. Neither path removes
+the DRM connector object during these transitions.
 
 That matches physical hotplug more closely than dynamically destroying KMS
 objects and avoids requiring the compositor to tolerate connector-object
 disappearance.
 
-### What are normal, delegated, and administrative grants?
+### What are the legacy grant modes?
 
 - A **normal** grant is created by the current top-level DRM owner master and
-  is bound to that exact master. Pronk's experimental Mutter fork uses this
-  form for session mode.
+  is bound to that exact master. It remains available to legacy integrations;
+  Rust session mode uses the display-session capabilities instead.
 - A **delegated** grant is created by host root while root is not the current
   master, is bound to the current top-level owner master, and can outlive the
   short-lived helper that created it. It exists for integrations that need
@@ -227,13 +231,13 @@ receive administrative behavior when it requested an ordinary grant.
 ### Does Pronk require a privileged helper?
 
 Session mode does not. The display server already owns DRM master, and the
-experimental PronkProject Mutter fork can create a normal grant on behalf of
-Pronk. Pronk receives only the holder descriptor and runs as a sandboxed user
-service. Failure to reach or pass the compositor's authorization fails setup;
-there is no administrative fallback.
+experimental PronkProject Mutter fork creates restricted monitor and capture
+capabilities on behalf of Pronk. Pronk receives only the holder descriptors
+and runs as a sandboxed user service. Failure to reach or pass the compositor's
+authorization fails setup; there is no administrative fallback.
 
 System mode deliberately uses a privileged helper because it cannot assume the
-active display server implements Pronk's grant interface. The long-running
+active display server implements Pronk's display-session interface. The long-running
 daemon, backends, PipeWire, and WirePlumber all run as the dedicated non-root
 `pronk` user. `pronkd` invokes the installed helper through
 `pkexec --disable-internal-agent --keep-cwd` from the unit's fixed `/` working
@@ -415,12 +419,13 @@ compositor-native rendering and capture on GNOME versus a kernel display
 device that works with ordinary KMS support. The latter also imposes a
 different memory path.
 
-CastKMS is a virtual, kernel-side KMS device rather than a physical GPU.
-Its software composition must produce a completed frame in host memory; the
-frame cannot remain solely inside a physical GPU's private render pipeline.
-Sharing the resulting DMA-BUF through PipeWire avoids another BGRx staging
-copy, but does not remove the software composition or the current CPU color
-conversion and encoding described above.
+CastKMS is a virtual, kernel-side KMS device rather than a physical GPU. Its
+current reference renderer produces a completed frame in host memory. Sharing
+the resulting DMA-BUF through PipeWire avoids another BGRx staging copy, but
+does not remove the current CPU composition, color conversion, or encoding.
+The separate userspace executor interface is intended to let a GPU read the
+compositor's source buffers and produce the final image without making that
+host-memory path mandatory.
 
 GNOME Network Displays can instead receive GPU-backed DMA-BUFs directly
 from Mutter. With compatible formats, modifiers, GStreamer elements, and
@@ -573,30 +578,33 @@ remote UI did not offer that control.
 
 ## Authorization and other questions
 
-### How does session mode decide which process receives a grant?
+### How does session mode decide which process receives capabilities?
 
-Upstream Mutter does not implement Pronk's capture-grant API. Session mode
+Upstream Mutter does not implement Pronk's display-session API. Session mode
 currently uses the experimental
 [PronkProject Mutter fork](https://github.com/pronkproject/mutter), which owns
-the CastKMS card as DRM master and brokers normal grants on the session bus.
+the CastKMS card as DRM master and brokers separate monitor-control and
+final-image capture capabilities on the session bus.
 The fork reuses Mutter's D-Bus access checker: it follows the installed
 `io.github.pronkproject.Pronk1` well-known name and permits method calls from
 that name's current unique owner. Each invocation carries that unique sender
 name; the fork does not add a separate Unix-credential policy for the method.
 Explicit unsafe debug mode bypasses the access checker. Pronk independently
-validates every returned grant property before use.
+validates the returned capabilities before use.
 
-The D-Bus decision controls which peer receives the descriptor. Possession of
-the descriptor is the kernel authorization for subsequent connector and
-capture operations. If Pronk leaves the bus, the fork closes the grantor and
-the kernel revokes the holder.
+The D-Bus decision controls which peer receives the descriptors. Possession of
+each descriptor is the kernel authorization for its monitor or capture
+operations. If Pronk leaves the bus, the fork closes both revocation owners and
+the kernel revokes the holders.
 
 ### What prevents a backend from asking Pronk to capture another monitor?
 
 The backend protocol contains negotiated Device capabilities and PipeWire
 targets, not DRM paths, connector IDs chosen by the backend, or capture file
-descriptors. Pronk chooses a free CastKMS slot, validates the compositor grant
-against that exact slot and rights profile, and owns the capture actor itself.
+descriptors. Pronk chooses an eligible CastKMS slot. In session mode, Mutter
+and the kernel arbitrate exclusive monitor ownership for that exact connector
+and return a separately restricted capture capability. Pronk owns the capture
+pipeline itself.
 
 Backend definitions are installed as root-owned, non-writable files and name a
 fixed systemd service template and runtime-relative local socket. Both sides
@@ -638,10 +646,11 @@ virtual-monitor API can provide the same desktop model through a different
 integration path, as the GNOME Network Displays comparison above explains.
 
 Existing DRM leases also have a different authority model. Pronk needs the
-compositor to retain display ownership while granting another process narrowly
-scoped access to completed frames. CastKMS grants express that relationship
-explicitly, revoke capture when either side closes its descriptor, and prevent
-pixels retained from a previous DRM master from crossing an authority boundary.
+compositor to retain display ownership while another process receives narrow
+access to monitor control and completed frames. Separate CastKMS capabilities
+express those relationships, provide revocation from the compositor side, and
+prevent pixels retained from a previous DRM master from crossing an authority
+boundary.
 
 The PipeWire boundary is likewise deliberate. It keeps network credentials and
 protocol code outside the display service, gives media backends a conventional
@@ -657,7 +666,7 @@ handling still detaches a display when the cast can no longer be sustained.
 This separation also makes the synchronization, DMA-BUF, audio, CEC, modeset,
 and teardown paths independently testable.
 
-For the detailed kernel contract, see the
-[CastKMS capture-grant documentation](https://github.com/pronkproject/castkms/blob/main/docs/capture-grants.md).
+For the detailed Rust driver contract, see the
+[CastKMS documentation](https://github.com/pronkproject/castkms/blob/rust/Documentation/gpu/castkms.rst).
 For the media protocol boundary, see the
 [Chromiacast project](https://github.com/pronkproject/chromiacast).

@@ -94,21 +94,20 @@ retained. Three consecutive runs passed alongside all 438 driver cases, followed
 by successful module unload. No test qualifies unrestricted exporter latency or
 revocation of previously exported backing allocations.
 
-## Application integration still required
+## Application integration
 
-The production `CastKmsKernelActor` still uses the old combined grant for display
-attachment, EDID, CEC, audio, events and capture. The new capture file cannot
-replace that object: display management and optional facilities require separate
-capabilities and adapters. Preserve `KernelDisplayPort`, `CapturePipelinePort`
-and the session state machine while moving their operations to the appropriate
-owners. The existing broker and inherited-grant metadata also describe the old
-combined capability and need migration before the application uses this client.
+Session mode obtains separate monitor-control and final-image capture
+capabilities from Mutter's display-session broker. The production display
+observer retains the broker session and monitor capability, while the media
+pipeline receives only capture access. Legacy system mode keeps the combined
+CastKMS grant because its audio and CEC facilities do not yet have corresponding
+generic capabilities.
 
-The live result is not a running casting session, a PipeWire qualification or a
-GPU-to-GPU path. The built-in renderer produces private host images and copies
-them to registered destinations. Userspace renderer activation, GPU-compatible
-media transport and hardware encoding remain separate integration work. The
-capture queue does not encode Chromecast's display cadence or transport window.
+The production session path uses the built-in reference renderer, which produces
+private host images and copies them to registered destinations. Userspace
+renderer activation, GPU-compatible media transport and hardware encoding remain
+separate integration work. The capture queue does not encode Chromecast's
+display cadence or transport window.
 
 If upstream chooses V4L2 for buffer transport, it would replace these transport
 operations rather than introduce a second production path. Keeping the client
