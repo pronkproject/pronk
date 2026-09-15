@@ -18,6 +18,10 @@ path = "src/handoff.rs"
 name = "pronk-capture-pipewire-live-test"
 path = "src/pipewire.rs"
 
+[[bin]]
+name = "pronk-capture-encoded-live-test"
+path = "src/encoded.rs"
+
 [dependencies]
 anyhow.workspace = true
 gstreamer.workspace = true
@@ -29,6 +33,7 @@ pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
 pronk-capture = { path = "../../crates/pronk-capture" }
 pronk-capture-pipewire = { path = "../../crates/pronk-capture-pipewire" }
 pronk-pipewire = { path = "../../crates/pronk-pipewire" }
+pronk-media = { path = "../../crates/pronk-media" }
 tokio.workspace = true
 
 [build-dependencies]
