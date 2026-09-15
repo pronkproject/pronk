@@ -200,6 +200,7 @@ impl OutputPool {
         let PrivateFrame {
             buffer,
             content_serial,
+            alpha: _,
         } = private;
         self.access.publish(permit).map(|publication| {
             (
@@ -312,6 +313,7 @@ impl OutputDestination {
                     image: source,
                 },
             content_serial,
+            alpha,
         } = source;
         let PrivateCopy {
             source,
@@ -326,6 +328,7 @@ impl OutputDestination {
                     image: source,
                 },
                 content_serial,
+                alpha,
             },
             destination,
             permit,

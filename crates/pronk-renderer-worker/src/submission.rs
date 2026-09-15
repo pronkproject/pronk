@@ -7,7 +7,7 @@ use std::os::fd::AsFd;
 use castkms_renderer::{SourceGeometry, SourceJob};
 use pronk_gpu::vulkan::{PendingPrivateRead, SourceImage};
 
-use crate::{ImportedSource, PrivateBuffer, PrivateFrame};
+use crate::{ImportedSource, PrivateBuffer, PrivateFrame, SourceAlpha};
 
 /// A source region paired with independently available private output storage.
 ///
@@ -25,6 +25,7 @@ pub struct PreparedSource<'job, 'renderer, F: AsFd> {
     image: SourceImage,
     destination: PrivateBuffer,
     geometry: SourceGeometry,
+    alpha: SourceAlpha,
 }
 
 impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
@@ -44,12 +45,14 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
             job,
             image,
             geometry,
+            alpha,
         } = source;
         Ok(Self {
             job,
             image,
             destination,
             geometry,
+            alpha,
         })
     }
 
@@ -62,6 +65,7 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
             image,
             destination,
             geometry,
+            alpha,
         } = self;
         match job.release_without_access() {
             Ok(()) => {
@@ -76,6 +80,7 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
                         image,
                         destination,
                         geometry,
+                        alpha,
                     }),
                     error,
                 })
@@ -99,6 +104,7 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
             image,
             destination,
             geometry,
+            alpha,
         } = self;
         let PrivateBuffer {
             identity,
@@ -114,6 +120,7 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
             Ok(pending) => Ok(SubmittedSource {
                 job,
                 identity,
+                alpha,
                 pending,
             }),
             Err(error) => Err(SourceSubmissionError {
@@ -172,6 +179,7 @@ impl<J> SourceSubmissionError<J> {
 pub struct SubmittedSource<'job, 'renderer, F: AsFd> {
     job: SourceJob<'job, 'renderer, F>,
     identity: std::sync::Arc<()>,
+    alpha: SourceAlpha,
     pending: PendingPrivateRead,
 }
 
@@ -183,12 +191,14 @@ impl<'job, 'renderer, F: AsFd> SubmittedSource<'job, 'renderer, F> {
         let Self {
             job,
             identity,
+            alpha,
             pending,
         } = self;
         let content_serial = job.content_serial();
         match job.release_submitted(pending.completion().map(AsFd::as_fd)) {
             Ok(()) => Ok(ReleasedSource {
                 identity,
+                alpha,
                 content_serial,
                 pending,
             }),
@@ -198,6 +208,7 @@ impl<'job, 'renderer, F: AsFd> SubmittedSource<'job, 'renderer, F> {
                     source: Box::new(Self {
                         job,
                         identity,
+                        alpha,
                         pending,
                     }),
                     error,
@@ -232,6 +243,7 @@ impl<S> SourceReleaseError<S> {
 #[must_use = "retire native work before using or discarding its private pixels"]
 pub struct ReleasedSource {
     identity: std::sync::Arc<()>,
+    alpha: SourceAlpha,
     content_serial: NonZeroU64,
     pending: PendingPrivateRead,
 }
@@ -241,12 +253,14 @@ impl ReleasedSource {
     pub fn wait(self) -> io::Result<PrivateFrame> {
         let Self {
             identity,
+            alpha,
             content_serial,
             pending,
         } = self;
         pending.wait().map(|image| PrivateFrame {
             buffer: PrivateBuffer { identity, image },
             content_serial: Some(content_serial),
+            alpha,
         })
     }
 }

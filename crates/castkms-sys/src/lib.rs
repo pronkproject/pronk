@@ -113,8 +113,12 @@ pub const CAPTURE_QUEUE_EXPLICIT_SYNC: u32 = 1 << 1;
 
 pub const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 pub const DRM_FORMAT_XBGR8888: u32 = u32::from_le_bytes(*b"XB24");
+pub const DRM_FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
+pub const DRM_FORMAT_ABGR8888: u32 = u32::from_le_bytes(*b"AB24");
 pub const DRM_FORMAT_XRGB2101010: u32 = u32::from_le_bytes(*b"XR30");
 pub const DRM_FORMAT_XBGR2101010: u32 = u32::from_le_bytes(*b"XB30");
+pub const DRM_FORMAT_ARGB2101010: u32 = u32::from_le_bytes(*b"AR30");
+pub const DRM_FORMAT_ABGR2101010: u32 = u32::from_le_bytes(*b"AB30");
 pub const DRM_FORMAT_RGB565: u32 = u32::from_le_bytes(*b"RG16");
 pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 pub const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;

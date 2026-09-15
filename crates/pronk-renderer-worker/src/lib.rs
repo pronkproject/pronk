@@ -21,7 +21,7 @@ pub use reader::{
     SourceReaderStartError,
 };
 pub use reads::{ReadCollectionError, SubmittedReads};
-pub use source::{ImportError, ImportedSource};
+pub use source::{ImportError, ImportedSource, SourceAlpha};
 pub use submission::{
     PreparedSource, ReleasedSource, SourcePreparationError, SourceReleaseError,
     SourceSubmissionError, SubmittedSource,

@@ -5,6 +5,7 @@ use std::os::fd::{AsFd, AsRawFd};
 
 use castkms_renderer::{FormatModifier, SourceGeometry, SourceJob, SourceReleaseError};
 use castkms_sys::{
+    DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
     DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010,
     DRM_FORMAT_XRGB8888,
 };
@@ -17,6 +18,16 @@ pub struct ImportedSource<'job, 'renderer, F: AsFd> {
     pub(super) job: SourceJob<'job, 'renderer, F>,
     pub(super) image: SourceImage,
     pub(super) geometry: SourceGeometry,
+    pub(super) alpha: SourceAlpha,
+}
+
+/// Whether the imported fourth channel contains alpha or ignored padding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceAlpha {
+    /// The fourth component is padding, or the format has no alpha component.
+    Opaque,
+    /// The native fourth component contains normalized pixel alpha.
+    Channel,
 }
 
 impl<'job, 'renderer, F: AsFd> ImportedSource<'job, 'renderer, F> {
@@ -26,10 +37,11 @@ impl<'job, 'renderer, F: AsFd> ImportedSource<'job, 'renderer, F> {
         job: SourceJob<'job, 'renderer, F>,
     ) -> Result<Self, ImportError<SourceJob<'job, 'renderer, F>>> {
         match import(device, &job) {
-            Ok(image) => Ok(Self {
+            Ok((image, alpha)) => Ok(Self {
                 geometry: job.geometry(),
                 job,
                 image,
+                alpha,
             }),
             Err(error) => Err(ImportError {
                 job: Box::new(job),
@@ -40,6 +52,10 @@ impl<'job, 'renderer, F: AsFd> ImportedSource<'job, 'renderer, F> {
 
     pub fn geometry(&self) -> SourceGeometry {
         self.geometry
+    }
+
+    pub fn alpha(&self) -> SourceAlpha {
+        self.alpha
     }
 
     /// Destroy the unused import before promising that no pixels were accessed.
@@ -73,7 +89,10 @@ impl<J> ImportError<J> {
     }
 }
 
-fn import<F: AsFd>(device: &Device, job: &SourceJob<'_, '_, F>) -> io::Result<SourceImage> {
+fn import<F: AsFd>(
+    device: &Device,
+    job: &SourceJob<'_, '_, F>,
+) -> io::Result<(SourceImage, SourceAlpha)> {
     let source = job.image();
     let format = source_format(source.format())?;
     let modifier = match source.modifier() {
@@ -99,7 +118,7 @@ fn import<F: AsFd>(device: &Device, job: &SourceJob<'_, '_, F>) -> io::Result<So
         .filter(|size| *size > 0)
         .ok_or_else(|| invalid("renderer source has no addressable DMA-BUF storage"))?;
     let layout = ImageLayout {
-        format,
+        format: format.packed,
         width: source.extent().width().try_into().map_err(invalid)?,
         height: source.extent().height().try_into().map_err(invalid)?,
         modifier,
@@ -115,7 +134,7 @@ fn import<F: AsFd>(device: &Device, job: &SourceJob<'_, '_, F>) -> io::Result<So
     // The kernel-issued job retains source-read authority and reports the
     // framebuffer's actual layout. Vulkan validates device compatibility, and
     // the captured producer record remains owned by the imported image.
-    match producer {
+    let image = match producer {
         Some(producer) => {
             // SAFETY: The retained job, checked layout and captured producer
             // record establish the external-source contract for this import.
@@ -126,24 +145,36 @@ fn import<F: AsFd>(device: &Device, job: &SourceJob<'_, '_, F>) -> io::Result<So
             // validated source job means its captured producer work completed.
             unsafe { device.import_ready_source(fd, layout) }
         }
-    }
+    }?;
+    Ok((image, format.alpha))
 }
 
 fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
-fn source_format(fourcc: u32) -> io::Result<PackedFormat> {
-    match fourcc {
-        DRM_FORMAT_XRGB8888 => Ok(PackedFormat::Bgra8),
-        DRM_FORMAT_XBGR8888 => Ok(PackedFormat::Rgba8),
-        DRM_FORMAT_XRGB2101010 => Ok(PackedFormat::Bgr10A2),
-        DRM_FORMAT_XBGR2101010 => Ok(PackedFormat::Rgb10A2),
-        DRM_FORMAT_RGB565 => Ok(PackedFormat::Rgb565),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceFormat {
+    packed: PackedFormat,
+    alpha: SourceAlpha,
+}
+
+fn source_format(fourcc: u32) -> io::Result<SourceFormat> {
+    let (packed, alpha) = match fourcc {
+        DRM_FORMAT_XRGB8888 => (PackedFormat::Bgra8, SourceAlpha::Opaque),
+        DRM_FORMAT_ARGB8888 => (PackedFormat::Bgra8, SourceAlpha::Channel),
+        DRM_FORMAT_XBGR8888 => (PackedFormat::Rgba8, SourceAlpha::Opaque),
+        DRM_FORMAT_ABGR8888 => (PackedFormat::Rgba8, SourceAlpha::Channel),
+        DRM_FORMAT_XRGB2101010 => (PackedFormat::Bgr10A2, SourceAlpha::Opaque),
+        DRM_FORMAT_ARGB2101010 => (PackedFormat::Bgr10A2, SourceAlpha::Channel),
+        DRM_FORMAT_XBGR2101010 => (PackedFormat::Rgb10A2, SourceAlpha::Opaque),
+        DRM_FORMAT_ABGR2101010 => (PackedFormat::Rgb10A2, SourceAlpha::Channel),
+        DRM_FORMAT_RGB565 => (PackedFormat::Rgb565, SourceAlpha::Opaque),
         _ => Err(unsupported(
-            "renderer source is not a supported opaque packed RGB format",
-        )),
-    }
+            "renderer source is not a supported packed RGB format",
+        ))?,
+    };
+    Ok(SourceFormat { packed, alpha })
 }
 
 fn unsupported(message: &'static str) -> io::Error {
@@ -155,36 +186,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opaque_source_formats_keep_their_native_channel_order() {
-        assert_eq!(
-            source_format(DRM_FORMAT_XRGB8888).unwrap(),
-            PackedFormat::Bgra8
-        );
-        assert_eq!(
-            source_format(DRM_FORMAT_XBGR8888).unwrap(),
-            PackedFormat::Rgba8
-        );
-        assert_eq!(
-            source_format(DRM_FORMAT_XRGB2101010).unwrap(),
-            PackedFormat::Bgr10A2
-        );
-        assert_eq!(
-            source_format(DRM_FORMAT_XBGR2101010).unwrap(),
-            PackedFormat::Rgb10A2
-        );
-        assert_eq!(
-            source_format(DRM_FORMAT_RGB565).unwrap(),
-            PackedFormat::Rgb565
-        );
+    fn source_formats_keep_channel_order_and_alpha_meaning() {
+        for (fourcc, packed, alpha) in [
+            (
+                DRM_FORMAT_XRGB8888,
+                PackedFormat::Bgra8,
+                SourceAlpha::Opaque,
+            ),
+            (
+                DRM_FORMAT_ARGB8888,
+                PackedFormat::Bgra8,
+                SourceAlpha::Channel,
+            ),
+            (
+                DRM_FORMAT_XBGR8888,
+                PackedFormat::Rgba8,
+                SourceAlpha::Opaque,
+            ),
+            (
+                DRM_FORMAT_ABGR8888,
+                PackedFormat::Rgba8,
+                SourceAlpha::Channel,
+            ),
+            (
+                DRM_FORMAT_XRGB2101010,
+                PackedFormat::Bgr10A2,
+                SourceAlpha::Opaque,
+            ),
+            (
+                DRM_FORMAT_ARGB2101010,
+                PackedFormat::Bgr10A2,
+                SourceAlpha::Channel,
+            ),
+            (
+                DRM_FORMAT_XBGR2101010,
+                PackedFormat::Rgb10A2,
+                SourceAlpha::Opaque,
+            ),
+            (
+                DRM_FORMAT_ABGR2101010,
+                PackedFormat::Rgb10A2,
+                SourceAlpha::Channel,
+            ),
+            (DRM_FORMAT_RGB565, PackedFormat::Rgb565, SourceAlpha::Opaque),
+        ] {
+            let format = source_format(fourcc).unwrap();
+            assert_eq!(format.packed, packed);
+            assert_eq!(format.alpha, alpha);
+        }
     }
 
     #[test]
     fn source_formats_do_not_infer_alpha_yuv_or_endian_support() {
         for fourcc in [
-            u32::from_le_bytes(*b"AR24"),
-            u32::from_le_bytes(*b"AB24"),
-            u32::from_le_bytes(*b"AR30"),
-            u32::from_le_bytes(*b"AB30"),
             u32::from_le_bytes(*b"NV12"),
             u32::from_le_bytes(*b"BG16"),
             DRM_FORMAT_XRGB8888 | (1 << 31),

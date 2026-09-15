@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use pronk_gpu::vulkan::{Device, PrivateImage};
 
+use crate::SourceAlpha;
+
 /// Maximum number of independently reusable private images in one pool.
 pub const MAX_PRIVATE_BUFFERS: usize = 64;
 /// Maximum device-memory bytes allocated by one private pool.
@@ -144,6 +146,7 @@ impl PrivateBuffer {
         image.clear_waited(rgb).map(|image| PrivateFrame {
             buffer: Self { identity, image },
             content_serial: None,
+            alpha: SourceAlpha::Opaque,
         })
     }
 }
@@ -153,6 +156,7 @@ impl PrivateBuffer {
 pub struct PrivateFrame {
     pub(super) buffer: PrivateBuffer,
     pub(super) content_serial: Option<NonZeroU64>,
+    pub(super) alpha: SourceAlpha,
 }
 
 impl PrivateFrame {
@@ -162,6 +166,10 @@ impl PrivateFrame {
 
     pub fn content_serial(&self) -> Option<NonZeroU64> {
         self.content_serial
+    }
+
+    pub fn source_alpha(&self) -> SourceAlpha {
+        self.alpha
     }
 }
 
