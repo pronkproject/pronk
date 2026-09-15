@@ -92,3 +92,53 @@ pub fn detach_monitor(fd: BorrowedFd<'_>) -> io::Result<()> {
     unsafe { detach(fd.as_raw_fd(), &request) }?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::{offset_of, size_of};
+    use std::os::fd::AsFd;
+
+    #[test]
+    fn requests_match_the_kernel_layout() {
+        assert_eq!(size_of::<Query>(), 16);
+        assert_eq!(size_of::<Attach>(), 16);
+        assert_eq!(offset_of!(Attach, edid_ptr), 8);
+        assert_eq!(size_of::<Detach>(), 8);
+        assert_eq!(nix::request_code_read!(b'd', 0x41, 16), 0x8010_6441);
+        assert_eq!(nix::request_code_write!(b'd', 0x42, 16), 0x4010_6442);
+        assert_eq!(nix::request_code_write!(b'd', 0x43, 8), 0x4008_6443);
+    }
+
+    #[test]
+    fn ordinary_files_reject_monitor_operations() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(
+            query_capabilities(file.as_fd()).unwrap_err().raw_os_error(),
+            Some(nix::libc::ENOTTY)
+        );
+        assert_eq!(
+            attach_monitor(file.as_fd(), None)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(nix::libc::ENOTTY)
+        );
+        assert_eq!(
+            detach_monitor(file.as_fd()).unwrap_err().raw_os_error(),
+            Some(nix::libc::ENOTTY)
+        );
+    }
+
+    #[test]
+    fn partial_edids_are_rejected_before_the_ioctl() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        for edid in [vec![0; 127], vec![0; 129]] {
+            assert_eq!(
+                attach_monitor(file.as_fd(), Some(&edid))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
+}
