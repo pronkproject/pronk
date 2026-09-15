@@ -14,8 +14,15 @@ path = "src/actor.rs"
 name = "pronk-capture-handoff-live-test"
 path = "src/handoff.rs"
 
+[[bin]]
+name = "pronk-capture-pipewire-live-test"
+path = "src/pipewire.rs"
+
 [dependencies]
 anyhow.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-video.workspace = true
 drm-capture = { path = "../../crates/drm-capture" }
 nix.workspace = true
 pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
