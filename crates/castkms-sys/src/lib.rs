@@ -122,6 +122,9 @@ pub const DMA_BUF_SYNC_WRITE: u64 = 2;
 pub const DMA_BUF_SYNC_START: u64 = 0;
 pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
+pub const RENDERER_VERSION: u32 = 2;
+pub const EXECUTION_HOST_V1: u32 = 1;
+
 /// Native-pointer layout used by the standard DRM `VERSION` ioctl.
 ///
 /// Unlike driver-private DRM UAPIs, this legacy structure intentionally uses
@@ -332,6 +335,70 @@ pub struct DrmSyncobjEventfd {
     pub point: u64,
     pub fd: i32,
     pub pad: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererQuery {
+    pub version: u32,
+    pub flags: u32,
+    pub profile: u32,
+    pub reserved: u32,
+    pub generation: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererTakeover {
+    pub candidate_id: u64,
+    pub execution_generation: u64,
+    pub profile: u32,
+    pub width: u32,
+    pub height: u32,
+    pub refresh_millihz: u32,
+    pub mode_flags: u32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererBeginTakeover {
+    pub expected_generation: u64,
+    pub result: u64,
+    pub flags: u32,
+    pub reserved: [u32; 3],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererAbortTakeover {
+    pub candidate_id: u64,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererSnapshot {
+    pub dma_buf_fd: i32,
+    pub format: u32,
+    pub modifier: u64,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub offset: u32,
+    pub content_serial: u64,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererGetSnapshot {
+    pub candidate_id: u64,
+    pub result: u64,
+    pub flags: u32,
+    pub reserved: [u32; 3],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -694,6 +761,31 @@ nix::ioctl_readwrite!(
 );
 nix::ioctl_write_ptr!(dma_buf_ioctl_sync, b'b', 0x00, DmaBufSync);
 
+nix::ioctl_read!(
+    drm_ioctl_castkms_renderer_query,
+    b'd',
+    0x44,
+    DrmCastkmsRendererQuery
+);
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_begin_takeover,
+    b'd',
+    0x45,
+    DrmCastkmsRendererBeginTakeover
+);
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_abort_takeover,
+    b'd',
+    0x46,
+    DrmCastkmsRendererAbortTakeover
+);
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_get_snapshot,
+    b'd',
+    0x47,
+    DrmCastkmsRendererGetSnapshot
+);
+
 // DRM_COMMAND_BASE (0x40) + DRM_CASTKMS_CAPTURE_QUERY_CAPS (0x00).
 nix::ioctl_readwrite!(
     drm_ioctl_castkms_capture_query_caps,
@@ -862,6 +954,35 @@ mod tests {
         assert_eq!(std::mem::size_of::<DrmCastkmsGetGrant>(), 32);
         assert_eq!(std::mem::align_of::<DrmCastkmsGetGrant>(), 8);
         assert_eq!(std::mem::offset_of!(DrmCastkmsGetGrant, output_index), 20);
+    }
+
+    #[test]
+    fn renderer_operations_match_the_uapi_layouts() {
+        assert_eq!(RENDERER_VERSION, 2);
+        assert_eq!(EXECUTION_HOST_V1, 1);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererQuery>(), 24);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererQuery>(), 8);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererTakeover>(), 40);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererTakeover, execution_generation),
+            8
+        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererBeginTakeover>(), 32);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererBeginTakeover, result),
+            8
+        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererAbortTakeover>(), 16);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererSnapshot>(), 48);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererSnapshot, content_serial),
+            32
+        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererGetSnapshot>(), 32);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererGetSnapshot, result),
+            8
+        );
     }
 
     #[test]

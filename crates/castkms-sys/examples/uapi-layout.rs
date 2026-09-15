@@ -21,6 +21,21 @@ macro_rules! field {
 }
 
 fn main() {
+    layout!(DrmCastkmsRendererQuery, "drm_castkms_renderer_query");
+    layout!(DrmCastkmsRendererTakeover, "drm_castkms_renderer_takeover");
+    layout!(
+        DrmCastkmsRendererBeginTakeover,
+        "drm_castkms_renderer_begin_takeover"
+    );
+    layout!(
+        DrmCastkmsRendererAbortTakeover,
+        "drm_castkms_renderer_abort_takeover"
+    );
+    layout!(DrmCastkmsRendererSnapshot, "drm_castkms_renderer_snapshot");
+    layout!(
+        DrmCastkmsRendererGetSnapshot,
+        "drm_castkms_renderer_get_snapshot"
+    );
     layout!(DrmCastkmsCaptureFormat, "drm_castkms_capture_format");
     layout!(DrmCastkmsCaptureQueryCaps, "drm_castkms_capture_query_caps");
     layout!(DrmCastkmsCaptureStart, "drm_castkms_capture_start");
@@ -77,6 +92,26 @@ fn main() {
     layout!(DrmCastkmsCecGetState, "drm_castkms_cec_get_state");
     layout!(DrmEventCastkmsCecTx, "drm_castkms_cec_event_tx");
 
+    field!(
+        DrmCastkmsRendererTakeover,
+        execution_generation,
+        "drm_castkms_renderer_takeover.execution_generation"
+    );
+    field!(
+        DrmCastkmsRendererBeginTakeover,
+        result,
+        "drm_castkms_renderer_begin_takeover.result"
+    );
+    field!(
+        DrmCastkmsRendererSnapshot,
+        content_serial,
+        "drm_castkms_renderer_snapshot.content_serial"
+    );
+    field!(
+        DrmCastkmsRendererGetSnapshot,
+        result,
+        "drm_castkms_renderer_get_snapshot.result"
+    );
     field!(
         DrmCastkmsCaptureQueryCaps,
         formats_ptr,
