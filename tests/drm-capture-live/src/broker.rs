@@ -88,12 +88,13 @@ async fn run(target: Target) -> anyhow::Result<()> {
             "renderer and capture output geometry differs"
         );
         let startup = candidate.startup_image()?;
+        let image = startup.image();
         ensure!(
-            startup.width() == offer.width && startup.height() == offer.height,
+            image.width() == offer.width && image.height() == offer.height,
             "startup image geometry differs"
         );
         ensure!(
-            startup.pitch().get()
+            image.pitch().get()
                 >= offer
                     .width
                     .get()
@@ -102,10 +103,11 @@ async fn run(target: Target) -> anyhow::Result<()> {
             "startup image pitch is too small"
         );
         ensure!(
-            startup.content_serial().is_some(),
+            image.content_serial().is_some(),
             "captured HOST content has no identity"
         );
-        candidate.abort()?;
+        let startup_serial = image.content_serial().unwrap();
+        startup.submit_probe(None)?.abort()?;
         if let Some(old) = &held {
             ensure!(
                 actor
@@ -120,9 +122,8 @@ async fn run(target: Target) -> anyhow::Result<()> {
             frame.layout().width,
             frame.layout().height,
             frame.request().get(),
-            startup.content_serial().unwrap()
+            startup_serial
         );
-        drop(startup);
         drop(renderer);
         drop(actor.shutdown().await?);
         session.release().await?;

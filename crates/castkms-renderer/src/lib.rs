@@ -12,10 +12,11 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use castkms_sys::{
     drm_ioctl_castkms_renderer_abort_takeover, drm_ioctl_castkms_renderer_begin_takeover,
     drm_ioctl_castkms_renderer_get_snapshot, drm_ioctl_castkms_renderer_query,
-    DrmCastkmsRendererAbortTakeover, DrmCastkmsRendererBeginTakeover,
-    DrmCastkmsRendererGetSnapshot, DrmCastkmsRendererQuery, DrmCastkmsRendererSnapshot,
-    DrmCastkmsRendererTakeover, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888, EXECUTION_HOST_V1,
-    RENDERER_VERSION,
+    drm_ioctl_castkms_renderer_submit_probe, DrmCastkmsRendererAbortTakeover,
+    DrmCastkmsRendererBeginTakeover, DrmCastkmsRendererGetSnapshot, DrmCastkmsRendererQuery,
+    DrmCastkmsRendererSnapshot, DrmCastkmsRendererSubmitProbe, DrmCastkmsRendererTakeover,
+    DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888, EXECUTION_HOST_V1, RENDERER_PROBE_PRIVATE,
+    RENDERER_PROBE_STARTUP_IMAGE, RENDERER_VERSION,
 };
 use nix::fcntl::{fcntl, FcntlArg};
 
@@ -104,10 +105,6 @@ impl StartupImage {
     /// Return the historical content identity, or `None` for a blank image.
     pub fn content_serial(&self) -> Option<NonZeroU64> {
         self.content_serial
-    }
-
-    pub fn into_dma_buf(self) -> OwnedFd {
-        self.dma_buf
     }
 }
 
@@ -224,7 +221,7 @@ pub struct TakeoverCandidate<'renderer, F: AsFd> {
     active: bool,
 }
 
-impl<F: AsFd> TakeoverCandidate<'_, F> {
+impl<'renderer, F: AsFd> TakeoverCandidate<'renderer, F> {
     pub fn profile(&self) -> Profile {
         self.profile
     }
@@ -236,8 +233,9 @@ impl<F: AsFd> TakeoverCandidate<'_, F> {
     /// Copy the newest eligible HOST result into independent storage.
     ///
     /// `ENODATA` means no retained HOST image is available. The operation does
-    /// not request a new HOST copy and does not change candidate state.
-    pub fn startup_image(&self) -> io::Result<StartupImage> {
+    /// not request a new HOST copy. Success pairs the only delivered image with
+    /// the candidate; any error aborts the consumed candidate.
+    pub fn startup_image(self) -> io::Result<StartupCandidate<'renderer, F>> {
         let mut result = DrmCastkmsRendererSnapshot {
             dma_buf_fd: -1,
             ..Default::default()
@@ -258,7 +256,52 @@ impl<F: AsFd> TakeoverCandidate<'_, F> {
         // SAFETY: A successful snapshot call installs one fresh descriptor for
         // the caller, and no other Rust owner has adopted it.
         let dma_buf = unsafe { OwnedFd::from_raw_fd(result.dma_buf_fd) };
-        validate_startup_image(result, dma_buf, self.configuration)
+        let image = validate_startup_image(result, dma_buf, self.configuration)?;
+        Ok(StartupCandidate {
+            candidate: self,
+            image,
+        })
+    }
+
+    /// Submit test work over renderer-owned storage.
+    ///
+    /// The candidate is consumed so safe Rust cannot submit a second test or
+    /// request a startup image afterward. The native completion may remain
+    /// pending after the operation returns.
+    ///
+    /// ```compile_fail
+    /// use castkms_renderer::TakeoverCandidate;
+    /// use std::os::fd::AsFd;
+    ///
+    /// fn submit_twice<F: AsFd>(candidate: TakeoverCandidate<'_, F>) {
+    ///     let submitted = candidate.submit_private_probe(None).unwrap();
+    ///     submitted.submit_private_probe(None);
+    /// }
+    /// ```
+    pub fn submit_private_probe(
+        self,
+        completion: Option<BorrowedFd<'_>>,
+    ) -> io::Result<SubmittedCandidate<'renderer, F>> {
+        self.submit_probe(RENDERER_PROBE_PRIVATE, completion)
+    }
+
+    fn submit_probe(
+        self,
+        source: u32,
+        completion: Option<BorrowedFd<'_>>,
+    ) -> io::Result<SubmittedCandidate<'renderer, F>> {
+        let request = DrmCastkmsRendererSubmitProbe {
+            candidate_id: self.id.get(),
+            completion_fd: completion.map_or(-1, |fd| fd.as_raw_fd()),
+            source,
+            ..Default::default()
+        };
+        // SAFETY: The initialized fixed-width request and any borrowed
+        // completion descriptor remain live throughout the synchronous ioctl.
+        unsafe {
+            drm_ioctl_castkms_renderer_submit_probe(self.renderer.fd.as_fd().as_raw_fd(), &request)
+        }?;
+        Ok(SubmittedCandidate { candidate: self })
     }
 
     /// Release the candidate without changing the active execution profile.
@@ -268,6 +311,58 @@ impl<F: AsFd> TakeoverCandidate<'_, F> {
             self.active = false;
         }
         result
+    }
+}
+
+/// A candidate paired with the independent startup image copied for it.
+#[must_use = "submit startup test work or abort the candidate deliberately"]
+#[derive(Debug)]
+pub struct StartupCandidate<'renderer, F: AsFd> {
+    candidate: TakeoverCandidate<'renderer, F>,
+    image: StartupImage,
+}
+
+impl<'renderer, F: AsFd> StartupCandidate<'renderer, F> {
+    pub fn image(&self) -> &StartupImage {
+        &self.image
+    }
+
+    /// Submit test work that uploaded the paired startup image.
+    pub fn submit_probe(
+        self,
+        completion: Option<BorrowedFd<'_>>,
+    ) -> io::Result<SubmittedCandidate<'renderer, F>> {
+        let Self { candidate, image } = self;
+        let submitted = candidate.submit_probe(RENDERER_PROBE_STARTUP_IMAGE, completion);
+        drop(image);
+        submitted
+    }
+
+    /// Release the candidate without changing the active execution profile.
+    pub fn abort(self) -> io::Result<()> {
+        self.candidate.abort()
+    }
+}
+
+/// A takeover candidate with one native test operation submitted to the kernel.
+#[must_use = "retain the submitted candidate for activation or abort it deliberately"]
+#[derive(Debug)]
+pub struct SubmittedCandidate<'renderer, F: AsFd> {
+    candidate: TakeoverCandidate<'renderer, F>,
+}
+
+impl<F: AsFd> SubmittedCandidate<'_, F> {
+    pub fn profile(&self) -> Profile {
+        self.candidate.profile()
+    }
+
+    pub fn configuration(&self) -> OutputConfiguration {
+        self.candidate.configuration()
+    }
+
+    /// Release the candidate without changing the active execution profile.
+    pub fn abort(self) -> io::Result<()> {
+        self.candidate.abort()
     }
 }
 
