@@ -294,8 +294,8 @@ impl<F: AsFd> std::error::Error for ReleaseSubmittedSceneError<'_, '_, F> {
 /// ```compile_fail
 /// use pronk_renderer_worker::ReleasedSceneJob;
 ///
-/// fn compose_before_wait(scene: ReleasedSceneJob) {
-///     scene.compose_and_wait();
+/// fn inspect_sources_before_wait(scene: ReleasedSceneJob) {
+///     scene.into_parts();
 /// }
 /// ```
 #[must_use = "wait for valid private sources before composition"]
@@ -305,6 +305,14 @@ pub struct ReleasedSceneJob {
 }
 
 impl ReleasedSceneJob {
+    /// Wait for released source reads and synchronously compose their scene.
+    pub fn compose_and_wait(self) -> Result<ComposedFrame, SceneCompletionError> {
+        self.wait()
+            .map_err(SceneCompletionError::Source)?
+            .compose_and_wait()
+            .map_err(SceneCompletionError::Composition)
+    }
+
     pub fn wait(self) -> Result<CompositableScene, SceneWaitError> {
         match self.reads.wait() {
             Ok(scene) => Ok(CompositableScene {
@@ -317,6 +325,15 @@ impl ReleasedSceneJob {
             }),
         }
     }
+}
+
+/// Failed source completion or composition for an already released scene.
+#[derive(Debug, thiserror::Error)]
+pub enum SceneCompletionError {
+    #[error("complete private scene sources: {0}")]
+    Source(#[source] SceneWaitError),
+    #[error("compose complete private scene: {0}")]
+    Composition(#[source] SceneCompositionError),
 }
 
 /// Source completion failure retaining the final image that was never written.

@@ -39,8 +39,8 @@ pub use scene_pool::{
 pub use scene_reader::{SceneAttempt, SceneAttemptError, SceneReader, SceneReaderStartError};
 pub use scene_transaction::{
     CancelSceneJobError, CompositableScene, PrepareSceneJobError, PreparedSceneJob,
-    ReleaseSubmittedSceneError, ReleasedSceneJob, SceneWaitError, SubmitSceneJobError,
-    SubmittedSceneJob,
+    ReleaseSubmittedSceneError, ReleasedSceneJob, SceneCompletionError, SceneWaitError,
+    SubmitSceneJobError, SubmittedSceneJob,
 };
 pub use source::{ImportError, ImportedSource, SourceAlpha};
 pub use submission::{
