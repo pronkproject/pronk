@@ -118,7 +118,7 @@ async fn run(
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
     let mut capture = DrmCapturePipeline::new(
-        session,
+        session.capture_access()?,
         remotes,
         DrmCapturePipelineConfig {
             connector_id: target.connector_id,
@@ -244,6 +244,7 @@ async fn run(
     capture
         .shutdown(MediaStopReason::BackendShutdown, CancellationToken::new())
         .await?;
+    session.release().await?;
     pattern.kill().await?;
     eprintln!("Mutter encoded={received} decoded={decoded} colors={colors:?}");
     Ok(())
