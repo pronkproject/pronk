@@ -35,7 +35,6 @@ async fn main() -> anyhow::Result<()> {
             device_instance: "policy-loss-probe".into(),
             connector_id: nonzero32(1),
             output_index: 0,
-            grant_id: nonzero32(1),
             media_generation: nonzero64(1),
             refresh_hz: nonzero32(60),
         },

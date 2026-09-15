@@ -1425,7 +1425,6 @@ mod tests {
                 device_instance: "test-device".to_string(),
                 connector_id: nonzero32(7),
                 output_index: 0,
-                grant_id: nonzero32(8),
                 media_generation,
                 refresh_hz: nonzero32(60),
             },

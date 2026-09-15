@@ -108,7 +108,6 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 device_instance: "generated-gpu".into(),
                 connector_id: nz(1),
                 output_index: 0,
-                grant_id: nz(1),
                 media_generation: generation,
                 refresh_hz: nz(30),
             },

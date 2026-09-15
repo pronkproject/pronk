@@ -1010,7 +1010,6 @@ async fn start_generation(
         device_instance: config.device_instance.clone(),
         connector_id,
         output_index: config.output_index,
-        grant_id,
         media_generation,
         refresh_hz: stream.refresh_hz,
     };

@@ -1195,7 +1195,6 @@ fn start_pipewire_gate_generation(
         device_instance: format!("castkms-grant-{grant_id}"),
         connector_id,
         output_index: 0,
-        grant_id,
         media_generation: stream.mode_generation,
         refresh_hz: stream.refresh_hz,
     };

@@ -680,7 +680,6 @@ fn trigger_graph(stream: &pw::stream::Stream) {
 fn source_properties(config: &VideoSourceConfig) -> pw::properties::PropertiesBox {
     let connector_id = config.connector_id.to_string();
     let output_index = config.output_index.to_string();
-    let grant_id = config.grant_id.to_string();
     let media_generation = config.media_generation.to_string();
     properties! {
         *pw::keys::MEDIA_CLASS => "Video/Source",
@@ -696,7 +695,6 @@ fn source_properties(config: &VideoSourceConfig) -> pw::properties::PropertiesBo
         "api.pronk.device-instance" => config.device_instance.as_str(),
         "api.pronk.connector-id" => connector_id,
         "api.pronk.output-index" => output_index,
-        "api.pronk.grant-id" => grant_id,
         "api.pronk.media-generation" => media_generation
     }
 }
@@ -1253,6 +1251,28 @@ fn pipewire_error(operation: &'static str, error: pw::Error) -> VideoSourceRunti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_identity_does_not_require_a_kernel_grant_number() {
+        let config = VideoSourceConfig {
+            node_name: "pronk.video.test".into(),
+            node_description: "Capture test".into(),
+            session_id: "session-test".into(),
+            device_instance: "device-test".into(),
+            connector_id: NonZeroU32::new(1).unwrap(),
+            output_index: 0,
+            media_generation: NonZeroU64::new(2).unwrap(),
+            refresh_hz: NonZeroU32::new(30).unwrap(),
+        };
+        let properties = source_properties(&config);
+        assert_eq!(properties.get("api.pronk.grant-id"), None);
+        assert_eq!(properties.get("api.pronk.session-id"), Some("session-test"));
+        assert_eq!(properties.get("api.pronk.media-generation"), Some("2"));
+        assert_eq!(
+            properties.get(PRIVATE_NODE_PROPERTY),
+            Some(PRIVATE_NODE_POLICY_VERSION)
+        );
+    }
 
     #[test]
     fn consumers_may_omit_optional_frame_metadata() {

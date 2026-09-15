@@ -84,7 +84,6 @@ pub struct VideoSourceConfig {
     pub device_instance: String,
     pub connector_id: NonZeroU32,
     pub output_index: u32,
-    pub grant_id: NonZeroU32,
     pub media_generation: NonZeroU64,
     pub refresh_hz: NonZeroU32,
 }
