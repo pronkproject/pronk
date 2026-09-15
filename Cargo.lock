@@ -1516,6 +1516,7 @@ dependencies = [
  "gstreamer-video",
  "nix 0.29.0",
  "pkg-config",
+ "pronk",
  "pronk-capture",
  "pronk-capture-broker",
  "pronk-capture-pipewire",

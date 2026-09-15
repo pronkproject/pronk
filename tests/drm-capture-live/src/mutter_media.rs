@@ -12,13 +12,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
-use pronk_capture::{allocation::Heap, Actor, Config, Layout};
+use pronk::display_state::{RouteTarget, RoutedMode};
+use pronk::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
+use pronk::media_pipeline_port::CapturePipelinePort;
+use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk_capture_broker::{Provider, Target};
-use pronk_capture_pipewire::{State, Video};
 use pronk_media::{
     MediaGraphActor, MediaGraphConfiguration, PipeWireVideoInput, VideoCodec, VideoFrameDependency,
 };
-use pronk_pipewire::{PipeWireRemote, VideoSourceConfig};
+use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use tokio_util::sync::CancellationToken;
 
 fn nz(value: u32) -> NonZeroU32 {
@@ -38,10 +40,10 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("initialize probe logging: {error}"))?;
     let args: Vec<_> = std::env::args().skip(1).collect();
     ensure!(
-        args.len() == 4 || (args.len() == 6 && args[4] == "--receiver"),
-        "expected device, CRTC, connector, private socket, optionally --receiver IP:PORT; receiver mode interrupts playback"
+        args.len() == 6 || (args.len() == 8 && args[6] == "--receiver"),
+        "expected device, CRTC, connector, width, height, private socket, optionally --receiver IP:PORT; receiver mode interrupts playback"
     );
-    let address: Option<SocketAddr> = args.get(5).map(|address| address.parse()).transpose()?;
+    let address: Option<SocketAddr> = args.get(7).map(|address| address.parse()).transpose()?;
     let device = std::fs::metadata(&args[0])?.rdev();
     let target = Target {
         device_major: nix::sys::stat::major(device).try_into()?,
@@ -49,12 +51,14 @@ async fn main() -> anyhow::Result<()> {
         crtc_id: NonZeroU32::new(args[1].parse()?).context("zero CRTC")?,
         connector_id: NonZeroU32::new(args[2].parse()?).context("zero connector")?,
     };
-    let socket = PathBuf::from(&args[3]);
+    let width: u32 = args[3].parse()?;
+    let height: u32 = args[4].parse()?;
+    let socket = PathBuf::from(&args[5]);
     let mut receiver = receiver::Receiver::default();
     let result = tokio::select! {
         result = tokio::time::timeout(
             Duration::from_secs(40),
-            run(target, &socket, &mut receiver, address),
+            run(target, width, height, &socket, &mut receiver, address),
         ) => result.context("capture probe timed out").and_then(|result| result),
         signal = tokio::signal::ctrl_c() => match signal {
             Ok(()) => Err(anyhow::anyhow!("capture probe interrupted")),
@@ -76,6 +80,8 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run(
     target: Target,
+    width: u32,
+    height: u32,
     socket: &Path,
     receiver: &mut receiver::Receiver,
     address: Option<SocketAddr>,
@@ -104,80 +110,67 @@ async fn run(
         NonZeroUsize::new(1).unwrap(),
         Duration::from_secs(5),
     )?;
-    let client = provider
-        .acquire(target, CancellationToken::new())
-        .await?
-        .into_capture()?;
-    let offer = client.describe()?;
+    let generation = nz64(u64::from(std::process::id()));
+    let runtime = socket.parent().context("private socket has no directory")?;
+    let remotes =
+        ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
+    let mut capture = DrmCapturePipeline::new(
+        provider,
+        remotes,
+        DrmCapturePipelineConfig {
+            device_major: target.device_major,
+            device_minor: target.device_minor,
+            connector_id: target.connector_id,
+            output_index: 0,
+            session_id: format!("private-test-{generation}"),
+            device_instance: "castkms-test".into(),
+            node_description: "Live Mutter capture".into(),
+            video_profile_id: "h264".into(),
+            video_bitrate: nz64(4_000_000),
+            capture_rate_hz: nz(30),
+            pool_size: nz(4),
+            request_capacity: nz(3),
+            pool_byte_limit: nz64(128 * 1024 * 1024),
+            heap_path: "/dev/dma_heap/system".into(),
+            poll_interval: Duration::from_millis(2),
+            shutdown_timeout: Duration::from_secs(5),
+        },
+    );
+    let request = MediaStartRequest {
+        media_generation: generation.get(),
+        route: MediaRoute {
+            route_generation: 1,
+            target: RouteTarget::new(target.crtc_id),
+            mode: RoutedMode {
+                width,
+                height,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+        },
+    };
+    let prepared = capture.start(request, CancellationToken::new()).await?;
     if let Some(address) = address {
         eprintln!(
             "Starting an explicit receiver test at {address}; current playback will be interrupted"
         );
-        receiver
-            .start(address, offer.width.get(), offer.height.get())
-            .await?;
+        receiver.start(address, width, height).await?;
     }
-    let buffers = Heap::open(Path::new("/dev/dma_heap/system"))?.allocate(
-        Layout {
-            width: offer.width,
-            height: offer.height,
-        },
-        nz(3),
-        nz64(128 * 1024 * 1024),
-    )?;
-    let actor = Actor::spawn(
-        client,
-        buffers,
-        Config {
-            capacity: nz(3),
-            poll_interval: Duration::from_millis(2),
-            shutdown_timeout: Duration::from_secs(5),
-        },
-    )?;
-    let generation = nz64(u64::from(std::process::id()));
-    let video = Video::start(
-        actor,
-        VideoSourceConfig {
-            node_name: format!("pronk.mutter-media-test-{generation}"),
-            node_description: "Live Mutter capture".into(),
-            session_id: format!("private-test-{generation}"),
-            device_instance: "castkms-test".into(),
-            connector_id: target.connector_id,
-            output_index: 0,
-            media_generation: generation,
-            refresh_hz: nz(30),
-        },
-        PipeWireRemote::AmbientDevelopment,
-    )
-    .await?;
-    let identity = video.identity().clone();
-    let mut state = video.subscribe();
+    let video_target = prepared.video_target;
     let (media, mut encoded) = MediaGraphActor::spawn_with_output(16)?;
     let config = MediaGraphConfiguration {
-        media_generation: identity.media_generation,
+        media_generation: generation,
         video: PipeWireVideoInput {
             remote: UnixStream::connect(socket)?.into(),
-            node_name: identity.node_name.clone(),
-            object_serial: identity.object_serial,
-            caps: format!(
-                "video/x-raw,format=BGRx,width={},height={},framerate=30/1",
-                offer.width, offer.height
-            ),
+            node_name: video_target.node_name.clone(),
+            object_serial: video_target.object_serial,
+            caps: video_target.caps,
         },
         audio: None,
         video_codec: VideoCodec::H264,
         video_bitrate: nz64(4_000_000),
     };
     let mut decoder = decoder::Decoder::new()?;
-    let mut link = tokio::process::Command::new("pw-link")
-        .arg("--wait")
-        .arg("--remote")
-        .arg(socket)
-        .arg(format!("{}:capture_1", identity.node_name))
-        .arg(format!("pronk-backend-media-{}:input_1", identity.media_generation))
-        .kill_on_drop(true)
-        .spawn()
-        .context("link media input")?;
     let mut received = 0;
     let mut decoded = 0;
     let mut colors = BTreeSet::new();
@@ -188,7 +181,10 @@ async fn run(
         let mut started = false;
         let activation = async {
             media.configure(config).await?;
-            media.start(identity.media_generation).await
+            capture
+                .activate(generation, CancellationToken::new())
+                .await?;
+            media.start(generation).await.map_err(anyhow::Error::from)
         };
         tokio::pin!(activation);
         let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -200,24 +196,20 @@ async fn run(
         {
             tokio::select! {
                 result = &mut activation, if !started => { result?; started = true; }
-                result = state.changed() => {
-                    result?;
-                    ensure!(*state.borrow() == State::Active, "capture failed: {:?}", *state.borrow());
-                }
                 frame = encoded.recv() => {
                     let frame = frame.context("encoded output stopped")?;
                     if received == 0 { ensure!(frame.dependency == VideoFrameDependency::KeyFrame, "initial key frame missing"); }
-                    ensure!(frame.media_generation == identity.media_generation && last_timestamp.is_none_or(|last| frame.media_timestamp > last), "encoded identity/timing");
+                    ensure!(frame.media_generation == generation && last_timestamp.is_none_or(|last| frame.media_timestamp > last), "encoded identity/timing");
                     ensure!(!frame.data.is_empty() && !frame.duration.is_zero(), "empty encoded frame or duration");
                     last_timestamp = Some(frame.media_timestamp);
                     if address.is_some() { receiver.send(frame.clone()).await?; }
                     decoder.push(frame)?;
                     received += 1;
                 }
-                pixels = decoder.next(offer.width.get(), offer.height.get()) => { colors.insert(pixels?); decoded += 1; }
+                pixels = decoder.next(width, height) => { colors.insert(pixels?); decoded += 1; }
                 event = receiver.next_event(), if address.is_some() => {
                     match event? {
-                        receiver::SenderEvent::NeedsKeyFrame { .. } => media.request_key_frame(identity.media_generation).await?,
+                        receiver::SenderEvent::NeedsKeyFrame { .. } => media.request_key_frame(generation).await?,
                         receiver::SenderEvent::ReceiverTimedOut => anyhow::bail!("receiver acknowledgements timed out"),
                         receiver::SenderEvent::FatalError(error) => return Err(error.into()),
                         _ => (),
@@ -227,24 +219,28 @@ async fn run(
                     decoder.check()?;
                     let snapshot = media.snapshot();
                     ensure!(snapshot.state != pronk_media::MediaGraphState::Failed, "media failed: {:?}", snapshot.last_error);
-                    eprintln!("Mutter capture {}x{} encoded={received} decoded={decoded} colors={colors:?}", offer.width, offer.height);
+                    eprintln!("Mutter capture {width}x{height} encoded={received} decoded={decoded} colors={colors:?}");
                     if address.is_some() {
                         let statistics = receiver.statistics().await?;
                         acknowledged = statistics.frames_acked;
                         eprintln!("receiver acknowledged={acknowledged} in_flight={}", statistics.in_flight_frames);
-                        if acknowledged == 0 { media.request_key_frame(identity.media_generation).await?; }
+                        if acknowledged == 0 { media.request_key_frame(generation).await?; }
                     }
                 }
             }
         }
     }
-    media.stop(identity.media_generation).await?;
+    media.stop(generation).await?;
     media.shutdown().await?;
     drop(decoder);
-    video.shutdown().await?.release().await?;
-    ensure!(*state.borrow() == State::Stopped, "video shutdown state");
+    capture
+        .stop(
+            generation,
+            MediaStopReason::BackendShutdown,
+            CancellationToken::new(),
+        )
+        .await?;
     pattern.kill().await?;
-    ensure!(link.wait().await?.success(), "media link failed");
     eprintln!("Mutter encoded={received} decoded={decoded} colors={colors:?}");
     Ok(())
 }
