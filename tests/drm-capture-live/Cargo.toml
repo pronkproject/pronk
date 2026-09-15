@@ -26,6 +26,10 @@ path = "src/encoded.rs"
 name = "pronk-capture-broker-live-test"
 path = "src/broker.rs"
 
+[[bin]]
+name = "pronk-capture-video-live-test"
+path = "src/video.rs"
+
 [dependencies]
 anyhow.workspace = true
 gstreamer.workspace = true
