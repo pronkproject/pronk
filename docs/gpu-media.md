@@ -197,16 +197,16 @@ for the opt-in tests.
 The allocation flow follows the [Vulkan DRM modifier extension](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_image_drm_format_modifier.html).
 Device selection uses [Vulkan DRM device properties](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceDrmPropertiesEXT.html).
 
-## Waited GPU frame generation
+## Synchronous GPU frame generation
 
-`Image::clear_waited` initializes a generated frame with opaque RGB pixels using
+`Image::clear_and_wait` initializes a generated frame with opaque RGB pixels using
 GPU commands. It consumes the image until completion, snapshots native reuse
 dependencies, acquires foreign ownership when needed, clears the entire image,
 and releases it for foreign consumers. Actual submitted completion is enrolled
 as a native writer before publication. The returned image and checked sync file
 can drive the output pool's submitted/producer-completion transition.
 
-`Image::clear_rgba_waited` uses the same ownership and synchronization path
+`Image::clear_rgba_and_wait` uses the same ownership and synchronization path
 with an explicit stored alpha value. It does not premultiply RGB or infer a
 blend equation. That supplies native alpha fixtures without CPU pixel writes;
 such images do not satisfy an opaque-only composition or media contract unless
@@ -257,8 +257,8 @@ external-memory handle types. Keeping private rendering storage distinct from
 shared `Image` allocations makes accidental downstream publication unavailable
 through the safe interface.
 
-The initial operations are whole-image opaque `clear_waited` and
-`copy_into_waited` into an equally sized shared image on the same device.
+The initial operations are whole-image opaque `clear_and_wait` and
+`copy_into_and_wait` into an equally sized shared image on the same device.
 They consume their owners until native completion. Private storage keeps local
 queue ownership; only the shared destination participates in foreign ownership
 and reservation-fence enrollment. Uninitialized or mismatched sources fail
@@ -278,7 +278,7 @@ qualified production memory-bandwidth or media-cadence choice. Native tests cove
 non-square images, device-owner teardown, independent private reuse, complete
 output pixels and rejection of unsupported extents or invalid copies.
 
-`SourceImage::copy_into_private_waited` acquires a whole imported source into
+`SourceImage::copy_into_private_and_wait` acquires a whole imported source into
 same-sized private storage. It waits for explicit producer completion and the
 source's reservation writers, then submits a packed-to-floating-point blit.
 Any exported native completion is enrolled as a source reader. Successful
@@ -369,7 +369,7 @@ representable at both depths, so placement, scaling and background comparisons
 need no quantization tolerance. Byte-copy rejection covers every pair of
 different packed layouts, in both directions. That qualifies the tested native
 path's precision; it does not qualify HDR processing or ten-bit media output.
-`clear_rgba16_waited` supplies normalized sixteen-bit inputs to native clears
+`clear_rgba16_and_wait` supplies normalized sixteen-bit inputs to native clears
 without adding CPU pixel writes. Such inputs are quantized to the allocation's
 channel depth; Vulkan need not choose the nearest adjacent integer for every
 nonintegral value.
@@ -382,7 +382,7 @@ BGRx; accepting a two-byte source does not add a two-byte PipeWire profile.
 
 ### Private shader blending
 
-`PrivateImage::blend_waited` blends one completed, equally sized private image
+`PrivateImage::blend_and_wait` blends one completed, equally sized private image
 over another. It accepts the reference renderer's `Blend` policy: ignored pixel
 alpha, premultiplied alpha or coverage alpha, plus normalized 16-bit plane alpha.
 The compute shader keeps encoded RGB, rounds intermediate color to normalized
@@ -391,7 +391,7 @@ operation performs no placement, scaling, gamma or color-space conversion.
 Source imports must already have
 retired; neither image is exported or carries downstream reuse dependencies.
 
-`blend_region_waited` accepts a checked integral crop, signed output placement
+`blend_region_and_wait` accepts a checked integral crop, signed output placement
 and every orthogonal rotation/reflection combination from the reference model.
 Source-axis reflection precedes counter-clockwise rotation. Rust clips the
 transformed crop to the output using widened integer arithmetic, and passes
@@ -406,7 +406,7 @@ owned and cannot alias through the safe interface. Resource teardown uses the
 same native job owner and device-loss handling as the transfer path.
 
 `Device::create_blender` creates an explicitly owned reusable compute program.
-`Blender::blend_region_waited` shares only immutable shader and layout state;
+`Blender::blend_region_and_wait` shares only immutable shader and layout state;
 each call creates distinct views and descriptor storage for its images. Clones
 may serve independent blocking workers. Accepted jobs retain the program, and
 the program retains its logical device, without a device-to-program reference
@@ -450,7 +450,7 @@ mapped. Native storage limits are checked, and unsupported tables fail without
 resampling or falling back to CPU rendering. The buffer uses sixteen bytes per
 entry before allocation alignment and command-storage overhead.
 
-`Gamma::apply_waited` consumes an initialized private image and applies that
+`Gamma::apply_and_wait` consumes an initialized private image and applies that
 table in place after composition, before packed output conversion. Input RGB is
 rounded to normalized 16-bit values; unsigned integer interpolation follows the
 reference's rational position and half-up rounding. The table-size bound keeps
@@ -477,9 +477,9 @@ The generated media fixture uses a two-entry green-inversion table after
 composition and verifies decoded colors against the CPU reference. That
 integrated curve is independent of the broader native table-size checks.
 
-## Waited copies from exportable executor-owned staging
+## Synchronous copies from exportable executor-owned staging
 
-`destination.copy_from_waited(source)` copies a complete initialized image into
+`destination.copy_from_and_wait(source)` copies a complete initialized image into
 a separate same-size allocation on the same Vulkan device. Both image owners
 move into the native job. Successful completion returns `CopiedImages`, with
 the source, destination and a checked native completion for publication. The
@@ -523,7 +523,7 @@ after successful memory allocation. The Rust source owner retains its own fd,
 producer fence, image, imported memory and device through native reading.
 
 `SourceImage` is distinct from writable `Image`: it has no clear operation or
-conversion into an output allocation. `copy_into_waited` consumes one source
+conversion into an output allocation. `copy_into_and_wait` consumes one source
 use and copies into a same-device, same-size private destination. It rejects
 aliased backing storage and queries destination completion without waiting.
 Pending destination work returns `WouldBlock` before source-producer waiting
@@ -560,7 +560,7 @@ waiting for pixels. There is no userspace promise hidden inside the record.
 The pending owner retains all source imports, command resources and private
 storage. It exposes no image that another operation could reuse. Consuming it
 with `wait` checks native completion, destroys the imports and returns the
-initialized private image. The existing `compose_opaque_waited` operation uses
+initialized private image. The existing `compose_opaque_and_wait` operation uses
 the same submission path followed immediately by that wait.
 
 Both submission and retirement belong on a blocking graphics worker: submission
@@ -577,7 +577,7 @@ claims crash-proof submission accounting.
 
 ## Placed source copies
 
-`SourceImage::copy_region_into_waited` extends private staging to a visible
+`SourceImage::copy_region_into_and_wait` extends private staging to a visible
 integral crop, using `drm-display-executor` geometry. It validates the crop's
 source dimensions, clips signed placement against the output, and checks native
 signed-offset conversions. Mismatched or fully offscreen input is rejected
@@ -601,7 +601,7 @@ pixel comparison. Synchronization validation may be enabled with
 
 ## Multiple opaque source planes
 
-`Image::compose_opaque_waited` accepts owned `OpaqueLayer` inputs in explicit
+`Image::compose_opaque_and_wait` accepts owned `OpaqueLayer` inputs in explicit
 bottom-to-top order. Each layer supplies one imported source, crop and signed
 placement. It validates the complete list before any producer wait and requires
 distinct backing allocations across all sources and private destination.

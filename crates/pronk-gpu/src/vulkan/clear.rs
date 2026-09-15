@@ -1,4 +1,4 @@
-//! Waited generated-image production for dedicated blocking graphics workers.
+//! Synchronous generated-image production for dedicated blocking graphics workers.
 
 use std::io;
 use std::os::fd::AsFd;

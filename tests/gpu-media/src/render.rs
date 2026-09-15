@@ -90,7 +90,7 @@ pub fn submit_sources(
             input.layout().format == plane.format,
             "source format differs from generated scene"
         );
-        let (input, producer) = input.clear_waited(plane.color)?;
+        let (input, producer) = input.clear_and_wait(plane.color)?;
         // SAFETY: Matching native physical-device/driver identities, exact
         // allocator metadata and identical image profile. Clear completed
         // foreign GENERAL release; no source writer runs before read completion.
@@ -143,14 +143,14 @@ impl SubmittedRead {
         let input = self
             .originals
             .into_iter()
-            .map(|input| input.clear_waited([255; 3]).map(|result| result.0))
+            .map(|input| input.clear_and_wait([255; 3]).map(|result| result.0))
             .collect::<std::io::Result<Vec<_>>>()?;
         timing.overwrites = started.elapsed();
         let started = Instant::now();
-        let mut private = self.output.clear_waited(pattern::BACKGROUND)?;
+        let mut private = self.output.clear_and_wait(pattern::BACKGROUND)?;
         let mut inputs = Vec::with_capacity(layers.len());
         for (source, plane) in layers {
-            let result = self.blender.blend_region_waited(
+            let result = self.blender.blend_region_and_wait(
                 private,
                 source,
                 plane.crop,
@@ -163,14 +163,14 @@ impl SubmittedRead {
         }
         timing.composition = started.elapsed();
         let started = Instant::now();
-        private = self.gamma.apply_waited(private)?;
+        private = self.gamma.apply_and_wait(private)?;
         timing.color = started.elapsed();
         let started = Instant::now();
         // Only an internal bridge crosses Vulkan devices. The exported capture
         // destination is allocated and accessed exclusively by the output side.
         let layout = output.layout();
         let bridge = worker.allocate(layout.width, layout.height, layout.modifier)?;
-        let copied = private.copy_into_waited(bridge)?;
+        let copied = private.copy_into_and_wait(bridge)?;
         let bridge_fd = copied.destination.export()?;
         let bridge_layout = copied.destination.layout();
         drop(copied.destination);
@@ -179,12 +179,12 @@ impl SubmittedRead {
         // consumer. Its source-side Vulkan image and memory owners are gone.
         let bridge =
             unsafe { output_worker.import_source(bridge_fd, bridge_layout, copied.completion) }?;
-        let (output, completion) = bridge.copy_into_waited(output)?;
+        let (output, completion) = bridge.copy_into_and_wait(output)?;
         timing.output = started.elapsed();
         let started = Instant::now();
         let private = PrivateStorage {
             inputs,
-            output: copied.source.clear_waited([0; 3])?,
+            output: copied.source.clear_and_wait([0; 3])?,
             blender: self.blender,
             gamma: self.gamma,
         };

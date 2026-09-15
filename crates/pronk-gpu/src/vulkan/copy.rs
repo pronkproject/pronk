@@ -1,4 +1,4 @@
-//! Waited copies between executor-owned images, independent of source grants.
+//! Synchronous copies between executor-owned images, independent of source grants.
 
 use std::io;
 use std::os::fd::AsFd;

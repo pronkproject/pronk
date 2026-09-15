@@ -80,7 +80,11 @@ async fn publication_survives_until_the_matching_release() {
         ));
     }
 
-    let source = private.take().unwrap().clear_waited([17, 34, 51]).unwrap();
+    let source = private
+        .take()
+        .unwrap()
+        .clear_and_wait([17, 34, 51])
+        .unwrap();
     let completed = transport.claim(0).unwrap().copy_from(source).unwrap();
     let pending = transport.submit(completed).unwrap();
     let ready = transport.finish(pending.wait().await).unwrap();
@@ -115,7 +119,11 @@ async fn publication_survives_until_the_matching_release() {
     assert!(transport.claim(0).is_err());
     assert_eq!(transport.finish_return(returned.wait().await).unwrap(), 0);
 
-    let source = private.take().unwrap().clear_waited([68, 85, 102]).unwrap();
+    let source = private
+        .take()
+        .unwrap()
+        .clear_and_wait([68, 85, 102])
+        .unwrap();
     let completed = transport.claim(1).unwrap().copy_from(source).unwrap();
     let pending = transport.submit(completed).unwrap();
     let ready = transport.finish(pending.wait().await).unwrap();
