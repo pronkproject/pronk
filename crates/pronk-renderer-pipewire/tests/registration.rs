@@ -10,7 +10,7 @@ use pronk_renderer_worker::{OutputPool, PrivatePool};
 
 #[tokio::test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
-async fn registration_exports_only_its_renderer_pool() {
+async fn registration_exports_its_owned_renderer_pool() {
     let node = std::env::var("PRONK_GPU_RENDER_NODE").expect("PRONK_GPU_RENDER_NODE");
     let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("PRONK_GPU_MODIFIER");
     let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16).unwrap();
@@ -21,14 +21,10 @@ async fn registration_exports_only_its_renderer_pool() {
     let pool = OutputPool::new(&device, width, height, modifier, capacity)
         .await
         .unwrap();
-    let other = OutputPool::new(&device, width, height, modifier, capacity)
-        .await
-        .unwrap();
-
-    let registration = Registration::new(&pool).unwrap();
-    let buffers = registration.export(&pool).unwrap();
+    let layout = pool.layout();
+    let registration = Registration::new(pool).unwrap();
+    let buffers = registration.export().unwrap();
     assert_eq!(buffers.len(), 2);
-    assert!(registration.export(&other).is_err());
     for (index, buffer) in buffers.iter().enumerate() {
         assert_eq!(buffer.id.get(), index as u32 + 1);
         assert_eq!(buffer.layout.format, VideoPixelFormat::Xrgb8888);
@@ -36,7 +32,7 @@ async fn registration_exports_only_its_renderer_pool() {
             buffer.layout.storage,
             VideoBufferStorage::DrmModifier {
                 modifier,
-                offset: u32::try_from(pool.layout().offset).unwrap(),
+                offset: u32::try_from(layout.offset).unwrap(),
             }
         );
     }
@@ -53,7 +49,7 @@ async fn publication_survives_until_the_matching_release() {
     let height = NonZeroU32::new(32).unwrap();
     let mut private =
         PrivatePool::new(&device, width, height, NonZeroUsize::new(1).unwrap()).unwrap();
-    let mut pool = OutputPool::new(
+    let pool = OutputPool::new(
         &device,
         width,
         height,
@@ -62,7 +58,7 @@ async fn publication_survives_until_the_matching_release() {
     )
     .await
     .unwrap();
-    let registration = Registration::new(&pool).unwrap();
+    let registration = Registration::new(pool).unwrap();
     let identity = VideoNodeIdentity {
         node_name: "pronk-renderer-test".into(),
         object_id: NonZeroU32::new(7).unwrap(),
@@ -70,6 +66,7 @@ async fn publication_survives_until_the_matching_release() {
         media_generation: NonZeroU64::new(9).unwrap(),
     };
     let mut transport = registration.bind(identity.clone());
+    assert!(transport.claim(0).is_err());
     for buffer in 1..=2 {
         assert!(matches!(
             transport
@@ -84,15 +81,13 @@ async fn publication_survives_until_the_matching_release() {
     }
 
     let source = private.take().unwrap().clear_waited([17, 34, 51]).unwrap();
-    let completed = pool.claim(0).unwrap().copy_from(source).unwrap();
-    let pending = pool.submit(completed).unwrap();
-    let ready = pool.finish(pending.wait().await).unwrap();
-    let (source, published) = pool.publish(ready).unwrap();
-    assert_eq!(published.content_serial(), None);
-    assert!(private.put(source).is_ok());
-    let frame = transport
-        .begin_publish(published, 123, true)
+    let completed = transport.claim(0).unwrap().copy_from(source).unwrap();
+    let pending = transport.submit(completed).unwrap();
+    let ready = transport.finish(pending.wait().await).unwrap();
+    let (source, frame) = transport
+        .publish(ready, 123, true)
         .unwrap_or_else(|error| panic!("publish: {}", error.error()));
+    assert!(private.put(source).is_ok());
     assert_eq!(frame.buffer_id.get(), 1);
     assert_eq!(frame.sequence, 1);
     assert_eq!(frame.pts_ns, 123);
@@ -104,7 +99,7 @@ async fn publication_survives_until_the_matching_release() {
             sequence: frame.sequence + 1,
         })
         .is_err());
-    let published = match transport
+    let returned = match transport
         .handle_event(&VideoSourceActorEvent::BufferReleased {
             media_generation: identity.media_generation,
             buffer_id: frame.buffer_id,
@@ -115,18 +110,17 @@ async fn publication_survives_until_the_matching_release() {
         OutputEvent::Released(output) => output,
         _ => panic!("matching release did not return publication ownership"),
     };
-    let returned = pool.begin_return(published).unwrap();
-    assert_eq!(pool.finish_return(returned.wait().await).unwrap(), 0);
+    assert!(transport.claim(0).is_err());
+    assert_eq!(transport.finish_return(returned.wait().await).unwrap(), 0);
 
     let source = private.take().unwrap().clear_waited([68, 85, 102]).unwrap();
-    let completed = pool.claim(1).unwrap().copy_from(source).unwrap();
-    let pending = pool.submit(completed).unwrap();
-    let ready = pool.finish(pending.wait().await).unwrap();
-    let (source, published) = pool.publish(ready).unwrap();
-    assert!(private.put(source).is_ok());
-    let frame = transport
-        .begin_publish(published, 456, false)
+    let completed = transport.claim(1).unwrap().copy_from(source).unwrap();
+    let pending = transport.submit(completed).unwrap();
+    let ready = transport.finish(pending.wait().await).unwrap();
+    let (source, frame) = transport
+        .publish(ready, 456, false)
         .unwrap_or_else(|error| panic!("publish: {}", error.error()));
+    assert!(private.put(source).is_ok());
     assert_eq!(frame.buffer_id.get(), 2);
 
     let reclaimed = match transport
@@ -142,10 +136,8 @@ async fn publication_survives_until_the_matching_release() {
         _ => panic!("stop did not reclaim renderer publications"),
     };
     assert_eq!(reclaimed.len(), 1);
-    let returned = pool
-        .begin_return(reclaimed.into_vec().pop().unwrap())
-        .unwrap();
-    assert_eq!(pool.finish_return(returned.wait().await).unwrap(), 1);
+    let returned = reclaimed.into_vec().pop().unwrap();
+    assert_eq!(transport.finish_return(returned.wait().await).unwrap(), 1);
     assert!(matches!(
         transport
             .handle_event(&VideoSourceActorEvent::BufferReleased {
