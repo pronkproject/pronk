@@ -1,5 +1,7 @@
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::StreamExt;
@@ -8,13 +10,12 @@ use nix::unistd::{getresgid, getresuid, Uid, User};
 use pronk::caller::PublicBus;
 use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
 use pronk::display::MediaRuntime;
+use pronk::kernel_session_provider::{KernelSessionProvider, LegacyKernelSessionProvider};
 use pronk::manager::{BackendConfig, ManagerActor};
-use pronk::mutter_grant_provider::MutterGrantProvider;
 use pronk_backend_host::{
     BackendReconnectPolicy, BackendRegistrationValidator, BackendRegistry,
     SystemdRegistrationValidator, SYSTEM_BACKEND_RUNTIME_DIR,
 };
-use pronk_core::grant::GrantProvider;
 use pronk_core::grant_helper::provider::PkexecAdminGrantProvider;
 use pronk_dbus::BUS_NAME;
 use tokio::runtime::Builder;
@@ -25,6 +26,8 @@ use zbus::names::BusName;
 
 const SYSTEM_SERVICE_USER: &str = "pronk";
 const SYSTEM_MEDIA_RUNTIME_DIRECTORY: &str = "/run/pronk";
+const MAX_KERNEL_DISPLAY_SESSIONS: usize = 8;
+const KERNEL_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> anyhow::Result<()> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
@@ -164,14 +167,20 @@ async fn run(mode: ServiceMode) -> anyhow::Result<()> {
             )
         })
         .collect();
-    let grant_provider: Arc<dyn GrantProvider> = match mode {
+    let kernel_session_provider: Arc<dyn KernelSessionProvider> = match mode {
         // Mutter authorizes the sender that owns Pronk's public session-bus
-        // name, so grant calls must use this same connection.
-        ServiceMode::Session => Arc::new(MutterGrantProvider::new(connection.clone())),
-        ServiceMode::System => Arc::new(PkexecAdminGrantProvider),
+        // name, so display-session calls must use this same connection.
+        ServiceMode::Session => Arc::new(pronk_capture_broker::Provider::new(
+            connection.clone(),
+            NonZeroUsize::new(MAX_KERNEL_DISPLAY_SESSIONS).unwrap(),
+            KERNEL_SESSION_TIMEOUT,
+        )?),
+        ServiceMode::System => Arc::new(LegacyKernelSessionProvider::new(Arc::new(
+            PkexecAdminGrantProvider,
+        ))),
     };
     let mut manager =
-        ManagerActor::spawn_with_media_runtime(configs, grant_provider, media_runtime)
+        ManagerActor::spawn_with_media_runtime(configs, kernel_session_provider, media_runtime)
             .context("start the Pronk manager")?;
     register_manager(&connection, manager.handle(), mode.public_bus())
         .await

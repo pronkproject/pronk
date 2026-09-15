@@ -834,7 +834,7 @@ mod tests {
     };
     use crate::manager::ManagerActor;
     use crate::preparation::PreparedCastDevice;
-    use crate::test_support::UnreachableGrantProvider;
+    use crate::test_support::UnreachableKernelSessionProvider;
 
     fn device() -> DeviceInfo {
         DeviceInfo {
@@ -985,7 +985,8 @@ mod tests {
     #[tokio::test]
     async fn public_interface_lists_and_emits_revisioned_devices() {
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
-        let actor = ManagerActor::spawn(Vec::new(), Arc::new(UnreachableGrantProvider)).unwrap();
+        let actor =
+            ManagerActor::spawn(Vec::new(), Arc::new(UnreachableKernelSessionProvider)).unwrap();
         let server = Builder::unix_stream(server_stream)
             .server(Guid::generate())
             .unwrap()
@@ -1042,7 +1043,8 @@ mod tests {
     #[tokio::test]
     async fn cast_display_object_returns_bounded_info_and_removes_idempotently() {
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
-        let actor = ManagerActor::spawn(Vec::new(), Arc::new(UnreachableGrantProvider)).unwrap();
+        let actor =
+            ManagerActor::spawn(Vec::new(), Arc::new(UnreachableKernelSessionProvider)).unwrap();
         let display_id = CastDisplayId::generate().unwrap();
         let path = display_path(display_id).unwrap();
         let info = CastDisplayInfo {
@@ -1109,7 +1111,8 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_events_register_signal_and_remove_cast_display_objects() {
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
-        let actor = ManagerActor::spawn(Vec::new(), Arc::new(UnreachableGrantProvider)).unwrap();
+        let actor =
+            ManagerActor::spawn(Vec::new(), Arc::new(UnreachableKernelSessionProvider)).unwrap();
         let server = Builder::unix_stream(server_stream)
             .server(Guid::generate())
             .unwrap()

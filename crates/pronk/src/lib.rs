@@ -29,21 +29,26 @@ pub mod system_authorization;
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use pronk_core::grant::{GrantAcquisitionError, GrantLease, GrantProvider, GrantTarget};
+    use pronk_core::output::CastKmsOutput;
     use tokio_util::sync::CancellationToken;
+
+    use crate::kernel_session_provider::{
+        KernelSession, KernelSessionError, KernelSessionProvider,
+    };
 
     /// Unit-test dependency for paths that must never reach grant acquisition.
     #[derive(Debug)]
-    pub struct UnreachableGrantProvider;
+    pub struct UnreachableKernelSessionProvider;
 
     #[async_trait::async_trait]
-    impl GrantProvider for UnreachableGrantProvider {
+    impl KernelSessionProvider for UnreachableKernelSessionProvider {
         async fn acquire(
             &self,
-            _target: GrantTarget,
+            _output: &CastKmsOutput,
+            _audio_enabled: bool,
             _cancellation: CancellationToken,
-        ) -> Result<GrantLease, GrantAcquisitionError> {
-            panic!("test unexpectedly reached grant acquisition")
+        ) -> Result<KernelSession, KernelSessionError> {
+            panic!("test unexpectedly reached kernel-session acquisition")
         }
     }
 }

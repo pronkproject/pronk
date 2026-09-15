@@ -10,7 +10,6 @@ use pronk_backend_host::{
     MAX_INSTALLED_BACKENDS,
 };
 use pronk_backend_protocol::{DeviceAvailability as BackendAvailability, SessionOptions, Validate};
-use pronk_core::grant::GrantProvider;
 use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID, SYSTEM_PNP_IDS_PATH};
 use pronk_core::output::{
     discover_castkms_outputs, CastKmsOutput, CastKmsOutputId, OutputDiscoveryError,
@@ -33,6 +32,7 @@ use crate::display::{
     DisplaySetupHandle, DisplaySetupOperation, DisplaySetupOperationError, DisplaySetupStartError,
     MediaRuntime, PendingDisplaySelection,
 };
+use crate::kernel_session_provider::KernelSessionProvider;
 use crate::preparation::initial_preparation_offer;
 use crate::slot::{
     OutputReservation, OutputReservationError, OutputReservationRelease, OutputSlotPool,
@@ -129,7 +129,7 @@ struct ManagerEventSinks {
 pub struct ManagerHandle {
     commands: mpsc::Sender<ManagerCommand>,
     output_provider: Arc<dyn OutputInventoryProvider>,
-    grant_provider: Arc<dyn GrantProvider>,
+    kernel_session_provider: Arc<dyn KernelSessionProvider>,
     pnp_resolver: Arc<PnpIdResolver>,
     media_runtime: MediaRuntime,
 }
@@ -348,7 +348,7 @@ impl ManagerHandle {
             },
             caller,
             DisplaySetupDependencies::new(
-                Arc::clone(&self.grant_provider),
+                Arc::clone(&self.kernel_session_provider),
                 Arc::clone(&self.pnp_resolver),
                 self.media_runtime.clone(),
                 initial_preparation_offer(audio_enabled),
@@ -536,24 +536,24 @@ pub struct ManagerActor {
 impl ManagerActor {
     pub fn spawn(
         configs: Vec<BackendConfig>,
-        grant_provider: Arc<dyn GrantProvider>,
+        kernel_session_provider: Arc<dyn KernelSessionProvider>,
     ) -> Result<Self, ManagerStartError> {
         Self::spawn_with_media_runtime(
             configs,
-            grant_provider,
+            kernel_session_provider,
             MediaRuntime::for_user(Uid::effective().as_raw()),
         )
     }
 
     pub fn spawn_with_media_runtime(
         configs: Vec<BackendConfig>,
-        grant_provider: Arc<dyn GrantProvider>,
+        kernel_session_provider: Arc<dyn KernelSessionProvider>,
         media_runtime: MediaRuntime,
     ) -> Result<Self, ManagerStartError> {
         Self::spawn_with_output_provider_and_media_runtime(
             configs,
             Arc::new(SystemOutputInventoryProvider),
-            grant_provider,
+            kernel_session_provider,
             media_runtime,
         )
     }
@@ -561,12 +561,12 @@ impl ManagerActor {
     pub fn spawn_with_output_provider(
         configs: Vec<BackendConfig>,
         output_provider: Arc<dyn OutputInventoryProvider>,
-        grant_provider: Arc<dyn GrantProvider>,
+        kernel_session_provider: Arc<dyn KernelSessionProvider>,
     ) -> Result<Self, ManagerStartError> {
         Self::spawn_with_output_provider_and_media_runtime(
             configs,
             output_provider,
-            grant_provider,
+            kernel_session_provider,
             MediaRuntime::for_user(Uid::effective().as_raw()),
         )
     }
@@ -574,7 +574,7 @@ impl ManagerActor {
     pub fn spawn_with_output_provider_and_media_runtime(
         configs: Vec<BackendConfig>,
         output_provider: Arc<dyn OutputInventoryProvider>,
-        grant_provider: Arc<dyn GrantProvider>,
+        kernel_session_provider: Arc<dyn KernelSessionProvider>,
         media_runtime: MediaRuntime,
     ) -> Result<Self, ManagerStartError> {
         let pnp_resolver =
@@ -583,7 +583,7 @@ impl ManagerActor {
         Self::spawn_with_providers_and_media_runtime(
             configs,
             output_provider,
-            grant_provider,
+            kernel_session_provider,
             Arc::new(pnp_resolver),
             media_runtime,
         )
@@ -592,13 +592,13 @@ impl ManagerActor {
     pub fn spawn_with_providers(
         configs: Vec<BackendConfig>,
         output_provider: Arc<dyn OutputInventoryProvider>,
-        grant_provider: Arc<dyn GrantProvider>,
+        kernel_session_provider: Arc<dyn KernelSessionProvider>,
         pnp_resolver: Arc<PnpIdResolver>,
     ) -> Result<Self, ManagerStartError> {
         Self::spawn_with_providers_and_media_runtime(
             configs,
             output_provider,
-            grant_provider,
+            kernel_session_provider,
             pnp_resolver,
             MediaRuntime::for_user(Uid::effective().as_raw()),
         )
@@ -607,7 +607,7 @@ impl ManagerActor {
     pub fn spawn_with_providers_and_media_runtime(
         configs: Vec<BackendConfig>,
         output_provider: Arc<dyn OutputInventoryProvider>,
-        grant_provider: Arc<dyn GrantProvider>,
+        kernel_session_provider: Arc<dyn KernelSessionProvider>,
         pnp_resolver: Arc<PnpIdResolver>,
         media_runtime: MediaRuntime,
     ) -> Result<Self, ManagerStartError> {
@@ -653,7 +653,7 @@ impl ManagerActor {
         let handle = ManagerHandle {
             commands: command_tx,
             output_provider,
-            grant_provider,
+            kernel_session_provider,
             pnp_resolver,
             media_runtime,
         };
@@ -2079,7 +2079,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::test_support::UnreachableGrantProvider;
+    use crate::test_support::UnreachableKernelSessionProvider;
 
     fn backend_device(backend_id: &str, device_id: &str, name: &str) -> BackendDevice {
         BackendDevice {
@@ -2464,7 +2464,8 @@ mod tests {
 
     #[tokio::test]
     async fn manager_with_no_backends_lists_and_stops_cleanly() {
-        let actor = ManagerActor::spawn(Vec::new(), Arc::new(UnreachableGrantProvider)).unwrap();
+        let actor =
+            ManagerActor::spawn(Vec::new(), Arc::new(UnreachableKernelSessionProvider)).unwrap();
         assert_eq!(
             actor.handle().list_devices().await.unwrap(),
             DeviceSnapshot {
@@ -2493,7 +2494,7 @@ mod tests {
         let actor = ManagerActor::spawn_with_output_provider(
             Vec::new(),
             Arc::new(CountingOutputProvider(Arc::clone(&calls))),
-            Arc::new(UnreachableGrantProvider),
+            Arc::new(UnreachableKernelSessionProvider),
         )
         .unwrap();
         let selection = DeviceSelection {

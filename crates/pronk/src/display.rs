@@ -13,8 +13,6 @@ use nix::{libc, unistd::Uid};
 use pronk_backend_host::{BackendSessionError, BackendSessionHandle};
 use pronk_backend_protocol::{PreparationRequest, StopReason, Validate};
 use pronk_core::castkms::{CastKmsClient, CastKmsError};
-use pronk_core::grant::{GrantAcquisitionError, GrantProvider};
-use pronk_core::grant::{GrantProfile, GrantTarget};
 use pronk_core::identity::PnpIdResolver;
 use pronk_core::output::CastKmsOutputId;
 use pronk_core::session::PinnedCallerProcess;
@@ -34,6 +32,7 @@ use crate::device_session::{BackendDeviceSession, BackendDeviceSessionEvents};
 use crate::device_session_port::DeviceSessionEventPort;
 use crate::display_state::{DisplayGrantState, DisplayRuntimeState};
 use crate::kernel_display_port::KernelDisplayPort;
+use crate::kernel_session_provider::{KernelSessionError, KernelSessionProvider};
 use crate::manager::{
     DeviceSessionResolver, ManagerHandle, ReserveDisplaySlotError, ReservedCastDisplaySlot,
     ResolveDeviceError,
@@ -71,7 +70,7 @@ impl MediaRuntime {
 }
 
 pub(crate) struct DisplaySetupDependencies {
-    grant_provider: Arc<dyn GrantProvider>,
+    kernel_session_provider: Arc<dyn KernelSessionProvider>,
     pnp_resolver: Arc<PnpIdResolver>,
     media_runtime: MediaRuntime,
     offer: PreparationRequest,
@@ -80,14 +79,14 @@ pub(crate) struct DisplaySetupDependencies {
 
 impl DisplaySetupDependencies {
     pub(crate) fn new(
-        grant_provider: Arc<dyn GrantProvider>,
+        kernel_session_provider: Arc<dyn KernelSessionProvider>,
         pnp_resolver: Arc<PnpIdResolver>,
         media_runtime: MediaRuntime,
         offer: PreparationRequest,
         audio_enabled: bool,
     ) -> Self {
         Self {
-            grant_provider,
+            kernel_session_provider,
             pnp_resolver,
             media_runtime,
             offer,
@@ -281,7 +280,7 @@ impl DisplaySetupOperation {
     pub fn spawn(
         slot: ReservedCastDisplaySlot,
         caller: PinnedCallerProcess,
-        grant_provider: Arc<dyn GrantProvider>,
+        kernel_session_provider: Arc<dyn KernelSessionProvider>,
         pnp_resolver: Arc<PnpIdResolver>,
         media_runtime: MediaRuntime,
         offer: PreparationRequest,
@@ -291,7 +290,7 @@ impl DisplaySetupOperation {
             DisplayReservation::Ready(Box::new(slot)),
             DisplaySetupCaller::from(caller),
             DisplaySetupDependencies::new(
-                grant_provider,
+                kernel_session_provider,
                 pnp_resolver,
                 media_runtime,
                 offer,
@@ -340,7 +339,7 @@ impl DisplaySetupOperation {
                 caller,
                 DisplaySetupContext {
                     display_id,
-                    grant_provider: dependencies.grant_provider,
+                    kernel_session_provider: dependencies.kernel_session_provider,
                     pnp_resolver: dependencies.pnp_resolver,
                     media_runtime: dependencies.media_runtime,
                     offer: dependencies.offer,
@@ -557,7 +556,7 @@ impl Drop for AddedCastDisplay {
 
 struct DisplaySetupContext {
     display_id: CastDisplayId,
-    grant_provider: Arc<dyn GrantProvider>,
+    kernel_session_provider: Arc<dyn KernelSessionProvider>,
     pnp_resolver: Arc<PnpIdResolver>,
     media_runtime: MediaRuntime,
     offer: PreparationRequest,
@@ -656,26 +655,13 @@ async fn run_display_setup_inner(
     }
     let device = slot.device().clone();
     let output = slot.output().clone();
-    let grant_profile = if context.audio_enabled {
-        GrantProfile::DisplayCecAudioV1
-    } else {
-        GrantProfile::DisplayCecV1
-    };
-    let lease = context
-        .grant_provider
-        .acquire(
-            GrantTarget {
-                device_major: output.device_major,
-                device_minor: output.device_minor,
-                connector_id: output.connector_id,
-                profile: grant_profile,
-            },
-            context.cancellation.clone(),
-        )
+    let kernel_session = context
+        .kernel_session_provider
+        .acquire(&output, context.audio_enabled, context.cancellation.clone())
         .await
         .map_err(|error| match error {
-            GrantAcquisitionError::Cancelled => DisplaySetupError::Cancelled,
-            error => DisplaySetupError::Grant(error),
+            KernelSessionError::Cancelled => DisplaySetupError::Cancelled,
+            error => DisplaySetupError::KernelSession(error),
         })?;
     if context.cancellation.is_cancelled() {
         return Err(DisplaySetupError::Cancelled);
@@ -689,7 +675,16 @@ async fn run_display_setup_inner(
             result = &mut revalidation => result.map_err(DisplaySetupError::Device)?,
         }
     }
-    let client = CastKmsClient::new(lease).map_err(DisplaySetupError::GrantClient)?;
+    let client = match kernel_session {
+        crate::kernel_session_provider::KernelSession::Legacy(lease) => {
+            CastKmsClient::new(lease).map_err(DisplaySetupError::GrantClient)?
+        }
+        crate::kernel_session_provider::KernelSession::Brokered(_) => {
+            return Err(DisplaySetupError::Monitor(
+                "brokered display setup is not connected to its runtime adapter".into(),
+            ));
+        }
+    };
 
     set_status(
         &context.status,
@@ -1089,8 +1084,8 @@ pub enum DisplaySetupError {
     Reserve(#[source] ReserveDisplaySlotError),
     #[error("selected Device changed during display setup: {0}")]
     Device(#[source] ResolveDeviceError),
-    #[error("acquire connector grant: {0}")]
-    Grant(#[source] GrantAcquisitionError),
+    #[error("acquire kernel display session: {0}")]
+    KernelSession(#[source] KernelSessionError),
     #[error("open verified CastKMS grant client: {0}")]
     GrantClient(#[source] CastKmsError),
     #[error("backend display session failed: {0}")]
@@ -1119,7 +1114,9 @@ impl DisplaySetupError {
             Self::Reserve(ReserveDisplaySlotError::Output(
                 OutputReservationError::DeviceAlreadyClaimed { .. },
             )) => OperationErrorCode::DeviceAlreadyAdded,
-            Self::Grant(_) | Self::GrantClient(_) => OperationErrorCode::AuthorizationFailed,
+            Self::KernelSession(_) | Self::GrantClient(_) => {
+                OperationErrorCode::AuthorizationFailed
+            }
             Self::Backend(error) => backend_session_error_code(error),
             Self::Prepare(error) => prepare_device_error_code(error),
             Self::Attach(_) => OperationErrorCode::AttachmentFailed,
@@ -1210,12 +1207,13 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use pronk_core::grant::GrantLease;
+    use pronk_core::grant::{GrantAcquisitionError, GrantLease, GrantProvider, GrantTarget};
     use pronk_core::identity::DEFAULT_SYNTHESIZER_PNP_ID;
     use pronk_core::output::{CastKmsOutput, CastKmsOutputId, OutputConnection};
     use pronk_dbus::DeviceAvailability;
 
     use super::*;
+    use crate::kernel_session_provider::LegacyKernelSessionProvider;
     use crate::manager::{
         test_reserved_display_slot, ManagerActor, OutputInventoryProvider,
         OutputInventoryProviderError,
@@ -1270,7 +1268,9 @@ mod tests {
             PnpIdResolver::from_database("GGL\tGoogle Inc.\n", &[], DEFAULT_SYNTHESIZER_PNP_ID)
                 .unwrap(),
         );
-        let provider: Arc<dyn GrantProvider> = Arc::new(UnreachableGrantProvider);
+        let provider: Arc<dyn KernelSessionProvider> = Arc::new(LegacyKernelSessionProvider::new(
+            Arc::new(UnreachableGrantProvider),
+        ));
         let manager = ManagerActor::spawn_with_providers(
             Vec::new(),
             Arc::new(UnreachableOutputProvider),
@@ -1352,10 +1352,12 @@ mod tests {
         let (slot, mut releases) = test_reserved_display_slot(device, output);
         let entered = Arc::new(tokio::sync::Notify::new());
         let observed_cancellation = Arc::new(AtomicBool::new(false));
-        let provider = Arc::new(CancellationGrantProvider {
+        let grants = Arc::new(CancellationGrantProvider {
             entered: Arc::clone(&entered),
             observed_cancellation: Arc::clone(&observed_cancellation),
         });
+        let provider: Arc<dyn KernelSessionProvider> =
+            Arc::new(LegacyKernelSessionProvider::new(grants));
         let resolver = Arc::new(
             PnpIdResolver::from_database("GGL\tGoogle Inc.\n", &[], DEFAULT_SYNTHESIZER_PNP_ID)
                 .unwrap(),
