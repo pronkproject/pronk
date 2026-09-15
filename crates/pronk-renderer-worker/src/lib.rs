@@ -10,6 +10,7 @@ mod scene_job;
 mod scene_pool;
 mod scene_profile;
 mod scene_reads;
+mod scene_transaction;
 mod source;
 mod submission;
 
@@ -30,15 +31,14 @@ pub use scene::{
     ComposedFrame, RejectedScene, RejectedSceneFrames, SceneComposer, SceneCompositionError,
     SceneFrames, SceneInputs, SceneStorageProfile,
 };
-pub use scene_job::{
-    QualifiedSceneJob, QualifySceneJobError, ReadyScene, ReleaseSceneJobError, ReleasedSceneReads,
-};
+pub use scene_job::{QualifiedSceneJob, QualifySceneJobError};
 pub use scene_pool::{
     RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool, MAX_SCENE_LAYERS,
 };
-pub use scene_reads::{
-    PrepareSceneReadsError, PreparedSceneReads, SceneSource, SubmitSceneReadsError,
-    SubmittedSceneReads,
+pub use scene_transaction::{
+    CancelSceneJobError, CompositableScene, PrepareSceneJobError, PreparedSceneJob,
+    ReleaseSubmittedSceneError, ReleasedSceneJob, SceneWaitError, SubmitSceneJobError,
+    SubmittedSceneJob,
 };
 pub use source::{ImportError, ImportedSource, SourceAlpha};
 pub use submission::{

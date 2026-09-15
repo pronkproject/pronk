@@ -13,7 +13,7 @@ use crate::{PrivateBuffer, PrivateFrame, SceneComposer, SceneFrames, SourceAlpha
 
 /// One imported scene layer before it is bound to private staging storage.
 #[must_use = "prepare the source for its scene or discard it without pixel access"]
-pub struct SceneSource {
+pub(crate) struct SceneSource {
     profile: Arc<()>,
     image: SourceImage,
     alpha: SourceAlpha,
@@ -57,7 +57,7 @@ struct PreparedRead {
 
 /// A complete set of checked layer reads that has not accessed source pixels.
 #[must_use = "submit the scene reads or recover every unused owner"]
-pub struct PreparedSceneReads {
+pub(crate) struct PreparedSceneReads {
     profile: Arc<()>,
     reads: Vec<PreparedRead>,
 }
@@ -157,7 +157,7 @@ impl PreparedSceneReads {
 }
 
 /// Inputs rejected before any source pixel access.
-pub struct PrepareSceneReadsError {
+pub(crate) struct PrepareSceneReadsError {
     sources: Vec<SceneSource>,
     destinations: Vec<PrivateBuffer>,
     cause: io::Error,
@@ -187,6 +187,7 @@ impl std::error::Error for PrepareSceneReadsError {
 }
 
 impl PrepareSceneReadsError {
+    #[cfg(test)]
     pub fn cause(&self) -> &io::Error {
         &self.cause
     }
@@ -198,7 +199,7 @@ impl PrepareSceneReadsError {
 
 /// Accepted reads represented by one native completion record.
 #[must_use = "release the aggregate completion before waiting for scene pixels"]
-pub struct SubmittedSceneReads {
+pub(crate) struct SubmittedSceneReads {
     profile: Arc<()>,
     identities: Vec<(std::sync::Arc<BufferIdentity>, SourceAlpha)>,
     reads: SubmittedReads,
@@ -209,10 +210,12 @@ impl SubmittedSceneReads {
         self.reads.completion()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.reads.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.reads.is_empty()
     }
@@ -241,7 +244,7 @@ impl SubmittedSceneReads {
 /// Terminal failure while submitting a complete set of source reads.
 #[derive(Debug, thiserror::Error)]
 #[error("submit complete scene reads: {0}")]
-pub struct SubmitSceneReadsError(#[source] io::Error);
+pub(crate) struct SubmitSceneReadsError(#[source] io::Error);
 
 impl SubmitSceneReadsError {
     pub fn into_error(self) -> io::Error {

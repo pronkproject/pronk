@@ -3,9 +3,10 @@
 use std::io;
 use std::os::fd::AsFd;
 
+use crate::scene_reads::{SceneSource, SubmittedSceneReads};
 use crate::{
-    ComposedFrame, SceneComposer, SceneCompositionError, SceneFrames, SceneInputs, SceneSource,
-    SceneStorageProfile, SubmittedSceneReads,
+    ComposedFrame, SceneComposer, SceneCompositionError, SceneFrames, SceneInputs,
+    SceneStorageProfile,
 };
 use castkms_renderer::{SceneJob, SourceReleaseError};
 
@@ -27,16 +28,12 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
         }
     }
 
-    pub fn job(&self) -> &SceneJob<'job, 'renderer, F> {
-        &self.job
-    }
-
-    pub fn composer(&self) -> &SceneComposer {
+    pub(crate) fn composer(&self) -> &SceneComposer {
         &self.composer
     }
 
     /// Import every layer under this job's nominal scene identity.
-    pub fn import_sources(&self) -> io::Result<Vec<SceneSource>> {
+    pub(crate) fn import_sources(&self) -> io::Result<Vec<SceneSource>> {
         let mut sources = Vec::new();
         sources
             .try_reserve_exact(self.job.layers().len())
@@ -59,7 +56,7 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
     }
 
     /// Transfer the bound aggregate completion and close source admission.
-    pub fn release_submitted(
+    pub(crate) fn release_submitted(
         self,
         reads: SubmittedSceneReads,
     ) -> Result<ReleasedSceneReads, Box<ReleaseSceneJobError<'job, 'renderer, F>>> {
@@ -129,17 +126,13 @@ impl<J> std::error::Error for QualifySceneJobError<J> {
 }
 
 /// Failed aggregate release retaining both the kernel job and native reads.
-pub struct ReleaseSceneJobError<'job, 'renderer, F: AsFd> {
+pub(crate) struct ReleaseSceneJobError<'job, 'renderer, F: AsFd> {
     scene: QualifiedSceneJob<'job, 'renderer, F>,
     reads: SubmittedSceneReads,
     cause: io::Error,
 }
 
 impl<'job, 'renderer, F: AsFd> ReleaseSceneJobError<'job, 'renderer, F> {
-    pub fn cause(&self) -> &io::Error {
-        &self.cause
-    }
-
     pub fn into_parts(
         self,
     ) -> (
@@ -174,7 +167,7 @@ impl<F: AsFd> std::error::Error for ReleaseSceneJobError<'_, '_, F> {
 
 /// Native reads accepted by CastKMS with no remaining source claim.
 #[must_use = "wait for valid private pixels before composing the scene"]
-pub struct ReleasedSceneReads {
+pub(crate) struct ReleasedSceneReads {
     reads: SubmittedSceneReads,
     content_serial: std::num::NonZeroU64,
     composer: SceneComposer,
@@ -192,17 +185,13 @@ impl ReleasedSceneReads {
 
 /// Private source pixels paired with the native program for their kernel job.
 #[must_use = "compose the released scene or retire its private buffers"]
-pub struct ReadyScene {
+pub(crate) struct ReadyScene {
     composer: SceneComposer,
     frames: SceneFrames,
 }
 
 impl ReadyScene {
-    pub fn composer(&self) -> &SceneComposer {
-        &self.composer
-    }
-
-    pub fn into_parts(self) -> (SceneComposer, SceneFrames) {
+    pub(crate) fn into_parts(self) -> (SceneComposer, SceneFrames) {
         (self.composer, self.frames)
     }
 

@@ -693,6 +693,23 @@ protocol's opaque black. Submission failure is terminal for that scene
 transaction; cleanup retires any accepted native work without pretending that
 a normal aggregate release remains possible.
 
+The production-facing transaction starts from a complete `ScenePool`
+reservation. `QualifiedSceneJob::prepare` imports sources only while that
+independently available slot is present. Before submission, cancellation
+returns every private buffer. After submission, the types carry the reserved
+final image through kernel release and source completion; only the resulting
+`CompositableScene` exposes composition. A terminal native submission failure
+keeps the source job opaque and returns only the final image, which no source
+read or composition has touched. The renderer endpoint must be abandoned after
+that result.
+
+Source imports, aggregate read preparation and the intermediate release owner
+are implementation details of that transaction. Public callers cannot import
+one job repeatedly, submit a second read set or wait for pixels through a
+lower-level path. They may qualify a job, release it without access, or consume
+it exactly once into `PreparedSceneJob`. Qualification also closes public
+access to the raw job descriptors and the per-job composer.
+
 The version-6 raw scene records are bound, but no production code dequeues or
 parses them into a GPU profile yet. `castkms-renderer` does own and validate the
 complete packet under one kernel job, including all installed descriptors,
