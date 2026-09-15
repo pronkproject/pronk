@@ -189,15 +189,15 @@ impl TransportOutput {
     ) -> Result<VideoFrame, TransportPublishError> {
         let slot = match self.validate_publication(&output) {
             Ok(slot) => slot,
-            Err(error) => return Err(TransportPublishError { output, error }),
+            Err(error) => return Err(TransportPublishError::new(output, error)),
         };
         let sequence = match self.next_sequence {
             Some(sequence) => sequence,
             None => {
-                return Err(TransportPublishError {
+                return Err(TransportPublishError::new(
                     output,
-                    error: invalid("renderer publication sequence exhausted"),
-                });
+                    invalid("renderer publication sequence exhausted"),
+                ));
             }
         };
         self.slots[slot].available = false;
@@ -373,13 +373,20 @@ impl PublishError {
 }
 
 struct TransportPublishError {
-    output: PublishedOutput,
+    output: Box<PublishedOutput>,
     error: io::Error,
 }
 
 impl TransportPublishError {
+    fn new(output: PublishedOutput, error: io::Error) -> Self {
+        Self {
+            output: Box::new(output),
+            error,
+        }
+    }
+
     fn into_parts(self) -> (PublishedOutput, io::Error) {
-        (self.output, self.error)
+        (*self.output, self.error)
     }
 }
 
