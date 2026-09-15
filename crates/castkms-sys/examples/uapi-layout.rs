@@ -44,6 +44,19 @@ fn main() {
         DrmCastkmsRendererCommitTakeover,
         "drm_castkms_renderer_commit_takeover"
     );
+    layout!(
+        DrmCastkmsRendererSourcePlane,
+        "drm_castkms_renderer_source_plane"
+    );
+    layout!(DrmCastkmsRendererSource, "drm_castkms_renderer_source");
+    layout!(
+        DrmCastkmsRendererDequeueSource,
+        "drm_castkms_renderer_dequeue_source"
+    );
+    layout!(
+        DrmCastkmsRendererReleaseSource,
+        "drm_castkms_renderer_release_source"
+    );
     layout!(DrmCastkmsCaptureFormat, "drm_castkms_capture_format");
     layout!(DrmCastkmsCaptureQueryCaps, "drm_castkms_capture_query_caps");
     layout!(DrmCastkmsCaptureStart, "drm_castkms_capture_start");
