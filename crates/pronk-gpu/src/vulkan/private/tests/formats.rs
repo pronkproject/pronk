@@ -46,21 +46,42 @@ fn rgba_sources_preserve_channels_through_private_bgra_output() {
 
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
-fn byte_copies_reject_different_packed_channel_orders() {
+fn byte_copies_reject_different_packed_channel_layouts() {
     let (device, modifier) = device();
+    let formats = [
+        PackedFormat::Bgra8,
+        PackedFormat::Rgba8,
+        PackedFormat::Bgr10A2,
+        PackedFormat::Rgb10A2,
+    ];
+    for source in formats {
+        for destination in formats.into_iter().filter(|format| *format != source) {
+            reject_mismatched_byte_copies(&device, modifier, source, destination);
+        }
+    }
+}
+
+fn reject_mismatched_byte_copies(
+    device: &Device,
+    modifier: u64,
+    source: PackedFormat,
+    destination: PackedFormat,
+) {
     let whole = Extent::new(16, 16).unwrap();
     let crop = SourceRect::new(whole, [0, 0], whole).unwrap();
     for operation in 0..4 {
         let original = device
-            .allocate_with_format(PackedFormat::Rgba8, nz(16), nz(16), modifier)
+            .allocate_with_format(source, nz(16), nz(16), modifier)
             .unwrap()
             .clear_waited([17, 85, 204])
             .unwrap();
-        let output = device.allocate(nz(16), nz(16), modifier).unwrap();
+        let output = device
+            .allocate_with_format(destination, nz(16), nz(16), modifier)
+            .unwrap();
         let error = if operation == 0 {
             output.copy_from_waited(original.0).err().unwrap()
         } else {
-            // SAFETY: An unchanged native allocation with exact RGBA metadata
+            // SAFETY: An unchanged native allocation with exact packed metadata
             // and completed producer release is retained through rejection.
             let source = unsafe {
                 device.import_source(

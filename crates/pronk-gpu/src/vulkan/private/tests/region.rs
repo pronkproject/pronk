@@ -21,14 +21,27 @@ fn cropped_rgba_reads_convert_channels_while_scaling_and_padding() {
     exercise_region_reads(PackedFormat::Rgba8);
 }
 
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn cropped_ten_bit_reads_preserve_placement_alpha_and_background() {
+    for format in [PackedFormat::Bgr10A2, PackedFormat::Rgb10A2] {
+        exercise_region_reads(format);
+    }
+}
+
 fn exercise_region_reads(format: PackedFormat) {
     let (producer, modifier) = device();
     let (worker, _) = device();
     assert_eq!(producer.identity(), worker.identity());
     let source_size = extent(32, 24);
     let output_size = extent(33, 35);
-    let inner = [231, 57, 19, 97];
-    let outer = [30, 90, 180];
+    let (inner, outer) = match format {
+        // Thirds are exactly representable in both eight- and ten-bit storage,
+        // including the two-bit alpha channel. Geometry has no quantization
+        // tolerance that could conceal a channel-order or placement error.
+        PackedFormat::Bgr10A2 | PackedFormat::Rgb10A2 => ([255, 0, 85, 85], [0, 85, 170]),
+        _ => ([231, 57, 19, 97], [30, 90, 180]),
+    };
     let background = [17, 85, 204];
     let mut private = worker.allocate_private(nz(33), nz(35)).unwrap();
 

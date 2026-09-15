@@ -361,8 +361,11 @@ Ten-bit native tests generate all 1024 color values in both packed orders,
 check the original words, then overwrite the originals after reading into
 private storage. They require exact ten-bit round trips on the selected GPU
 and separately check conversion into eight-bit output against the permitted
-neighboring quantization values. That qualifies the tested native path's
-precision; it does not qualify HDR processing or ten-bit media output.
+neighboring quantization values. Cropped ten-bit cases use colors and alpha
+representable at both depths, so placement, scaling and background comparisons
+need no quantization tolerance. Byte-copy rejection covers every pair of
+different packed layouts, in both directions. That qualifies the tested native
+path's precision; it does not qualify HDR processing or ten-bit media output.
 `clear_rgba16_waited` supplies normalized sixteen-bit inputs to native clears
 without adding CPU pixel writes. Such inputs are quantized to the allocation's
 channel depth; Vulkan need not choose the nearest adjacent integer for every
