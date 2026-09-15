@@ -4,6 +4,9 @@
 //! Consumers finish CPU reads and enroll native reads before returning buffers.
 //! The capture actor snapshots native reuse dependencies before the next write.
 
+mod video;
+pub use video::{State, Video};
+
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::AsFd;

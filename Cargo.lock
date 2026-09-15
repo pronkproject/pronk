@@ -1415,6 +1415,8 @@ version = "0.1.0"
 dependencies = [
  "pronk-capture",
  "pronk-pipewire",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
