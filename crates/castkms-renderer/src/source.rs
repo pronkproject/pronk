@@ -138,12 +138,15 @@ impl<F: AsFd> SourceJob<'_, '_, F> {
         self.release(RENDERER_RELEASE_CPU_DONE, None)
     }
 
-    /// Transfer a native sync file covering every submitted source read.
+    /// Transfer completion for every submitted source read.
+    ///
+    /// `None` means the native work was already complete when its sync file was
+    /// exported. It does not mean that no source access occurred.
     pub fn release_submitted(
         self,
-        completion: BorrowedFd<'_>,
+        completion: Option<BorrowedFd<'_>>,
     ) -> Result<(), SourceReleaseError<Self>> {
-        self.release(RENDERER_RELEASE_SUBMITTED, Some(completion))
+        self.release(RENDERER_RELEASE_SUBMITTED, completion)
     }
 
     fn release(
@@ -588,9 +591,28 @@ mod tests {
             producer: source.producer,
         };
         let completion = std::fs::File::open("/dev/null").unwrap();
-        let error = job.release_submitted(completion.as_fd()).unwrap_err();
+        let error = job.release_submitted(Some(completion.as_fd())).unwrap_err();
         assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
         assert!(fcntl(completion.as_raw_fd(), FcntlArg::F_GETFD).is_ok());
+        assert_eq!(error.into_job().content_serial().get(), 14);
+    }
+
+    #[test]
+    fn completed_submission_uses_the_native_sync_file_sentinel() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut renderer = Renderer { fd: file };
+        let mut active = active_renderer(&mut renderer);
+        let source = validate_source(source_result()).unwrap();
+        let job = SourceJob {
+            renderer: &mut active,
+            id: source.id,
+            content_serial: source.content_serial,
+            image: source.image,
+            geometry: source.geometry,
+            producer: source.producer,
+        };
+        let error = job.release_submitted(None).unwrap_err();
+        assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
         assert_eq!(error.into_job().content_serial().get(), 14);
     }
 
