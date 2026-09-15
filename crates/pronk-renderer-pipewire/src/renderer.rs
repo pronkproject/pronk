@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use castkms_renderer::Renderer;
 use pronk_gpu::vulkan::Device;
-use pronk_pipewire::{PipeWireRemote, VideoNodeIdentity, VideoSourceConfig};
+use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity, VideoSourceConfig};
 use pronk_renderer_worker::{OutputPool, PrivatePool, PrivateProbe, SourceReader};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
@@ -41,6 +41,7 @@ pub struct ActiveRendererStream<F> {
 
 struct StreamHandle<F> {
     identity: VideoNodeIdentity,
+    layout: VideoBufferLayout,
     state: watch::Receiver<RendererStreamState>,
     stop: CancellationToken,
     task: Option<JoinHandle<(Option<F>, io::Result<()>)>>,
@@ -85,9 +86,10 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             armed: true,
         };
         match response.await {
-            Ok(Started::Ready(identity)) => Ok(Self {
+            Ok(Started::Ready { identity, layout }) => Ok(Self {
                 handle: Some(StreamHandle {
                     identity,
+                    layout,
                     state: receive,
                     stop,
                     task: Some(starting.take_task()),
@@ -105,6 +107,10 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
 
     pub fn subscribe(&self) -> watch::Receiver<RendererStreamState> {
         self.handle().state.clone()
+    }
+
+    pub fn layout(&self) -> VideoBufferLayout {
+        self.handle().layout
     }
 
     /// Activate delegated execution and consume the one-shot candidate handle.
@@ -182,6 +188,13 @@ impl<F: AsFd + Send + 'static> ActiveRendererStream<F> {
             .expect("live active renderer stream owns its handle")
             .state
             .clone()
+    }
+
+    pub fn layout(&self) -> VideoBufferLayout {
+        self.handle
+            .as_ref()
+            .expect("live active renderer stream owns its handle")
+            .layout
     }
 
     /// Stop transport and close the active renderer endpoint.
@@ -294,7 +307,10 @@ impl<F> Drop for Starting<F> {
 }
 
 enum Started {
-    Ready(VideoNodeIdentity),
+    Ready {
+        identity: VideoNodeIdentity,
+        layout: VideoBufferLayout,
+    },
     Failed,
 }
 
@@ -560,6 +576,7 @@ async fn prepare_generation<'renderer, F: AsFd>(
     )
     .await?;
     let registration = Registration::new(output)?;
+    let layout = registration.layout();
     let video = match Video::start(registration, config.pipewire, remote).await {
         Ok(video) => video,
         Err(error) => {
@@ -569,7 +586,7 @@ async fn prepare_generation<'renderer, F: AsFd>(
         }
     };
     let identity = video.identity().clone();
-    if started.send(Started::Ready(identity)).is_err() {
+    if started.send(Started::Ready { identity, layout }).is_err() {
         let failure = finish_candidate(
             video,
             probe,
@@ -758,6 +775,14 @@ mod tests {
         let (_, state) = watch::channel(RendererStreamState::Prepared);
         drop(StreamHandle {
             identity: identity(),
+            layout: VideoBufferLayout {
+                format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
+                width: NonZeroU32::new(1).unwrap(),
+                height: NonZeroU32::new(1).unwrap(),
+                pitch: NonZeroU32::new(4).unwrap(),
+                size: NonZeroU64::new(4).unwrap(),
+                storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
+            },
             state,
             stop: stop.clone(),
             task: Some(task),
