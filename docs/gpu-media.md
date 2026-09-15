@@ -154,7 +154,9 @@ not qualify an encoder or a PipeWire consumer.
 Images use dedicated device-local memory. Their immutable `ImageLayout` reports
 packed channel order, dimensions, modifier, plane offset, pitch and allocation
 size directly from Vulkan. `Device::allocate` selects BGRA storage;
-`allocate_with_format` explicitly selects `PackedFormat::Bgra8` or `Rgba8`.
+`allocate_with_format` explicitly selects `PackedFormat::Bgra8`, `Rgba8`,
+`Bgr10A2` or `Rgb10A2`. The ten-bit variants describe three ten-bit color
+channels and two alpha bits, not a color space or HDR transfer function.
 Each format/modifier tuple is queried independently, without substitution.
 Images retain their device and loader; exported DMA-BUFs retain backing storage
 after image destruction. No image is mapped for CPU access.
@@ -296,9 +298,10 @@ alpha is copied without blending or color-space conversion.
 The CastKMS worker uses this operation for the source protocol's integral crop,
 top-left destination and complete output dimensions. Its private pool matches
 the output, with opaque black outside the primary plane. The supported import
-profile is one XRGB8888 or XBGR8888 memory plane with an explicit compatible
-modifier. The worker does not infer support for scene properties absent from the
-source protocol. Admission still reserves private storage before claiming any source.
+profile is one XRGB8888, XBGR8888, XRGB2101010 or XBGR2101010 memory plane with
+an explicit compatible modifier. The worker does not infer support for scene
+properties absent from the source protocol. Admission still reserves private
+storage before claiming any source.
 
 Native tests close and collect a trusted source use before extracting private
 pixels, then overwrite the original before output conversion. They also check
@@ -327,6 +330,17 @@ packed formats, while private-image blits perform channel conversion. Neither
 the worker's XBGR import support nor the native alpha-preservation tests expand
 the worker's accepted blend policy; alpha-bearing DRM formats remain rejected.
 PipeWire output is still BGRx, independently of the source channel order.
+
+Ten-bit native tests generate all 1024 color values in both packed orders,
+check the original words, then overwrite the originals after reading into
+private storage. They require exact ten-bit round trips on the selected GPU
+and separately check conversion into eight-bit output against the permitted
+neighboring quantization values. That qualifies the tested native path's
+precision; it does not qualify HDR processing or ten-bit media output.
+`clear_rgba16_waited` supplies normalized sixteen-bit inputs to native clears
+without adding CPU pixel writes. Such inputs are quantized to the allocation's
+channel depth; Vulkan need not choose the nearest adjacent integer for every
+nonintegral value.
 
 ### Private shader blending
 
