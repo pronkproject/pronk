@@ -1472,6 +1472,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_sampling_cadence_is_independent_of_display_presentation() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        let mut transport = FakeTransport::default();
+        media.complete_preparation(capabilities()).unwrap();
+        let mut capture_target = target(session_id, 1);
+        capture_target.caps = "video/x-raw,format=BGRx,width=640,height=480,framerate=30/1".into();
+
+        media
+            .configure(
+                remote(),
+                vec![capture_target],
+                configuration(),
+                1,
+                &mut transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(configuration().mode.refresh_millihz, 60_000);
+        assert_eq!(
+            transport
+                .configuration
+                .as_ref()
+                .unwrap()
+                .framerate_numerator,
+            VIDEO_FRAME_RATE
+        );
+        media.stop_media(1, &mut transport).await.unwrap();
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn receiver_selected_h264_configures_the_fallback_encoder() {
         let session_id = "12345678-1234-1234-1234-123456789abc";
         let (output, receiver) = mpsc::channel(4);
