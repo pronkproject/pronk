@@ -122,7 +122,9 @@ pub const DMA_BUF_SYNC_WRITE: u64 = 2;
 pub const DMA_BUF_SYNC_START: u64 = 0;
 pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
-pub const RENDERER_VERSION: u32 = 2;
+pub const RENDERER_VERSION: u32 = 3;
+pub const RENDERER_PROBE_PRIVATE: u32 = 1;
+pub const RENDERER_PROBE_STARTUP_IMAGE: u32 = 2;
 pub const EXECUTION_HOST_V1: u32 = 1;
 
 /// Native-pointer layout used by the standard DRM `VERSION` ioctl.
@@ -397,6 +399,16 @@ pub struct DrmCastkmsRendererSnapshot {
 pub struct DrmCastkmsRendererGetSnapshot {
     pub candidate_id: u64,
     pub result: u64,
+    pub flags: u32,
+    pub reserved: [u32; 3],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererSubmitProbe {
+    pub candidate_id: u64,
+    pub completion_fd: i32,
+    pub source: u32,
     pub flags: u32,
     pub reserved: [u32; 3],
 }
@@ -785,6 +797,12 @@ nix::ioctl_write_ptr!(
     0x47,
     DrmCastkmsRendererGetSnapshot
 );
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_submit_probe,
+    b'd',
+    0x48,
+    DrmCastkmsRendererSubmitProbe
+);
 
 // DRM_COMMAND_BASE (0x40) + DRM_CASTKMS_CAPTURE_QUERY_CAPS (0x00).
 nix::ioctl_readwrite!(
@@ -958,7 +976,9 @@ mod tests {
 
     #[test]
     fn renderer_operations_match_the_uapi_layouts() {
-        assert_eq!(RENDERER_VERSION, 2);
+        assert_eq!(RENDERER_VERSION, 3);
+        assert_eq!(RENDERER_PROBE_PRIVATE, 1);
+        assert_eq!(RENDERER_PROBE_STARTUP_IMAGE, 2);
         assert_eq!(EXECUTION_HOST_V1, 1);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererQuery>(), 24);
         assert_eq!(std::mem::align_of::<DrmCastkmsRendererQuery>(), 8);
@@ -981,6 +1001,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererGetSnapshot>(), 32);
         assert_eq!(
             std::mem::offset_of!(DrmCastkmsRendererGetSnapshot, result),
+            8
+        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererSubmitProbe>(), 32);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererSubmitProbe, completion_fd),
             8
         );
     }

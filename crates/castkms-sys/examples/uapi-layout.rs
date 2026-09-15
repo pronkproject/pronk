@@ -36,6 +36,10 @@ fn main() {
         DrmCastkmsRendererGetSnapshot,
         "drm_castkms_renderer_get_snapshot"
     );
+    layout!(
+        DrmCastkmsRendererSubmitProbe,
+        "drm_castkms_renderer_submit_probe"
+    );
     layout!(DrmCastkmsCaptureFormat, "drm_castkms_capture_format");
     layout!(DrmCastkmsCaptureQueryCaps, "drm_castkms_capture_query_caps");
     layout!(DrmCastkmsCaptureStart, "drm_castkms_capture_start");
@@ -111,6 +115,11 @@ fn main() {
         DrmCastkmsRendererGetSnapshot,
         result,
         "drm_castkms_renderer_get_snapshot.result"
+    );
+    field!(
+        DrmCastkmsRendererSubmitProbe,
+        completion_fd,
+        "drm_castkms_renderer_submit_probe.completion_fd"
     );
     field!(
         DrmCastkmsCaptureQueryCaps,
