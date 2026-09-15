@@ -4,9 +4,9 @@ use std::io;
 use std::os::fd::AsFd;
 
 use castkms_renderer::SourceJob;
-use pronk_gpu::vulkan::{PendingPrivateRead, PrivateImage, SourceImage};
+use pronk_gpu::vulkan::{PendingPrivateRead, SourceImage};
 
-use crate::ImportedSource;
+use crate::{ImportedSource, PrivateBuffer};
 
 /// A fullscreen source paired with independently available private storage.
 ///
@@ -22,14 +22,14 @@ use crate::ImportedSource;
 pub struct PreparedSource<'job, 'renderer, F: AsFd> {
     job: SourceJob<'job, 'renderer, F>,
     image: SourceImage,
-    destination: PrivateImage,
+    destination: PrivateBuffer,
 }
 
 impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
     /// Validate the initial fullscreen profile before native source access.
     pub fn new(
         source: ImportedSource<'job, 'renderer, F>,
-        destination: PrivateImage,
+        destination: PrivateBuffer,
     ) -> Result<Self, SourcePreparationError<ImportedSource<'job, 'renderer, F>>> {
         if let Err(error) = validate(&source, &destination) {
             return Err(SourcePreparationError {
@@ -49,7 +49,7 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
     /// Cancel before submission and return the still-unused private image.
     pub fn release_without_access(
         self,
-    ) -> Result<PrivateImage, SourceReleaseError<PreparedSource<'job, 'renderer, F>>> {
+    ) -> Result<PrivateBuffer, SourceReleaseError<PreparedSource<'job, 'renderer, F>>> {
         let Self {
             job,
             image,
@@ -90,8 +90,16 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
             image,
             destination,
         } = self;
+        let PrivateBuffer {
+            identity,
+            image: destination,
+        } = destination;
         match image.submit_private_copy(destination) {
-            Ok(pending) => Ok(SubmittedSource { job, pending }),
+            Ok(pending) => Ok(SubmittedSource {
+                job,
+                identity,
+                pending,
+            }),
             Err(error) => Err(SourceSubmissionError {
                 _job: Box::new(job),
                 error,
@@ -103,7 +111,7 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
 /// Failed read preparation retaining both still-unused resources.
 pub struct SourcePreparationError<S> {
     source: Box<S>,
-    destination: PrivateImage,
+    destination: PrivateBuffer,
     error: io::Error,
 }
 
@@ -112,7 +120,7 @@ impl<S> SourcePreparationError<S> {
         &self.error
     }
 
-    pub fn into_parts(self) -> (S, PrivateImage, io::Error) {
+    pub fn into_parts(self) -> (S, PrivateBuffer, io::Error) {
         (*self.source, self.destination, self.error)
     }
 }
@@ -142,6 +150,7 @@ impl<J> SourceSubmissionError<J> {
 #[must_use = "release the submitted source completion to CastKMS"]
 pub struct SubmittedSource<'job, 'renderer, F: AsFd> {
     job: SourceJob<'job, 'renderer, F>,
+    identity: std::sync::Arc<()>,
     pending: PendingPrivateRead,
 }
 
@@ -150,13 +159,21 @@ impl<'job, 'renderer, F: AsFd> SubmittedSource<'job, 'renderer, F> {
     pub fn release(
         self,
     ) -> Result<ReleasedSource, SourceReleaseError<SubmittedSource<'job, 'renderer, F>>> {
-        let Self { job, pending } = self;
+        let Self {
+            job,
+            identity,
+            pending,
+        } = self;
         match job.release_submitted(pending.completion().map(AsFd::as_fd)) {
-            Ok(()) => Ok(ReleasedSource { pending }),
+            Ok(()) => Ok(ReleasedSource { identity, pending }),
             Err(error) => {
                 let (job, error) = error.into_parts();
                 Err(SourceReleaseError {
-                    source: Box::new(Self { job, pending }),
+                    source: Box::new(Self {
+                        job,
+                        identity,
+                        pending,
+                    }),
                     error,
                 })
             }
@@ -184,19 +201,23 @@ impl<S> SourceReleaseError<S> {
 /// Dropping or waiting for this owner may block while the GPU retires the read.
 #[must_use = "retire native work before using or discarding its private pixels"]
 pub struct ReleasedSource {
+    identity: std::sync::Arc<()>,
     pending: PendingPrivateRead,
 }
 
 impl ReleasedSource {
     /// Wait for valid pixels and recover the independently owned private image.
-    pub fn wait(self) -> io::Result<PrivateImage> {
-        self.pending.wait()
+    pub fn wait(self) -> io::Result<PrivateBuffer> {
+        let Self { identity, pending } = self;
+        pending
+            .wait()
+            .map(|image| PrivateBuffer { identity, image })
     }
 }
 
 fn validate<F: AsFd>(
     source: &ImportedSource<'_, '_, F>,
-    destination: &PrivateImage,
+    destination: &PrivateBuffer,
 ) -> io::Result<()> {
     let image = source.job.image().extent();
     let geometry = source.geometry;
