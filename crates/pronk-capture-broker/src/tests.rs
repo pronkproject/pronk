@@ -167,6 +167,7 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
         .acquire(target(), CancellationToken::new())
         .await
         .unwrap();
+    assert_eq!(session.id(), NonZeroU64::new(91).unwrap());
     fixture.monitor_peer.write_all(&[0x37]).unwrap();
     let mut monitor =
         std::os::unix::net::UnixStream::from(session.monitor().try_clone_to_owned().unwrap());
@@ -178,8 +179,8 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
     assert_eq!(monitor_byte, [0x37]);
     drop(monitor);
     fixture._peer.write_all(&[0x49]).unwrap();
-    let mut capture =
-        std::os::unix::net::UnixStream::from(session.capture().try_clone_to_owned().unwrap());
+    let capture_access = session.capture_access().unwrap();
+    let mut capture = std::os::unix::net::UnixStream::from(capture_access.capture);
     capture
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
