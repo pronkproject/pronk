@@ -4,13 +4,13 @@ mod active;
 mod output;
 mod registration;
 mod renderer;
+mod task;
+mod types;
 mod video;
 pub use output::{OutputEvent, OutputFrame, OutputSession, PublishError};
 pub use registration::Registration;
-pub use renderer::{
-    ActiveRendererStream, RendererStream, RendererStreamConfig, RendererStreamError,
-    RendererStreamState,
-};
+pub use renderer::{ActiveRendererStream, RendererStream, RendererStreamError};
+pub use types::{RendererStreamConfig, RendererStreamState};
 pub use video::{FramePublishError, StoppedVideo, Video, VideoEvent};
 
 use std::io;
