@@ -22,7 +22,7 @@ impl std::fmt::Debug for KernelSession {
                 .debug_tuple("Brokered")
                 .field(&session.id())
                 .finish(),
-            Self::Legacy(lease) => formatter.debug_tuple("Legacy").field(lease).finish(),
+            Self::Legacy(_) => formatter.debug_tuple("Legacy").finish(),
         }
     }
 }
@@ -37,6 +37,8 @@ pub enum KernelSessionError {
     Legacy(#[source] GrantAcquisitionError),
     #[error("CastKMS output has an invalid zero {0}")]
     InvalidOutput(&'static str),
+    #[error("brokered kernel display sessions do not yet provide audio")]
+    UnsupportedAudio,
 }
 
 #[async_trait]
@@ -54,9 +56,10 @@ impl KernelSessionProvider for BrokerProvider {
     async fn acquire(
         &self,
         output: &CastKmsOutput,
-        _audio_enabled: bool,
+        audio_enabled: bool,
         cancellation: CancellationToken,
     ) -> Result<KernelSession, KernelSessionError> {
+        validate_brokered_features(audio_enabled)?;
         let crtc_id = std::num::NonZeroU32::new(output.crtc_id)
             .ok_or(KernelSessionError::InvalidOutput("CRTC ID"))?;
         let connector_id = std::num::NonZeroU32::new(output.connector_id)
@@ -77,6 +80,14 @@ impl KernelSessionProvider for BrokerProvider {
             pronk_capture_broker::Error::Cancelled => KernelSessionError::Cancelled,
             error => KernelSessionError::Broker(error),
         })
+    }
+}
+
+fn validate_brokered_features(audio_enabled: bool) -> Result<(), KernelSessionError> {
+    if audio_enabled {
+        Err(KernelSessionError::UnsupportedAudio)
+    } else {
+        Ok(())
     }
 }
 
