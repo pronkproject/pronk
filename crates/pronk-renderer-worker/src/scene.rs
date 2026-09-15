@@ -847,13 +847,13 @@ mod tests {
         };
         let first = SceneComposer::new(&device, scene).unwrap();
         let second = SceneComposer::new(&device, scene).unwrap();
-        let mut pool = second
+        let mut foreign_pool = second
             .create_pool(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(1).unwrap())
             .unwrap();
         let SceneBuffers {
             destination,
             mut sources,
-        } = pool.take().unwrap().unwrap();
+        } = foreign_pool.take().unwrap().unwrap();
         let serial = NonZeroU64::new(73).unwrap();
         let mut source = sources
             .pop()
@@ -874,13 +874,13 @@ mod tests {
         let (destination, frames, _) = inputs.into_parts();
         let (_, frames) = frames.into_parts();
         let sources = frames.into_iter().map(|frame| frame.buffer).collect();
-        assert!(pool
+        assert!(foreign_pool
             .restore(SceneBuffers {
                 destination,
                 sources,
             })
             .is_ok());
-        assert_eq!(pool.available(), 1);
+        assert_eq!(foreign_pool.available(), 1);
 
         let moved_layers = [LayerRequirements {
             destination: DestinationRect {
@@ -912,13 +912,10 @@ mod tests {
         let composed = shared
             .compose_and_wait(SceneInputs::new(destination, frames, [0; 3]))
             .unwrap();
-        let (sources, destination) = composed.into_parts();
-        assert!(pool
-            .restore(SceneBuffers {
-                destination: destination.buffer,
-                sources,
-            })
-            .is_ok());
+        let rejected = foreign_pool.finish_composition(composed).err().unwrap();
+        let (sources, destination) = rejected.into_parts();
+        assert!(pool.restore_sources(sources).is_ok());
+        assert!(pool.restore_destination(destination.buffer).is_ok());
         assert_eq!(pool.available(), 1);
     }
 

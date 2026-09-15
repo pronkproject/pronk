@@ -34,7 +34,8 @@ pub use scene::{
 };
 pub use scene_job::{QualifiedSceneJob, QualifySceneJobError};
 pub use scene_pool::{
-    RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool, MAX_SCENE_LAYERS,
+    RejectedComposedFrame, RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool,
+    MAX_SCENE_LAYERS,
 };
 pub use scene_reader::{SceneAttempt, SceneAttemptError, SceneReader, SceneReaderStartError};
 pub use scene_transaction::{

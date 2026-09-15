@@ -10,7 +10,7 @@ use pronk_gpu::vulkan::Device;
 use crate::pool::{
     SceneBinding, SceneBufferRole, MAX_PRIVATE_BUFFERS, MAX_PRIVATE_POOL_BYTES, PRIVATE_PIXEL_BYTES,
 };
-use crate::{PrivateBuffer, PrivatePool, RejectedBuffer};
+use crate::{ComposedFrame, PrivateBuffer, PrivateFrame, PrivatePool, RejectedBuffer};
 
 /// Maximum source layers retained by one prepared scene profile.
 pub const MAX_SCENE_LAYERS: usize = 24;
@@ -147,6 +147,21 @@ impl ScenePool {
         Ok(())
     }
 
+    /// Restore every completed source stage and retain the final frame.
+    pub fn finish_composition(
+        &mut self,
+        composed: ComposedFrame,
+    ) -> Result<PrivateFrame, RejectedComposedFrame> {
+        let (sources, frame) = composed.into_parts();
+        if !self.accepts_sources(&sources) {
+            return Err(RejectedComposedFrame { sources, frame });
+        }
+        for (pool, source) in self.sources.iter_mut().zip(sources) {
+            pool.put_validated(source);
+        }
+        Ok(frame)
+    }
+
     /// Return a final private image after its output copy retires.
     pub fn restore_destination(
         &mut self,
@@ -185,6 +200,18 @@ impl RejectedSceneBuffers {
 /// Ordered source buffers rejected without partially changing their pools.
 pub struct RejectedSceneSources {
     sources: Vec<PrivateBuffer>,
+}
+
+/// Completed scene rejected without partially returning its source stages.
+pub struct RejectedComposedFrame {
+    sources: Vec<PrivateBuffer>,
+    frame: PrivateFrame,
+}
+
+impl RejectedComposedFrame {
+    pub fn into_parts(self) -> (Vec<PrivateBuffer>, PrivateFrame) {
+        (self.sources, self.frame)
+    }
 }
 
 impl RejectedSceneSources {

@@ -6,8 +6,8 @@ use std::os::fd::AsFd;
 use castkms_renderer::ActiveRenderer;
 
 use crate::{
-    PrivateBuffer, QualifiedSceneJob, RejectedBuffer, RejectedSceneSources, ReleasedSceneJob,
-    ScenePool, SceneStorageProfile,
+    ComposedFrame, PrivateBuffer, PrivateFrame, QualifiedSceneJob, RejectedBuffer,
+    RejectedComposedFrame, RejectedSceneSources, ReleasedSceneJob, ScenePool, SceneStorageProfile,
 };
 
 /// Active scene endpoint and the reusable private pool for its storage profile.
@@ -115,6 +115,13 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
         sources: Vec<PrivateBuffer>,
     ) -> Result<(), RejectedSceneSources> {
         self.private.restore_sources(sources)
+    }
+
+    pub fn finish_composition(
+        &mut self,
+        composed: ComposedFrame,
+    ) -> Result<PrivateFrame, RejectedComposedFrame> {
+        self.private.finish_composition(composed)
     }
 
     pub fn return_destination(&mut self, destination: PrivateBuffer) -> Result<(), RejectedBuffer> {

@@ -723,6 +723,10 @@ incarnation rather than a reason to reuse possibly affected stages.
 The released result provides one blocking `compose_and_wait` operation for a
 graphics worker while retaining distinct source-completion and composition
 errors for supervision.
+After that operation, `SceneReader::finish_composition` atomically returns all
+source stages to their profile pool and yields only the final private frame for
+output delivery. A profile mismatch returns every source and the final frame
+without changing any pool.
 
 The version-6 raw scene records are bound, but no production code dequeues or
 parses them into a GPU profile yet. `castkms-renderer` does own and validate the
