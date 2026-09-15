@@ -10,6 +10,7 @@ members = [
     "crates/pronk-backend-protocol",
     "crates/pronk-capture-broker",
     "crates/pronk-capture",
+    "crates/pronk-capture-pipewire",
     "crates/pronk-chromiacast",
     "crates/pronk-core",
     "crates/pronk-dbus",

@@ -1410,6 +1410,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pronk-capture-pipewire"
+version = "0.1.0"
+dependencies = [
+ "pronk-capture",
+ "pronk-pipewire",
+]
+
+[[package]]
 name = "pronk-castkms-live-test"
 version = "0.1.0"
 dependencies = [
