@@ -4,6 +4,7 @@
 //! independently writable linear XRGB8888 allocations for one authorization
 //! domain. Never recycle exported storage into a differently authorized session.
 
+pub mod allocation;
 mod native;
 mod worker;
 
