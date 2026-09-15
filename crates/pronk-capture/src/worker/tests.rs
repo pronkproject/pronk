@@ -128,6 +128,32 @@ async fn a_held_frame_prevents_another_write_to_its_slot() {
 }
 
 #[tokio::test]
+async fn exported_handles_identify_storage_without_retaining_a_pool_use() {
+    let (actor, shared) = fixture(2);
+    let handles = actor.buffers().to_vec();
+    let first = frame(&actor, &shared).await;
+    assert!(handles[0].contains_frame(&first));
+    assert!(!handles[1].contains_frame(&first));
+    assert_eq!(handles[0].stride(), nz(4));
+    let exported = handles[0].as_fd().try_clone_to_owned().unwrap();
+    drop(first);
+    let second = frame(&actor, &shared).await;
+    assert!(handles[0].contains_frame(&second));
+    assert_eq!(second.request().get(), 2);
+    actor.shutdown().await.unwrap();
+    assert!(handles[0].contains_frame(&second));
+
+    let (replacement, shared) = fixture(1);
+    let new_frame = frame(&replacement, &shared).await;
+    assert!(!handles[0].contains_frame(&new_frame));
+    assert!(replacement.buffers()[0].contains_frame(&new_frame));
+    drop(new_frame);
+    drop(second);
+    drop(exported);
+    replacement.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn producer_failure_is_not_published_as_pixels() {
     let (actor, shared) = fixture(1);
     let (result, ()) = tokio::join!(actor.capture(), complete(&shared, Err(-nix::libc::EIO)));

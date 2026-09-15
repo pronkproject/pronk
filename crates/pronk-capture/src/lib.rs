@@ -6,7 +6,10 @@
 
 pub mod allocation;
 mod native;
+mod pool;
 mod worker;
+
+pub use pool::BufferHandle;
 
 use std::io;
 use std::num::NonZeroU32;
@@ -149,6 +152,7 @@ pub struct Actor<F> {
     stop: CancellationToken,
     task: Option<JoinHandle<io::Result<F>>>,
     layout: Layout,
+    buffers: Vec<BufferHandle>,
 }
 
 impl<F: AsFd + Send + 'static> Actor<F> {
@@ -168,6 +172,12 @@ impl<F: AsFd + Send + 'static> Actor<F> {
 
     pub fn layout(&self) -> Layout {
         self.layout
+    }
+
+    /// Stable storage handles for registering a media transport before capture.
+    /// Access is authorized only while retaining a matching completed `Frame`.
+    pub fn buffers(&self) -> &[BufferHandle] {
+        &self.buffers
     }
 
     /// Request one frame. Backpressure means no request was admitted.

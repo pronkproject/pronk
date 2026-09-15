@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
-use crate::{Actor, Buffer, CaptureError, Config, Frame, Layout, Reply};
+use crate::{Actor, Buffer, BufferHandle, CaptureError, Config, Frame, Layout, Reply};
 
 pub(crate) struct Completed {
     pub request: RequestId,
@@ -35,6 +35,8 @@ pub(crate) fn spawn<B: Backend>(
     config: Config,
 ) -> Actor<B::Owner> {
     let (commands, receive) = mpsc::channel(buffers.len());
+    let buffers: Vec<_> = buffers.into_iter().map(Arc::new).collect();
+    let handles = buffers.iter().cloned().map(BufferHandle).collect();
     let stop = CancellationToken::new();
     let task = tokio::spawn(run(backend, buffers, layout, config, receive, stop.clone()));
     Actor {
@@ -42,18 +44,18 @@ pub(crate) fn spawn<B: Backend>(
         stop,
         task: Some(task),
         layout,
+        buffers: handles,
     }
 }
 
 async fn run<B: Backend>(
     mut backend: B,
-    buffers: Vec<Buffer>,
+    buffers: Vec<Arc<Buffer>>,
     layout: Layout,
     config: Config,
     mut commands: mpsc::Receiver<Reply>,
     stop: CancellationToken,
 ) -> io::Result<B::Owner> {
-    let buffers: Vec<_> = buffers.into_iter().map(Arc::new).collect();
     let mut uses: Vec<_> = buffers.iter().map(|_| Use::Available).collect();
     let (returned, mut returns) = mpsc::unbounded_channel();
     let mut next = Some(1u64);
