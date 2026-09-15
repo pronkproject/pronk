@@ -1,4 +1,4 @@
-//! Integral, unscaled placement for the initial RGB rendering profile.
+//! Checked integral source crops and destination geometry.
 
 use std::num::NonZeroU32;
 
@@ -45,6 +45,16 @@ impl Extent {
     pub fn height(self) -> u32 {
         self.height.get()
     }
+}
+
+/// A nonempty destination rectangle before clipping to an output.
+///
+/// Position may be negative or wholly outside the output. Dimensions describe
+/// the scaled, transformed crop; they do not describe an allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DestinationRect {
+    pub position: [i32; 2],
+    pub extent: Extent,
 }
 
 /// An integral crop checked against the dimensions of its source image.
