@@ -122,3 +122,63 @@ impl KernelSessionProvider for LegacyKernelSessionProvider {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    use pronk_core::output::{CastKmsOutputId, OutputConnection};
+
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct RecordingGrantProvider {
+        target: Mutex<Option<GrantTarget>>,
+    }
+
+    #[async_trait]
+    impl GrantProvider for RecordingGrantProvider {
+        async fn acquire(
+            &self,
+            target: GrantTarget,
+            _cancellation: CancellationToken,
+        ) -> Result<GrantLease, GrantAcquisitionError> {
+            *self.target.lock().unwrap() = Some(target);
+            Err(GrantAcquisitionError::Cancelled)
+        }
+    }
+
+    fn output() -> CastKmsOutput {
+        CastKmsOutput {
+            id: CastKmsOutputId {
+                device_path: PathBuf::from("/sys/devices/virtual/castkms"),
+                output_index: 3,
+            },
+            node_path: PathBuf::from("/dev/dri/card9"),
+            device_major: 226,
+            device_minor: 9,
+            crtc_id: 17,
+            connector_id: 29,
+            connector_name: "Virtual-4".into(),
+            connection: OutputConnection::Disconnected,
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_adapter_selects_the_complete_audio_profile() {
+        let grants = Arc::new(RecordingGrantProvider::default());
+        let provider = LegacyKernelSessionProvider::new(grants.clone());
+        assert!(matches!(
+            provider
+                .acquire(&output(), true, CancellationToken::new())
+                .await,
+            Err(KernelSessionError::Cancelled)
+        ));
+        let target = grants.target.lock().unwrap().clone().unwrap();
+        assert_eq!(target.device_major, 226);
+        assert_eq!(target.device_minor, 9);
+        assert_eq!(target.connector_id, 29);
+        assert_eq!(target.profile, GrantProfile::DisplayCecAudioV1);
+    }
+}

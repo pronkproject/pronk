@@ -19,6 +19,7 @@ use pronk::device_session_port::{
 };
 use pronk::display::DisplaySetupStage;
 use pronk::display_state::RoutedMode;
+use pronk::kernel_session_provider::LegacyKernelSessionProvider;
 use pronk::manager::{
     BackendConfig, InventoryEvent, ManagerActor, OutputInventoryProvider,
     OutputInventoryProviderError,
@@ -639,7 +640,9 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
         .context("own the Pronk bus name used by Mutter authorization")?;
     let mut manager = ManagerActor::spawn(
         vec![BackendConfig::new(endpoint, 151, validator, policy)],
-        Arc::new(MutterGrantProvider::new(connection.clone())),
+        Arc::new(LegacyKernelSessionProvider::new(Arc::new(
+            MutterGrantProvider::new(connection.clone()),
+        ))),
     )?;
     let mut events = manager
         .take_events()
@@ -737,7 +740,9 @@ async fn run_inventory_manager(path: &Path) -> anyhow::Result<()> {
         Arc::new(StaticOutputInventoryProvider {
             outputs: mock_outputs(),
         }),
-        Arc::new(UnreachableGrantProvider),
+        Arc::new(LegacyKernelSessionProvider::new(Arc::new(
+            UnreachableGrantProvider,
+        ))),
     )?;
     let mut events = manager
         .take_events()

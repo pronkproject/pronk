@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::Context;
 use pronk::caller::PublicBus;
 use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
+use pronk::kernel_session_provider::LegacyKernelSessionProvider;
 use pronk::manager::{BackendConfig, ManagerActor};
 use pronk_backend_host::{BackendEndpoint, BackendReconnectPolicy, ExactRegistrationValidator};
 use pronk_dbus::BUS_NAME;
@@ -25,7 +26,9 @@ async fn main() -> anyhow::Result<()> {
         BackendReconnectPolicy::new(0, Duration::ZERO, Duration::ZERO, Duration::from_secs(1))?;
     let mut manager = ManagerActor::spawn(
         vec![BackendConfig::new(endpoint, 501, validator, policy)],
-        Arc::new(UnreachableGrantProvider),
+        Arc::new(LegacyKernelSessionProvider::new(Arc::new(
+            UnreachableGrantProvider,
+        ))),
     )?;
     let connection = zbus::Connection::session()
         .await
