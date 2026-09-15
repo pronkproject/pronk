@@ -235,13 +235,14 @@ impl CapturePipelinePort for RendererCapturePipeline {
             ));
         }
         let render_node = self.config.render_node.clone();
-        let device_task = tokio::task::spawn_blocking(move || Device::open(render_node));
+        let mut device_task = tokio::task::spawn_blocking(move || Device::open(render_node));
         let device = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
+                let _ = (&mut device_task).await;
                 return Err(MediaPipelineError::new("renderer start was cancelled"));
             }
-            result = device_task => result
+            result = &mut device_task => result
                 .map_err(|error| MediaPipelineError::new(format!("join renderer GPU setup: {error}")))?
                 .map_err(|error| MediaPipelineError::new(format!("open renderer GPU: {error}")))?,
         };
