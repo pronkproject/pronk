@@ -1,7 +1,6 @@
 //! Source admission after reserving independent private storage.
 
 use std::io;
-use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
 
 use castkms_renderer::{ActiveRenderer, SourceJob};
@@ -20,28 +19,24 @@ pub struct SourceReader<'renderer, F: AsFd> {
 }
 
 impl<'renderer, F: AsFd> SourceReader<'renderer, F> {
-    /// Allocate every source destination before admitting renderer work.
+    /// Bind an already allocated private pool before admitting renderer work.
     pub fn new(
         renderer: ActiveRenderer<'renderer, F>,
         device: Device,
-        capacity: NonZeroUsize,
+        private: PrivatePool,
     ) -> Result<Self, SourceReaderStartError<'renderer, F>> {
         let configuration = renderer.configuration();
-        let private = match PrivatePool::new(
-            &device,
-            configuration.width(),
-            configuration.height(),
-            capacity,
-        ) {
-            Ok(private) => private,
-            Err(error) => {
-                return Err(SourceReaderStartError {
-                    renderer,
-                    device,
-                    error,
-                });
-            }
-        };
+        if private.extent() != (configuration.width(), configuration.height()) {
+            return Err(SourceReaderStartError {
+                renderer,
+                device,
+                private: Box::new(private),
+                error: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "private pool dimensions do not match the active output",
+                ),
+            });
+        }
         Ok(Self {
             renderer,
             device,
@@ -168,6 +163,7 @@ pub enum SourceAttemptError {
 pub struct SourceReaderStartError<'renderer, F: AsFd> {
     renderer: ActiveRenderer<'renderer, F>,
     device: Device,
+    private: Box<PrivatePool>,
     error: io::Error,
 }
 
@@ -176,8 +172,8 @@ impl<'renderer, F: AsFd> SourceReaderStartError<'renderer, F> {
         &self.error
     }
 
-    pub fn into_parts(self) -> (ActiveRenderer<'renderer, F>, Device, io::Error) {
-        (self.renderer, self.device, self.error)
+    pub fn into_parts(self) -> (ActiveRenderer<'renderer, F>, Device, PrivatePool, io::Error) {
+        (self.renderer, self.device, *self.private, self.error)
     }
 }
 

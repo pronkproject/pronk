@@ -11,6 +11,7 @@ pub struct PrivatePool {
     identity: Arc<()>,
     available: Vec<PrivateBuffer>,
     capacity: NonZeroUsize,
+    extent: (NonZeroU32, NonZeroU32),
 }
 
 impl PrivatePool {
@@ -36,6 +37,7 @@ impl PrivatePool {
             identity,
             available,
             capacity,
+            extent: (width, height),
         })
     }
 
@@ -45,6 +47,10 @@ impl PrivatePool {
 
     pub fn available(&self) -> usize {
         self.available.len()
+    }
+
+    pub fn extent(&self) -> (NonZeroU32, NonZeroU32) {
+        self.extent
     }
 
     /// Reserve one buffer before attempting to claim a source.

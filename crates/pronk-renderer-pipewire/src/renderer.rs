@@ -7,7 +7,7 @@ use std::os::fd::AsFd;
 use castkms_renderer::Renderer;
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{PipeWireRemote, VideoNodeIdentity, VideoSourceConfig};
-use pronk_renderer_worker::{OutputPool, PrivateProbe};
+use pronk_renderer_worker::{OutputPool, PrivatePool, PrivateProbe};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -19,6 +19,7 @@ use crate::{Registration, Video};
 pub struct RendererStreamConfig {
     pub pipewire: VideoSourceConfig,
     pub output_modifier: u64,
+    pub private_capacity: NonZeroUsize,
     pub output_capacity: NonZeroUsize,
 }
 
@@ -230,6 +231,19 @@ async fn run_generation<F: AsFd>(
         drop(candidate);
         error
     })?;
+    let private = match PrivatePool::new(
+        device,
+        configuration.width(),
+        configuration.height(),
+        config.private_capacity,
+    ) {
+        Ok(private) => private,
+        Err(error) => {
+            drop(probe);
+            let _ = started.send(Started::Failed);
+            return Err(error);
+        }
+    };
     let output = OutputPool::new(
         device,
         configuration.width(),
@@ -252,17 +266,19 @@ async fn run_generation<F: AsFd>(
         return finish(
             video,
             probe,
+            private,
             Some(io::Error::other("renderer stream setup was abandoned")),
         )
         .await;
     }
     stop.cancelled().await;
-    finish(video, probe, None).await
+    finish(video, probe, private, None).await
 }
 
 async fn finish<F: AsFd>(
     video: Video,
     probe: PrivateProbe<'_, F>,
+    private: PrivatePool,
     mut failure: Option<io::Error>,
 ) -> io::Result<()> {
     let stopped = video.shutdown().await;
@@ -272,6 +288,7 @@ async fn finish<F: AsFd>(
     if let Err(error) = probe.abort() {
         failure.get_or_insert(error);
     }
+    drop(private);
     failure.map_or(Ok(()), Err)
 }
 
