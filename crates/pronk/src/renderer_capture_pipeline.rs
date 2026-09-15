@@ -5,7 +5,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use pronk_capture_broker::RendererAccess;
+use castkms_renderer::Renderer;
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoPixelFormat,
@@ -50,7 +50,7 @@ struct Generation {
 
 /// Sole owner of renderer authority and its per-generation GPU producer.
 pub struct RendererCapturePipeline {
-    renderer: RendererAccess,
+    renderer: Option<Renderer<OwnedFd>>,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
     generation: Option<Generation>,
@@ -58,12 +58,12 @@ pub struct RendererCapturePipeline {
 
 impl RendererCapturePipeline {
     pub fn new(
-        renderer: RendererAccess,
+        renderer: Renderer<OwnedFd>,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
     ) -> Self {
         Self {
-            renderer,
+            renderer: Some(renderer),
             producer_remotes,
             config,
             generation: None,
@@ -83,11 +83,13 @@ impl RendererCapturePipeline {
         }
         match generation.stream {
             Stream::Prepared(stream) => {
-                let owner = stream
-                    .shutdown()
-                    .await
-                    .map_err(|error| stream_error("stop prepared renderer", error))?;
-                drop(owner);
+                let owner = match stream.shutdown().await {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        return Err(self.recover_stream_error("stop prepared renderer", error));
+                    }
+                };
+                self.restore_renderer(owner)?;
             }
             Stream::Active(stream) => stream
                 .shutdown()
@@ -113,6 +115,33 @@ impl RendererCapturePipeline {
             media_generation: generation,
             caps: renderer_caps(stream.layout(), self.config.capture_rate_hz)?,
         })
+    }
+
+    fn restore_renderer(&mut self, owner: OwnedFd) -> Result<(), MediaPipelineError> {
+        if self.renderer.is_some() {
+            return Err(MediaPipelineError::new(
+                "renderer descriptor owner is already present",
+            ));
+        }
+        self.renderer = Some(Renderer::from_fd(owner).map_err(|error| {
+            MediaPipelineError::new(format!("restore renderer descriptor owner: {error}"))
+        })?);
+        Ok(())
+    }
+
+    fn recover_stream_error(
+        &mut self,
+        operation: &str,
+        error: RendererStreamError<OwnedFd>,
+    ) -> MediaPipelineError {
+        let (owner, cause) = error.into_parts();
+        let recovery = owner.map(|owner| self.restore_renderer(owner));
+        match recovery {
+            Some(Err(recovery)) => MediaPipelineError::new(format!(
+                "{operation}: {cause}; renderer recovery failed: {recovery}"
+            )),
+            _ => MediaPipelineError::new(format!("{operation}: {cause}")),
+        }
     }
 }
 
@@ -146,10 +175,11 @@ impl CapturePipelinePort for RendererCapturePipeline {
         }
         let generation = NonZeroU64::new(request.media_generation)
             .ok_or_else(|| MediaPipelineError::new("media generation must be nonzero"))?;
-        let renderer = self
-            .renderer
-            .open()
-            .map_err(|error| MediaPipelineError::new(format!("open renderer session: {error}")))?;
+        if self.renderer.is_none() {
+            return Err(MediaPipelineError::new(
+                "renderer descriptor was consumed by an earlier active generation",
+            ));
+        }
         let render_node = self.config.render_node.clone();
         let device_task = tokio::task::spawn_blocking(move || Device::open(render_node));
         let device = tokio::select! {
@@ -170,6 +200,10 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 MediaPipelineError::new(format!("connect renderer PipeWire producer: {error}"))
             })?,
         };
+        let renderer = self
+            .renderer
+            .take()
+            .expect("checked renderer descriptor owner");
         let preparation = RendererStream::prepare(
             renderer,
             device,
@@ -189,22 +223,17 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 output_capacity: self.config.output_capacity,
             },
             remote.into_remote(),
+            cancellation.clone(),
         );
-        tokio::pin!(preparation);
-        let stream = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                return Err(MediaPipelineError::new("renderer start was cancelled"));
-            }
-            result = &mut preparation => result
-                .map_err(|error| stream_error("prepare renderer stream", error))?,
-        };
+        let prepared = preparation.await;
+        let stream = prepared
+            .map_err(|error| self.recover_stream_error("prepare renderer stream", error))?;
         if cancellation.is_cancelled() {
             let owner = stream
                 .shutdown()
                 .await
-                .map_err(|error| stream_error("cancel renderer stream", error))?;
-            drop(owner);
+                .map_err(|error| self.recover_stream_error("cancel renderer stream", error))?;
+            self.restore_renderer(owner)?;
             return Err(MediaPipelineError::new("renderer start was cancelled"));
         }
         let layout = stream.layout();
@@ -212,17 +241,30 @@ impl CapturePipelinePort for RendererCapturePipeline {
             || layout.height.get() != request.route.mode.height
         {
             let actual = (layout.width, layout.height);
-            let owner = stream
-                .shutdown()
-                .await
-                .map_err(|error| stream_error("stop mismatched renderer stream", error))?;
-            drop(owner);
+            let owner = stream.shutdown().await.map_err(|error| {
+                self.recover_stream_error("stop mismatched renderer stream", error)
+            })?;
+            self.restore_renderer(owner)?;
             return Err(MediaPipelineError::new(format!(
                 "renderer output is {}x{}; active route is {}x{}",
                 actual.0, actual.1, request.route.mode.width, request.route.mode.height
             )));
         }
-        let target = self.target(&stream, generation)?;
+        let target = match self.target(&stream, generation) {
+            Ok(target) => target,
+            Err(error) => {
+                let owner = match stream.shutdown().await {
+                    Ok(owner) => owner,
+                    Err(shutdown) => {
+                        return Err(
+                            self.recover_stream_error("stop rejected renderer stream", shutdown)
+                        );
+                    }
+                };
+                self.restore_renderer(owner)?;
+                return Err(error);
+            }
+        };
         self.generation = Some(Generation {
             id: generation,
             stream: Stream::Prepared(stream),
@@ -282,16 +324,10 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 Ok(())
             }
             Stream::Prepared(stream) => {
-                let activation = stream.activate();
-                tokio::pin!(activation);
-                let stream = tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        return Err(MediaPipelineError::new("renderer activation was cancelled"));
-                    }
-                    result = &mut activation => result
-                        .map_err(|error| stream_error("activate renderer stream", error))?,
-                };
+                let activated = stream.activate(cancellation).await;
+                let stream = activated.map_err(|error| {
+                    self.recover_stream_error("activate renderer stream", error)
+                })?;
                 self.generation = Some(Generation {
                     id: generation.id,
                     stream: Stream::Active(stream),

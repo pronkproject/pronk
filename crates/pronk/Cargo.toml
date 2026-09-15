@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+castkms-renderer = { path = "../castkms-renderer" }
 futures-util.workspace = true
 nix.workspace = true
 pronk-backend-host = { path = "../pronk-backend-host" }

@@ -34,7 +34,7 @@ pub struct RendererStream<F> {
     activate: Option<oneshot::Sender<oneshot::Sender<()>>>,
 }
 
-/// Activated renderer generation whose endpoint closes when the task stops.
+/// Activated renderer generation whose descriptor owner is consumed when the task stops.
 pub struct ActiveRendererStream<F> {
     handle: Option<StreamHandle<F>>,
 }
@@ -63,6 +63,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         device: Device,
         config: RendererStreamConfig,
         remote: PipeWireRemote,
+        cancellation: CancellationToken,
     ) -> Result<Self, RendererStreamError<F>> {
         let stop = CancellationToken::new();
         let (state, receive) = watch::channel(RendererStreamState::Prepared);
@@ -85,7 +86,19 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             task: Some(task),
             armed: true,
         };
-        match response.await {
+        let response = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                let mut error = starting.join().await;
+                error.error = io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "renderer stream preparation was cancelled",
+                );
+                return Err(error);
+            }
+            response = response => response,
+        };
+        match response {
             Ok(Started::Ready { identity, layout }) => Ok(Self {
                 handle: Some(StreamHandle {
                     identity,
@@ -118,14 +131,33 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
     }
 
     /// Activate delegated execution and consume the one-shot candidate handle.
-    pub async fn activate(mut self) -> Result<ActiveRendererStream<F>, RendererStreamError<F>> {
+    pub async fn activate(
+        mut self,
+        cancellation: CancellationToken,
+    ) -> Result<ActiveRendererStream<F>, RendererStreamError<F>> {
         let (acknowledge, acknowledged) = oneshot::channel();
         let activate = self
             .activate
             .take()
             .expect("prepared renderer stream owns activation command");
         let mut handle = self.take_handle();
-        if activate.send(acknowledge).is_err() || acknowledged.await.is_err() {
+        if activate.send(acknowledge).is_err() {
+            return Err(join_failure(handle.take_task()).await);
+        }
+        let acknowledged = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                handle.stop.cancel();
+                let mut error = join_failure(handle.take_task()).await;
+                error.error = io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "renderer stream activation was cancelled",
+                );
+                return Err(error);
+            }
+            acknowledged = acknowledged => acknowledged,
+        };
+        if acknowledged.is_err() {
             return Err(join_failure(handle.take_task()).await);
         }
         Ok(ActiveRendererStream {
@@ -210,7 +242,7 @@ impl<F: AsFd + Send + 'static> ActiveRendererStream<F> {
             .layout
     }
 
-    /// Stop transport and close the active renderer endpoint.
+    /// Stop transport and release the task's active renderer descriptor.
     pub async fn shutdown(mut self) -> Result<(), RendererStreamError<F>> {
         let mut handle = self
             .handle
@@ -375,7 +407,15 @@ async fn run_generation<F: AsFd>(
     remote: PipeWireRemote,
     control: GenerationControl<'_>,
 ) -> GenerationOutcome {
-    let result = prepare_generation(renderer, &device, config, remote, control.started).await;
+    let result = {
+        let preparation = prepare_generation(renderer, &device, config, remote, control.started);
+        tokio::pin!(preparation);
+        tokio::select! {
+            biased;
+            _ = control.stop.cancelled() => return GenerationOutcome::candidate(Ok(())),
+            result = &mut preparation => result,
+        }
+    };
     let generation = match result {
         Ok(generation) => generation,
         Err(error) => return GenerationOutcome::candidate(Err(error)),
