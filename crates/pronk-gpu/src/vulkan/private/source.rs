@@ -5,7 +5,7 @@ use std::os::fd::AsFd;
 use std::sync::Arc;
 
 use ash::vk;
-use pronk_dmabuf::{export_dependencies, import_completion, Access, SyncFile};
+use pronk_dmabuf::{export_dependencies, import_completion, Access};
 
 use super::PrivateImage;
 use crate::vulkan::submission::{require_success, Job};
@@ -46,9 +46,7 @@ impl SourceImage {
                 "private source copy needs matching images on one device",
             ));
         }
-        require_success(
-            SyncFile::from_fd(self.producer.as_fd().try_clone_to_owned()?)?.wait_blocking()?,
-        )?;
+        self.wait_for_producer()?;
         require_success(export_dependencies(self.fd.as_fd(), Access::Read)?.wait_blocking()?)?;
         let mut job = Job::new(Arc::clone(&self.device), (self, destination))?;
         let (source, destination) = job.resources();

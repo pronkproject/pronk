@@ -26,7 +26,7 @@ pub struct SourceImage {
     pub(super) device: Arc<DeviceInner>,
     pub(super) raw: vk::Image,
     pub(super) fd: OwnedFd,
-    pub(super) producer: SyncFile,
+    pub(super) producer: Option<SyncFile>,
     memory: vk::DeviceMemory,
     layout: ImageLayout,
 }
@@ -53,6 +53,37 @@ impl Device {
         fd: OwnedFd,
         layout: ImageLayout,
         producer: SyncFile,
+    ) -> io::Result<SourceImage> {
+        // SAFETY: The caller supplies the external-image contract documented
+        // above; the producer record is retained by the imported source.
+        unsafe { self.import_source_with_completion(fd, layout, Some(producer)) }
+    }
+
+    /// Import a source whose captured producer work has already completed.
+    ///
+    /// Reservation dependencies discovered at submission time remain mandatory.
+    /// The operation only omits a separate captured producer wait.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor and metadata have the external-image obligations of
+    /// [`Self::import_source`]. In addition, every producer dependency that the
+    /// source owner captured before issuing the descriptor must have completed
+    /// successfully. A missing record alone does not establish that fact.
+    pub unsafe fn import_ready_source(
+        &self,
+        fd: OwnedFd,
+        layout: ImageLayout,
+    ) -> io::Result<SourceImage> {
+        // SAFETY: The caller supplies both documented external contracts.
+        unsafe { self.import_source_with_completion(fd, layout, None) }
+    }
+
+    unsafe fn import_source_with_completion(
+        &self,
+        fd: OwnedFd,
+        layout: ImageLayout,
+        producer: Option<SyncFile>,
     ) -> io::Result<SourceImage> {
         validate_layout(layout)?;
         // The native ioctl establishes that this is a DMA-BUF before Vulkan sees
@@ -167,6 +198,15 @@ impl Device {
 impl SourceImage {
     pub fn layout(&self) -> ImageLayout {
         self.layout
+    }
+
+    pub(super) fn wait_for_producer(&self) -> io::Result<()> {
+        let Some(producer) = &self.producer else {
+            return Ok(());
+        };
+        super::submission::require_success(
+            SyncFile::from_fd(producer.as_fd().try_clone_to_owned()?)?.wait_blocking()?,
+        )
     }
 }
 

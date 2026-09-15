@@ -82,6 +82,33 @@ fn imported_backing_survives_its_exporting_device() {
 
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn completed_source_import_needs_no_separate_producer_record() {
+    let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
+    let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("select hex modifier");
+    let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16).unwrap();
+    let device = Device::open(node).unwrap();
+    let size = NonZeroU32::new(64).unwrap();
+    let (image, completion) = device
+        .allocate(size, size, modifier)
+        .unwrap()
+        .clear_waited([17, 85, 204])
+        .unwrap();
+    assert_eq!(completion.wait_blocking().unwrap(), Completion::Success);
+    // SAFETY: The waited clear completed successfully and released the exact
+    // same-device allocation to FOREIGN/GENERAL before import.
+    let source =
+        unsafe { device.import_ready_source(image.export().unwrap(), image.layout()) }.unwrap();
+    let (staging, _) = source
+        .copy_into_waited(device.allocate(size, size, modifier).unwrap())
+        .unwrap();
+    let (_, pixels) = readback(staging);
+    assert!(pixels
+        .chunks_exact(4)
+        .all(|pixel| pixel == [204, 85, 17, 255]));
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
 fn source_copy_rejects_aliasing_its_destination() {
     let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
     let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("select hex modifier");

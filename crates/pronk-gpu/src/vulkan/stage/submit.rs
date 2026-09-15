@@ -6,7 +6,7 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
 
 use ash::vk;
-use pronk_dmabuf::{export_dependencies, import_completion, Access, Completion, SyncFile};
+use pronk_dmabuf::{export_dependencies, import_completion, Access, Completion};
 
 use super::geometry::Transfer;
 use super::PendingStage;
@@ -39,9 +39,7 @@ pub(super) fn submit(
     }
     require_available(export_dependencies(output.as_fd(), Access::Write)?.completion()?)?;
     for (source, _) in &sources {
-        require_success(
-            SyncFile::from_fd(source.producer.as_fd().try_clone_to_owned()?)?.wait_blocking()?,
-        )?;
+        source.wait_for_producer()?;
         require_success(export_dependencies(source.fd.as_fd(), Access::Read)?.wait_blocking()?)?;
     }
     let mut job = Job::new(Arc::clone(&destination.device), (sources, destination))?;
