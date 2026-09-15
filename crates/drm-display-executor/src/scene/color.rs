@@ -101,6 +101,72 @@ impl ColorMatrix {
     }
 }
 
+/// One operation in an ordered RGB color pipeline.
+#[derive(Clone, Copy, Debug)]
+pub enum ColorOperation<'a> {
+    /// Preserve the current values, including signed matrix range.
+    Bypass,
+    /// Convert standard sRGB nonlinear values to linear-light values.
+    SrgbEotf,
+    /// Convert linear-light values to standard sRGB nonlinear values.
+    SrgbInverseEotf,
+    /// Apply a signed S31.32 three-by-four matrix.
+    Matrix(ColorMatrix),
+    /// Clamp to normalized range and sample a uniformly spaced RGB table.
+    Lut(Lut<'a>),
+}
+
+/// Borrowed ordered color operations with explicit boundary arithmetic.
+#[derive(Clone, Copy, Debug)]
+pub struct ColorPipeline<'a> {
+    operations: &'a [ColorOperation<'a>],
+}
+
+impl<'a> ColorPipeline<'a> {
+    pub const fn new(operations: &'a [ColorOperation<'a>]) -> Self {
+        Self { operations }
+    }
+
+    pub const fn operations(self) -> &'a [ColorOperation<'a>] {
+        self.operations
+    }
+
+    /// Apply operations in order and clamp the final normalized result.
+    ///
+    /// Matrices preserve signed extended range between adjacent matrices and
+    /// bypasses. Curves and lookup tables clamp their input and produce values
+    /// in normalized range. Standard sRGB equations round to the nearest u16.
+    pub fn apply(self, input: [u16; 3]) -> [u16; 3] {
+        let mut channels = input.map(i32::from);
+        for operation in self.operations {
+            channels = match *operation {
+                ColorOperation::Bypass => channels,
+                ColorOperation::SrgbEotf => channels.map(|value| transfer(value, true)),
+                ColorOperation::SrgbInverseEotf => channels.map(|value| transfer(value, false)),
+                ColorOperation::Matrix(matrix) => matrix.apply(channels),
+                ColorOperation::Lut(table) => table.sample_extended(channels),
+            };
+        }
+        channels.map(|value| value.clamp(0, i32::from(u16::MAX)) as u16)
+    }
+}
+
+fn transfer(value: i32, eotf: bool) -> i32 {
+    let input = f64::from(value.clamp(0, i32::from(u16::MAX))) / f64::from(u16::MAX);
+    let result = if eotf {
+        if input <= 0.04045 {
+            input / 12.92
+        } else {
+            ((input + 0.055) / 1.055).powf(2.4)
+        }
+    } else if input <= 0.0031308 {
+        input * 12.92
+    } else {
+        1.055 * input.powf(1.0 / 2.4) - 0.055
+    };
+    (result * f64::from(u16::MAX)).round() as i32
+}
+
 /// Post-composition degamma, matrix and gamma before output quantization.
 ///
 /// Lookup tables clamp their input. The matrix uses signed extended-range

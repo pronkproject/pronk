@@ -4,7 +4,7 @@ use drm_display_executor::render::cpu::{
 };
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
-    color::{ColorMatrix, Lut, LutError, OutputColor},
+    color::{ColorMatrix, ColorOperation, ColorPipeline, Lut, LutError, OutputColor},
     format::PackedRgbFormat,
     geometry::Extent,
 };
@@ -177,5 +177,113 @@ fn output_matrix_clamps_signed_and_extreme_results() {
         }
         .apply([u16::MAX; 3]),
         [u16::MAX; 3]
+    );
+}
+
+#[test]
+fn ordered_color_operations_preserve_only_matrix_extended_range() {
+    let offset_magnitude = 65536_u64 << 32;
+    let negative_offset = (1 << 63) | offset_magnitude;
+    let offset = ColorMatrix::from_sign_magnitude([
+        1 << 32,
+        0,
+        0,
+        negative_offset,
+        0,
+        1 << 32,
+        0,
+        negative_offset,
+        0,
+        0,
+        1 << 32,
+        negative_offset,
+    ]);
+    let restore = ColorMatrix::from_sign_magnitude([
+        1 << 32,
+        0,
+        0,
+        offset_magnitude,
+        0,
+        1 << 32,
+        0,
+        offset_magnitude,
+        0,
+        0,
+        1 << 32,
+        offset_magnitude,
+    ]);
+    assert_eq!(
+        ColorPipeline::new(&[
+            ColorOperation::Matrix(offset),
+            ColorOperation::Bypass,
+            ColorOperation::Matrix(restore),
+        ])
+        .apply([123, 4567, 65535]),
+        [123, 4567, 65535]
+    );
+    assert_eq!(
+        ColorPipeline::new(&[
+            ColorOperation::Matrix(offset),
+            ColorOperation::SrgbInverseEotf,
+            ColorOperation::Matrix(restore),
+        ])
+        .apply([123, 4567, 65535]),
+        [65535; 3]
+    );
+}
+
+#[test]
+fn standard_srgb_curves_have_exact_endpoints_and_near_inverse_roundtrips() {
+    let encoded_to_linear = [ColorOperation::SrgbEotf];
+    let linear_to_encoded = [ColorOperation::SrgbInverseEotf];
+    let roundtrip = [ColorOperation::SrgbEotf, ColorOperation::SrgbInverseEotf];
+    for channel in [0, 1, 127, 1024, 2650, 4096, 32768, 65534, 65535] {
+        let input = [channel; 3];
+        let linear = ColorPipeline::new(&encoded_to_linear).apply(input);
+        let encoded = ColorPipeline::new(&linear_to_encoded).apply(input);
+        assert!(linear[0] <= channel);
+        assert!(encoded[0] >= channel);
+        let returned = ColorPipeline::new(&roundtrip).apply(input)[0];
+        assert!(
+            returned.abs_diff(channel) <= 6,
+            "{channel} became {returned}"
+        );
+    }
+    assert_eq!(ColorPipeline::new(&roundtrip).apply([0; 3]), [0; 3]);
+    assert_eq!(ColorPipeline::new(&roundtrip).apply([65535; 3]), [65535; 3]);
+    assert_eq!(
+        ColorPipeline::new(&encoded_to_linear).apply([32768; 3]),
+        [14028; 3]
+    );
+    assert_eq!(
+        ColorPipeline::new(&linear_to_encoded).apply([32768; 3]),
+        [48192; 3]
+    );
+}
+
+#[test]
+fn lookup_tables_clamp_prior_extended_matrix_values() {
+    let table = [[100, 200, 300], [400, 500, 600]];
+    let extremes = ColorMatrix::from_sign_magnitude([
+        (1 << 63) | i64::MAX as u64,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        i64::MAX as u64,
+        0,
+        0,
+        1 << 32,
+        0,
+    ]);
+    assert_eq!(
+        ColorPipeline::new(&[
+            ColorOperation::Matrix(extremes),
+            ColorOperation::Lut(Lut::new(&table).unwrap()),
+        ])
+        .apply([65535; 3]),
+        [100, 500, 600]
     );
 }
