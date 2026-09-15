@@ -6,6 +6,14 @@ use std::sync::Arc;
 
 use pronk_gpu::vulkan::{Device, PrivateImage};
 
+/// Maximum number of independently reusable private images in one pool.
+pub const MAX_PRIVATE_BUFFERS: usize = 64;
+/// Maximum unpadded RGBA32 bytes described by one pool request.
+///
+/// Native allocation alignment can consume additional device memory.
+pub const MAX_PRIVATE_POOL_BYTES: u64 = 512 * 1024 * 1024;
+const PRIVATE_PIXEL_BYTES: u64 = 16;
+
 /// A fixed-size pool of non-exportable rendering buffers.
 pub struct PrivatePool {
     identity: Arc<()>,
@@ -22,6 +30,7 @@ impl PrivatePool {
         height: NonZeroU32,
         capacity: NonZeroUsize,
     ) -> io::Result<Self> {
+        validate_request(width, height, capacity)?;
         let identity = Arc::new(());
         let mut available = Vec::new();
         available
@@ -68,6 +77,29 @@ impl PrivatePool {
         self.available.push(buffer);
         Ok(())
     }
+}
+
+fn validate_request(
+    width: NonZeroU32,
+    height: NonZeroU32,
+    capacity: NonZeroUsize,
+) -> io::Result<()> {
+    if capacity.get() > MAX_PRIVATE_BUFFERS {
+        return Err(invalid("private pool exceeds its buffer limit"));
+    }
+    let bytes = u64::from(width.get())
+        .checked_mul(u64::from(height.get()))
+        .and_then(|pixels| pixels.checked_mul(PRIVATE_PIXEL_BYTES))
+        .and_then(|bytes| bytes.checked_mul(capacity.get() as u64))
+        .ok_or_else(|| invalid("private pool byte size overflowed"))?;
+    if bytes > MAX_PRIVATE_POOL_BYTES {
+        return Err(invalid("private pool exceeds its byte limit"));
+    }
+    Ok(())
+}
+
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
 /// One uniquely owned buffer reserved from a [`PrivatePool`].
@@ -120,5 +152,39 @@ pub struct RejectedBuffer {
 impl RejectedBuffer {
     pub fn into_buffer(self) -> PrivateBuffer {
         self.buffer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nz32(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).unwrap()
+    }
+
+    fn nzsize(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
+    #[test]
+    fn private_pool_policy_accepts_the_initial_four_k_budget() {
+        validate_request(nz32(3840), nz32(2160), nzsize(4)).unwrap();
+    }
+
+    #[test]
+    fn private_pool_policy_rejects_excess_count_or_storage() {
+        assert_eq!(
+            validate_request(nz32(1), nz32(1), nzsize(MAX_PRIVATE_BUFFERS + 1))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            validate_request(nz32(7680), nz32(4320), nzsize(2))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 }
