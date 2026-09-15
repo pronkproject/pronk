@@ -1,0 +1,293 @@
+//! Profile-bound private storage for several complete scenes.
+
+use std::io;
+use std::num::{NonZeroU32, NonZeroUsize};
+
+use drm_display_executor::scene::geometry::Extent;
+use pronk_gpu::vulkan::Device;
+
+use crate::pool::{MAX_PRIVATE_POOL_BYTES, PRIVATE_PIXEL_BYTES};
+use crate::{PrivateBuffer, PrivatePool, RejectedBuffer};
+
+/// Maximum source layers retained by one prepared scene profile.
+pub const MAX_SCENE_LAYERS: usize = 24;
+
+/// Source-sized intermediates and final images for one qualified scene profile.
+///
+/// Every layer has a distinct provenance domain even when dimensions match.
+/// The final-image pool may remain checked out for output while completed
+/// source intermediates return independently.
+pub struct ScenePool {
+    destination: PrivatePool,
+    sources: Vec<PrivatePool>,
+}
+
+impl ScenePool {
+    /// Allocate complete scene slots under one aggregate native-memory budget.
+    pub(crate) fn new(
+        device: &Device,
+        output: Extent,
+        source_extents: impl ExactSizeIterator<Item = Extent> + Clone,
+        depth: NonZeroUsize,
+    ) -> io::Result<Self> {
+        validate_request(output, source_extents.clone(), depth)?;
+        let mut allocated_bytes = 0;
+        let destination = PrivatePool::new_accounted(
+            device,
+            nonzero(output.width()),
+            nonzero(output.height()),
+            depth,
+            &mut allocated_bytes,
+        )?;
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(source_extents.len())
+            .map_err(io::Error::other)?;
+        for extent in source_extents {
+            sources.push(PrivatePool::new_accounted(
+                device,
+                nonzero(extent.width()),
+                nonzero(extent.height()),
+                depth,
+                &mut allocated_bytes,
+            )?);
+        }
+        Ok(Self {
+            destination,
+            sources,
+        })
+    }
+
+    pub fn depth(&self) -> NonZeroUsize {
+        self.destination.capacity()
+    }
+
+    pub fn available(&self) -> usize {
+        self.sources
+            .iter()
+            .fold(self.destination.available(), |available, source| {
+                available.min(source.available())
+            })
+    }
+
+    /// Reserve one destination and every ordered source without partial checkout.
+    pub fn take(&mut self) -> io::Result<Option<SceneBuffers>> {
+        if self.available() == 0 {
+            return Ok(None);
+        }
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(self.sources.len())
+            .map_err(io::Error::other)?;
+        let destination = self
+            .destination
+            .take()
+            .expect("availability covers the scene destination");
+        sources.extend(self.sources.iter_mut().map(|source| {
+            source
+                .take()
+                .expect("availability covers every scene source")
+        }));
+        Ok(Some(SceneBuffers {
+            destination,
+            sources,
+        }))
+    }
+
+    /// Return an unused complete reservation without changing any partial state.
+    pub fn restore(&mut self, buffers: SceneBuffers) -> Result<(), RejectedSceneBuffers> {
+        if !self.destination.accepts(&buffers.destination)
+            || !self.accepts_sources(&buffers.sources)
+        {
+            return Err(RejectedSceneBuffers { buffers });
+        }
+        self.destination.put_validated(buffers.destination);
+        for (pool, source) in self.sources.iter_mut().zip(buffers.sources) {
+            pool.put_validated(source);
+        }
+        Ok(())
+    }
+
+    /// Return completed source intermediates in profile order.
+    pub fn restore_sources(
+        &mut self,
+        sources: Vec<PrivateBuffer>,
+    ) -> Result<(), RejectedSceneSources> {
+        if !self.accepts_sources(&sources) {
+            return Err(RejectedSceneSources { sources });
+        }
+        for (pool, source) in self.sources.iter_mut().zip(sources) {
+            pool.put_validated(source);
+        }
+        Ok(())
+    }
+
+    /// Return a final private image after its output copy retires.
+    pub fn restore_destination(
+        &mut self,
+        destination: PrivateBuffer,
+    ) -> Result<(), RejectedBuffer> {
+        self.destination.put(destination)
+    }
+
+    fn accepts_sources(&self, sources: &[PrivateBuffer]) -> bool {
+        sources.len() == self.sources.len()
+            && self
+                .sources
+                .iter()
+                .zip(sources)
+                .all(|(pool, source)| pool.accepts(source))
+    }
+}
+
+/// One all-or-none reservation in profile order from a [`ScenePool`].
+pub struct SceneBuffers {
+    pub destination: PrivateBuffer,
+    pub sources: Vec<PrivateBuffer>,
+}
+
+/// A complete reservation rejected without returning any of its buffers.
+pub struct RejectedSceneBuffers {
+    buffers: SceneBuffers,
+}
+
+impl RejectedSceneBuffers {
+    pub fn into_buffers(self) -> SceneBuffers {
+        self.buffers
+    }
+}
+
+/// Ordered source buffers rejected without partially changing their pools.
+pub struct RejectedSceneSources {
+    sources: Vec<PrivateBuffer>,
+}
+
+impl RejectedSceneSources {
+    pub fn into_sources(self) -> Vec<PrivateBuffer> {
+        self.sources
+    }
+}
+
+fn validate_request(
+    output: Extent,
+    mut source_extents: impl ExactSizeIterator<Item = Extent>,
+    depth: NonZeroUsize,
+) -> io::Result<()> {
+    if source_extents.len() > MAX_SCENE_LAYERS {
+        return Err(invalid("scene exceeds its private layer limit"));
+    }
+    let pixels = source_extents.try_fold(
+        u64::from(output.width()) * u64::from(output.height()),
+        |pixels, extent| {
+            u64::from(extent.width())
+                .checked_mul(u64::from(extent.height()))
+                .and_then(|layer| pixels.checked_add(layer))
+        },
+    );
+    let bytes = pixels
+        .and_then(|pixels| pixels.checked_mul(PRIVATE_PIXEL_BYTES))
+        .and_then(|bytes| bytes.checked_mul(u64::try_from(depth.get()).ok()?))
+        .ok_or_else(|| invalid("scene private storage size overflowed"))?;
+    if bytes > MAX_PRIVATE_POOL_BYTES {
+        return Err(invalid("scene private storage exceeds its byte limit"));
+    }
+    Ok(())
+}
+
+fn nonzero(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).expect("scene extents are nonzero")
+}
+
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extent(width: u32, height: u32) -> Extent {
+        Extent::new(width, height).unwrap()
+    }
+
+    #[test]
+    fn aggregate_policy_counts_every_depth_and_source() {
+        let output = extent(3840, 2160);
+        let sources = [output];
+        assert!(
+            validate_request(output, sources.into_iter(), NonZeroUsize::new(1).unwrap()).is_ok()
+        );
+        assert!(
+            validate_request(output, sources.into_iter(), NonZeroUsize::new(2).unwrap()).is_ok()
+        );
+        assert_eq!(
+            validate_request(output, sources.into_iter(), NonZeroUsize::new(3).unwrap())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn aggregate_policy_bounds_layer_count() {
+        let output = extent(1, 1);
+        let sources = vec![output; MAX_SCENE_LAYERS + 1];
+        assert_eq!(
+            validate_request(output, sources.into_iter(), NonZeroUsize::new(1).unwrap())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    #[ignore = "requires explicit Vulkan GPU selection"]
+    fn reservations_and_returns_preserve_each_role() {
+        let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
+        let device = Device::open(node).unwrap();
+        let output = extent(8, 6);
+        let sources = [extent(4, 3), extent(2, 5)];
+        let mut pool = ScenePool::new(
+            &device,
+            output,
+            sources.into_iter(),
+            NonZeroUsize::new(2).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pool.depth().get(), 2);
+        let first = pool.take().unwrap().unwrap();
+        let second = pool.take().unwrap().unwrap();
+        assert!(pool.take().unwrap().is_none());
+        assert_eq!(first.destination.extent(), (nonzero(8), nonzero(6)));
+        assert_eq!(first.sources[0].extent(), (nonzero(4), nonzero(3)));
+        assert_eq!(first.sources[1].extent(), (nonzero(2), nonzero(5)));
+        assert!(pool.restore(first).is_ok());
+        assert_eq!(pool.available(), 1);
+        assert!(pool.restore(second).is_ok());
+        assert_eq!(pool.available(), 2);
+    }
+
+    #[test]
+    #[ignore = "requires explicit Vulkan GPU selection"]
+    fn invalid_source_order_is_rejected_atomically() {
+        let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
+        let device = Device::open(node).unwrap();
+        let output = extent(8, 6);
+        let sources = [extent(4, 3), extent(2, 5)];
+        let mut pool = ScenePool::new(
+            &device,
+            output,
+            sources.into_iter(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap();
+        let mut buffers = pool.take().unwrap().unwrap();
+        buffers.sources.swap(0, 1);
+        let error = pool.restore(buffers).err().unwrap();
+        assert_eq!(pool.available(), 0);
+        let mut buffers = error.into_buffers();
+        buffers.sources.swap(0, 1);
+        assert!(pool.restore(buffers).is_ok());
+        assert_eq!(pool.available(), 1);
+    }
+}

@@ -12,7 +12,7 @@ use crate::SourceAlpha;
 pub const MAX_PRIVATE_BUFFERS: usize = 64;
 /// Maximum device-memory bytes allocated by one private pool.
 pub const MAX_PRIVATE_POOL_BYTES: u64 = 512 * 1024 * 1024;
-const PRIVATE_PIXEL_BYTES: u64 = 16;
+pub(crate) const PRIVATE_PIXEL_BYTES: u64 = 16;
 
 /// A fixed-size pool of non-exportable rendering buffers.
 pub struct PrivatePool {
@@ -31,16 +31,26 @@ impl PrivatePool {
         height: NonZeroU32,
         capacity: NonZeroUsize,
     ) -> io::Result<Self> {
+        let mut allocated_bytes = 0;
+        Self::new_accounted(device, width, height, capacity, &mut allocated_bytes)
+    }
+
+    pub(crate) fn new_accounted(
+        device: &Device,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        capacity: NonZeroUsize,
+        allocated_bytes: &mut u64,
+    ) -> io::Result<Self> {
         validate_request(width, height, capacity)?;
         let identity = Arc::new(());
         let mut available = Vec::new();
         available
             .try_reserve_exact(capacity.get())
             .map_err(io::Error::other)?;
-        let mut allocated_bytes = 0;
         for _ in 0..capacity.get() {
             let image = device.allocate_private(width, height)?;
-            allocated_bytes = account_allocation(allocated_bytes, image.allocation_size())?;
+            *allocated_bytes = account_allocation(*allocated_bytes, image.allocation_size())?;
             available.push(PrivateBuffer {
                 identity: Arc::clone(&identity),
                 image,
@@ -82,13 +92,20 @@ impl PrivatePool {
 
     /// Return a retired buffer to the pool that allocated it.
     pub fn put(&mut self, buffer: PrivateBuffer) -> Result<(), RejectedBuffer> {
-        if !Arc::ptr_eq(&self.identity, &buffer.identity)
-            || self.available.len() == self.capacity.get()
-        {
+        if !self.accepts(&buffer) {
             return Err(RejectedBuffer { buffer });
         }
         self.available.push(buffer);
         Ok(())
+    }
+
+    pub(crate) fn accepts(&self, buffer: &PrivateBuffer) -> bool {
+        Arc::ptr_eq(&self.identity, &buffer.identity) && self.available.len() < self.capacity.get()
+    }
+
+    pub(crate) fn put_validated(&mut self, buffer: PrivateBuffer) {
+        debug_assert!(self.accepts(&buffer));
+        self.available.push(buffer);
     }
 }
 

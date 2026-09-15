@@ -1,7 +1,7 @@
 //! Complete private-scene execution after compositor sources retire.
 
 use std::io;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
@@ -12,6 +12,7 @@ use pronk_gpu::vulkan::{
     Blender, ColorPipelineProgram, Device, OutputColorProgram, PrivateLayer, SceneRequirements,
 };
 
+use crate::scene_pool::{ScenePool, MAX_SCENE_LAYERS};
 use crate::{PrivateBuffer, PrivateFrame, SourceAlpha};
 
 struct LayerPlan {
@@ -35,6 +36,9 @@ pub struct SceneComposer {
 impl SceneComposer {
     /// Qualify and prepare one complete scene before source acquisition.
     pub fn new(device: &Device, scene: SceneRequirements<'_>) -> io::Result<Self> {
+        if scene.layers.len() > MAX_SCENE_LAYERS {
+            return Err(invalid("scene exceeds its private layer limit"));
+        }
         let blender = device.create_blender()?;
         blender.check_scene(scene)?;
         let color = device.create_output_color(scene.output, scene.color)?;
@@ -69,13 +73,20 @@ impl SceneComposer {
         self.layers.len()
     }
 
+    /// Allocate bounded private storage matching this checked profile.
+    pub fn create_pool(&self, depth: NonZeroUsize) -> io::Result<ScenePool> {
+        let sources = self.layers.iter().map(|layer| layer.source);
+        ScenePool::new(&self.device, self.output, sources, depth)
+    }
+
     /// Compose qualified source frames and apply the complete output color path.
     ///
     /// Sources must be supplied in the profile's bottom-to-top order. Their
-    /// compositor-source access has already ended; only independent private
-    /// allocations enter this operation. Predictable input mismatches return
-    /// every buffer untouched. A native failure consumes all affected buffers
-    /// because their pixel validity may be unknown.
+    /// dimensions match the source storage in that profile. Compositor-source
+    /// access has already ended; only independent private allocations enter
+    /// this operation. Predictable input mismatches return every buffer
+    /// untouched. A native failure consumes all affected buffers because their
+    /// pixel validity may be unknown.
     pub fn compose_and_wait(
         &self,
         inputs: SceneInputs,
@@ -284,6 +295,7 @@ mod tests {
     use pronk_gpu::vulkan::{LayerRequirements, PackedFormat, SourceRequirements};
 
     use super::*;
+    use crate::SceneBuffers;
 
     #[test]
     fn opaque_sources_ignore_every_pixel_alpha_mode() {
@@ -365,15 +377,16 @@ mod tests {
         .unwrap();
         assert_eq!(composer.output(), extent);
         assert_eq!(composer.layer_count(), 1);
-        let mut pool = crate::PrivatePool::new(
-            &device,
-            NonZeroU32::new(4).unwrap(),
-            NonZeroU32::new(3).unwrap(),
-            NonZeroUsize::new(2).unwrap(),
-        )
-        .unwrap();
-        let source = pool.take().unwrap().clear_and_wait([231, 57, 19]).unwrap();
-        let destination = pool.take().unwrap();
+        let mut pool = composer.create_pool(NonZeroUsize::new(2).unwrap()).unwrap();
+        let SceneBuffers {
+            destination,
+            mut sources,
+        } = pool.take().unwrap().unwrap();
+        let source = sources
+            .pop()
+            .unwrap()
+            .clear_and_wait([231, 57, 19])
+            .unwrap();
         let result = composer
             .compose_and_wait(SceneInputs {
                 destination,
@@ -386,8 +399,8 @@ mod tests {
         assert_eq!(frame.content_serial(), NonZeroU64::new(73));
         assert_eq!(frame.source_alpha(), SourceAlpha::Opaque);
         assert_eq!(sources.len(), 1);
-        assert!(pool.put(sources.into_iter().next().unwrap()).is_ok());
-        assert!(pool.put(frame.buffer).is_ok());
+        assert!(pool.restore_sources(sources).is_ok());
+        assert!(pool.restore_destination(frame.buffer).is_ok());
         assert_eq!(pool.available(), 2);
     }
 

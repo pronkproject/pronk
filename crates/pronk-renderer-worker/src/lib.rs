@@ -6,6 +6,7 @@ mod pool;
 mod reader;
 mod reads;
 mod scene;
+mod scene_pool;
 mod source;
 mod submission;
 
@@ -23,6 +24,9 @@ pub use reader::{
 };
 pub use reads::{ReadCollectionError, SubmittedReads};
 pub use scene::{ComposedFrame, RejectedScene, SceneComposer, SceneCompositionError, SceneInputs};
+pub use scene_pool::{
+    RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool, MAX_SCENE_LAYERS,
+};
 pub use source::{ImportError, ImportedSource, SourceAlpha};
 pub use submission::{
     PreparedSource, ReleasedSource, SourcePreparationError, SourceReleaseError,
