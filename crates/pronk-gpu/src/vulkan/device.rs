@@ -36,11 +36,17 @@ pub(super) struct DeviceInner {
     instance: Instance,
     pub(super) physical: vk::PhysicalDevice,
     pub(super) queue_family: u32,
+    pub(super) shader_int64: bool,
     pub(super) submission: Mutex<()>,
     _render_node: File,
 }
 
 impl Device {
+    /// Whether this logical device enabled exact 64-bit shader arithmetic.
+    pub fn supports_shader_int64(&self) -> bool {
+        self.inner.shader_int64
+    }
+
     /// Whether both owners refer to the same logical Vulkan device instance.
     ///
     /// Clones share an instance. Separate opens of one render node do not,
@@ -180,9 +186,14 @@ impl Device {
                 .queue_family_index(queue as u32)
                 .queue_priorities(&priorities)];
             let names: Vec<_> = required.iter().map(|name| name.as_ptr()).collect();
+            // SAFETY: The physical device belongs to the live instance.
+            let available_features = unsafe { instance.raw.get_physical_device_features(physical) };
+            let enabled_features = vk::PhysicalDeviceFeatures::default()
+                .shader_int64(available_features.shader_int64 == vk::TRUE);
             let create = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queues)
-                .enabled_extension_names(&names);
+                .enabled_extension_names(&names)
+                .enabled_features(&enabled_features);
             // SAFETY: Queried extensions and queue family belong to this physical
             // device; all create-info pointers live through the synchronous call.
             let raw =
@@ -193,6 +204,7 @@ impl Device {
                     instance,
                     physical,
                     queue_family: queue as u32,
+                    shader_int64: available_features.shader_int64 == vk::TRUE,
                     submission: Mutex::new(()),
                     _render_node: node,
                 }),
