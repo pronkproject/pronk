@@ -105,6 +105,10 @@ impl SceneComposer {
             && destination.matches_scene(&self.profile, SceneBufferRole::Source(index))
     }
 
+    pub(crate) fn profile(&self) -> &Arc<()> {
+        &self.profile
+    }
+
     /// Allocate independently bounded final and source storage for this profile.
     ///
     /// A final image may remain checked out while a smaller set of source

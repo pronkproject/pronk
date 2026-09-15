@@ -16,7 +16,10 @@ use crate::SceneComposer;
 
 impl SceneComposer {
     /// Qualify one checked complete-scene job for native execution.
-    pub fn from_scene_job<F: AsFd>(device: &Device, job: &SceneJob<'_, '_, F>) -> io::Result<Self> {
+    pub(crate) fn from_scene_job<F: AsFd>(
+        device: &Device,
+        job: &SceneJob<'_, '_, F>,
+    ) -> io::Result<Self> {
         let mut colors = Vec::new();
         colors
             .try_reserve_exact(job.layers().len())

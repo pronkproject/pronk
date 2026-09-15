@@ -664,17 +664,23 @@ Composition rechecks the nominal profile and exact layer role before applying
 per-layer color, alpha-aware bottom-to-top blending and final output color.
 Structurally identical composers cannot exchange their private buffers.
 
-`PreparedSceneReads` validates the complete ordered import and private-stage
-set before submitting any GPU access. A source's DRM fourcc determines whether
-its fourth channel is padding or pixel alpha and must agree with the imported
-Vulkan layout. `SceneSource::import` borrows each layer from the aggregate job,
-duplicates its checked DMA-BUF and common producer completion, and leaves the
-job's sole release authority untouched. Submission copies each complete image
-into its source-sized stage and exposes one merged concrete sync file. After
-the owning kernel scene job accepts that completion, `SubmittedSceneReads::wait`
-yields ordered frames under the job's content serial. Submission failure is
-terminal for that scene transaction; cleanup retires any accepted native work
-without pretending that a normal aggregate release remains possible.
+`QualifiedSceneJob` binds the checked kernel job to the only native profile
+derived from its metadata. It imports every layer under a nominal job identity
+while leaving the job's sole release authority untouched. `PreparedSceneReads`
+validates the complete ordered import and private-stage set before submitting
+any GPU access. A source's DRM fourcc determines whether its fourth channel is
+padding or pixel alpha and must agree with the imported Vulkan layout.
+Submission copies each complete image into its source-sized stage and exposes
+one merged concrete sync file. Structurally identical jobs cannot exchange
+sources or submitted reads.
+
+Only `QualifiedSceneJob::release_submitted` can transfer that merged completion
+to the matching kernel job. A successful release returns `ReleasedSceneReads`,
+whose blocking wait yields ordered frames under the job's content serial. The
+type boundary therefore prevents native pixels from being consumed before the
+kernel accepts their source-read completion. Submission failure is terminal
+for that scene transaction; cleanup retires any accepted native work without
+pretending that a normal aggregate release remains possible.
 
 The version-6 raw scene records are bound, but no production code dequeues or
 parses them into a GPU profile yet. `castkms-renderer` does own and validate the
@@ -687,10 +693,10 @@ matrix, two-LUT or LUT/matrix arrangement and rejects a lone LUT as unsupported.
 The UAPI needs stage identity before that final valid configuration can be
 accepted without guessing.
 
-Once that contract is explicit, the adapter can import all layers against the
-requirements above, transfer the prepared aggregate completion, release the
-job once and only then wait for private pixels. The older single-source job is
-not a per-layer substitute for that transaction.
+Once that contract is explicit, a production loop can dequeue each aggregate
+job, reserve its independent private stages and drive the qualified transaction
+above. The older single-source job is not a per-layer substitute for that
+transaction.
 
 ## Current scope
 

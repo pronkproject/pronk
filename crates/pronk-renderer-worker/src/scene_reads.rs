@@ -3,6 +3,7 @@
 use std::io;
 use std::num::NonZeroU64;
 use std::os::fd::BorrowedFd;
+use std::sync::Arc;
 
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::SourceImage;
@@ -13,64 +14,39 @@ use crate::{PrivateBuffer, PrivateFrame, SceneComposer, SceneFrames, SourceAlpha
 /// One imported scene layer before it is bound to private staging storage.
 #[must_use = "prepare the source for its scene or discard it without pixel access"]
 pub struct SceneSource {
+    profile: Arc<()>,
     image: SourceImage,
     alpha: SourceAlpha,
 }
 
 impl SceneSource {
     /// Import one checked scene layer without consuming its aggregate job.
-    pub fn import(
+    pub(crate) fn import(
+        profile: &Arc<()>,
         device: &pronk_gpu::vulkan::Device,
         layer: &castkms_renderer::SceneLayer,
         producer: Option<BorrowedFd<'_>>,
     ) -> io::Result<Self> {
-        crate::source::import_image(device, layer.image(), producer)
-            .map(|(image, alpha)| Self { image, alpha })
+        crate::source::import_image(device, layer.image(), producer).map(|(image, alpha)| Self {
+            profile: Arc::clone(profile),
+            image,
+            alpha,
+        })
     }
 
     /// Bind the DRM format's alpha meaning to a compatible native import.
-    pub fn from_drm_format(image: SourceImage, format: u32) -> Result<Self, RejectedSceneSource> {
-        match crate::source::source_alpha(format, image.layout().format) {
-            Ok(alpha) => Ok(Self { image, alpha }),
-            Err(cause) => Err(RejectedSceneSource { image, cause }),
-        }
-    }
-}
-
-/// A source image rejected before it was attached to scene metadata.
-pub struct RejectedSceneSource {
-    image: SourceImage,
-    cause: io::Error,
-}
-
-impl std::fmt::Debug for RejectedSceneSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RejectedSceneSource")
-            .field("cause", &self.cause)
-            .finish()
-    }
-}
-
-impl std::fmt::Display for RejectedSceneSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "reject scene source: {}", self.cause)
-    }
-}
-
-impl std::error::Error for RejectedSceneSource {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.cause)
-    }
-}
-
-impl RejectedSceneSource {
-    pub fn cause(&self) -> &io::Error {
-        &self.cause
-    }
-
-    pub fn into_parts(self) -> (SourceImage, io::Error) {
-        (self.image, self.cause)
+    #[cfg(test)]
+    pub(crate) fn from_drm_format(
+        composer: &SceneComposer,
+        image: SourceImage,
+        format: u32,
+    ) -> io::Result<Self> {
+        let alpha = crate::source::source_alpha(format, image.layout().format)?;
+        Ok(Self {
+            profile: Arc::clone(composer.profile()),
+            image,
+            alpha,
+        })
     }
 }
 
@@ -82,6 +58,7 @@ struct PreparedRead {
 /// A complete set of checked layer reads that has not accessed source pixels.
 #[must_use = "submit the scene reads or recover every unused owner"]
 pub struct PreparedSceneReads {
+    profile: Arc<()>,
     reads: Vec<PreparedRead>,
 }
 
@@ -97,7 +74,8 @@ impl PreparedSceneReads {
             || destinations.len() != composer.layer_count()
             || sources.iter().zip(&destinations).enumerate().any(
                 |(index, (source, destination))| {
-                    !composer.accepts_source_stage(index, &source.image, destination)
+                    !Arc::ptr_eq(&source.profile, composer.profile())
+                        || !composer.accepts_source_stage(index, &source.image, destination)
                 },
             )
         {
@@ -124,7 +102,10 @@ impl PreparedSceneReads {
                     destination,
                 }),
         );
-        Ok(Self { reads })
+        Ok(Self {
+            profile: Arc::clone(composer.profile()),
+            reads,
+        })
     }
 
     /// Submit every whole-image read and prepare one aggregate completion.
@@ -143,7 +124,11 @@ impl PreparedSceneReads {
             return Err(SubmitSceneReadsError(io::Error::other(error)));
         }
         for read in self.reads {
-            let SceneSource { image, alpha } = read.source;
+            let SceneSource {
+                profile: _,
+                image,
+                alpha,
+            } = read.source;
             let PrivateBuffer {
                 identity,
                 image: destination,
@@ -156,7 +141,11 @@ impl PreparedSceneReads {
         }
         let reads = SubmittedReads::new(pending)
             .map_err(|error| SubmitSceneReadsError(error.into_parts().1))?;
-        Ok(SubmittedSceneReads { identities, reads })
+        Ok(SubmittedSceneReads {
+            profile: self.profile,
+            identities,
+            reads,
+        })
     }
 
     pub fn into_parts(self) -> (Vec<SceneSource>, Vec<PrivateBuffer>) {
@@ -210,6 +199,7 @@ impl PrepareSceneReadsError {
 /// Accepted reads represented by one native completion record.
 #[must_use = "release the aggregate completion before waiting for scene pixels"]
 pub struct SubmittedSceneReads {
+    profile: Arc<()>,
     identities: Vec<(std::sync::Arc<BufferIdentity>, SourceAlpha)>,
     reads: SubmittedReads,
 }
@@ -227,8 +217,12 @@ impl SubmittedSceneReads {
         self.reads.is_empty()
     }
 
+    pub(crate) fn belongs_to(&self, composer: &SceneComposer) -> bool {
+        Arc::ptr_eq(&self.profile, composer.profile())
+    }
+
     /// Wait for every read and attach the kernel scene's content identity.
-    pub fn wait(self, content_serial: NonZeroU64) -> io::Result<SceneFrames> {
+    pub(crate) fn wait(self, content_serial: NonZeroU64) -> io::Result<SceneFrames> {
         let images = self.reads.wait()?;
         let layers = self
             .identities
@@ -362,10 +356,33 @@ mod tests {
             .unwrap();
             originals.push(image);
             sources.push(
-                SceneSource::from_drm_format(imported, format)
-                    .unwrap_or_else(|_| panic!("matching DRM source format was rejected")),
+                SceneSource::from_drm_format(&composer, imported, format)
+                    .expect("matching DRM source format was rejected"),
             );
         }
+
+        let other_composer = SceneComposer::new(
+            &worker,
+            SceneRequirements {
+                output: extent,
+                layers: &layers,
+                color: OutputColor::default(),
+            },
+        )
+        .unwrap();
+        let mut other_pool = other_composer
+            .create_pool(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        let other_buffers = other_pool.take().unwrap().unwrap();
+        let rejected = PreparedSceneReads::new(&other_composer, sources, other_buffers.sources)
+            .err()
+            .unwrap();
+        assert_eq!(rejected.cause().kind(), io::ErrorKind::InvalidInput);
+        let (sources, other_sources, _) = rejected.into_parts();
+        assert!(other_pool.restore_sources(other_sources).is_ok());
+        assert!(other_pool
+            .restore_destination(other_buffers.destination)
+            .is_ok());
 
         destinations.swap(0, 1);
         let rejected = PreparedSceneReads::new(&composer, sources, destinations)
@@ -378,6 +395,8 @@ mod tests {
             .unwrap_or_else(|_| panic!("matching scene reads were rejected"))
             .submit()
             .unwrap();
+        assert!(submitted.belongs_to(&composer));
+        assert!(!submitted.belongs_to(&other_composer));
         assert_eq!(submitted.len(), 2);
         assert!(!submitted.is_empty());
         if let Some(completion) = submitted.completion() {

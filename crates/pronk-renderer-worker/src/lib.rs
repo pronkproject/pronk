@@ -6,6 +6,7 @@ mod pool;
 mod reader;
 mod reads;
 mod scene;
+mod scene_job;
 mod scene_pool;
 mod scene_profile;
 mod scene_reads;
@@ -29,12 +30,15 @@ pub use scene::{
     ComposedFrame, RejectedScene, RejectedSceneFrames, SceneComposer, SceneCompositionError,
     SceneFrames, SceneInputs,
 };
+pub use scene_job::{
+    QualifiedSceneJob, QualifySceneJobError, ReleaseSceneJobError, ReleasedSceneReads,
+};
 pub use scene_pool::{
     RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool, MAX_SCENE_LAYERS,
 };
 pub use scene_reads::{
-    PrepareSceneReadsError, PreparedSceneReads, RejectedSceneSource, SceneSource,
-    SubmitSceneReadsError, SubmittedSceneReads,
+    PrepareSceneReadsError, PreparedSceneReads, SceneSource, SubmitSceneReadsError,
+    SubmittedSceneReads,
 };
 pub use source::{ImportError, ImportedSource, SourceAlpha};
 pub use submission::{
