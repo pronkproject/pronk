@@ -11,9 +11,9 @@ use pronk_gpu::vulkan::{Device, ImageLayout, SourceImage};
 /// One claimed source paired with its ordinary Vulkan import.
 #[must_use = "release the source without access or submit its native read"]
 pub struct ImportedSource<'job, 'renderer, F: AsFd> {
-    job: SourceJob<'job, 'renderer, F>,
-    image: SourceImage,
-    geometry: SourceGeometry,
+    pub(super) job: SourceJob<'job, 'renderer, F>,
+    pub(super) image: SourceImage,
+    pub(super) geometry: SourceGeometry,
 }
 
 impl<'job, 'renderer, F: AsFd> ImportedSource<'job, 'renderer, F> {
