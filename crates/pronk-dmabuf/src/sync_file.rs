@@ -34,8 +34,9 @@ impl SyncFile {
 
     /// Combine two submitted completion records into one sync file.
     ///
-    /// The returned record completes after both inputs and preserves an error
-    /// from either input. Merging does not consume or otherwise change either
+    /// The returned record completes after both inputs. The kernel may discard
+    /// completed inputs, including their errors: check the original records to
+    /// establish pixel validity. Merging does not consume or change either
     /// source record. It joins already submitted native work; it cannot stand
     /// in for work that userspace intends to submit later.
     pub fn merge(&self, other: &Self) -> io::Result<Self> {

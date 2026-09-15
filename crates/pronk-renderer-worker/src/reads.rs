@@ -54,6 +54,8 @@ impl SubmittedReads {
     ///
     /// `None` means every submission returned its already-completed sentinel.
     /// With one pending record, the original sync file is borrowed directly.
+    /// Aggregate success establishes retirement only; [`Self::wait`] checks
+    /// each original completion before returning valid images.
     pub fn completion(&self) -> Option<&SyncFile> {
         self.merged
             .as_ref()
@@ -174,13 +176,12 @@ mod tests {
         };
         assert_eq!(submitted.len(), 3);
         assert!(!submitted.is_empty());
-        let completion = submitted
-            .completion()
-            .expect("native reads returned no completion record");
-        assert!(matches!(
-            completion.completion().unwrap(),
-            None | Some(Completion::Success)
-        ));
+        if let Some(completion) = submitted.completion() {
+            assert!(matches!(
+                completion.completion().unwrap(),
+                None | Some(Completion::Success)
+            ));
+        }
         assert_eq!(submitted.wait().unwrap().len(), 3);
         for image in originals {
             image.clear_waited([255; 3]).unwrap();
