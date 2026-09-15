@@ -1,0 +1,19 @@
+[package]
+name = "pronk-capture-receiver-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+chromiacast.workspace = true
+pronk-media = { path = "../../crates/pronk-media" }
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

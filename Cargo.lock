@@ -1420,6 +1420,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pronk-capture-receiver-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chromiacast",
+ "pronk-media",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pronk-castkms-live-test"
 version = "0.1.0"
 dependencies = [

@@ -22,6 +22,7 @@ members = [
     "crates/pronk-userns",
     "crates/pronkctl",
     "tests/backend-activation",
+    "tests/capture-receiver",
     "tests/castkms-live",
     "tests/drm-capture-live",
     "tests/executor-replay",
