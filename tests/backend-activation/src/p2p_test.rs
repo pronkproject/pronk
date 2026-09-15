@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
@@ -17,14 +17,13 @@ use pronk::device_session_port::{
     DeviceMediaStopReason, DeviceMediaSuspendReason, DeviceMediaTarget, DeviceSessionPort,
     DeviceSessionStopReason,
 };
-use pronk::display::DisplaySetupStage;
+use pronk::display::{DisplaySetupStage, MediaRuntime};
 use pronk::display_state::RoutedMode;
 use pronk::kernel_session_provider::LegacyKernelSessionProvider;
 use pronk::manager::{
     BackendConfig, InventoryEvent, ManagerActor, OutputInventoryProvider,
-    OutputInventoryProviderError,
+    OutputInventoryProviderError, SystemOutputInventoryProvider,
 };
-use pronk::mutter_grant_provider::MutterGrantProvider;
 use pronk::preparation::PreparedCastDevice;
 use pronk_backend_host::{
     BackendConnectError, BackendConnection, BackendDisconnectReason, BackendEndpoint,
@@ -41,12 +40,13 @@ use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID};
 use pronk_core::output::{
     discover_castkms_outputs, CastKmsOutput, CastKmsOutputId, OutputConnection,
 };
-use pronk_core::session::PinnedCallerSession;
+use pronk_core::session::PinnedCallerProcess;
 use pronk_dbus::DeviceSelection;
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use pronk_systemd::BACKEND_CONTROL_FD_NAME;
 use tokio::io::AsyncReadExt;
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 
 mod gstreamer_fixture;
 mod test_grant_provider;
@@ -103,6 +103,16 @@ async fn main() -> anyhow::Result<()> {
         Some(value) if value == "real" => true,
         Some(_) => bail!("PRONK_VM_DISPLAY_SETUP_GATE must be unset or 'real'"),
     };
+    if real_display_setup {
+        let manager_path = temporary_socket_path("real-display");
+        let mut manager =
+            ActivationLauncher::start(&socket_activate, &mock_backend, &manager_path, None, None)?;
+        manager.wait_until_listening().await?;
+        run_real_display_setup(&manager_path).await?;
+        manager.stop()?;
+        println!("p2p_brokered_display_setup=pass");
+        return Ok(());
+    }
 
     let normal_path = temporary_socket_path("normal");
     let mut normal =
@@ -142,9 +152,6 @@ async fn main() -> anyhow::Result<()> {
     manager.wait_until_listening().await?;
     run_inventory_manager(&manager_path).await?;
     run_supervised_preparation(&manager_path).await?;
-    if real_display_setup {
-        run_real_display_setup(&manager_path).await?;
-    }
     manager.stop()?;
 
     let eof_path = temporary_socket_path("unsolicited-eof");
@@ -638,11 +645,19 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
         .request_name(pronk_dbus::BUS_NAME)
         .await
         .context("own the Pronk bus name used by Mutter authorization")?;
-    let mut manager = ManagerActor::spawn(
+    let pnp_resolver =
+        PnpIdResolver::from_database("GGL\tGoogle Inc.\n", &[], DEFAULT_SYNTHESIZER_PNP_ID)?;
+    let kernel_sessions = Arc::new(pronk_capture_broker::Provider::new(
+        connection.clone(),
+        NonZeroUsize::new(1).unwrap(),
+        METHOD_TIMEOUT,
+    )?);
+    let mut manager = ManagerActor::spawn_with_providers_and_media_runtime(
         vec![BackendConfig::new(endpoint, 151, validator, policy)],
-        Arc::new(LegacyKernelSessionProvider::new(Arc::new(
-            MutterGrantProvider::new(connection.clone()),
-        ))),
+        Arc::new(SystemOutputInventoryProvider),
+        kernel_sessions.clone(),
+        Arc::new(pnp_resolver),
+        MediaRuntime::new(PathBuf::from("/run/mutter-test/private"), 0),
     )?;
     let mut events = manager
         .take_events()
@@ -660,9 +675,7 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
         .find(|device| device.device_id == "living-room")
         .context("mock living-room Device is missing")?;
     let uid = fs::metadata("/proc/self")?.uid();
-    let caller = PinnedCallerSession::pin_async(std::process::id(), uid, uid)
-        .await?
-        .into_process();
+    let caller = PinnedCallerProcess::pin_async(std::process::id(), uid, uid).await?;
     let operation = manager
         .handle()
         .start_display_setup(DeviceSelection::from_device(device), None, caller, false)
@@ -683,9 +696,13 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
     })
     .await
     .context("display setup did not reach a terminal state")??;
+    let terminal = status.borrow().clone();
     ensure!(
-        status.borrow().stage == DisplaySetupStage::Added,
-        "display setup did not reach Added"
+        terminal.stage == DisplaySetupStage::Added,
+        "display setup ended in {:?} with {:?}: {}",
+        terminal.stage,
+        terminal.error_code,
+        terminal.error.as_deref().unwrap_or("no diagnostic"),
     );
     let displays = manager.handle().list_displays().await?;
     let added = displays
@@ -698,13 +715,12 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
                 == Some(added.device.display_name.as_str()),
         "added display identity differs from the selected Device"
     );
-    let output_id = added.output.id.clone();
-    let connector_id = added.output.connector_id;
+    let output = added.output.clone();
     let attached = discover_castkms_outputs()?;
     ensure!(
         attached.iter().any(|output| {
-            output.id == output_id
-                && output.connector_id == connector_id
+            output.id == added.output.id
+                && output.connector_id == added.output.connector_id
                 && output.connection == OutputConnection::Connected
         }),
         "selected CastKMS output was not atomically attached"
@@ -714,13 +730,23 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
         manager.handle().list_displays().await?.is_empty(),
         "removed cast display remains in the manager inventory"
     );
-    let detached = discover_castkms_outputs()?;
-    ensure!(
-        detached.iter().any(|output| {
-            output.id == output_id && output.connection == OutputConnection::Disconnected
-        }),
-        "removed cast display did not detach its exact output"
-    );
+    let reacquired = kernel_sessions
+        .acquire(
+            pronk_capture_broker::Target {
+                device_major: output.device_major,
+                device_minor: output.device_minor,
+                crtc_id: NonZeroU32::new(output.crtc_id).context("output has a zero CRTC ID")?,
+                connector_id: NonZeroU32::new(output.connector_id)
+                    .context("output has a zero connector ID")?,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .context("removed cast display retained its kernel session")?;
+    reacquired
+        .release()
+        .await
+        .context("release reacquired kernel session")?;
     let report = manager.shutdown().await?;
     ensure!(
         report.errors.is_empty(),

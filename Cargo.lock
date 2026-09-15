@@ -1336,6 +1336,7 @@ dependencies = [
  "pronk",
  "pronk-backend-host",
  "pronk-backend-protocol",
+ "pronk-capture-broker",
  "pronk-core",
  "pronk-dbus",
  "pronk-pipewire",

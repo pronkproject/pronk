@@ -14,6 +14,7 @@ nix.workspace = true
 pronk = { path = "../../crates/pronk" }
 pronk-backend-host = { path = "../../crates/pronk-backend-host" }
 pronk-backend-protocol = { path = "../../crates/pronk-backend-protocol" }
+pronk-capture-broker = { path = "../../crates/pronk-capture-broker" }
 pronk-core = { path = "../../crates/pronk-core" }
 pronk-dbus = { path = "../../crates/pronk-dbus" }
 pronk-pipewire = { path = "../../crates/pronk-pipewire" }
