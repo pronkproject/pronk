@@ -1025,10 +1025,11 @@ async fn run_manager(
                             .ok_or_else(|| ResolveDeviceError::BackendUnavailable {
                                 backend_id: device.backend_id.clone(),
                             })?;
-                        let reservation = output_slots.reserve(
+                        let reservation = output_slots.reserve_where(
                             &device,
                             &outputs,
                             preferred_output.as_ref(),
+                            |output| manager.kernel_session_provider.may_acquire(output),
                         )?;
                         Ok(ReservedCastDisplaySlot {
                             device: device.clone(),
