@@ -7,7 +7,9 @@ use std::sync::Arc;
 use drm_display_executor::scene::geometry::Extent;
 use pronk_gpu::vulkan::Device;
 
-use crate::pool::{SceneBinding, SceneBufferRole, MAX_PRIVATE_POOL_BYTES, PRIVATE_PIXEL_BYTES};
+use crate::pool::{
+    SceneBinding, SceneBufferRole, MAX_PRIVATE_BUFFERS, MAX_PRIVATE_POOL_BYTES, PRIVATE_PIXEL_BYTES,
+};
 use crate::{PrivateBuffer, PrivatePool, RejectedBuffer};
 
 /// Maximum source layers retained by one prepared scene profile.
@@ -17,10 +19,12 @@ pub const MAX_SCENE_LAYERS: usize = 24;
 ///
 /// Every layer has a distinct provenance domain even when dimensions match.
 /// The final-image pool may remain checked out for output while completed
-/// source intermediates return independently.
+/// source intermediates return independently. Their capacities are separate;
+/// one complete reservation still requires both kinds to be available.
 pub struct ScenePool {
     destination: PrivatePool,
     sources: Vec<PrivatePool>,
+    source_capacity: NonZeroUsize,
 }
 
 impl ScenePool {
@@ -29,16 +33,22 @@ impl ScenePool {
         device: &Device,
         output: Extent,
         source_extents: impl ExactSizeIterator<Item = Extent> + Clone,
-        depth: NonZeroUsize,
+        final_capacity: NonZeroUsize,
+        source_capacity: NonZeroUsize,
         profile: &Arc<()>,
     ) -> io::Result<Self> {
-        validate_request(output, source_extents.clone(), depth)?;
+        validate_request(
+            output,
+            source_extents.clone(),
+            final_capacity,
+            source_capacity,
+        )?;
         let mut allocated_bytes = 0;
         let destination = PrivatePool::new_accounted(
             device,
             nonzero(output.width()),
             nonzero(output.height()),
-            depth,
+            final_capacity,
             &mut allocated_bytes,
             Some(SceneBinding::new(profile, SceneBufferRole::Destination)),
         )?;
@@ -51,7 +61,7 @@ impl ScenePool {
                 device,
                 nonzero(extent.width()),
                 nonzero(extent.height()),
-                depth,
+                source_capacity,
                 &mut allocated_bytes,
                 Some(SceneBinding::new(profile, SceneBufferRole::Source(index))),
             )?);
@@ -59,11 +69,16 @@ impl ScenePool {
         Ok(Self {
             destination,
             sources,
+            source_capacity,
         })
     }
 
-    pub fn depth(&self) -> NonZeroUsize {
+    pub fn final_capacity(&self) -> NonZeroUsize {
         self.destination.capacity()
+    }
+
+    pub fn source_capacity(&self) -> NonZeroUsize {
+        self.source_capacity
     }
 
     pub fn available(&self) -> usize {
@@ -175,22 +190,27 @@ impl RejectedSceneSources {
 fn validate_request(
     output: Extent,
     mut source_extents: impl ExactSizeIterator<Item = Extent>,
-    depth: NonZeroUsize,
+    final_capacity: NonZeroUsize,
+    source_capacity: NonZeroUsize,
 ) -> io::Result<()> {
+    if final_capacity.get() > MAX_PRIVATE_BUFFERS || source_capacity.get() > MAX_PRIVATE_BUFFERS {
+        return Err(invalid("scene pool exceeds its buffer-count limit"));
+    }
     if source_extents.len() > MAX_SCENE_LAYERS {
         return Err(invalid("scene exceeds its private layer limit"));
     }
-    let pixels = source_extents.try_fold(
-        u64::from(output.width()) * u64::from(output.height()),
-        |pixels, extent| {
-            u64::from(extent.width())
-                .checked_mul(u64::from(extent.height()))
-                .and_then(|layer| pixels.checked_add(layer))
-        },
-    );
-    let bytes = pixels
+    let output_pixels = u64::from(output.width())
+        .checked_mul(u64::from(output.height()))
+        .and_then(|pixels| pixels.checked_mul(final_capacity.get() as u64));
+    let source_pixels = source_extents.try_fold(0_u64, |pixels, extent| {
+        u64::from(extent.width())
+            .checked_mul(u64::from(extent.height()))
+            .and_then(|layer| layer.checked_mul(source_capacity.get() as u64))
+            .and_then(|layer| pixels.checked_add(layer))
+    });
+    let bytes = output_pixels
+        .and_then(|output| source_pixels.and_then(|sources| output.checked_add(sources)))
         .and_then(|pixels| pixels.checked_mul(PRIVATE_PIXEL_BYTES))
-        .and_then(|bytes| bytes.checked_mul(u64::try_from(depth.get()).ok()?))
         .ok_or_else(|| invalid("scene private storage size overflowed"))?;
     if bytes > MAX_PRIVATE_POOL_BYTES {
         return Err(invalid("scene private storage exceeds its byte limit"));
@@ -215,19 +235,32 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_policy_counts_every_depth_and_source() {
+    fn aggregate_policy_counts_each_capacity_and_source() {
         let output = extent(3840, 2160);
         let sources = [output];
-        assert!(
-            validate_request(output, sources.into_iter(), NonZeroUsize::new(1).unwrap()).is_ok()
-        );
-        assert!(
-            validate_request(output, sources.into_iter(), NonZeroUsize::new(2).unwrap()).is_ok()
-        );
+        assert!(validate_request(
+            output,
+            sources.into_iter(),
+            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .is_ok());
+        assert!(validate_request(
+            output,
+            sources.into_iter(),
+            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .is_ok());
         assert_eq!(
-            validate_request(output, sources.into_iter(), NonZeroUsize::new(3).unwrap())
-                .unwrap_err()
-                .kind(),
+            validate_request(
+                output,
+                sources.into_iter(),
+                NonZeroUsize::new(3).unwrap(),
+                NonZeroUsize::new(2).unwrap(),
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::InvalidInput
         );
     }
@@ -237,9 +270,30 @@ mod tests {
         let output = extent(1, 1);
         let sources = vec![output; MAX_SCENE_LAYERS + 1];
         assert_eq!(
-            validate_request(output, sources.into_iter(), NonZeroUsize::new(1).unwrap())
-                .unwrap_err()
-                .kind(),
+            validate_request(
+                output,
+                sources.into_iter(),
+                NonZeroUsize::new(1).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn background_only_scene_still_bounds_both_capacities() {
+        let output = extent(1, 1);
+        assert_eq!(
+            validate_request(
+                output,
+                std::iter::empty(),
+                NonZeroUsize::new(1).unwrap(),
+                NonZeroUsize::new(MAX_PRIVATE_BUFFERS + 1).unwrap(),
+            )
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::InvalidInput
         );
     }
@@ -256,10 +310,12 @@ mod tests {
             output,
             sources.into_iter(),
             NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::new(2).unwrap(),
             &Arc::new(()),
         )
         .unwrap();
-        assert_eq!(pool.depth().get(), 2);
+        assert_eq!(pool.final_capacity().get(), 2);
+        assert_eq!(pool.source_capacity().get(), 2);
         let first = pool.take().unwrap().unwrap();
         let second = pool.take().unwrap().unwrap();
         assert!(pool.take().unwrap().is_none());
@@ -274,6 +330,39 @@ mod tests {
 
     #[test]
     #[ignore = "requires explicit Vulkan GPU selection"]
+    fn source_storage_cycles_while_final_images_accumulate() {
+        let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
+        let device = Device::open(node).unwrap();
+        let output = extent(8, 6);
+        let sources = [extent(4, 3), extent(2, 5)];
+        let mut pool = ScenePool::new(
+            &device,
+            output,
+            sources.into_iter(),
+            NonZeroUsize::new(3).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+            &Arc::new(()),
+        )
+        .unwrap();
+        assert_eq!(pool.final_capacity().get(), 3);
+        assert_eq!(pool.source_capacity().get(), 1);
+
+        let mut held_destinations = Vec::new();
+        for _ in 0..3 {
+            let reservation = pool.take().unwrap().unwrap();
+            assert!(pool.take().unwrap().is_none());
+            held_destinations.push(reservation.destination);
+            assert!(pool.restore_sources(reservation.sources).is_ok());
+        }
+        assert!(pool.take().unwrap().is_none());
+        for destination in held_destinations {
+            assert!(pool.restore_destination(destination).is_ok());
+        }
+        assert_eq!(pool.available(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires explicit Vulkan GPU selection"]
     fn invalid_source_order_is_rejected_atomically() {
         let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
         let device = Device::open(node).unwrap();
@@ -283,6 +372,7 @@ mod tests {
             &device,
             output,
             sources.into_iter(),
+            NonZeroUsize::new(1).unwrap(),
             NonZeroUsize::new(1).unwrap(),
             &Arc::new(()),
         )

@@ -77,10 +77,24 @@ impl SceneComposer {
         self.layers.len()
     }
 
-    /// Allocate bounded private storage matching this checked profile.
-    pub fn create_pool(&self, depth: NonZeroUsize) -> io::Result<ScenePool> {
+    /// Allocate independently bounded final and source storage for this profile.
+    ///
+    /// A final image may remain checked out while a smaller set of source
+    /// intermediates cycles through later compositions.
+    pub fn create_pool(
+        &self,
+        final_capacity: NonZeroUsize,
+        source_capacity: NonZeroUsize,
+    ) -> io::Result<ScenePool> {
         let sources = self.layers.iter().map(|layer| layer.source);
-        ScenePool::new(&self.device, self.output, sources, depth, &self.profile)
+        ScenePool::new(
+            &self.device,
+            self.output,
+            sources,
+            final_capacity,
+            source_capacity,
+            &self.profile,
+        )
     }
 
     /// Compose qualified source frames and apply the complete output color path.
@@ -512,7 +526,9 @@ mod tests {
         .unwrap();
         assert_eq!(composer.output(), extent);
         assert_eq!(composer.layer_count(), 1);
-        let mut pool = composer.create_pool(NonZeroUsize::new(2).unwrap()).unwrap();
+        let mut pool = composer
+            .create_pool(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(2).unwrap())
+            .unwrap();
         let SceneBuffers {
             destination,
             mut sources,
@@ -546,6 +562,7 @@ mod tests {
             &device,
             extent,
             [extent, extent].into_iter(),
+            NonZeroUsize::new(1).unwrap(),
             NonZeroUsize::new(1).unwrap(),
             &Arc::new(()),
         )
@@ -618,7 +635,9 @@ mod tests {
             },
         )
         .unwrap();
-        let mut pool = composer.create_pool(NonZeroUsize::new(1).unwrap()).unwrap();
+        let mut pool = composer
+            .create_pool(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
         let SceneBuffers {
             destination,
             sources,
