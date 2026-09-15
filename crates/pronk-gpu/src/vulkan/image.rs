@@ -7,14 +7,17 @@ use ash::vk;
 
 use super::device::{native, unsupported, Device, DeviceInner};
 
-pub(super) const FORMAT: vk::Format = vk::Format::B8G8R8A8_UNORM;
+mod format;
+pub use format::PackedFormat;
+
 pub(super) const USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::from_raw(
     vk::ImageUsageFlags::TRANSFER_SRC.as_raw() | vk::ImageUsageFlags::TRANSFER_DST.as_raw(),
 );
 
-/// Allocator-reported single-memory-plane B8G8R8A8 layout, without CPU mapping.
+/// Allocator-reported single-memory-plane packed layout, without CPU mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageLayout {
+    pub format: PackedFormat,
     pub width: NonZeroU32,
     pub height: NonZeroU32,
     pub modifier: u64,
@@ -53,7 +56,9 @@ impl Device {
         height: NonZeroU32,
         modifier: u64,
     ) -> io::Result<Image> {
+        let format = PackedFormat::Bgra8;
         self.check_image(
+            format,
             width.get(),
             height.get(),
             modifier,
@@ -68,7 +73,7 @@ impl Device {
             .push_next(&mut tiling)
             .push_next(&mut external)
             .image_type(vk::ImageType::TYPE_2D)
-            .format(FORMAT)
+            .format(format.native())
             .extent(vk::Extent3D {
                 width: width.get(),
                 height: height.get(),
@@ -90,6 +95,7 @@ impl Device {
             state: ImageState::Uninitialized,
             memory: vk::DeviceMemory::null(),
             layout: ImageLayout {
+                format,
                 width,
                 height,
                 modifier,
@@ -163,6 +169,7 @@ impl Device {
 
     pub(super) fn check_image(
         &self,
+        packed: PackedFormat,
         width: u32,
         height: u32,
         modifier: u64,
@@ -173,7 +180,9 @@ impl Device {
         let mut list = vk::DrmFormatModifierPropertiesListEXT::default();
         let mut format = vk::FormatProperties2::default().push_next(&mut list);
         // SAFETY: Live physical device, supported extension and valid output chain.
-        unsafe { instance.get_physical_device_format_properties2(physical, FORMAT, &mut format) };
+        unsafe {
+            instance.get_physical_device_format_properties2(physical, packed.native(), &mut format)
+        };
         let mut entries = vec![
             vk::DrmFormatModifierPropertiesEXT::default();
             list.drm_format_modifier_count as usize
@@ -182,7 +191,9 @@ impl Device {
             .drm_format_modifier_properties(&mut entries);
         let mut format = vk::FormatProperties2::default().push_next(&mut list);
         // SAFETY: The second query has storage for the enumerated property count.
-        unsafe { instance.get_physical_device_format_properties2(physical, FORMAT, &mut format) };
+        unsafe {
+            instance.get_physical_device_format_properties2(physical, packed.native(), &mut format)
+        };
         let needed = vk::FormatFeatureFlags::BLIT_SRC | vk::FormatFeatureFlags::BLIT_DST;
         if !entries.iter().any(|entry| {
             entry.drm_format_modifier == modifier
@@ -199,7 +210,7 @@ impl Device {
         let query = vk::PhysicalDeviceImageFormatInfo2::default()
             .push_next(&mut tiling)
             .push_next(&mut external)
-            .format(FORMAT)
+            .format(packed.native())
             .ty(vk::ImageType::TYPE_2D)
             .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
             .usage(USAGE);

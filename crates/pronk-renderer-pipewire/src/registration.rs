@@ -24,6 +24,11 @@ impl Registration {
             return Err(invalid("renderer pool is outside PipeWire buffer limits"));
         }
         let image = pool.layout();
+        if image.format != pronk_gpu::vulkan::PackedFormat::Bgra8 {
+            return Err(invalid(
+                "renderer output does not use the BGRx transport format",
+            ));
+        }
         let pitch = NonZeroU32::new(
             image
                 .pitch

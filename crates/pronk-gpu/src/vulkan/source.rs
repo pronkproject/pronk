@@ -8,7 +8,7 @@ use ash::vk;
 use pronk_dmabuf::{export_dependencies, Access, SyncFile};
 
 use super::device::{native, DeviceInner};
-use super::image::{FORMAT, USAGE};
+use super::image::USAGE;
 use super::{Device, ImageLayout};
 
 /// One imported source use with its explicit producer dependency retained.
@@ -32,7 +32,7 @@ pub struct SourceImage {
 }
 
 impl Device {
-    /// Import a single-plane B8G8R8A8 source through the ordinary Vulkan driver.
+    /// Import a single-plane packed source through the ordinary Vulkan driver.
     ///
     /// Both descriptors are consumed on success and failure. The explicit
     /// producer dependency remains separate from a later reservation snapshot.
@@ -42,7 +42,7 @@ impl Device {
     ///
     /// The descriptor and metadata must identify a compatible image allocation
     /// on this physical GPU, satisfying Vulkan external-memory requirements for
-    /// the fixed format, dimensions and transfer usage. The supplied submitted
+    /// the reported format, dimensions and transfer usage. The supplied submitted
     /// fence must cover all producer writes and release in GENERAL layout with
     /// foreign queue ownership. Failed producer completion is allowed as input,
     /// but must not authorize reading invalid pixels. Native bounds checks
@@ -92,6 +92,7 @@ impl Device {
         let stat = nix::sys::stat::fstat(fd.as_raw_fd())?;
         validate_backing(layout.allocation_size, stat.st_size)?;
         self.check_image(
+            layout.format,
             layout.width.get(),
             layout.height.get(),
             layout.modifier,
@@ -109,7 +110,7 @@ impl Device {
             .push_next(&mut modifier)
             .push_next(&mut external)
             .image_type(vk::ImageType::TYPE_2D)
-            .format(FORMAT)
+            .format(layout.format.native())
             .extent(vk::Extent3D {
                 width: layout.width.get(),
                 height: layout.height.get(),
@@ -274,6 +275,7 @@ mod tests {
     #[test]
     fn source_layout_bounds_do_not_invent_tiled_extents() {
         let mut layout = ImageLayout {
+            format: super::super::PackedFormat::Bgra8,
             width: NonZeroU32::new(16).unwrap(),
             height: NonZeroU32::new(8).unwrap(),
             modifier: 0,

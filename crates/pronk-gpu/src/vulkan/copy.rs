@@ -42,11 +42,12 @@ impl Image {
         let input = source.layout();
         if layout.width != input.width
             || layout.height != input.height
+            || layout.format != input.format
             || source.state != ImageState::Released
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "copy needs an initialized source with matching dimensions",
+                "copy needs an initialized source with matching dimensions and format",
             ));
         }
         let destination_fd = self.export()?;

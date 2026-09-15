@@ -26,6 +26,7 @@ fn dimension(value: u32) -> NonZeroU32 {
 
 fn native_layout(width: u32, height: u32) -> ImageLayout {
     ImageLayout {
+        format: crate::vulkan::PackedFormat::Bgra8,
         width: dimension(width),
         height: dimension(height),
         modifier: 0,

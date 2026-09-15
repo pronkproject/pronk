@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use std::os::fd::AsRawFd;
 
 use pronk_gpu::output_pool::OutputPool;
-use pronk_gpu::vulkan::Device;
+use pronk_gpu::vulkan::{Device, PackedFormat};
 
 fn selected() -> (Device, u64) {
     let node = std::env::var_os("PRONK_GPU_RENDER_NODE")
@@ -34,6 +34,7 @@ fn exported_images_retain_device_and_allocation_identity() {
     let mut buffers = Vec::new();
     for image in &images {
         let layout = image.layout();
+        assert_eq!(layout.format, PackedFormat::Bgra8);
         assert_eq!(
             (layout.width, layout.height, layout.modifier),
             (width, height, modifier)

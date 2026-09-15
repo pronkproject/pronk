@@ -23,6 +23,12 @@ pub(super) fn submit(
     let mut allocations = HashSet::new();
     allocations.insert((dst.st_dev, dst.st_ino));
     for (source, _) in &sources {
+        if source.layout().format != destination.layout().format {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staging copy needs matching source and destination formats",
+            ));
+        }
         if !Arc::ptr_eq(&source.device, &destination.device) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

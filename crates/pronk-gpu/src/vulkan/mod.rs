@@ -14,7 +14,7 @@ mod test_support;
 
 pub use copy::CopiedImages;
 pub use device::{Device, DeviceIdentity};
-pub use image::{Image, ImageLayout};
+pub use image::{Image, ImageLayout, PackedFormat};
 pub use private::{BlendedImages, Blender, Gamma, PendingPrivateRead, PrivateCopy, PrivateImage};
 pub use source::SourceImage;
 pub use stage::{OpaqueLayer, PendingStage};

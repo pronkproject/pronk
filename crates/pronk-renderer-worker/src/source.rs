@@ -6,7 +6,7 @@ use std::os::fd::{AsFd, AsRawFd};
 use castkms_renderer::{FormatModifier, SourceGeometry, SourceJob, SourceReleaseError};
 use castkms_sys::DRM_FORMAT_XRGB8888;
 use pronk_dmabuf::SyncFile;
-use pronk_gpu::vulkan::{Device, ImageLayout, SourceImage};
+use pronk_gpu::vulkan::{Device, ImageLayout, PackedFormat, SourceImage};
 
 /// One claimed source paired with its ordinary Vulkan import.
 #[must_use = "release the source without access or submit its native read"]
@@ -98,6 +98,7 @@ fn import<F: AsFd>(device: &Device, job: &SourceJob<'_, '_, F>) -> io::Result<So
         .filter(|size| *size > 0)
         .ok_or_else(|| invalid("renderer source has no addressable DMA-BUF storage"))?;
     let layout = ImageLayout {
+        format: PackedFormat::Bgra8,
         width: source.extent().width().try_into().map_err(invalid)?,
         height: source.extent().height().try_into().map_err(invalid)?,
         modifier,
