@@ -74,6 +74,45 @@ the `x264enc`, `h264parse`, and `avdec_h264` GStreamer plugins. Encoder startup
 is driven concurrently with capture because the media actor acknowledges
 startup only after receiving media.
 
+## Optional receiver test
+
+Only after arranging permission to interrupt a specific receiver, append
+`--receiver IP:PORT` to the live Mutter media probe. There is no automatic
+receiver selection. For example, inside the disposable compositor environment:
+
+```sh
+pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
+    /path/to/private/socket --receiver RECEIVER_IP:8009
+```
+
+The probe authenticates the receiver and launches its mirroring application,
+**replacing current playback**. It offers the captured mode as H.264 at 30 fps,
+4 Mbit/s and 400 ms target delay, rejecting incompatible receiver constraints.
+It forwards the production encoder's access units, requests key frames on
+feedback, and requires at least thirty acknowledged frames over a run of at
+least fifteen seconds. A dropped encoded frame ends the probe rather than
+continuing a broken dependency chain. Normal completion, error, Ctrl-C, and the
+probe timeout all attempt to stop the application; that does not restore whatever
+the receiver was previously playing.
+
+Local decoding and receiver acknowledgements are distinct results. Neither
+acknowledgements nor successful packet delivery prove that the television
+displays the changing pattern. Observe the receiver before claiming visible
+end-to-end playback. The VM needs outbound TCP and bidirectional UDP; an
+explicit endpoint avoids relying on multicast discovery through NAT.
+
+Set `RUST_LOG=chromiacast::control=trace` to record the negotiation message
+types and routing when diagnosing an offer timeout. Logging goes to stderr.
+Keep VM stdout and stderr in separate host files if the VM runner opens
+independent file handles for them; redirecting both onto one file can overwrite
+parts of the record.
+
+The receiver helper is in `tests/capture-receiver` and accepts encoded access
+units, not capture descriptors or raw images. The qualification executable
+combines capture and networking only for testing; it is not the installed
+backend's process or sandbox boundary.
+
 These tests use reference CPU composition. They do not qualify delegated GPU
-composition, hardware encoding, the installed service sandbox, receiver
-decoding, or end-to-end television playback.
+composition, hardware encoding, or the installed service sandbox. The default
+probes do not exercise receiver transport; even the optional receiver probe
+needs visual confirmation to establish television playback.
