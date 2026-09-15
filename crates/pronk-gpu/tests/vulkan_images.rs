@@ -21,6 +21,28 @@ fn selected() -> (Device, u64) {
 
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn source_profiles_can_be_checked_without_allocating_storage() {
+    let (device, modifier) = selected();
+    let width = NonZeroU32::new(1920).unwrap();
+    let height = NonZeroU32::new(1080).unwrap();
+    for format in [
+        PackedFormat::Bgra8,
+        PackedFormat::Rgba8,
+        PackedFormat::Bgr10A2,
+        PackedFormat::Rgb10A2,
+        PackedFormat::Rgb565,
+    ] {
+        device
+            .check_source_image(format, width, height, modifier)
+            .unwrap();
+    }
+    assert!(device
+        .check_source_image(PackedFormat::Bgra8, width, height, u64::MAX)
+        .is_err());
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
 fn exported_images_retain_device_and_allocation_identity() {
     let (device, modifier) = selected();
     eprintln!("selected GPU: {}", device.name());

@@ -44,6 +44,28 @@ pub struct Image {
 }
 
 impl Device {
+    /// Check whether one packed source profile can be imported for reading.
+    ///
+    /// The query uses the source-only Vulkan usage and DMA-BUF import contract.
+    /// It creates no image and grants no access to an allocation. Exact memory
+    /// planes, pitch, offset and allocation size still require validation when
+    /// a particular source is imported.
+    pub fn check_source_image(
+        &self,
+        format: PackedFormat,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        modifier: u64,
+    ) -> io::Result<()> {
+        self.check_image(
+            format,
+            width.get(),
+            height.get(),
+            modifier,
+            ImageUse::ImportedSource,
+        )
+    }
+
     /// Allocate BGRA storage with an explicitly selected modifier.
     ///
     /// The caller negotiates the modifier with its intended importer. Capability
