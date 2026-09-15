@@ -44,9 +44,11 @@ async fn run_until_stopped<F: AsFd>(
     stop: &CancellationToken,
 ) -> io::Result<()> {
     loop {
+        if stop.is_cancelled() {
+            return Ok(());
+        }
         pipeline.dispatch_outputs(video)?;
         tokio::select! {
-            biased;
             _ = stop.cancelled() => return Ok(()),
             event = video.next_event() => {
                 if let Some(error) = pipeline.handle_video_event(video, event?).await? {
