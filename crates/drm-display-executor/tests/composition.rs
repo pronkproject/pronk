@@ -5,6 +5,7 @@ use drm_display_executor::{
     },
     scene::{
         blend::{Blend, PixelBlend},
+        color::{ColorOperation, ColorPipeline, Lut},
         format::PackedRgbFormat as Format,
         geometry::Extent,
         transform::{Rotation, Transform},
@@ -188,6 +189,23 @@ fn pixel_interpretation_is_not_selected_by_format() {
             pixel: PixelBlend::Premultiplied,
             plane_alpha: u16::MAX
         }
+    );
+}
+
+#[test]
+fn layer_color_precedes_pixel_and_plane_blending() {
+    let table = [[u16::MAX, 0, 0]];
+    let operations = [ColorOperation::Lut(Lut::new(&table).unwrap())];
+    let source = [0, 0, 0, 128];
+    let layer = pixel_layer(&source, Format::Argb8888)
+        .with_color(ColorPipeline::new(&operations))
+        .with_blend(Blend {
+            pixel: PixelBlend::Coverage,
+            plane_alpha: u16::MAX,
+        });
+    assert_eq!(
+        render_pixel([0, 0, 255], &[layer], Format::Xrgb8888),
+        [127, 0, 128, 255]
     );
 }
 

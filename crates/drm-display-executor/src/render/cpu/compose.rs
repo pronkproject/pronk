@@ -7,15 +7,15 @@ use super::{
     pixel::Rgb,
 };
 use crate::scene::blend::Blend;
-use crate::scene::color::OutputColor;
+use crate::scene::color::{ColorPipeline, OutputColor};
 use crate::scene::geometry::{CopyRegion, Extent, GeometryError, SourceRect};
 use crate::scene::transform::Transform;
 
 /// One integral crop with nearest-neighbor scaling, transform and blending.
 ///
 /// The default is premultiplied pixel alpha and fully opaque plane alpha. Source
-/// pixels must be in the same encoded RGB domain as the background and output;
-/// this profile performs no color-space conversion or lookup-table processing.
+/// pixels use the background/output RGB domain unless [`Layer::with_color`]
+/// supplies an explicit conversion. Source color never changes pixel alpha.
 #[derive(Clone, Copy)]
 pub struct Layer<'a> {
     image: Image<'a>,
@@ -24,6 +24,7 @@ pub struct Layer<'a> {
     blend: Blend,
     transform: Transform,
     destination_extent: Option<Extent>,
+    color: ColorPipeline<'a>,
 }
 
 impl<'a> Layer<'a> {
@@ -40,6 +41,7 @@ impl<'a> Layer<'a> {
             blend: Blend::default(),
             transform: Transform::default(),
             destination_extent: None,
+            color: ColorPipeline::new(&[]),
         })
     }
 
@@ -62,6 +64,12 @@ impl<'a> Layer<'a> {
     /// The extent stays fixed if a subsequent call changes the transform.
     pub fn with_destination_extent(mut self, extent: Extent) -> Self {
         self.destination_extent = Some(extent);
+        self
+    }
+
+    /// Apply ordered source color operations before this layer is blended.
+    pub fn with_color(mut self, color: ColorPipeline<'a>) -> Self {
+        self.color = color;
         self
     }
 
@@ -102,10 +110,11 @@ impl<'a> Layer<'a> {
         let pixels = self.image.row(oy + local[1]).expect("validated source row");
         let start = (ox + local[0]) as usize * 4;
         let source = &pixels[start..start + 4];
-        Rgb::read(
+        let (color, alpha) = Rgb::read(
             [source[0], source[1], source[2], source[3]],
             self.image.layout().format(),
-        )
+        );
+        (color.source_color(self.color), alpha)
     }
 }
 
