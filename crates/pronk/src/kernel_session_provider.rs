@@ -220,4 +220,17 @@ mod tests {
         ));
         assert!(validate_brokered_features(false).is_ok());
     }
+
+    #[test]
+    fn broker_attempts_ownership_for_connected_outputs() {
+        let mut candidate = output();
+        candidate.connection = OutputConnection::Connected;
+        assert!(broker_may_acquire(&candidate));
+
+        let legacy = LegacyKernelSessionProvider::new(Arc::new(RecordingGrantProvider::default()));
+        assert!(!legacy.may_acquire(&candidate));
+
+        candidate.connection = OutputConnection::Unknown;
+        assert!(!broker_may_acquire(&candidate));
+    }
 }
