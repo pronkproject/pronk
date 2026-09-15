@@ -4,7 +4,7 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd};
 
 use castkms_renderer::{FormatModifier, SourceGeometry, SourceJob, SourceReleaseError};
-use castkms_sys::DRM_FORMAT_XRGB8888;
+use castkms_sys::{DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888};
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{Device, ImageLayout, PackedFormat, SourceImage};
 
@@ -72,9 +72,7 @@ impl<J> ImportError<J> {
 
 fn import<F: AsFd>(device: &Device, job: &SourceJob<'_, '_, F>) -> io::Result<SourceImage> {
     let source = job.image();
-    if source.format() != DRM_FORMAT_XRGB8888 {
-        return Err(unsupported("renderer source format is not XRGB8888"));
-    }
+    let format = source_format(source.format())?;
     let modifier = match source.modifier() {
         FormatModifier::Explicit(modifier) => modifier,
         FormatModifier::Unspecified => {
@@ -98,7 +96,7 @@ fn import<F: AsFd>(device: &Device, job: &SourceJob<'_, '_, F>) -> io::Result<So
         .filter(|size| *size > 0)
         .ok_or_else(|| invalid("renderer source has no addressable DMA-BUF storage"))?;
     let layout = ImageLayout {
-        format: PackedFormat::Bgra8,
+        format,
         width: source.extent().width().try_into().map_err(invalid)?,
         height: source.extent().height().try_into().map_err(invalid)?,
         modifier,
@@ -132,6 +130,51 @@ fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Er
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+fn source_format(fourcc: u32) -> io::Result<PackedFormat> {
+    match fourcc {
+        DRM_FORMAT_XRGB8888 => Ok(PackedFormat::Bgra8),
+        DRM_FORMAT_XBGR8888 => Ok(PackedFormat::Rgba8),
+        _ => Err(unsupported(
+            "renderer source is not a supported opaque packed RGB format",
+        )),
+    }
+}
+
 fn unsupported(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_source_formats_keep_their_native_channel_order() {
+        assert_eq!(
+            source_format(DRM_FORMAT_XRGB8888).unwrap(),
+            PackedFormat::Bgra8
+        );
+        assert_eq!(
+            source_format(DRM_FORMAT_XBGR8888).unwrap(),
+            PackedFormat::Rgba8
+        );
+    }
+
+    #[test]
+    fn source_formats_do_not_infer_alpha_yuv_or_endian_support() {
+        for fourcc in [
+            u32::from_le_bytes(*b"AR24"),
+            u32::from_le_bytes(*b"AB24"),
+            u32::from_le_bytes(*b"NV12"),
+            u32::from_le_bytes(*b"RG16"),
+            DRM_FORMAT_XRGB8888 | (1 << 31),
+            DRM_FORMAT_XBGR8888 | (1 << 31),
+            0,
+        ] {
+            assert_eq!(
+                source_format(fourcc).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+    }
 }

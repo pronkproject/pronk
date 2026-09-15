@@ -112,6 +112,7 @@ pub const CAPTURE_QUEUE_IMPLICIT_SYNC: u32 = 1 << 0;
 pub const CAPTURE_QUEUE_EXPLICIT_SYNC: u32 = 1 << 1;
 
 pub const DRM_FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
+pub const DRM_FORMAT_XBGR8888: u32 = u32::from_le_bytes(*b"XB24");
 pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 pub const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 pub const DRM_CLOEXEC: u32 = 0x0008_0000;
