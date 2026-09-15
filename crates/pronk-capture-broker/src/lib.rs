@@ -15,6 +15,10 @@ use tokio_util::sync::CancellationToken;
 use zbus::names::OwnedUniqueName;
 use zbus::zvariant::OwnedFd as BusFd;
 
+mod monitor;
+
+pub use monitor::Capabilities as MonitorCapabilities;
+
 const SERVICE: &str = "org.gnome.Mutter.CastKms";
 const PATH: &str = "/org/gnome/Mutter/CastKms";
 
@@ -93,6 +97,18 @@ impl Session {
             .as_ref()
             .expect("live session owns monitor control")
             .as_fd()
+    }
+
+    pub fn monitor_capabilities(&self) -> std::io::Result<monitor::Capabilities> {
+        monitor::query_capabilities(self.monitor())
+    }
+
+    pub fn attach_monitor(&self, edid: Option<&[u8]>) -> std::io::Result<()> {
+        monitor::attach_monitor(self.monitor(), edid)
+    }
+
+    pub fn detach_monitor(&self) -> std::io::Result<()> {
+        monitor::detach_monitor(self.monitor())
     }
 
     /// Validate the current image offer and move the whole session into the client.
