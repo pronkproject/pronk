@@ -10,6 +10,7 @@ use super::device::DeviceInner;
 mod allocation;
 mod blend;
 mod clear;
+mod color;
 mod gamma;
 mod matrix;
 mod output;
@@ -18,6 +19,7 @@ mod scene;
 mod source;
 
 pub use blend::{BlendedImages, Blender};
+pub use color::OutputColorProgram;
 pub use gamma::Gamma;
 pub use matrix::OutputMatrix;
 pub use output::PrivateCopy;

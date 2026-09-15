@@ -51,6 +51,11 @@ impl<'a> Lut<'a> {
         })
     }
 
+    /// Return the uniformly spaced entries in native channel order.
+    pub const fn entries(self) -> &'a [[u16; 3]] {
+        self.entries
+    }
+
     fn sample_extended(self, input: [i32; 3]) -> [i32; 3] {
         self.sample(input.map(|value| value.clamp(0, i32::from(u16::MAX)) as u16))
             .map(i32::from)

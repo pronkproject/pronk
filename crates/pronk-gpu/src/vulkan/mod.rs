@@ -16,8 +16,8 @@ pub use copy::CopiedImages;
 pub use device::{Device, DeviceIdentity};
 pub use image::{Image, ImageLayout, PackedFormat};
 pub use private::{
-    BlendedImages, Blender, ComposedScene, Gamma, LayerRequirements, OutputMatrix,
-    PendingPrivateRead, PrivateCopy, PrivateImage, PrivateLayer, SceneRequirements,
+    BlendedImages, Blender, ComposedScene, Gamma, LayerRequirements, OutputColorProgram,
+    OutputMatrix, PendingPrivateRead, PrivateCopy, PrivateImage, PrivateLayer, SceneRequirements,
     SourceRequirements,
 };
 pub use source::SourceImage;
