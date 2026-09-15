@@ -154,6 +154,29 @@ async fn exported_handles_identify_storage_without_retaining_a_pool_use() {
 }
 
 #[tokio::test]
+async fn uncertain_consumer_release_withholds_storage_without_blocking_shutdown() {
+    let (actor, shared) = fixture(2);
+    let first = frame(&actor, &shared).await;
+    first.retire();
+    let second = frame(&actor, &shared).await;
+    assert!(actor.buffers()[1].contains_frame(&second));
+    assert!(matches!(
+        actor.capture().await,
+        Err(CaptureError::Backpressure)
+    ));
+    drop(second);
+    let next = frame(&actor, &shared).await;
+    assert!(actor.buffers()[1].contains_frame(&next));
+    next.retire();
+    assert!(matches!(
+        actor.capture().await,
+        Err(CaptureError::Backpressure)
+    ));
+    actor.shutdown().await.unwrap();
+    assert_eq!(shared.state.lock().unwrap().closes, 1);
+}
+
+#[tokio::test]
 async fn producer_failure_is_not_published_as_pixels() {
     let (actor, shared) = fixture(1);
     let (result, ()) = tokio::join!(actor.capture(), complete(&shared, Err(-nix::libc::EIO)));

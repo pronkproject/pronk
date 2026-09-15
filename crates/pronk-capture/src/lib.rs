@@ -90,7 +90,7 @@ pub struct Frame {
     request: RequestId,
     timestamp: Duration,
     layout: Layout,
-    returned: mpsc::UnboundedSender<usize>,
+    returned: Option<mpsc::UnboundedSender<usize>>,
 }
 
 impl Frame {
@@ -109,6 +109,15 @@ impl Frame {
     pub fn stride(&self) -> NonZeroU32 {
         self.buffer.stride
     }
+
+    /// Permanently withhold this destination from further captures in the actor.
+    ///
+    /// Use when a consumer's release is uncertain. Storage references are freed
+    /// normally, but no pool credit is returned. Shutdown still drains admitted
+    /// kernel work and does not wait for the withheld credit.
+    pub fn retire(mut self) {
+        self.returned = None;
+    }
 }
 
 impl AsFd for Frame {
@@ -121,7 +130,9 @@ impl Drop for Frame {
     fn drop(&mut self) {
         // Each non-cloneable frame returns exactly once; queued returns are
         // bounded by the pool, even though Drop cannot await channel capacity.
-        let _ = self.returned.send(self.slot);
+        if let Some(returned) = &self.returned {
+            let _ = returned.send(self.slot);
+        }
     }
 }
 

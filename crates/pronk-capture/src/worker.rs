@@ -180,7 +180,7 @@ fn drain<B: Backend>(
                     request: completed.request,
                     timestamp,
                     layout,
-                    returned: returned.clone(),
+                    returned: Some(returned.clone()),
                 })
             }
             Err(error) => match error.checked_neg() {
