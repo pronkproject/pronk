@@ -136,6 +136,11 @@ impl<J> SourceSubmissionError<J> {
     pub fn error(&self) -> &io::Error {
         &self.error
     }
+
+    /// Discard terminal source ownership and return the submission error.
+    pub fn into_error(self) -> io::Error {
+        self.error
+    }
 }
 
 /// Accepted native work awaiting transfer of its completion to CastKMS.
