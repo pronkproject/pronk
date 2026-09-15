@@ -34,6 +34,10 @@ path = "src/video.rs"
 name = "pronk-capture-pattern-client"
 path = "src/pattern.rs"
 
+[[bin]]
+name = "pronk-capture-mutter-media-live-test"
+path = "src/mutter_media.rs"
+
 [dependencies]
 anyhow.workspace = true
 gstreamer.workspace = true
