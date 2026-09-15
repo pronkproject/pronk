@@ -9,7 +9,7 @@ mod submission;
 pub use activation::{PrivateProbe, ProbePreparationError};
 pub use output::{
     CompletedOutput, CompletedReturn, FinishedOutput, OutputDestination, OutputPool, OutputReturn,
-    PendingOutput, PublishedOutput, ReadyOutput,
+    OutputScope, PendingOutput, PublishedOutput, ReadyOutput,
 };
 pub use pool::{PrivateBuffer, PrivatePool, RejectedBuffer};
 pub use source::{ImportError, ImportedSource};

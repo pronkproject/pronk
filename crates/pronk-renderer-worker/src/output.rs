@@ -21,6 +21,18 @@ pub struct OutputPool {
     layout: ImageLayout,
 }
 
+/// Opaque identity of one output pool and recipient authorization scope.
+#[derive(Clone)]
+pub struct OutputScope(Arc<()>);
+
+impl PartialEq for OutputScope {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for OutputScope {}
+
 impl OutputPool {
     /// Allocate and prepare every output before source work may use the pool.
     pub async fn new(
@@ -82,6 +94,10 @@ impl OutputPool {
 
     pub fn layout(&self) -> ImageLayout {
         self.layout
+    }
+
+    pub fn scope(&self) -> OutputScope {
+        OutputScope(Arc::clone(&self.identity))
     }
 
     /// Duplicate one allocation descriptor for transport registration.
@@ -309,6 +325,10 @@ pub struct PublishedOutput {
 impl PublishedOutput {
     pub fn slot(&self) -> usize {
         self.publication.slot()
+    }
+
+    pub fn belongs_to(&self, scope: &OutputScope) -> bool {
+        Arc::ptr_eq(&self.pool, &scope.0)
     }
 }
 

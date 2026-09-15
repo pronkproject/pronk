@@ -1599,6 +1599,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pronk-renderer-pipewire"
+version = "0.1.0"
+dependencies = [
+ "pronk-gpu",
+ "pronk-pipewire",
+ "pronk-renderer-worker",
+ "tokio",
+]
+
+[[package]]
 name = "pronk-renderer-worker"
 version = "0.1.0"
 dependencies = [

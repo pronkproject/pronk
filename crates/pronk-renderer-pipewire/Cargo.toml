@@ -1,0 +1,18 @@
+[package]
+name = "pronk-renderer-pipewire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pronk-pipewire = { path = "../pronk-pipewire" }
+pronk-renderer-worker = { path = "../pronk-renderer-worker" }
+
+[dev-dependencies]
+pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
+tokio.workspace = true
+
+[lints]
+workspace = true
