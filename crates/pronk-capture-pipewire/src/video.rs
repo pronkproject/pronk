@@ -151,6 +151,7 @@ async fn pump<F: AsFd + Send + 'static>(
         }
         tokio::select! {
             _ = stop.cancelled() => return Ok(()),
+            _ = actor.closed() => return Err(error("capture actor stopped accepting frames")),
             event = source.next_event() => {
                 let event = event.ok_or_else(|| error("capture video source stopped"))?;
                 output.handle_event(&event)?;
@@ -170,6 +171,7 @@ async fn pump<F: AsFd + Send + 'static>(
                         // Ownership is recorded before this cancellable handoff.
                         tokio::select! {
                             _ = stop.cancelled() => return Ok(()),
+                            _ = actor.closed() => return Err(error("capture actor stopped accepting frames")),
                             result = source.publish(identity.media_generation, description) => result.map_err(error)?,
                         }
                         first = false;
