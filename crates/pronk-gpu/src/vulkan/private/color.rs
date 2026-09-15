@@ -14,6 +14,8 @@ use super::{
 };
 use crate::vulkan::Device;
 
+const MAX_COLOR_OPERATIONS: usize = 16;
+
 /// Immutable native implementation of a complete output color pipeline.
 #[derive(Clone)]
 pub struct OutputColorProgram {
@@ -38,6 +40,12 @@ pub struct ColorPipelineProgram {
 impl Device {
     /// Check ordered color operations without allocating native data.
     pub fn check_color_pipeline(&self, extent: Extent, color: ColorPipeline<'_>) -> io::Result<()> {
+        if color.operations().len() > MAX_COLOR_OPERATIONS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "color pipeline exceeds sixteen operations",
+            ));
+        }
         for operation in color.operations() {
             match operation {
                 ColorOperation::Bypass => {}
@@ -66,23 +74,49 @@ impl Device {
         stages
             .try_reserve_exact(color.operations().len())
             .map_err(io::Error::other)?;
-        for operation in color.operations() {
-            let stage = match *operation {
-                ColorOperation::Bypass => continue,
+        let operations = color.operations();
+        let mut index = 0;
+        while index < operations.len() {
+            let stage = match operations[index] {
+                ColorOperation::Bypass => {
+                    index += 1;
+                    continue;
+                }
                 ColorOperation::SrgbEotf => {
                     ColorStage::Transfer(Transfer::new(self, Function::Eotf)?)
                 }
                 ColorOperation::SrgbInverseEotf => {
                     ColorStage::Transfer(Transfer::new(self, Function::InverseEotf)?)
                 }
-                ColorOperation::Matrix(matrix) => {
-                    ColorStage::Matrix(self.create_output_matrix(matrix)?)
+                ColorOperation::Matrix(_) => {
+                    let start = index;
+                    while index < operations.len()
+                        && matches!(
+                            operations[index],
+                            ColorOperation::Bypass | ColorOperation::Matrix(_)
+                        )
+                    {
+                        index += 1;
+                    }
+                    let mut matrices = Vec::new();
+                    matrices
+                        .try_reserve_exact(index - start)
+                        .map_err(io::Error::other)?;
+                    matrices.extend(operations[start..index].iter().filter_map(|operation| {
+                        let ColorOperation::Matrix(matrix) = operation else {
+                            return None;
+                        };
+                        Some(*matrix)
+                    }));
+                    stages.push(ColorStage::Matrix(self.create_matrix_chain(&matrices)?));
+                    continue;
                 }
                 ColorOperation::Lut(table) => {
                     ColorStage::Lookup(self.create_gamma(table.entries())?)
                 }
             };
             stages.push(stage);
+            index += 1;
         }
         Ok(ColorPipelineProgram {
             device: Arc::clone(&self.inner),

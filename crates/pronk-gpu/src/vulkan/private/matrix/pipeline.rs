@@ -5,9 +5,10 @@ use ash::vk;
 use drm_display_executor::scene::color::ColorMatrix;
 use drm_display_executor::scene::geometry::Extent;
 
+use super::table::Table;
 use crate::vulkan::device::{native, unsupported, DeviceInner};
 
-pub(super) const PARAMETER_SIZE: usize = 8 + 12 * 8;
+pub(super) const PARAMETER_SIZE: usize = 12;
 
 pub(super) struct Program {
     pub(super) device: Arc<DeviceInner>,
@@ -15,13 +16,14 @@ pub(super) struct Program {
     pub(super) layout: vk::PipelineLayout,
     pub(super) pipeline: vk::Pipeline,
     pub(super) max_groups: [u32; 2],
-    pub(super) matrix: ColorMatrix,
+    pub(super) matrices: Table,
     shader: vk::ShaderModule,
 }
 
 impl Program {
-    pub(super) fn new(device: Arc<DeviceInner>, matrix: ColorMatrix) -> io::Result<Self> {
+    pub(super) fn new(device: Arc<DeviceInner>, matrices: &[ColorMatrix]) -> io::Result<Self> {
         let limits = requirements(&device)?;
+        let matrices = Table::new(Arc::clone(&device), matrices)?;
         let mut owner = Self {
             device,
             descriptors: vk::DescriptorSetLayout::null(),
@@ -31,16 +33,23 @@ impl Program {
                 limits.max_compute_work_group_count[0],
                 limits.max_compute_work_group_count[1],
             ],
-            matrix,
+            matrices,
             shader: vk::ShaderModule::null(),
         };
-        let bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE)];
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ];
         let descriptors = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        // SAFETY: The single storage image fits the mandatory descriptor limit.
+        // SAFETY: One storage image and buffer fit the mandatory limits.
         owner.descriptors = unsafe {
             owner
                 .device
@@ -58,7 +67,7 @@ impl Program {
         let words = ash::util::read_spv(&mut Cursor::new(include_bytes!("shader.spv")))?;
         let shader = vk::ShaderModuleCreateInfo::default().code(&words);
         // SAFETY: The checked-in shader matches the descriptor layout and
-        // 104-byte push-constant range. Its required feature was enabled.
+        // 12-byte push-constant range. Its required feature was enabled.
         unsafe {
             owner.layout = owner
                 .device
@@ -137,7 +146,7 @@ pub(super) fn check_support(device: &DeviceInner, extent: Extent) -> io::Result<
 
 impl Drop for Program {
     fn drop(&mut self) {
-        // SAFETY: Accepted image jobs retain the immutable program.
+        // SAFETY: Accepted image jobs retain the immutable program and data.
         unsafe {
             let raw = &self.device.raw;
             raw.destroy_pipeline(self.pipeline, None);

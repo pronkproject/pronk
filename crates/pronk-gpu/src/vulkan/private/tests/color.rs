@@ -18,10 +18,43 @@ fn ordered_native_color_pipeline_matches_the_portable_reference() {
     coefficients[2] = 1 << 32;
     coefficients[5] = 1 << 32;
     coefficients[8] = 1 << 32;
+    let offset_magnitude = 65536_u64 << 32;
+    let negative_offset = (1 << 63) | offset_magnitude;
+    let subtract = ColorMatrix::from_sign_magnitude([
+        1 << 32,
+        0,
+        0,
+        negative_offset,
+        0,
+        1 << 32,
+        0,
+        negative_offset,
+        0,
+        0,
+        1 << 32,
+        negative_offset,
+    ]);
+    let restore = ColorMatrix::from_sign_magnitude([
+        1 << 32,
+        0,
+        0,
+        offset_magnitude,
+        0,
+        1 << 32,
+        0,
+        offset_magnitude,
+        0,
+        0,
+        1 << 32,
+        offset_magnitude,
+    ]);
     let table = [[1024, 2048, 4096], [32768; 3], [65535; 3]];
     let operations = [
         ColorOperation::Bypass,
         ColorOperation::SrgbEotf,
+        ColorOperation::Matrix(subtract),
+        ColorOperation::Bypass,
+        ColorOperation::Matrix(restore),
         ColorOperation::Matrix(ColorMatrix::from_sign_magnitude(coefficients)),
         ColorOperation::SrgbInverseEotf,
         ColorOperation::Lut(Lut::new(&table).unwrap()),

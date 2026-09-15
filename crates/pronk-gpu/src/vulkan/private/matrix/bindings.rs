@@ -30,27 +30,42 @@ impl Bindings {
             .subresource_range(image.range());
         // SAFETY: The caller checked device identity and retains the image.
         owner.view = unsafe { raw.create_image_view(&view, None) }.map_err(native)?;
-        let sizes = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::STORAGE_IMAGE)
-            .descriptor_count(1)];
+        let sizes = [
+            vk::DescriptorType::STORAGE_IMAGE,
+            vk::DescriptorType::STORAGE_BUFFER,
+        ]
+        .map(|ty| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(1));
         let pool = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
             .pool_sizes(&sizes);
+        // SAFETY: Pool counts cover exactly one matching descriptor set.
         owner.pool = unsafe { raw.create_descriptor_pool(&pool, None) }.map_err(native)?;
         let layouts = [owner.program.descriptors];
         let allocate = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(owner.pool)
             .set_layouts(&layouts);
+        // SAFETY: The retained pool and immutable matching layout are live.
         owner.set = unsafe { raw.allocate_descriptor_sets(&allocate) }.map_err(native)?[0];
         let images = [vk::DescriptorImageInfo::default()
             .image_view(owner.view)
             .image_layout(vk::ImageLayout::GENERAL)];
-        let writes = [vk::WriteDescriptorSet::default()
-            .dst_set(owner.set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-            .image_info(&images)];
-        // SAFETY: The descriptor references the retained complete image view.
+        let buffers = [vk::DescriptorBufferInfo::default()
+            .buffer(owner.program.matrices.buffer)
+            .range(owner.program.matrices.size)];
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(owner.set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&images),
+            vk::WriteDescriptorSet::default()
+                .dst_set(owner.set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&buffers),
+        ];
+        // SAFETY: Descriptors retain the complete image view and immutable
+        // matrix storage with ranges matching the shader interface.
         unsafe { raw.update_descriptor_sets(&writes, &[]) };
         Ok(owner)
     }

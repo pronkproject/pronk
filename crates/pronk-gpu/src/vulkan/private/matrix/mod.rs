@@ -13,6 +13,7 @@ use crate::vulkan::Device;
 
 mod bindings;
 mod pipeline;
+mod table;
 use bindings::Bindings;
 use pipeline::Program;
 
@@ -32,8 +33,12 @@ pub struct OutputMatrix {
 impl Device {
     /// Prepare an exact DRM S31.32 output matrix.
     pub fn create_output_matrix(&self, matrix: ColorMatrix) -> io::Result<OutputMatrix> {
+        self.create_matrix_chain(std::slice::from_ref(&matrix))
+    }
+
+    pub(super) fn create_matrix_chain(&self, matrices: &[ColorMatrix]) -> io::Result<OutputMatrix> {
         Ok(OutputMatrix {
-            program: Arc::new(Program::new(Arc::clone(&self.inner), matrix)?),
+            program: Arc::new(Program::new(Arc::clone(&self.inner), matrices)?),
         })
     }
 }
@@ -71,12 +76,7 @@ impl OutputMatrix {
         {
             bytes.copy_from_slice(&value.to_ne_bytes());
         }
-        for (bytes, value) in parameters[8..]
-            .chunks_exact_mut(8)
-            .zip(self.program.matrix.sign_magnitude())
-        {
-            bytes.copy_from_slice(&value.to_ne_bytes());
-        }
+        parameters[8..12].copy_from_slice(&self.program.matrices.count.to_ne_bytes());
         let bindings = Bindings::new(Arc::clone(&self.program), &image)?;
         let mut job = Job::new(Arc::clone(&image.device), Resources { bindings, image })?;
         let barrier = job
