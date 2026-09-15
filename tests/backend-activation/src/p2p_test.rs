@@ -37,7 +37,7 @@ use pronk_backend_protocol::{
     PreparationRequest, SessionOptions, StopReason, SuspendReason, Validate, VideoProfile,
     SESSION_FEATURE_AUDIO, SESSION_FEATURE_CONTROL,
 };
-use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID, SYSTEM_PNP_IDS_PATH};
+use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID};
 use pronk_core::output::{
     discover_castkms_outputs, CastKmsOutput, CastKmsOutputId, OutputConnection,
 };
@@ -855,7 +855,7 @@ async fn run_inventory_manager(path: &Path) -> anyhow::Result<()> {
         "manager-routed preparation returned the wrong identity"
     );
     let pnp_resolver =
-        PnpIdResolver::load_system(SYSTEM_PNP_IDS_PATH, &[], DEFAULT_SYNTHESIZER_PNP_ID)?;
+        PnpIdResolver::from_database("GGL\tGoogle Inc.\n", &[], DEFAULT_SYNTHESIZER_PNP_ID)?;
     let prepared =
         PreparedCastDevice::from_capabilities(device.clone(), capabilities, &pnp_resolver, true)?;
     ensure!(
