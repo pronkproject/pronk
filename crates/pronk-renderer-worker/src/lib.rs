@@ -4,6 +4,7 @@ mod activation;
 mod output;
 mod pool;
 mod reader;
+mod reads;
 mod source;
 mod submission;
 
@@ -19,6 +20,7 @@ pub use reader::{
     RejectedSource, SourceAttempt, SourceAttemptError, SourceOpportunity, SourceReader,
     SourceReaderStartError,
 };
+pub use reads::{ReadCollectionError, SubmittedReads};
 pub use source::{ImportError, ImportedSource};
 pub use submission::{
     PreparedSource, ReleasedSource, SourcePreparationError, SourceReleaseError,
