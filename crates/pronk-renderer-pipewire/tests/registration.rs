@@ -88,6 +88,7 @@ async fn publication_survives_until_the_matching_release() {
     let pending = pool.submit(completed).unwrap();
     let ready = pool.finish(pending.wait().await).unwrap();
     let (source, published) = pool.publish(ready).unwrap();
+    assert_eq!(published.content_serial(), None);
     assert!(private.put(source).is_ok());
     let frame = transport
         .begin_publish(published, 123, true)

@@ -1,7 +1,7 @@
 //! Bounded private storage reserved independently of scene sources.
 
 use std::io;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 use pronk_gpu::vulkan::{Device, PrivateImage};
@@ -80,11 +80,29 @@ impl PrivateBuffer {
     }
 
     /// Initialize private pixels without involving a compositor source.
-    pub fn clear_waited(self, rgb: [u8; 3]) -> io::Result<Self> {
+    pub fn clear_waited(self, rgb: [u8; 3]) -> io::Result<PrivateFrame> {
         let Self { identity, image } = self;
-        image
-            .clear_waited(rgb)
-            .map(|image| Self { identity, image })
+        image.clear_waited(rgb).map(|image| PrivateFrame {
+            buffer: Self { identity, image },
+            content_serial: None,
+        })
+    }
+}
+
+/// Initialized private pixels with optional CastKMS content identity.
+#[must_use = "copy the frame to output and recover its private buffer"]
+pub struct PrivateFrame {
+    pub(super) buffer: PrivateBuffer,
+    pub(super) content_serial: Option<NonZeroU64>,
+}
+
+impl PrivateFrame {
+    pub fn extent(&self) -> (NonZeroU32, NonZeroU32) {
+        self.buffer.extent()
+    }
+
+    pub fn content_serial(&self) -> Option<NonZeroU64> {
+        self.content_serial
     }
 }
 

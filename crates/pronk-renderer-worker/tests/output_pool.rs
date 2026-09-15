@@ -30,6 +30,7 @@ async fn private_pixels_cross_output_ownership_without_source_state() {
     let finished = pending.wait().await;
     let ready = output.finish(finished).unwrap();
     let (source, published) = output.publish(ready).unwrap();
+    assert_eq!(published.content_serial(), None);
     assert!(private.put(source).is_ok());
     assert!(output.claim(0).is_err());
 

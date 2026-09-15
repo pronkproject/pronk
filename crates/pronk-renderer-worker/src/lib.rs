@@ -12,7 +12,7 @@ pub use output::{
     CompletedOutput, CompletedReturn, FinishedOutput, OutputDestination, OutputPool, OutputReturn,
     OutputScope, PendingOutput, PublishedOutput, ReadyOutput,
 };
-pub use pool::{PrivateBuffer, PrivatePool, RejectedBuffer};
+pub use pool::{PrivateBuffer, PrivateFrame, PrivatePool, RejectedBuffer};
 pub use reader::{RejectedSource, SourceOpportunity, SourceReader, SourceReaderStartError};
 pub use source::{ImportError, ImportedSource};
 pub use submission::{

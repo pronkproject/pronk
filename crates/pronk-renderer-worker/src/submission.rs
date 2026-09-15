@@ -1,12 +1,13 @@
 //! Source-read preparation before any native submission can be accepted.
 
 use std::io;
+use std::num::NonZeroU64;
 use std::os::fd::AsFd;
 
 use castkms_renderer::SourceJob;
 use pronk_gpu::vulkan::{PendingPrivateRead, SourceImage};
 
-use crate::{ImportedSource, PrivateBuffer};
+use crate::{ImportedSource, PrivateBuffer, PrivateFrame};
 
 /// A fullscreen source paired with independently available private storage.
 ///
@@ -164,8 +165,13 @@ impl<'job, 'renderer, F: AsFd> SubmittedSource<'job, 'renderer, F> {
             identity,
             pending,
         } = self;
+        let content_serial = job.content_serial();
         match job.release_submitted(pending.completion().map(AsFd::as_fd)) {
-            Ok(()) => Ok(ReleasedSource { identity, pending }),
+            Ok(()) => Ok(ReleasedSource {
+                identity,
+                content_serial,
+                pending,
+            }),
             Err(error) => {
                 let (job, error) = error.into_parts();
                 Err(SourceReleaseError {
@@ -206,16 +212,22 @@ impl<S> SourceReleaseError<S> {
 #[must_use = "retire native work before using or discarding its private pixels"]
 pub struct ReleasedSource {
     identity: std::sync::Arc<()>,
+    content_serial: NonZeroU64,
     pending: PendingPrivateRead,
 }
 
 impl ReleasedSource {
     /// Wait for valid pixels and recover the independently owned private image.
-    pub fn wait(self) -> io::Result<PrivateBuffer> {
-        let Self { identity, pending } = self;
-        pending
-            .wait()
-            .map(|image| PrivateBuffer { identity, image })
+    pub fn wait(self) -> io::Result<PrivateFrame> {
+        let Self {
+            identity,
+            content_serial,
+            pending,
+        } = self;
+        pending.wait().map(|image| PrivateFrame {
+            buffer: PrivateBuffer { identity, image },
+            content_serial: Some(content_serial),
+        })
     }
 }
 
