@@ -1599,6 +1599,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pronk-renderer-worker"
+version = "0.1.0"
+dependencies = [
+ "castkms-renderer",
+ "castkms-sys",
+ "nix 0.29.0",
+ "pronk-dmabuf",
+ "pronk-gpu",
+]
+
+[[package]]
 name = "pronk-systemd"
 version = "0.1.0"
 dependencies = [

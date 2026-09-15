@@ -1,0 +1,17 @@
+[package]
+name = "pronk-renderer-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+castkms-renderer = { path = "../castkms-renderer" }
+castkms-sys = { path = "../castkms-sys" }
+nix.workspace = true
+pronk-dmabuf = { path = "../pronk-dmabuf" }
+pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
+
+[lints]
+workspace = true

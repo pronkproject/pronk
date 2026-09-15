@@ -19,6 +19,7 @@ members = [
     "crates/pronk-gpu",
     "crates/pronk-media",
     "crates/pronk-pipewire",
+    "crates/pronk-renderer-worker",
     "crates/pronk-systemd",
     "crates/pronk-userns",
     "crates/pronkctl",
