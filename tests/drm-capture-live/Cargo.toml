@@ -22,6 +22,10 @@ path = "src/pipewire.rs"
 name = "pronk-capture-encoded-live-test"
 path = "src/encoded.rs"
 
+[[bin]]
+name = "pronk-capture-broker-live-test"
+path = "src/broker.rs"
+
 [dependencies]
 anyhow.workspace = true
 gstreamer.workspace = true
@@ -31,10 +35,13 @@ drm-capture = { path = "../../crates/drm-capture" }
 nix.workspace = true
 pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
 pronk-capture = { path = "../../crates/pronk-capture" }
+pronk-capture-broker = { path = "../../crates/pronk-capture-broker" }
 pronk-capture-pipewire = { path = "../../crates/pronk-capture-pipewire" }
 pronk-pipewire = { path = "../../crates/pronk-pipewire" }
 pronk-media = { path = "../../crates/pronk-media" }
 tokio.workspace = true
+tokio-util.workspace = true
+zbus.workspace = true
 
 [build-dependencies]
 cc = "1"

@@ -1501,11 +1501,14 @@ dependencies = [
  "nix 0.29.0",
  "pkg-config",
  "pronk-capture",
+ "pronk-capture-broker",
  "pronk-capture-pipewire",
  "pronk-dmabuf",
  "pronk-media",
  "pronk-pipewire",
  "tokio",
+ "tokio-util",
+ "zbus",
 ]
 
 [[package]]
