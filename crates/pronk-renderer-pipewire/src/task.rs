@@ -73,19 +73,11 @@ async fn run_generation<F: AsFd>(
     remote: PipeWireRemote,
     control: GenerationControl<'_>,
 ) -> GenerationOutcome {
-    let result = {
-        let preparation = prepare_generation(renderer, &device, config, remote, control.started);
-        tokio::pin!(preparation);
-        tokio::select! {
-            biased;
-            _ = control.stop.cancelled() => return GenerationOutcome::candidate(Ok(())),
-            result = &mut preparation => result,
-        }
-    };
-    let generation = match result {
-        Ok(generation) => generation,
-        Err(error) => return GenerationOutcome::candidate(Err(error)),
-    };
+    let generation =
+        match prepare_generation(renderer, &device, config, remote, control.started).await {
+            Ok(generation) => generation,
+            Err(error) => return GenerationOutcome::candidate(Err(error)),
+        };
     run_prepared(
         generation,
         device,
