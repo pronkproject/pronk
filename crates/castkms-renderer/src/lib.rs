@@ -11,12 +11,13 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use castkms_sys::{
     drm_ioctl_castkms_renderer_abort_takeover, drm_ioctl_castkms_renderer_begin_takeover,
-    drm_ioctl_castkms_renderer_get_snapshot, drm_ioctl_castkms_renderer_query,
-    drm_ioctl_castkms_renderer_submit_probe, DrmCastkmsRendererAbortTakeover,
-    DrmCastkmsRendererBeginTakeover, DrmCastkmsRendererGetSnapshot, DrmCastkmsRendererQuery,
+    drm_ioctl_castkms_renderer_commit_takeover, drm_ioctl_castkms_renderer_get_snapshot,
+    drm_ioctl_castkms_renderer_query, drm_ioctl_castkms_renderer_submit_probe,
+    DrmCastkmsRendererAbortTakeover, DrmCastkmsRendererBeginTakeover,
+    DrmCastkmsRendererCommitTakeover, DrmCastkmsRendererGetSnapshot, DrmCastkmsRendererQuery,
     DrmCastkmsRendererSnapshot, DrmCastkmsRendererSubmitProbe, DrmCastkmsRendererTakeover,
-    DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888, EXECUTION_HOST_V1, RENDERER_PROBE_PRIVATE,
-    RENDERER_PROBE_STARTUP_IMAGE, RENDERER_VERSION,
+    DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888, EXECUTION_GPU_V1, EXECUTION_HOST_V1,
+    RENDERER_PROBE_PRIVATE, RENDERER_PROBE_STARTUP_IMAGE, RENDERER_VERSION,
 };
 use nix::fcntl::{fcntl, FcntlArg};
 
@@ -24,12 +25,14 @@ use nix::fcntl::{fcntl, FcntlArg};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
     HostV1,
+    GpuV1,
 }
 
 impl Profile {
     fn from_uapi(value: u32) -> io::Result<Self> {
         match value {
             EXECUTION_HOST_V1 => Ok(Self::HostV1),
+            EXECUTION_GPU_V1 => Ok(Self::GpuV1),
             _ => Err(unsupported("unknown CastKMS execution profile")),
         }
     }
@@ -187,6 +190,7 @@ impl<F: AsFd> Renderer<F> {
             renderer: self,
             id: description.id,
             profile: description.profile,
+            execution: expected,
             configuration: description.configuration,
             active: true,
         })
@@ -217,6 +221,7 @@ pub struct TakeoverCandidate<'renderer, F: AsFd> {
     renderer: &'renderer mut Renderer<F>,
     id: NonZeroU64,
     profile: Profile,
+    execution: Description,
     configuration: OutputConfiguration,
     active: bool,
 }
@@ -351,7 +356,7 @@ pub struct SubmittedCandidate<'renderer, F: AsFd> {
     candidate: TakeoverCandidate<'renderer, F>,
 }
 
-impl<F: AsFd> SubmittedCandidate<'_, F> {
+impl<'renderer, F: AsFd> SubmittedCandidate<'renderer, F> {
     pub fn profile(&self) -> Profile {
         self.candidate.profile()
     }
@@ -360,9 +365,106 @@ impl<F: AsFd> SubmittedCandidate<'_, F> {
         self.candidate.configuration()
     }
 
+    /// Publish delegated execution after the submitted native work completes.
+    ///
+    /// Failure returns ownership with the error so a pending completion can be
+    /// retried. Success transfers the exclusive renderer borrow into an active
+    /// renderer handle.
+    pub fn activate(
+        mut self,
+    ) -> Result<ActiveRenderer<'renderer, F>, ActivationError<'renderer, F>> {
+        let generation = match self
+            .candidate
+            .execution
+            .generation
+            .get()
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+        {
+            Some(generation) => generation,
+            None => {
+                return Err(ActivationError {
+                    submitted: self,
+                    error: invalid_data("CastKMS execution generation overflowed"),
+                });
+            }
+        };
+        let request = DrmCastkmsRendererCommitTakeover {
+            candidate_id: self.candidate.id.get(),
+            ..Default::default()
+        };
+        // SAFETY: The initialized fixed-width request remains live throughout
+        // the synchronous ioctl.
+        if let Err(error) = unsafe {
+            drm_ioctl_castkms_renderer_commit_takeover(
+                self.candidate.renderer.fd.as_fd().as_raw_fd(),
+                &request,
+            )
+        } {
+            return Err(ActivationError {
+                submitted: self,
+                error: error.into(),
+            });
+        }
+        self.candidate.active = false;
+        Ok(ActiveRenderer {
+            submitted: self,
+            description: Description {
+                profile: Profile::GpuV1,
+                generation,
+            },
+        })
+    }
+
     /// Release the candidate without changing the active execution profile.
     pub fn abort(self) -> io::Result<()> {
         self.candidate.abort()
+    }
+}
+
+/// A failed activation retaining the submitted candidate for inspection or retry.
+#[derive(Debug)]
+pub struct ActivationError<'renderer, F: AsFd> {
+    submitted: SubmittedCandidate<'renderer, F>,
+    error: io::Error,
+}
+
+impl<'renderer, F: AsFd> ActivationError<'renderer, F> {
+    pub fn error(&self) -> &io::Error {
+        &self.error
+    }
+
+    pub fn into_candidate(self) -> SubmittedCandidate<'renderer, F> {
+        self.submitted
+    }
+
+    /// Discard retry ownership and return the operation error.
+    pub fn into_error(self) -> io::Error {
+        self.error
+    }
+}
+
+/// Exclusive access to one active delegated-renderer incarnation.
+#[must_use = "retain active renderer ownership while delegated execution is in use"]
+#[derive(Debug)]
+pub struct ActiveRenderer<'renderer, F: AsFd> {
+    submitted: SubmittedCandidate<'renderer, F>,
+    description: Description,
+}
+
+impl<F: AsFd> ActiveRenderer<'_, F> {
+    pub fn description(&self) -> Description {
+        self.description
+    }
+
+    pub fn configuration(&self) -> OutputConfiguration {
+        self.submitted.configuration()
+    }
+}
+
+impl<F: AsFd> AsFd for ActiveRenderer<'_, F> {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.submitted.candidate.renderer.as_fd()
     }
 }
 
@@ -522,6 +624,25 @@ mod tests {
         }
     }
 
+    fn submitted_candidate(
+        renderer: &mut Renderer<std::fs::File>,
+        generation: u64,
+    ) -> SubmittedCandidate<'_, std::fs::File> {
+        SubmittedCandidate {
+            candidate: TakeoverCandidate {
+                renderer,
+                id: NonZeroU64::new(9).unwrap(),
+                profile: Profile::HostV1,
+                execution: Description {
+                    profile: Profile::HostV1,
+                    generation: NonZeroU64::new(generation).unwrap(),
+                },
+                configuration: configuration(),
+                active: true,
+            },
+        }
+    }
+
     #[test]
     fn failed_validation_drops_the_complete_owner() {
         let (owner, drops) = owner();
@@ -549,6 +670,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(validate_description(valid).unwrap(), expected());
+        assert_eq!(
+            validate_description(DrmCastkmsRendererQuery {
+                profile: EXECUTION_GPU_V1,
+                ..valid
+            })
+            .unwrap()
+            .profile(),
+            Profile::GpuV1
+        );
         for invalid in [
             DrmCastkmsRendererQuery {
                 version: RENDERER_VERSION + 1,
@@ -556,7 +686,7 @@ mod tests {
             },
             DrmCastkmsRendererQuery { flags: 1, ..valid },
             DrmCastkmsRendererQuery {
-                profile: 2,
+                profile: u32::MAX,
                 ..valid
             },
             DrmCastkmsRendererQuery {
@@ -592,7 +722,7 @@ mod tests {
                 ..valid
             },
             DrmCastkmsRendererTakeover {
-                profile: 2,
+                profile: u32::MAX,
                 ..valid
             },
             DrmCastkmsRendererTakeover { width: 0, ..valid },
@@ -690,5 +820,22 @@ mod tests {
                 .raw_os_error(),
             Some(nix::libc::ENOTTY)
         );
+    }
+
+    #[test]
+    fn failed_activation_returns_the_submitted_candidate() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut renderer = Renderer { fd: file };
+        let error = submitted_candidate(&mut renderer, 7)
+            .activate()
+            .unwrap_err();
+        assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
+        assert_eq!(error.into_candidate().configuration(), configuration());
+
+        let error = submitted_candidate(&mut renderer, u64::MAX)
+            .activate()
+            .unwrap_err();
+        assert_eq!(error.error().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.into_candidate().profile(), Profile::HostV1);
     }
 }
