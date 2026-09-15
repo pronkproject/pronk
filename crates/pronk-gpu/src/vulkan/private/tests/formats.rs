@@ -53,6 +53,7 @@ fn byte_copies_reject_different_packed_channel_layouts() {
         PackedFormat::Rgba8,
         PackedFormat::Bgr10A2,
         PackedFormat::Rgb10A2,
+        PackedFormat::Rgb565,
     ];
     for source in formats {
         for destination in formats.into_iter().filter(|format| *format != source) {

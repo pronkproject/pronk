@@ -221,7 +221,7 @@ fn validate_layout(layout: ImageLayout) -> io::Result<()> {
         ));
     }
     if layout.modifier == 0 {
-        let row = u64::from(layout.width.get()) * 4;
+        let row = u64::from(layout.width.get()) * u64::from(layout.format.bytes_per_pixel());
         let end = layout
             .pitch
             .checked_mul(u64::from(layout.height.get() - 1))
@@ -272,6 +272,35 @@ mod tests {
         assert!(validate_backing(4096, 8192).is_ok());
         assert!(validate_backing(4096, 4095).is_err());
         assert!(validate_backing(4096, -1).is_err());
+    }
+
+    #[test]
+    fn linear_row_bounds_follow_the_packed_pixel_size() {
+        let layout = ImageLayout {
+            format: super::super::PackedFormat::Rgb565,
+            width: NonZeroU32::new(13).unwrap(),
+            height: NonZeroU32::new(7).unwrap(),
+            modifier: 0,
+            offset: 8,
+            pitch: 32,
+            allocation_size: 8 + 6 * 32 + 13 * 2,
+        };
+        assert!(validate_layout(layout).is_ok());
+        assert!(validate_layout(ImageLayout {
+            allocation_size: layout.allocation_size - 1,
+            ..layout
+        })
+        .is_err());
+        assert!(validate_layout(ImageLayout {
+            pitch: 25,
+            ..layout
+        })
+        .is_err());
+        assert!(validate_layout(ImageLayout {
+            format: super::super::PackedFormat::Bgra8,
+            ..layout
+        })
+        .is_err());
     }
 
     #[test]

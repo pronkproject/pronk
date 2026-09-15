@@ -28,9 +28,9 @@ impl Image {
     /// Fill the image with explicit RGBA channel values, without premultiplying.
     ///
     /// Exclusive native access, dependency waits and blocking-worker requirements
-    /// are identical to [`Self::clear_waited`]. The selected alpha is stored
-    /// literally; successful completion does not make these pixels opaque or
-    /// suitable for an opaque-only composition or media profile.
+    /// are identical to [`Self::clear_waited`]. Channels are quantized to the
+    /// selected format, and alpha is ignored when that format has no alpha.
+    /// Successful completion does not establish the blending or media policy.
     pub fn clear_rgba_waited(self, rgba: [u8; 4]) -> io::Result<(Self, SyncFile)> {
         self.clear_rgba16_waited(rgba.map(|channel| u16::from(channel) * 257))
     }
@@ -40,8 +40,9 @@ impl Image {
     /// Channels span zero through 65535 and are quantized to the destination's
     /// packed format using Vulkan's normalized fixed-point conversion rules,
     /// which permit either adjacent representable value. Higher-depth sources
-    /// need no CPU pixel writes. It does not change color space, premultiply alpha or imply
-    /// HDR. Ownership and native waits follow [`Self::clear_rgba_waited`].
+    /// need no CPU pixel writes. It does not change color space, premultiply
+    /// alpha or imply HDR. Ownership and native waits follow
+    /// [`Self::clear_rgba_waited`].
     pub fn clear_rgba16_waited(self, rgba: [u16; 4]) -> io::Result<(Self, SyncFile)> {
         let buffer = self.export()?;
         require_success(export_dependencies(buffer.as_fd(), Access::Write)?.wait_blocking()?)?;

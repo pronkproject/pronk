@@ -29,6 +29,12 @@ fn cropped_ten_bit_reads_preserve_placement_alpha_and_background() {
     }
 }
 
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn cropped_rgb565_reads_scale_into_opaque_padded_outputs() {
+    exercise_region_reads(PackedFormat::Rgb565);
+}
+
 fn exercise_region_reads(format: PackedFormat) {
     let (producer, modifier) = device();
     let (worker, _) = device();
@@ -40,6 +46,7 @@ fn exercise_region_reads(format: PackedFormat) {
         // including the two-bit alpha channel. Geometry has no quantization
         // tolerance that could conceal a channel-order or placement error.
         PackedFormat::Bgr10A2 | PackedFormat::Rgb10A2 => ([255, 0, 85, 85], [0, 85, 170]),
+        PackedFormat::Rgb565 => ([255, 0, 0, 255], [0, 255, 255]),
         _ => ([231, 57, 19, 97], [30, 90, 180]),
     };
     let background = [17, 85, 204];

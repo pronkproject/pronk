@@ -9,6 +9,7 @@ mod geometry;
 mod pending;
 mod program;
 mod region;
+mod rgb565;
 mod ten_bit;
 
 fn device() -> (Device, u64) {

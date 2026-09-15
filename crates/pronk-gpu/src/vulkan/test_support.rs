@@ -9,7 +9,9 @@ use super::Image;
 
 pub(super) fn readback(image: Image) -> (Image, Vec<u8>) {
     let layout = image.layout();
-    let size = u64::from(layout.width.get()) * u64::from(layout.height.get()) * 4;
+    let size = u64::from(layout.width.get())
+        * u64::from(layout.height.get())
+        * u64::from(layout.format.bytes_per_pixel());
     let device = Arc::clone(&image.device);
     let mut job = Job::new(Arc::clone(&device), image).unwrap();
     // SAFETY: This test uses resources from one device, checks each creation,
