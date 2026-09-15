@@ -179,7 +179,7 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
     drop(monitor);
     fixture._peer.write_all(&[0x49]).unwrap();
     let mut capture =
-        std::os::unix::net::UnixStream::from(session.as_fd().try_clone_to_owned().unwrap());
+        std::os::unix::net::UnixStream::from(session.capture().try_clone_to_owned().unwrap());
     capture
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
@@ -311,7 +311,8 @@ async fn rejecting_a_non_capture_descriptor_releases_the_session() {
         .await
         .unwrap();
     // The fixture transfers a socket, not an anonymous DRM capture file.
-    assert!(session.into_capture().is_err());
+    assert!(session.open_capture().is_err());
+    drop(session);
     notified(&fixture.state.released).await;
     assert_eq!(
         fixture.state.releases.lock().unwrap().as_slice(),

@@ -110,16 +110,17 @@ async fn run(
         NonZeroUsize::new(1).unwrap(),
         Duration::from_secs(5),
     )?;
+    let session = provider.acquire(target, CancellationToken::new()).await?;
+    session.attach_monitor(None)?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let generation = nz64(u64::from(std::process::id()));
     let runtime = socket.parent().context("private socket has no directory")?;
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
     let mut capture = DrmCapturePipeline::new(
-        provider,
+        session,
         remotes,
         DrmCapturePipelineConfig {
-            device_major: target.device_major,
-            device_minor: target.device_minor,
             connector_id: target.connector_id,
             output_index: 0,
             session_id: format!("private-test-{generation}"),
@@ -239,6 +240,9 @@ async fn run(
             MediaStopReason::BackendShutdown,
             CancellationToken::new(),
         )
+        .await?;
+    capture
+        .shutdown(MediaStopReason::BackendShutdown, CancellationToken::new())
         .await?;
     pattern.kill().await?;
     eprintln!("Mutter encoded={received} decoded={decoded} colors={colors:?}");

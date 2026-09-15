@@ -58,7 +58,7 @@ async fn run(target: Target) -> anyhow::Result<()> {
     let mut held = None;
     for pass in 0..2 {
         let session = provider.acquire(target, CancellationToken::new()).await?;
-        let client = session.into_capture()?;
+        let client = session.open_capture()?;
         let witness = client.as_fd().try_clone_to_owned()?;
         let offer = client.describe()?;
         let buffers = heap.allocate(
@@ -95,7 +95,8 @@ async fn run(target: Target) -> anyhow::Result<()> {
             frame.layout().height,
             frame.request().get()
         );
-        actor.shutdown().await?.release().await?;
+        drop(actor.shutdown().await?);
+        session.release().await?;
         let revoked = drm_capture::Client::from_fd(witness)
             .err()
             .context("released broker grant remained active")?;
