@@ -1,8 +1,9 @@
-//! Session ownership for Mutter's private pixel-only capture broker.
+//! Session ownership for Mutter's private CastKMS display broker.
 //!
-//! Sessions confer no display/audio rights. Convert a session with
-//! [`Session::into_capture`] to retain its ownership in the DRM client. Release
-//! revokes authority; it does not acknowledge completion of admitted output writes.
+//! Monitor control and final-image capture arrive as separate descriptors under
+//! one broker lifetime. Sessions confer no primary-node, audio, CEC or raw-plane
+//! access. Release revokes both capabilities; it does not acknowledge completion
+//! of admitted output writes.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -28,19 +29,19 @@ pub struct Target {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("capture acquisition canceled")]
+    #[error("display-session acquisition canceled")]
     Cancelled,
-    #[error("capture acquisition timed out")]
+    #[error("display-session acquisition timed out")]
     Timeout,
-    #[error("capture session worker stopped")]
+    #[error("display-session worker stopped")]
     WorkerStopped,
     #[error("the shared bus connection must not impose a method timeout")]
     ConnectionTimeout,
-    #[error("capture session limit exceeds semaphore capacity")]
+    #[error("display-session limit exceeds semaphore capacity")]
     InvalidCapacity,
-    #[error("Mutter returned a zero capture session identifier")]
+    #[error("Mutter returned a zero display-session identifier")]
     InvalidSession,
-    #[error("capture broker operation failed: {0}")]
+    #[error("display-session broker operation failed: {0}")]
     Bus(#[from] zbus::Error),
 }
 
@@ -55,13 +56,14 @@ pub struct Provider {
     timeout: Duration,
 }
 
-/// Owns capture and a request to release its broker session.
+/// Owns separate monitor and capture capabilities under one broker session.
 ///
 /// Drop requests asynchronous release. Use [`Self::release`] to observe its
 /// result. The Tokio runtime must remain alive for cleanup; process/bus-name
 /// loss is the broker's fallback if that runtime stops. No control fd is exposed.
 #[derive(Debug)]
 pub struct Session {
+    monitor: Option<OwnedFd>,
     capture: Option<OwnedFd>,
     release: Option<oneshot::Sender<()>>,
     done: Option<oneshot::Receiver<Result<(), Error>>>,
@@ -78,25 +80,36 @@ impl AsFd for Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.monitor.take();
         self.capture.take();
         self.release.take();
     }
 }
 
 impl Session {
-    /// Validate the current image offer and move session ownership into the client.
+    /// Borrow the monitor-control capability without exposing capture through it.
+    pub fn monitor(&self) -> BorrowedFd<'_> {
+        self.monitor
+            .as_ref()
+            .expect("live session owns monitor control")
+            .as_fd()
+    }
+
+    /// Validate the current image offer and move the whole session into the client.
     ///
     /// Inactive or unauthorized outputs fail with the kernel's error and request
-    /// session release. Call this after display activation; it does not wait for
-    /// a modeset or reserve the returned offer. Dropping the client requests
-    /// release even if no stream was opened. For observed release, recover the
-    /// session with `Client::into_owner` and call [`Self::release`]. Neither path
-    /// acknowledges completion of outstanding destination writes.
+    /// session release. The monitor-control descriptor remains owned but is not
+    /// exposed through the DRM capture client. Call this after display activation;
+    /// it does not wait for a modeset or reserve the returned offer. Dropping the
+    /// client requests release even if no stream was opened. For observed release,
+    /// recover the session with `Client::into_owner` and call [`Self::release`].
+    /// Neither path acknowledges completion of outstanding destination writes.
     pub fn into_capture(self) -> std::io::Result<drm_capture::Client<Self>> {
         drm_capture::Client::from_owner(self)
     }
 
     pub async fn release(mut self) -> Result<(), Error> {
+        self.monitor.take();
         self.capture.take();
         self.release.take();
         self.done
@@ -180,7 +193,7 @@ async fn run_session(
             Some(owner.as_str()),
             PATH,
             Some(SERVICE),
-            "CreateCaptureGrant",
+            "CreateDisplaySession",
             &(
                 target.device_major,
                 target.device_minor,
@@ -189,9 +202,9 @@ async fn run_session(
             ),
         )
         .await;
-    let received = result.and_then(|message| message.body().deserialize::<(BusFd, u64)>());
-    let (capture, id) = match received {
-        Ok((capture, id)) if id != 0 => (capture, id),
+    let received = result.and_then(|message| message.body().deserialize::<(BusFd, BusFd, u64)>());
+    let (monitor, capture, id) = match received {
+        Ok((monitor, capture, id)) if id != 0 => (monitor, capture, id),
         Ok(_) => {
             let _ = send.send(Err(Error::InvalidSession));
             return;
@@ -201,11 +214,14 @@ async fn run_session(
             return;
         }
     };
+    let monitor: OwnedFd = monitor.into();
+    let capture: OwnedFd = capture.into();
     let (release, wait_release) = oneshot::channel();
     let (done, wait_done) = oneshot::channel();
     // A rejected send drops the session here, waking the same cleanup path.
     let _ = send.send(Ok(Session {
-        capture: Some(capture.into()),
+        monitor: Some(monitor),
+        capture: Some(capture),
         release: Some(release),
         done: Some(wait_done),
     }));
@@ -215,7 +231,7 @@ async fn run_session(
             Some(owner.as_str()),
             PATH,
             Some(SERVICE),
-            "ReleaseCaptureGrant",
+            "ReleaseDisplaySession",
             &(id,),
         )
         .await
