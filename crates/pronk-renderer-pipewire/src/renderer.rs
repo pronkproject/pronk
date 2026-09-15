@@ -44,6 +44,15 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         remote: PipeWireRemote,
         cancellation: CancellationToken,
     ) -> Result<Self, RendererStreamError<F>> {
+        if cancellation.is_cancelled() {
+            return Err(RendererStreamError {
+                owner: Some(renderer.into_owner()),
+                error: io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "renderer stream preparation was cancelled",
+                ),
+            });
+        }
         let stop = CancellationToken::new();
         let (state, receive) = watch::channel(RendererStreamState::Prepared);
         let (started, response) = oneshot::channel();
@@ -68,12 +77,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         let response = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                let mut error = starting.join().await;
-                error.error = io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "renderer stream preparation was cancelled",
-                );
-                return Err(error);
+                return Err(starting.cancel().await);
             }
             response = response => response,
         };
@@ -114,6 +118,10 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         mut self,
         cancellation: CancellationToken,
     ) -> Result<ActiveRendererStream<F>, RendererStreamError<F>> {
+        if cancellation.is_cancelled() {
+            let mut handle = self.take_handle();
+            return Err(cancel_activation(&mut handle).await);
+        }
         let (acknowledge, acknowledged) = oneshot::channel();
         let activate = self
             .activate
@@ -126,13 +134,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         let acknowledged = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                handle.stop.cancel();
-                let mut error = join_failure(handle.take_task()).await;
-                error.error = io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "renderer stream activation was cancelled",
-                );
-                return Err(error);
+                return Err(cancel_activation(&mut handle).await);
             }
             acknowledged = acknowledged => acknowledged,
         };
@@ -162,6 +164,15 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             .take()
             .expect("live renderer stream owns its handle")
     }
+}
+
+async fn cancel_activation<F>(handle: &mut StreamHandle<F>) -> RendererStreamError<F> {
+    handle.stop.cancel();
+    join_cancelled(
+        handle.take_task(),
+        "renderer stream activation was cancelled",
+    )
+    .await
 }
 
 impl<F> Drop for RendererStream<F> {
@@ -320,6 +331,15 @@ impl<F> Starting<F> {
             },
         }
     }
+
+    async fn cancel(mut self) -> RendererStreamError<F> {
+        self.stop.cancel();
+        let task = self
+            .task
+            .take()
+            .expect("starting renderer stream owns task");
+        join_cancelled(task, "renderer stream preparation was cancelled").await
+    }
 }
 
 impl<F> Drop for Starting<F> {
@@ -357,6 +377,29 @@ async fn join_failure<F>(task: JoinHandle<(Option<F>, io::Result<()>)>) -> Rende
         Err(error) => RendererStreamError {
             owner: None,
             error: join_error(error),
+        },
+    }
+}
+
+async fn join_cancelled<F>(
+    task: JoinHandle<(Option<F>, io::Result<()>)>,
+    message: &'static str,
+) -> RendererStreamError<F> {
+    match task.await {
+        Ok((owner, Ok(()))) => RendererStreamError {
+            owner,
+            error: io::Error::new(io::ErrorKind::Interrupted, message),
+        },
+        Ok((owner, Err(error))) => RendererStreamError {
+            owner,
+            error: io::Error::new(
+                io::ErrorKind::Interrupted,
+                format!("{message}; renderer cleanup failed: {error}"),
+            ),
+        },
+        Err(error) => RendererStreamError {
+            owner: None,
+            error: io::Error::new(io::ErrorKind::Interrupted, format!("{message}; {error}")),
         },
     }
 }
@@ -471,5 +514,86 @@ mod tests {
             task: Some(task),
         });
         assert!(stop.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancelled_activation_does_not_send_the_takeover_command() {
+        let stop = CancellationToken::new();
+        let task = waiting_start(stop.clone());
+        let (_, state) = watch::channel(RendererStreamState::Prepared);
+        let (activate, activation) = oneshot::channel();
+        let stream = RendererStream {
+            handle: Some(StreamHandle {
+                identity: identity(),
+                layout: VideoBufferLayout {
+                    format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
+                    width: NonZeroU32::new(1).unwrap(),
+                    height: NonZeroU32::new(1).unwrap(),
+                    pitch: NonZeroU32::new(4).unwrap(),
+                    size: NonZeroU64::new(4).unwrap(),
+                    storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
+                },
+                state,
+                stop,
+                task: Some(task),
+            }),
+            activate: Some(activate),
+        };
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = match stream.activate(cancellation).await {
+            Ok(_) => panic!("cancelled activation unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let (owner, error) = error.into_parts();
+        assert!(owner.is_some());
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(activation.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_activation_retains_cleanup_failure() {
+        let task = tokio::spawn(async {
+            (
+                Some(7),
+                Err(io::Error::other("renderer candidate abort failed")),
+            )
+        });
+
+        let error = join_cancelled(task, "renderer stream activation was cancelled").await;
+        let (owner, error) = error.into_parts();
+        assert_eq!(owner, Some(7));
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            error.to_string(),
+            "renderer stream activation was cancelled; renderer cleanup failed: renderer candidate abort failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_preparation_retains_cleanup_failure() {
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(async {
+            (
+                Some(7),
+                Err(io::Error::other("renderer candidate abort failed")),
+            )
+        });
+        let starting = Starting {
+            stop: stop.clone(),
+            task: Some(task),
+            armed: true,
+        };
+
+        let error = starting.cancel().await;
+        let (owner, error) = error.into_parts();
+        assert!(stop.is_cancelled());
+        assert_eq!(owner, Some(7));
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            error.to_string(),
+            "renderer stream preparation was cancelled; renderer cleanup failed: renderer candidate abort failed"
+        );
     }
 }
