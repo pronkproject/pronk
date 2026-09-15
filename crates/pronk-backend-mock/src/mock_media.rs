@@ -309,20 +309,6 @@ fn validate_video_target(
             caps.width, caps.height, configuration.mode.width, configuration.mode.height
         )));
     }
-    let caps_millihz = u64::from(caps.framerate_numerator.get())
-        .checked_mul(1000)
-        .ok_or_else(|| MockMediaError::new("video caps refresh overflows"))?;
-    let mode_millihz = u64::from(configuration.mode.refresh_millihz)
-        .checked_mul(u64::from(caps.framerate_denominator.get()))
-        .ok_or_else(|| MockMediaError::new("configured refresh overflows"))?;
-    if caps_millihz != mode_millihz {
-        return Err(MockMediaError::new(format!(
-            "video caps refresh {}/{} differs from configured {} mHz",
-            caps.framerate_numerator,
-            caps.framerate_denominator,
-            configuration.mode.refresh_millihz
-        )));
-    }
     Ok(())
 }
 
