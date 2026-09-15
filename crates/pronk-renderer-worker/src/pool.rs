@@ -140,6 +140,10 @@ impl PrivateBuffer {
         self.image.extent()
     }
 
+    pub(super) fn is_owned_by(&self, device: &Device) -> bool {
+        self.image.is_owned_by(device)
+    }
+
     /// Initialize private pixels without involving a compositor source.
     pub fn clear_waited(self, rgb: [u8; 3]) -> io::Result<PrivateFrame> {
         let Self { identity, image } = self;
@@ -170,6 +174,10 @@ impl PrivateFrame {
 
     pub fn source_alpha(&self) -> SourceAlpha {
         self.alpha
+    }
+
+    pub(super) fn is_owned_by(&self, device: &Device) -> bool {
+        self.buffer.is_owned_by(device)
     }
 }
 

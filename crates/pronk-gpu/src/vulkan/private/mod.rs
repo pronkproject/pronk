@@ -61,6 +61,11 @@ impl PrivateImage {
         (self.width, self.height)
     }
 
+    /// Whether this image belongs to the supplied logical device instance.
+    pub fn is_owned_by(&self, device: &super::Device) -> bool {
+        Arc::ptr_eq(&self.device, &device.inner)
+    }
+
     /// Number of device-memory bytes dedicated to the image.
     pub fn allocation_size(&self) -> u64 {
         self.allocation_size

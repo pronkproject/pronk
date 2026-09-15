@@ -9,13 +9,13 @@ publish = false
 [dependencies]
 castkms-renderer = { path = "../castkms-renderer" }
 castkms-sys = { path = "../castkms-sys" }
+drm-display-executor = { path = "../drm-display-executor" }
 nix.workspace = true
 pronk-dmabuf = { path = "../pronk-dmabuf" }
 pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
 thiserror.workspace = true
 
 [dev-dependencies]
-drm-display-executor = { path = "../drm-display-executor" }
 tokio.workspace = true
 
 [lints]
