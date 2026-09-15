@@ -511,6 +511,14 @@ mod tests {
         );
         assert!(!prepared.provenance().display_name_omitted_from_edid);
         assert_eq!(prepared.generated_edid().edid().len(), 384);
+        assert_eq!(
+            prepared.generated_edid().modes(),
+            &[
+                EdidMode::new(1920, 1080, 60_000).unwrap(),
+                EdidMode::new(1280, 720, 60_000).unwrap(),
+                EdidMode::new(640, 480, 60_000).unwrap(),
+            ]
+        );
     }
 
     #[test]
