@@ -99,6 +99,11 @@ impl RendererAccess {
     pub fn open(&self) -> std::io::Result<castkms_renderer::Renderer> {
         castkms_renderer::Renderer::from_fd(self.renderer.try_clone()?)
     }
+
+    /// Consume the sole application owner when worker lifetime must govern the descriptor.
+    pub fn into_renderer(self) -> std::io::Result<castkms_renderer::Renderer> {
+        castkms_renderer::Renderer::from_fd(self.renderer)
+    }
 }
 
 impl CaptureAccess {
@@ -115,11 +120,11 @@ impl Session {
             .as_fd()
     }
 
-    fn renderer(&self) -> BorrowedFd<'_> {
+    fn renderer(&self) -> std::io::Result<BorrowedFd<'_>> {
         self.renderer
             .as_ref()
-            .expect("live session owns renderer control")
-            .as_fd()
+            .map(AsFd::as_fd)
+            .ok_or_else(|| std::io::Error::other("renderer access was already transferred"))
     }
     /// Borrow the monitor-control capability without exposing capture through it.
     pub fn monitor(&self) -> BorrowedFd<'_> {
@@ -141,8 +146,16 @@ impl Session {
 
     pub fn renderer_access(&self) -> std::io::Result<RendererAccess> {
         Ok(RendererAccess {
-            renderer: self.renderer().try_clone_to_owned()?,
+            renderer: self.renderer()?.try_clone_to_owned()?,
         })
+    }
+
+    /// Transfer the session's renderer descriptor instead of retaining a duplicate.
+    pub fn take_renderer_access(&mut self) -> std::io::Result<RendererAccess> {
+        self.renderer
+            .take()
+            .map(|renderer| RendererAccess { renderer })
+            .ok_or_else(|| std::io::Error::other("renderer access was already transferred"))
     }
 
     pub fn monitor_capabilities(&self) -> std::io::Result<monitor::Capabilities> {

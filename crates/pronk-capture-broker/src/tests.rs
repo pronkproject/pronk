@@ -256,6 +256,37 @@ async fn dropping_a_session_requests_release() {
 }
 
 #[tokio::test]
+async fn renderer_access_can_move_out_of_the_broker_session_once() {
+    let mut fixture = Fixture::new(false, false).await;
+    let mut session = fixture
+        .provider
+        .acquire(target(), CancellationToken::new())
+        .await
+        .unwrap();
+    let renderer = session.take_renderer_access().unwrap();
+    assert!(session.take_renderer_access().is_err());
+    assert!(session.renderer_access().is_err());
+
+    fixture.renderer_peer.write_all(&[0x53]).unwrap();
+    let mut renderer = std::os::unix::net::UnixStream::from(renderer.renderer);
+    renderer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut byte = [0];
+    renderer.read_exact(&mut byte).unwrap();
+    assert_eq!(byte, [0x53]);
+
+    session.release().await.unwrap();
+    fixture
+        .renderer_peer
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .unwrap();
+    assert!(fixture.renderer_peer.read(&mut [0]).is_err());
+    drop(renderer);
+    assert_eq!(fixture.renderer_peer.read(&mut [0]).unwrap(), 0);
+}
+
+#[tokio::test]
 async fn cancellation_before_acquisition_does_not_send_a_request() {
     let fixture = Fixture::new(false, false).await;
     let cancellation = CancellationToken::new();
