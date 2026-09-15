@@ -136,6 +136,13 @@ format, modifier or external-memory handle, and these values are not a stable
 product-level device identifier. Native device tests compare nonzero identities
 across repeated opens of the selected node.
 
+`Device::clone` retains the same logical Vulkan instance, while a second open
+of that node creates a distinct instance. `is_same_instance` distinguishes
+those cases without exposing native handles. The worker retains that identity
+with its private pool and rejects a different instance before claiming a source,
+including when all private buffers are checked out. Equal physical UUIDs are
+not permission to use another logical device's private allocations.
+
 The backend requires Vulkan 1.1, external DMA-BUF memory, DRM modifiers with
 their image-format-list dependency, foreign ownership, and importable/exportable
 binary sync files. Each allocation additionally checks the selected modifier's
@@ -145,9 +152,12 @@ must be negotiated with the intended importer; allocator support alone does
 not qualify an encoder or a PipeWire consumer.
 
 Images use dedicated device-local memory. Their immutable `ImageLayout` reports
-B8G8R8A8 dimensions, modifier, plane offset, pitch and allocation size directly
-from Vulkan. Images retain their device and loader; exported DMA-BUFs retain
-backing storage after image destruction. No image is mapped for CPU access.
+packed channel order, dimensions, modifier, plane offset, pitch and allocation
+size directly from Vulkan. `Device::allocate` selects BGRA storage;
+`allocate_with_format` explicitly selects `PackedFormat::Bgra8` or `Rgba8`.
+Each format/modifier tuple is queried independently, without substitution.
+Images retain their device and loader; exported DMA-BUFs retain backing storage
+after image destruction. No image is mapped for CPU access.
 Allocation and export do not initialize pixels or establish producer completion.
 Do not publish a newly allocated image until rendering has initialized it.
 Keep each allocation within one compatible recipient scope for its lifetime.
@@ -163,10 +173,12 @@ cargo test -p pronk-gpu --features vulkan --test vulkan_images -- --ignored
 The node and hexadecimal modifier above are the Lunar Lake development tuple,
 not portable defaults. The tests check four distinct exported images, alias
 rejection by the output pool, close-on-exec descriptors, device/image/storage
-lifetimes and rejection without fallback. `vulkan_device` separately tests
-selection and repeated device teardown. These tests do not submit rendering,
-read pixels, run PipeWire or qualify media performance. Vulkan validation layers
-may be enabled through the usual loader environment for the opt-in tests.
+lifetimes and rejection without fallback. They do not submit rendering or read
+pixels. `vulkan_device` separately tests selection, repeated device teardown and
+logical-instance ownership, including a private clear after the cloned device
+owners are dropped. Neither suite runs PipeWire or qualifies media performance.
+Vulkan validation layers may be enabled through the usual loader environment
+for the opt-in tests.
 
 The allocation flow follows the [Vulkan DRM modifier extension](https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_image_drm_format_modifier.html).
 Device selection uses [Vulkan DRM device properties](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceDrmPropertiesEXT.html).
@@ -284,9 +296,9 @@ alpha is copied without blending or color-space conversion.
 The CastKMS worker uses this operation for the source protocol's integral crop,
 top-left destination and complete output dimensions. Its private pool matches
 the output, with opaque black outside the primary plane. The supported import
-profile remains one XRGB8888 memory plane with an explicit compatible modifier;
-the worker does not infer support for scene properties absent from the source
-protocol. Admission still reserves private storage before claiming any source.
+profile is one XRGB8888 or XBGR8888 memory plane with an explicit compatible
+modifier. The worker does not infer support for scene properties absent from the
+source protocol. Admission still reserves private storage before claiming any source.
 
 Native tests close and collect a trusted source use before extracting private
 pixels, then overwrite the original before output conversion. They also check
@@ -306,6 +318,15 @@ through source-to-private-to-output conversion. It overwrites and destroys each
 producer allocation before allocating the shared output, then checks every
 output pixel. That qualifies whole-image channel preservation on the selected
 device, not shader blending, color conversion or asynchronous source accounting.
+
+RGBA source tests separately check the native byte order and all 256 values in
+each channel through private storage into BGRA output. Their original images
+are overwritten before exported output is allocated. Cropped RGBA tests include
+scaling and background initialization. Ordinary byte-copy paths reject different
+packed formats, while private-image blits perform channel conversion. Neither
+the worker's XBGR import support nor the native alpha-preservation tests expand
+the worker's accepted blend policy; alpha-bearing DRM formats remain rejected.
+PipeWire output is still BGRx, independently of the source channel order.
 
 ### Private shader blending
 
