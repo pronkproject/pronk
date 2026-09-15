@@ -5,7 +5,7 @@
 //! access. Release revokes both capabilities; it does not acknowledge completion
 //! of admitted output writes.
 
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,10 +67,27 @@ pub struct Provider {
 /// loss is the broker's fallback if that runtime stops. No control fd is exposed.
 #[derive(Debug)]
 pub struct Session {
+    id: NonZeroU64,
     monitor: Option<OwnedFd>,
     capture: Option<OwnedFd>,
     release: Option<oneshot::Sender<()>>,
     done: Option<oneshot::Receiver<Result<(), Error>>>,
+}
+
+/// Capture authority derived from a display session's lifetime.
+///
+/// Cloning the underlying file description keeps capture available without
+/// transferring monitor control or responsibility for releasing the broker
+/// session.
+#[derive(Debug)]
+pub struct CaptureAccess {
+    capture: OwnedFd,
+}
+
+impl CaptureAccess {
+    pub fn open(&self) -> std::io::Result<drm_capture::Client> {
+        drm_capture::Client::from_fd(self.capture.try_clone()?)
+    }
 }
 
 impl Session {
@@ -86,6 +103,16 @@ impl Session {
             .as_ref()
             .expect("live session owns monitor control")
             .as_fd()
+    }
+
+    pub fn id(&self) -> NonZeroU64 {
+        self.id
+    }
+
+    pub fn capture_access(&self) -> std::io::Result<CaptureAccess> {
+        Ok(CaptureAccess {
+            capture: self.capture().try_clone_to_owned()?,
+        })
     }
 
     pub fn monitor_capabilities(&self) -> std::io::Result<monitor::Capabilities> {
@@ -108,8 +135,7 @@ impl Session {
     /// wait for a modeset or reserve the returned offer. Dropping the client
     /// leaves monitor control and broker ownership with the session.
     pub fn open_capture(&self) -> std::io::Result<drm_capture::Client> {
-        let capture = self.capture().try_clone_to_owned()?;
-        drm_capture::Client::from_fd(capture)
+        self.capture_access()?.open()
     }
 
     pub async fn release(mut self) -> Result<(), Error> {
@@ -216,10 +242,12 @@ async fn run_session(
         .await;
     let received = result.and_then(|message| message.body().deserialize::<(BusFd, BusFd, u64)>());
     let (monitor, capture, id) = match received {
-        Ok((monitor, capture, id)) if id != 0 => (monitor, capture, id),
-        Ok(_) => {
-            let _ = send.send(Err(Error::InvalidSession));
-            return;
+        Ok((monitor, capture, id)) => {
+            let Some(id) = NonZeroU64::new(id) else {
+                let _ = send.send(Err(Error::InvalidSession));
+                return;
+            };
+            (monitor, capture, id)
         }
         Err(error) => {
             let _ = send.send(Err(error.into()));
@@ -232,6 +260,7 @@ async fn run_session(
     let (done, wait_done) = oneshot::channel();
     // A rejected send drops the session here, waking the same cleanup path.
     let _ = send.send(Ok(Session {
+        id,
         monitor: Some(monitor),
         capture: Some(capture),
         release: Some(release),
@@ -244,7 +273,7 @@ async fn run_session(
             PATH,
             Some(SERVICE),
             "ReleaseDisplaySession",
-            &(id,),
+            &(id.get(),),
         )
         .await
         .and_then(|message| message.body().deserialize::<()>());
