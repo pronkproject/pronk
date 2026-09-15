@@ -108,7 +108,7 @@ async fn run(
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
     let renderer = session.take_renderer_access()?.into_renderer()?;
-    let mut capture = RendererCapturePipeline::new(
+    let (mut capture, mut renderer_events) = RendererCapturePipeline::new(
         renderer,
         remotes,
         RendererCapturePipelineConfig {
@@ -163,7 +163,12 @@ async fn run(
     let mut held = None;
     for index in 0..12 {
         consumer.check()?;
-        let buffer = consumer.next().await?;
+        let buffer = tokio::select! {
+            buffer = consumer.next() => buffer?,
+            event = renderer_events.next_event() => {
+                anyhow::bail!("renderer stopped while awaiting output: {event:?}");
+            }
+        };
         let sequence = renderer_consumer::check_buffer(&buffer)?;
         ensure!(
             last_sequence.is_none_or(|last| sequence > last),

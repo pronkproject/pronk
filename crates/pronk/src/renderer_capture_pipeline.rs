@@ -15,6 +15,8 @@ use pronk_renderer_pipewire::{
     ActiveRendererStream, RendererStream, RendererStreamConfig, RendererStreamError,
     RendererStreamState,
 };
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
@@ -40,7 +42,10 @@ pub struct RendererCapturePipelineConfig {
 
 enum Stream {
     Prepared(RendererStream<OwnedFd>),
-    Active(ActiveRendererStream<OwnedFd>),
+    Active {
+        stream: ActiveRendererStream<OwnedFd>,
+        monitor: ActiveMonitor,
+    },
 }
 
 struct Generation {
@@ -54,6 +59,59 @@ pub struct RendererCapturePipeline {
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
     generation: Option<Generation>,
+    events: mpsc::UnboundedSender<RendererCapturePipelineEvent>,
+}
+
+/// Terminal active-renderer event carrying its exact media generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RendererCapturePipelineEvent {
+    Failed {
+        media_generation: NonZeroU64,
+        error: String,
+    },
+}
+
+/// Sole consumer of asynchronous renderer-pipeline health.
+pub struct RendererCapturePipelineEvents {
+    events: mpsc::UnboundedReceiver<RendererCapturePipelineEvent>,
+}
+
+impl RendererCapturePipelineEvents {
+    pub async fn next_event(&mut self) -> Option<RendererCapturePipelineEvent> {
+        self.events.recv().await
+    }
+}
+
+impl std::fmt::Debug for RendererCapturePipelineEvents {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RendererCapturePipelineEvents")
+            .finish_non_exhaustive()
+    }
+}
+
+struct ActiveMonitor {
+    stop: CancellationToken,
+    task: Option<JoinHandle<()>>,
+}
+
+impl ActiveMonitor {
+    async fn shutdown(mut self) -> Result<(), MediaPipelineError> {
+        self.stop.cancel();
+        self.task
+            .take()
+            .expect("live active renderer monitor owns its task")
+            .await
+            .map_err(|error| {
+                MediaPipelineError::new(format!("join active renderer monitor: {error}"))
+            })
+    }
+}
+
+impl Drop for ActiveMonitor {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
 }
 
 impl RendererCapturePipeline {
@@ -61,13 +119,18 @@ impl RendererCapturePipeline {
         renderer: Renderer<OwnedFd>,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
-    ) -> Self {
-        Self {
-            renderer: Some(renderer),
-            producer_remotes,
-            config,
-            generation: None,
-        }
+    ) -> (Self, RendererCapturePipelineEvents) {
+        let (events, receive) = mpsc::unbounded_channel();
+        (
+            Self {
+                renderer: Some(renderer),
+                producer_remotes,
+                config,
+                generation: None,
+                events,
+            },
+            RendererCapturePipelineEvents { events: receive },
+        )
     }
 
     async fn stop_generation(&mut self, id: NonZeroU64) -> Result<(), MediaPipelineError> {
@@ -91,10 +154,7 @@ impl RendererCapturePipeline {
                 };
                 self.restore_renderer(owner)?;
             }
-            Stream::Active(stream) => stream
-                .shutdown()
-                .await
-                .map_err(|error| stream_error("stop active renderer", error))?,
+            Stream::Active { stream, monitor } => shutdown_active(stream, monitor).await?,
         }
         Ok(())
     }
@@ -300,37 +360,44 @@ impl CapturePipelinePort for RendererCapturePipeline {
             )));
         }
         match generation.stream {
-            Stream::Active(stream) => {
+            Stream::Active { stream, monitor } => {
                 match stream.state() {
                     RendererStreamState::Active => {}
                     RendererStreamState::Failed(error) => {
-                        let result = stream.shutdown().await;
-                        return Err(result.err().map_or_else(
-                            || MediaPipelineError::new(error),
-                            |error| stream_error("join failed renderer stream", error),
-                        ));
+                        return match shutdown_active(stream, monitor).await {
+                            Ok(()) => Err(MediaPipelineError::new(error)),
+                            Err(shutdown) => Err(MediaPipelineError::new(format!(
+                                "{error}; active renderer cleanup failed: {shutdown}"
+                            ))),
+                        };
                     }
                     state => {
-                        let _ = stream.shutdown().await;
-                        return Err(MediaPipelineError::new(format!(
-                            "renderer generation has invalid active state {state:?}"
-                        )));
+                        let error =
+                            format!("renderer generation has invalid active state {state:?}");
+                        return match shutdown_active(stream, monitor).await {
+                            Ok(()) => Err(MediaPipelineError::new(error)),
+                            Err(shutdown) => Err(MediaPipelineError::new(format!(
+                                "{error}; active renderer cleanup failed: {shutdown}"
+                            ))),
+                        };
                     }
                 }
                 self.generation = Some(Generation {
                     id: generation.id,
-                    stream: Stream::Active(stream),
+                    stream: Stream::Active { stream, monitor },
                 });
                 Ok(())
             }
             Stream::Prepared(stream) => {
+                let state = stream.subscribe();
                 let activated = stream.activate(cancellation).await;
                 let stream = activated.map_err(|error| {
                     self.recover_stream_error("activate renderer stream", error)
                 })?;
+                let monitor = monitor_active_renderer(generation.id, state, self.events.clone());
                 self.generation = Some(Generation {
                     id: generation.id,
-                    stream: Stream::Active(stream),
+                    stream: Stream::Active { stream, monitor },
                 });
                 Ok(())
             }
@@ -364,6 +431,66 @@ impl CapturePipelinePort for RendererCapturePipeline {
             self.stop_generation(generation).await?;
         }
         Ok(())
+    }
+}
+
+async fn shutdown_active(
+    stream: ActiveRendererStream<OwnedFd>,
+    monitor: ActiveMonitor,
+) -> Result<(), MediaPipelineError> {
+    let (stream, monitor) = tokio::join!(stream.shutdown(), monitor.shutdown());
+    let stream = stream.map_err(|error| stream_error("stop active renderer", error));
+    match (stream, monitor) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(stream), Err(monitor)) => Err(MediaPipelineError::new(format!(
+            "{stream}; active renderer monitor cleanup also failed: {monitor}"
+        ))),
+    }
+}
+
+fn monitor_active_renderer(
+    media_generation: NonZeroU64,
+    mut state: tokio::sync::watch::Receiver<RendererStreamState>,
+    events: mpsc::UnboundedSender<RendererCapturePipelineEvent>,
+) -> ActiveMonitor {
+    let stop = CancellationToken::new();
+    let cancellation = stop.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            if cancellation.is_cancelled() {
+                return;
+            }
+            let failure = match state.borrow().clone() {
+                RendererStreamState::Failed(error) => Some(error),
+                RendererStreamState::Stopped => Some("renderer stream stopped unexpectedly".into()),
+                RendererStreamState::Prepared | RendererStreamState::Active => None,
+            };
+            if let Some(error) = failure {
+                let _ = events.send(RendererCapturePipelineEvent::Failed {
+                    media_generation,
+                    error,
+                });
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return,
+                changed = state.changed() => {
+                    if changed.is_err() {
+                        let _ = events.send(RendererCapturePipelineEvent::Failed {
+                            media_generation,
+                            error: "renderer stream health channel closed".into(),
+                        });
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    ActiveMonitor {
+        stop,
+        task: Some(task),
     }
 }
 
@@ -442,5 +569,31 @@ mod tests {
         .unwrap();
         assert!(caps.contains("drm-format=XR24,"));
         assert!(caps.ends_with("framerate=60/1"));
+    }
+
+    #[tokio::test]
+    async fn active_monitor_reports_the_exact_failed_generation() {
+        let generation = NonZeroU64::new(7).unwrap();
+        let (state, receive) = tokio::sync::watch::channel(RendererStreamState::Active);
+        let (events, mut event_rx) = mpsc::unbounded_channel();
+        let monitor = monitor_active_renderer(generation, receive, events);
+        state.send_replace(RendererStreamState::Failed("device lost".into()));
+        assert_eq!(
+            event_rx.recv().await,
+            Some(RendererCapturePipelineEvent::Failed {
+                media_generation: generation,
+                error: "device lost".into(),
+            })
+        );
+        monitor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn orderly_monitor_shutdown_does_not_report_failure() {
+        let (_, receive) = tokio::sync::watch::channel(RendererStreamState::Active);
+        let (events, mut event_rx) = mpsc::unbounded_channel();
+        let monitor = monitor_active_renderer(NonZeroU64::new(9).unwrap(), receive, events);
+        monitor.shutdown().await.unwrap();
+        assert_eq!(event_rx.recv().await, None);
     }
 }
