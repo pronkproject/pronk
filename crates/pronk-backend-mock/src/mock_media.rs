@@ -346,3 +346,38 @@ impl From<MediaGraphError> for MockMediaError {
         Self::new(error.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use pronk_backend_protocol::DisplayMode;
+
+    use super::*;
+
+    #[test]
+    fn capture_sampling_cadence_is_independent_of_display_presentation() {
+        let target = PipeWireTarget {
+            kind: MediaKind::Video,
+            node_name: "pronk.test.video".into(),
+            object_serial: 42,
+            session_id: "12345678-1234-1234-1234-123456789abc".into(),
+            device_instance: "test-card".into(),
+            connector_id: 40,
+            output_index: 0,
+            media_generation: 1,
+            caps: "video/x-raw,format=BGRx,width=640,height=480,framerate=30/1".into(),
+        };
+        let configuration = MediaConfiguration {
+            video_profile_id: "h264-high".into(),
+            audio_profile_id: None,
+            mode: DisplayMode {
+                width: 640,
+                height: 480,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            video_bitrate: 2_000_000,
+        };
+
+        validate_video_target(&target, &configuration).unwrap();
+    }
+}
