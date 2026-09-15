@@ -9,6 +9,7 @@ mod scene;
 mod scene_job;
 mod scene_pool;
 mod scene_profile;
+mod scene_reader;
 mod scene_reads;
 mod scene_transaction;
 mod source;
@@ -35,6 +36,7 @@ pub use scene_job::{QualifiedSceneJob, QualifySceneJobError};
 pub use scene_pool::{
     RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool, MAX_SCENE_LAYERS,
 };
+pub use scene_reader::{SceneAttempt, SceneAttemptError, SceneReader, SceneReaderStartError};
 pub use scene_transaction::{
     CancelSceneJobError, CompositableScene, PrepareSceneJobError, PreparedSceneJob,
     ReleaseSubmittedSceneError, ReleasedSceneJob, SceneWaitError, SubmitSceneJobError,

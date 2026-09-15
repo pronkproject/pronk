@@ -86,6 +86,10 @@ impl SceneStorageProfile {
         self.sources.get(index).copied()
     }
 
+    pub(crate) fn profile(&self) -> &Arc<()> {
+        &self.profile
+    }
+
     /// Allocate bounded final and source storage reusable across scene jobs.
     pub fn create_pool(
         &self,

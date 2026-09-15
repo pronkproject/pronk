@@ -22,6 +22,7 @@ pub const MAX_SCENE_LAYERS: usize = 24;
 /// source intermediates return independently. Their capacities are separate;
 /// one complete reservation still requires both kinds to be available.
 pub struct ScenePool {
+    profile: Arc<()>,
     destination: PrivatePool,
     sources: Vec<PrivatePool>,
     source_capacity: NonZeroUsize,
@@ -67,6 +68,7 @@ impl ScenePool {
             )?);
         }
         Ok(Self {
+            profile: Arc::clone(profile),
             destination,
             sources,
             source_capacity,
@@ -87,6 +89,10 @@ impl ScenePool {
             .fold(self.destination.available(), |available, source| {
                 available.min(source.available())
             })
+    }
+
+    pub(crate) fn belongs_to(&self, profile: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.profile, profile)
     }
 
     /// Reserve one destination and every ordered source without partial checkout.

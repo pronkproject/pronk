@@ -713,6 +713,14 @@ lower-level path. They may qualify a job, release it without access, or consume
 it exactly once into `PreparedSceneJob`. Qualification also closes public
 access to the raw job descriptors and the per-job composer.
 
+`SceneReader` owns the active renderer endpoint together with one qualified
+storage profile and its pool. Every attempt reserves a complete slot before it
+dequeues a source-bearing job. Idle dequeue and metadata rejection release the
+job without access and restore the whole slot; successful submission returns
+only work whose aggregate completion has already been accepted by CastKMS.
+Native submission or release uncertainty is terminal for that renderer
+incarnation rather than a reason to reuse possibly affected stages.
+
 The version-6 raw scene records are bound, but no production code dequeues or
 parses them into a GPU profile yet. `castkms-renderer` does own and validate the
 complete packet under one kernel job, including all installed descriptors,
