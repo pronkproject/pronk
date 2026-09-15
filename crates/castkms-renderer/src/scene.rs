@@ -272,6 +272,11 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
         .filter(|count| *count <= 3)
         .ok_or_else(|| invalid("CastKMS returned an invalid output color count"))?;
 
+    const MAX_FDS: usize = 1 + RENDERER_SCENE_MAX_LAYERS * RENDERER_MAX_PLANES;
+    let mut adopted = [-1; MAX_FDS];
+    let mut adopted_count = 0;
+    let producer = adopt_fd(header.producer_fd, &mut adopted, &mut adopted_count)?;
+
     let mut cursor = size_of::<DrmCastkmsRendererScene>();
     let mut raw_layers = Vec::new();
     raw_layers
@@ -280,6 +285,10 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
     for _ in 0..layer_count {
         let start = cursor;
         let layer: DrmCastkmsRendererLayer = read(bytes, start)?;
+        let mut plane_fds: [Option<OwnedFd>; RENDERER_MAX_PLANES] = std::array::from_fn(|_| None);
+        for (owner, plane) in plane_fds.iter_mut().zip(layer.planes) {
+            *owner = adopt_fd(plane.dma_buf_fd, &mut adopted, &mut adopted_count)?;
+        }
         let layer_bytes = usize::try_from(layer.bytes)
             .ok()
             .filter(|length| *length >= size_of::<DrmCastkmsRendererLayer>() && *length % 8 == 0)
@@ -297,46 +306,12 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
         if cursor != end {
             return Err(invalid("CastKMS returned trailing layer metadata"));
         }
-        raw_layers.push((layer, color));
+        raw_layers.push((layer, color, plane_fds));
     }
     let color = decode_colors(bytes, &mut cursor, output_color_count, total)?;
     if cursor != total {
         return Err(invalid("CastKMS returned trailing scene metadata"));
     }
-
-    const MAX_FDS: usize = 1 + RENDERER_SCENE_MAX_LAYERS * RENDERER_MAX_PLANES;
-    let fd_count = 1 + layer_count * RENDERER_MAX_PLANES;
-    let mut raw_fds = [-1; MAX_FDS];
-    raw_fds[0] = header.producer_fd;
-    let mut fd_index = 1;
-    for (layer, _) in &raw_layers {
-        for plane in layer.planes {
-            raw_fds[fd_index] = plane.dma_buf_fd;
-            fd_index += 1;
-        }
-    }
-    for index in 0..fd_count {
-        let fd = raw_fds[index];
-        if fd >= 0 && raw_fds[..index].contains(&fd) {
-            close_unique_fds(&raw_fds[..fd_count]);
-            return Err(invalid("CastKMS returned a duplicate scene descriptor"));
-        }
-    }
-    if raw_fds[..fd_count].iter().any(|fd| *fd < -1) {
-        close_unique_fds(&raw_fds[..fd_count]);
-        return Err(invalid("CastKMS returned an invalid scene descriptor"));
-    }
-    let mut owned_fds: [Option<OwnedFd>; MAX_FDS] = std::array::from_fn(|_| None);
-    for (owner, fd) in owned_fds.iter_mut().zip(raw_fds).take(fd_count) {
-        *owner = (fd >= 0).then(|| {
-            // SAFETY: A successful dequeue installs each unique nonnegative
-            // descriptor once for this result, and the duplicate check above
-            // prevents constructing a second owner for the same descriptor.
-            unsafe { OwnedFd::from_raw_fd(fd) }
-        });
-    }
-    let mut fds = owned_fds.into_iter().take(fd_count);
-    let producer = fds.next().expect("scene producer slot");
     if producer.as_ref().is_some_and(|fd| !has_close_on_exec(fd)) {
         return Err(invalid("CastKMS returned a producer without close-on-exec"));
     }
@@ -345,9 +320,7 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
     layers
         .try_reserve_exact(layer_count)
         .map_err(io::Error::other)?;
-    for (raw, color) in raw_layers {
-        let plane_fds: [Option<OwnedFd>; RENDERER_MAX_PLANES] =
-            std::array::from_fn(|_| fds.next().expect("validated scene plane slot"));
+    for (raw, color, plane_fds) in raw_layers {
         layers.push(decode_layer(raw, color, plane_fds)?);
     }
     if layers
@@ -364,6 +337,30 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
         color: color.into_boxed_slice(),
         producer,
     })
+}
+
+fn adopt_fd<const N: usize>(
+    fd: i32,
+    adopted: &mut [i32; N],
+    count: &mut usize,
+) -> io::Result<Option<OwnedFd>> {
+    if fd < -1 {
+        return Err(invalid("CastKMS returned an invalid scene descriptor"));
+    }
+    if fd == -1 {
+        return Ok(None);
+    }
+    if *count >= adopted.len() {
+        return Err(invalid("CastKMS returned too many scene descriptors"));
+    }
+    if adopted[..*count].contains(&fd) {
+        return Err(invalid("CastKMS returned a duplicate scene descriptor"));
+    }
+    adopted[*count] = fd;
+    *count += 1;
+    // SAFETY: Each nonnegative descriptor is adopted once, and the duplicate
+    // check runs before constructing another owner for the same descriptor.
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
 }
 
 fn decode_layer(
@@ -544,16 +541,6 @@ fn read_bounded<T: WireValue>(bytes: &[u8], offset: usize, end: usize) -> io::Re
     Ok(unsafe { std::ptr::read_unaligned(bytes.as_ptr().add(offset).cast::<T>()) })
 }
 
-fn close_unique_fds(fds: &[i32]) {
-    for (index, fd) in fds.iter().copied().enumerate() {
-        if fd >= 0 && !fds[..index].contains(&fd) {
-            // SAFETY: These are distinct descriptors installed for the caller
-            // by a successful dequeue and no Rust owner was constructed.
-            unsafe { nix::libc::close(fd) };
-        }
-    }
-}
-
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -562,7 +549,7 @@ fn invalid(message: &'static str) -> io::Error {
 mod tests {
     use std::os::fd::IntoRawFd;
 
-    use nix::fcntl::{fcntl, FcntlArg};
+    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 
     use super::*;
 
@@ -721,5 +708,41 @@ mod tests {
             fcntl(raw_fd, FcntlArg::F_GETFD),
             Err(nix::errno::Errno::EBADF)
         );
+    }
+
+    #[test]
+    fn descriptors_are_closed_when_later_scene_metadata_is_rejected() {
+        let (mut bytes, raw_fd) = scene_packet();
+        let reserved = bytes.len() - size_of::<u16>();
+        bytes[reserved..].copy_from_slice(&1_u16.to_ne_bytes());
+
+        assert_eq!(
+            decode_scene(&bytes).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            fcntl(raw_fd, FcntlArg::F_GETFD),
+            Err(nix::errno::Errno::EBADF)
+        );
+    }
+
+    #[test]
+    fn invalid_producer_flags_do_not_leak_layer_descriptors() {
+        let (mut bytes, layer_fd) = scene_packet();
+        let producer_fd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        fcntl(producer_fd, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
+        patch(
+            &mut bytes,
+            std::mem::offset_of!(DrmCastkmsRendererScene, producer_fd),
+            producer_fd as u32,
+        );
+
+        assert_eq!(
+            decode_scene(&bytes).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        for fd in [producer_fd, layer_fd] {
+            assert_eq!(fcntl(fd, FcntlArg::F_GETFD), Err(nix::errno::Errno::EBADF));
+        }
     }
 }
