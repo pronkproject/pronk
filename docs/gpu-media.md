@@ -733,6 +733,12 @@ readers through one private frame-source contract. Both paths share cadence,
 output availability, publication, return and cancellation handling. Complete
 scenes specialize only the blocking wait/composition operation and the atomic
 return of source stages before their final frame enters output copying.
+Blocking work may finish concurrently, but an explicit admission sequence
+holds later results until every earlier admitted frame completes. PipeWire
+therefore observes source order rather than host thread wake-up order. Final
+output copying through publication is serialized after that ordered boundary;
+source staging and scene composition remain concurrent and independently
+bounded.
 
 The version-6 raw scene records are bound, but no production code dequeues or
 parses them into a GPU profile yet. `castkms-renderer` does own and validate the
