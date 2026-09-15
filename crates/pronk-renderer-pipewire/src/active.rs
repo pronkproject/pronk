@@ -8,7 +8,7 @@ use std::time::Duration;
 use nix::sys::time::TimeValLike;
 use nix::time::{clock_gettime, ClockId};
 use pronk_renderer_worker::{
-    CompletedReturn, FinishedOutput, PrivateFrame, SourceAttempt, SourceReader,
+    CompletedOutput, CompletedReturn, FinishedOutput, PrivateFrame, SourceAttempt, SourceReader,
 };
 use tokio::task::JoinSet;
 use tokio::time::{self, MissedTickBehavior};
@@ -32,7 +32,7 @@ pub(crate) async fn run<F: AsFd>(
     source_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        pipeline.dispatch_outputs(video).await?;
+        pipeline.dispatch_outputs(video)?;
         tokio::select! {
             biased;
             _ = stop.cancelled() => return Ok(()),
@@ -47,7 +47,14 @@ pub(crate) async fn run<F: AsFd>(
                     .map_err(join_error)??;
                 pipeline.frames.push_back(frame);
             }
-            completed = pipeline.output_writes.join_next(), if !pipeline.output_writes.is_empty() => {
+            completed = pipeline.output_copies.join_next(), if !pipeline.output_copies.is_empty() => {
+                let output = completed
+                    .ok_or_else(|| io::Error::other("output copy set ended unexpectedly"))?
+                    .map_err(join_error)??;
+                let pending = video.submit(output)?;
+                pipeline.producer_waits.spawn(async move { pending.wait().await });
+            }
+            completed = pipeline.producer_waits.join_next(), if !pipeline.producer_waits.is_empty() => {
                 let output = completed
                     .ok_or_else(|| io::Error::other("output wait set ended unexpectedly"))?
                     .map_err(join_error)?;
@@ -65,7 +72,7 @@ pub(crate) async fn run<F: AsFd>(
                     }
                 }
             }
-            completed = pipeline.output_returns.join_next(), if !pipeline.output_returns.is_empty() => {
+            completed = pipeline.reader_waits.join_next(), if !pipeline.reader_waits.is_empty() => {
                 let returned = completed
                     .ok_or_else(|| io::Error::other("output return set ended unexpectedly"))?
                     .map_err(join_error)?;
@@ -89,8 +96,9 @@ struct Pipeline {
     available: VecDeque<usize>,
     frames: VecDeque<PrivateFrame>,
     source_reads: JoinSet<io::Result<PrivateFrame>>,
-    output_writes: JoinSet<FinishedOutput>,
-    output_returns: JoinSet<CompletedReturn>,
+    output_copies: JoinSet<io::Result<CompletedOutput>>,
+    producer_waits: JoinSet<FinishedOutput>,
+    reader_waits: JoinSet<CompletedReturn>,
     published: bool,
 }
 
@@ -100,18 +108,18 @@ impl Pipeline {
             available,
             frames: VecDeque::new(),
             source_reads: JoinSet::new(),
-            output_writes: JoinSet::new(),
-            output_returns: JoinSet::new(),
+            output_copies: JoinSet::new(),
+            producer_waits: JoinSet::new(),
+            reader_waits: JoinSet::new(),
             published: false,
         }
     }
 
-    async fn dispatch_outputs(&mut self, video: &mut Video) -> io::Result<()> {
+    fn dispatch_outputs(&mut self, video: &mut Video) -> io::Result<()> {
         while let Some((slot, frame)) = take_pair(&mut self.available, &mut self.frames) {
-            let completed = video.claim(slot)?.copy_from(frame)?;
-            let pending = video.submit(completed)?;
-            self.output_writes
-                .spawn(async move { pending.wait().await });
+            let destination = video.claim(slot)?;
+            self.output_copies
+                .spawn_blocking(move || destination.copy_from(frame));
         }
         Ok(())
     }
@@ -128,8 +136,7 @@ impl Pipeline {
                 Ok(None)
             }
             VideoEvent::Released(output) => {
-                self.output_returns
-                    .spawn(async move { output.wait().await });
+                self.reader_waits.spawn(async move { output.wait().await });
                 Ok(None)
             }
             VideoEvent::Failed { cause, returns } => {
@@ -156,8 +163,7 @@ impl Pipeline {
                     })?;
                 }
                 if let Some(output) = retirement {
-                    self.output_returns
-                        .spawn(async move { output.wait().await });
+                    self.reader_waits.spawn(async move { output.wait().await });
                 }
             }
             FramePublishError::Handoff { private, .. } => {
@@ -195,7 +201,15 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::take_pair;
+    use pronk_renderer_worker::CompletedOutput;
     use std::collections::VecDeque;
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn completed_output_can_return_from_a_blocking_worker() {
+        assert_send::<CompletedOutput>();
+    }
 
     #[test]
     fn pairing_does_not_discard_an_unmatched_item() {
