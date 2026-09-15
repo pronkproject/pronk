@@ -176,6 +176,10 @@ impl<J> SourceReleaseError<J> {
     pub fn into_job(self) -> J {
         *self.job
     }
+
+    pub fn into_parts(self) -> (J, io::Error) {
+        (*self.job, self.error)
+    }
 }
 
 struct SourceDescription {
@@ -564,7 +568,9 @@ mod tests {
         };
         let error = job.release_cpu().unwrap_err();
         assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
-        assert_eq!(error.into_job().content_serial().get(), 14);
+        let (job, error) = error.into_parts();
+        assert_eq!(error.raw_os_error(), Some(nix::libc::ENOTTY));
+        assert_eq!(job.content_serial().get(), 14);
     }
 
     #[test]
