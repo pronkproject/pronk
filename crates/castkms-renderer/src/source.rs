@@ -350,11 +350,8 @@ fn validate_source(mut result: DrmCastkmsRendererSource) -> io::Result<SourceDes
         .map_err(|_| invalid_data("CastKMS returned empty destination dimensions"))?;
     let output = Extent::new(result.output[0], result.output[1])
         .map_err(|_| invalid_data("CastKMS returned empty output dimensions"))?;
-    if destination.width() > output.width() || destination.height() > output.height() {
-        return Err(invalid_data(
-            "CastKMS returned destination dimensions outside the output",
-        ));
-    }
+    let geometry = SourceGeometry::new(source, destination, output)
+        .map_err(|_| invalid_data("CastKMS returned destination dimensions outside the output"))?;
 
     Ok(SourceDescription {
         id,
@@ -370,11 +367,7 @@ fn validate_source(mut result: DrmCastkmsRendererSource) -> io::Result<SourceDes
             planes,
             plane_count,
         },
-        geometry: SourceGeometry {
-            source,
-            destination,
-            output,
-        },
+        geometry,
         producer: returned.producer,
     })
 }
@@ -558,6 +551,31 @@ mod tests {
                 io::ErrorKind::InvalidInput
             );
         }
+    }
+
+    #[test]
+    fn source_result_decodes_cropped_and_scaled_geometry() {
+        let mut result = source_result();
+        result.source = [20 << 16, 30 << 16, 640 << 16, 360 << 16];
+        result.destination = [1280, 720];
+        let source = validate_source(result).unwrap();
+        assert_eq!(source.geometry.source().origin(), [20, 30]);
+        assert_eq!(
+            source.geometry.source().extent(),
+            Extent::new(640, 360).unwrap()
+        );
+        assert_eq!(
+            source.geometry.destination(),
+            Extent::new(1280, 720).unwrap()
+        );
+        assert_eq!(source.geometry.output(), Extent::new(1920, 1080).unwrap());
+
+        let mut result = source_result();
+        result.destination[0] = result.output[0] + 1;
+        assert_eq!(
+            validate_source(result).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
