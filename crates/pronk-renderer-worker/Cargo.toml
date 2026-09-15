@@ -13,5 +13,8 @@ nix.workspace = true
 pronk-dmabuf = { path = "../pronk-dmabuf" }
 pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
 
+[dev-dependencies]
+tokio.workspace = true
+
 [lints]
 workspace = true

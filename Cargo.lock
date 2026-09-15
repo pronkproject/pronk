@@ -1607,6 +1607,7 @@ dependencies = [
  "nix 0.29.0",
  "pronk-dmabuf",
  "pronk-gpu",
+ "tokio",
 ]
 
 [[package]]

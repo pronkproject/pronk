@@ -78,6 +78,14 @@ impl PrivateBuffer {
     pub fn extent(&self) -> (NonZeroU32, NonZeroU32) {
         self.image.extent()
     }
+
+    /// Initialize private pixels without involving a compositor source.
+    pub fn clear_waited(self, rgb: [u8; 3]) -> io::Result<Self> {
+        let Self { identity, image } = self;
+        image
+            .clear_waited(rgb)
+            .map(|image| Self { identity, image })
+    }
 }
 
 /// A buffer rejected by a pool without losing its unique owner.
