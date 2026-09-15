@@ -21,18 +21,18 @@ impl Image {
     ///
     /// The returned native completion is ready for the output-pool handoff. No
     /// CPU pixel mapping is performed. Use `spawn_blocking` from async callers.
-    pub fn clear_waited(self, rgb: [u8; 3]) -> io::Result<(Self, SyncFile)> {
-        self.clear_rgba_waited([rgb[0], rgb[1], rgb[2], 255])
+    pub fn clear_and_wait(self, rgb: [u8; 3]) -> io::Result<(Self, SyncFile)> {
+        self.clear_rgba_and_wait([rgb[0], rgb[1], rgb[2], 255])
     }
 
     /// Fill the image with explicit RGBA channel values, without premultiplying.
     ///
     /// Exclusive native access, dependency waits and blocking-worker requirements
-    /// are identical to [`Self::clear_waited`]. Channels are quantized to the
+    /// are identical to [`Self::clear_and_wait`]. Channels are quantized to the
     /// selected format, and alpha is ignored when that format has no alpha.
     /// Successful completion does not establish the blending or media policy.
-    pub fn clear_rgba_waited(self, rgba: [u8; 4]) -> io::Result<(Self, SyncFile)> {
-        self.clear_rgba16_waited(rgba.map(|channel| u16::from(channel) * 257))
+    pub fn clear_rgba_and_wait(self, rgba: [u8; 4]) -> io::Result<(Self, SyncFile)> {
+        self.clear_rgba16_and_wait(rgba.map(|channel| u16::from(channel) * 257))
     }
 
     /// Fill the image with normalized 16-bit RGBA channel values.
@@ -42,8 +42,8 @@ impl Image {
     /// which permit either adjacent representable value. Higher-depth sources
     /// need no CPU pixel writes. It does not change color space, premultiply
     /// alpha or imply HDR. Ownership and native waits follow
-    /// [`Self::clear_rgba_waited`].
-    pub fn clear_rgba16_waited(self, rgba: [u16; 4]) -> io::Result<(Self, SyncFile)> {
+    /// [`Self::clear_rgba_and_wait`].
+    pub fn clear_rgba16_and_wait(self, rgba: [u16; 4]) -> io::Result<(Self, SyncFile)> {
         let buffer = self.export()?;
         require_success(export_dependencies(buffer.as_fd(), Access::Write)?.wait_blocking()?)?;
         let mut job = Job::new(Arc::clone(&self.device), self)?;

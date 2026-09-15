@@ -55,7 +55,7 @@ impl Blender {
     /// destination. An error consumes all images, including a destination that
     /// native work may have partly changed, so none can be mistaken for valid
     /// output or immediately reused.
-    pub fn compose_waited(
+    pub fn compose_and_wait(
         &self,
         destination: PrivateImage,
         background: [u8; 3],
@@ -76,9 +76,9 @@ impl Blender {
         sources
             .try_reserve_exact(layers.len())
             .map_err(io::Error::other)?;
-        let mut destination = destination.clear_waited(background)?;
+        let mut destination = destination.clear_and_wait(background)?;
         for layer in layers {
-            let result = self.blend_scaled_region_waited(
+            let result = self.blend_scaled_region_and_wait(
                 destination,
                 layer.image,
                 layer.crop,

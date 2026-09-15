@@ -36,16 +36,16 @@ fn check_transformed_blends(scaled: bool) {
     let seed = producer
         .allocate(nz(7), nz(5), modifier)
         .unwrap()
-        .clear_rgba_waited([231, 57, 19, 97])
+        .clear_rgba_and_wait([231, 57, 19, 97])
         .unwrap();
     // SAFETY: Exact local native layout and completed producer release, with
-    // unchanged seed pixels retained throughout the waited pattern copy.
+    // unchanged seed pixels retained until the pattern copy finishes.
     let imported =
         unsafe { producer.import_source(seed.0.export().unwrap(), seed.0.layout(), seed.1) }
             .unwrap();
     let full = SourceRect::new(extent(7, 5), [0, 0], extent(7, 5)).unwrap();
     let pattern = imported
-        .copy_region_into_waited(
+        .copy_region_into_and_wait(
             producer.allocate(nz(32), nz(24), modifier).unwrap(),
             full,
             [4, 3],
@@ -58,9 +58,9 @@ fn check_transformed_blends(scaled: bool) {
         unsafe { worker.import_source(pattern.0.export().unwrap(), pattern.0.layout(), pattern.1) }
             .unwrap();
     let mut source = imported
-        .copy_into_private_waited(worker.allocate_private(nz(32), nz(24)).unwrap())
+        .copy_into_private_and_wait(worker.allocate_private(nz(32), nz(24)).unwrap())
         .unwrap();
-    drop(pattern.0.clear_waited([255; 3]).unwrap());
+    drop(pattern.0.clear_and_wait([255; 3]).unwrap());
     drop(seed.0);
     let mut reference = vec![0; 32 * 24 * 4];
     for y in 0..24 {
@@ -121,10 +121,10 @@ fn check_transformed_blends(scaled: bool) {
                         let destination = worker
                             .allocate_private(nz(17), nz(11))
                             .unwrap()
-                            .clear_waited(background)
+                            .clear_and_wait(background)
                             .unwrap();
                         let result = if scaled {
-                            blender.blend_scaled_region_waited(
+                            blender.blend_scaled_region_and_wait(
                                 destination,
                                 source,
                                 crop,
@@ -137,13 +137,13 @@ fn check_transformed_blends(scaled: bool) {
                             )
                         } else {
                             destination
-                                .blend_region_waited(source, crop, placement, transform, blend)
+                                .blend_region_and_wait(source, crop, placement, transform, blend)
                         }
                         .unwrap();
                         source = result.source;
                         let copied = result
                             .destination
-                            .copy_into_waited(worker.allocate(nz(17), nz(11), modifier).unwrap())
+                            .copy_into_and_wait(worker.allocate(nz(17), nz(11), modifier).unwrap())
                             .unwrap();
                         let (_, actual) = readback(copied.destination);
                         let layer = Layer::new(
@@ -188,17 +188,17 @@ fn private_crop_must_match_its_actual_source_image() {
     let source = worker
         .allocate_private(nz(13), nz(9))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     let destination = worker
         .allocate_private(nz(17), nz(11))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     let wrong = SourceRect::new(extent(14, 9), [0, 0], extent(13, 9)).unwrap();
     assert_eq!(
         destination
-            .blend_region_waited(
+            .blend_region_and_wait(
                 source,
                 wrong,
                 [0, 0],

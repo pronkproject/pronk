@@ -29,7 +29,7 @@ impl PrivateImage {
     ///
     /// Conversion uses a nearest-neighbor Vulkan format blit, with no scaling or
     /// color-space conversion. Errors return neither allocation for reuse.
-    pub fn copy_into_waited(self, destination: Image) -> io::Result<PrivateCopy> {
+    pub fn copy_into_and_wait(self, destination: Image) -> io::Result<PrivateCopy> {
         if !Arc::ptr_eq(&self.device, &destination.device)
             || self.extent() != (destination.layout().width, destination.layout().height)
             || !self.initialized

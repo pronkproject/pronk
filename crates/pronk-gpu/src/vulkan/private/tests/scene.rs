@@ -75,7 +75,7 @@ fn native_scene_matches_ordered_reference_layers() {
             device
                 .allocate_private(nz(7), nz(5))
                 .unwrap()
-                .clear_waited(rgb)
+                .clear_and_wait(rgb)
                 .unwrap(),
             crop,
             destination,
@@ -85,7 +85,7 @@ fn native_scene_matches_ordered_reference_layers() {
         source_bytes.push([rgb[2], rgb[1], rgb[0], 255].repeat(7 * 5));
     }
     let composed = blender
-        .compose_waited(
+        .compose_and_wait(
             device.allocate_private(nz(17), nz(11)).unwrap(),
             [17, 85, 204],
             private_layers,
@@ -94,7 +94,7 @@ fn native_scene_matches_ordered_reference_layers() {
     assert_eq!(composed.sources.len(), specs.len());
     let copied = composed
         .destination
-        .copy_into_waited(device.allocate(nz(17), nz(11), modifier).unwrap())
+        .copy_into_and_wait(device.allocate(nz(17), nz(11), modifier).unwrap())
         .unwrap();
     let (_, actual) = readback(copied.destination);
 
@@ -144,7 +144,7 @@ fn scene_validation_precedes_destination_initialization() {
         other
             .allocate_private(nz(7), nz(5))
             .unwrap()
-            .clear_waited([0; 3])
+            .clear_and_wait([0; 3])
             .unwrap(),
         SourceRect::new(source_extent, [0, 0], source_extent).unwrap(),
         DestinationRect {
@@ -156,7 +156,7 @@ fn scene_validation_precedes_destination_initialization() {
     );
     assert_eq!(
         blender
-            .compose_waited(
+            .compose_and_wait(
                 worker.allocate_private(nz(7), nz(5)).unwrap(),
                 [0; 3],
                 vec![layer],
@@ -176,7 +176,7 @@ fn empty_scene_clears_only_a_local_destination() {
     let blender = worker.create_blender().unwrap();
     assert_eq!(
         blender
-            .compose_waited(
+            .compose_and_wait(
                 other.allocate_private(nz(7), nz(5)).unwrap(),
                 [17, 85, 204],
                 Vec::new(),
@@ -187,7 +187,7 @@ fn empty_scene_clears_only_a_local_destination() {
         std::io::ErrorKind::InvalidInput
     );
     let composed = blender
-        .compose_waited(
+        .compose_and_wait(
             worker.allocate_private(nz(7), nz(5)).unwrap(),
             [17, 85, 204],
             Vec::new(),
@@ -196,7 +196,7 @@ fn empty_scene_clears_only_a_local_destination() {
     assert!(composed.sources.is_empty());
     let copied = composed
         .destination
-        .copy_into_waited(worker.allocate(nz(7), nz(5), modifier).unwrap())
+        .copy_into_and_wait(worker.allocate(nz(7), nz(5), modifier).unwrap())
         .unwrap();
     let (_, pixels) = readback(copied.destination);
     assert!(pixels

@@ -19,7 +19,7 @@ use super::{Device, ImageLayout};
 /// ```compile_fail
 /// use pronk_gpu::vulkan::SourceImage;
 /// fn overwrite(source: SourceImage) {
-///     source.clear_waited([0, 0, 0]);
+///     source.clear_and_wait([0, 0, 0]);
 /// }
 /// ```
 pub struct SourceImage {

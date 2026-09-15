@@ -43,5 +43,5 @@ fn logical_device_identity_survives_cloning_but_not_reopening() {
         .allocate_private(31.try_into().unwrap(), 17.try_into().unwrap())
         .unwrap();
     drop(retained);
-    image.clear_waited([17, 85, 204]).unwrap();
+    image.clear_and_wait([17, 85, 204]).unwrap();
 }

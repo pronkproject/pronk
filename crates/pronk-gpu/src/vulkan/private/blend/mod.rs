@@ -110,10 +110,10 @@ impl Blender {
     }
 
     /// Blend a crop using the lifetime, geometry and precision contract of
-    /// [`PrivateImage::blend_region_waited`], without recreating the program.
+    /// [`PrivateImage::blend_region_and_wait`], without recreating the program.
     /// Both images must belong to this program's logical device. Calls may run
     /// on separate blocking workers with independently owned images.
-    pub fn blend_region_waited(
+    pub fn blend_region_and_wait(
         &self,
         destination: PrivateImage,
         source: PrivateImage,
@@ -122,7 +122,7 @@ impl Blender {
         transform: Transform,
         blend: Blend,
     ) -> io::Result<BlendedImages> {
-        self.blend_scaled_region_waited(
+        self.blend_scaled_region_and_wait(
             destination,
             source,
             crop,
@@ -136,8 +136,8 @@ impl Blender {
     }
 
     /// Blend with explicit destination dimensions using the contract of
-    /// [`PrivateImage::blend_scaled_region_waited`] and a reusable program.
-    pub fn blend_scaled_region_waited(
+    /// [`PrivateImage::blend_scaled_region_and_wait`] and a reusable program.
+    pub fn blend_scaled_region_and_wait(
         &self,
         destination: PrivateImage,
         source: PrivateImage,
@@ -182,7 +182,7 @@ impl PrivateImage {
     /// precision after each blend. Native floating-point evaluation is not a
     /// bit-identical integer reference. No geometry, scaling, gamma or color
     /// management is applied. Errors return neither image for reuse.
-    pub fn blend_waited(self, source: PrivateImage, blend: Blend) -> io::Result<BlendedImages> {
+    pub fn blend_and_wait(self, source: PrivateImage, blend: Blend) -> io::Result<BlendedImages> {
         if self.extent() != source.extent() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -192,7 +192,7 @@ impl PrivateImage {
         let extent = Extent::new(source.width.get(), source.height.get())
             .expect("private extent is nonzero");
         let crop = SourceRect::new(extent, [0, 0], extent).expect("whole source crop is valid");
-        self.blend_region_waited(source, crop, [0, 0], Transform::default(), blend)
+        self.blend_region_and_wait(source, crop, [0, 0], Transform::default(), blend)
     }
 
     /// Blend an integral source crop at an unscaled output placement.
@@ -204,8 +204,8 @@ impl PrivateImage {
     /// before reaching this private-image operation.
     ///
     /// Initialization, device, lifetime and precision requirements are those of
-    /// [`Self::blend_waited`]. Fractional crops and filtering are not supported.
-    pub fn blend_region_waited(
+    /// [`Self::blend_and_wait`]. Fractional crops and filtering are not supported.
+    pub fn blend_region_and_wait(
         self,
         source: PrivateImage,
         crop: SourceRect,
@@ -213,7 +213,7 @@ impl PrivateImage {
         transform: Transform,
         blend: Blend,
     ) -> io::Result<BlendedImages> {
-        self.blend_scaled_region_waited(
+        self.blend_scaled_region_and_wait(
             source,
             crop,
             DestinationRect {
@@ -231,8 +231,8 @@ impl PrivateImage {
     /// the CPU reference. Clipping preserves that sampling grid. The checked
     /// integer shader supports axis products up to `u32::MAX`; larger visible
     /// placements return `Unsupported` before submission. Device, precision and
-    /// ownership requirements follow [`Self::blend_region_waited`].
-    pub fn blend_scaled_region_waited(
+    /// ownership requirements follow [`Self::blend_region_and_wait`].
+    pub fn blend_scaled_region_and_wait(
         self,
         source: PrivateImage,
         crop: SourceRect,

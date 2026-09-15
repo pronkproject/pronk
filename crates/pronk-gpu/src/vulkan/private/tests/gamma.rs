@@ -26,9 +26,9 @@ fn gamma_matches_reference_for_every_byte_at_table_extremes() {
         let gamma = device.create_gamma(&entries).unwrap();
         for value in 0..=255u8 {
             let rgb = [value, value.wrapping_mul(71), 255 - value];
-            image = image.clear_waited(rgb).unwrap();
-            image = gamma.apply_waited(image).unwrap();
-            let copy = image.copy_into_waited(output).unwrap();
+            image = image.clear_and_wait(rgb).unwrap();
+            image = gamma.apply_and_wait(image).unwrap();
+            let copy = image.copy_into_and_wait(output).unwrap();
             image = copy.source;
             let expected = reference
                 .sample(rgb.map(|v| u16::from(v) * 257))
@@ -55,20 +55,20 @@ fn gamma_preserves_imported_alpha_after_original_destruction() {
     let gamma = device.create_gamma(&[[65535, 12345, 0]]).unwrap();
     for alpha in [0, 1, 127, 128, 254, 255] {
         let input = producer.allocate(nz(13), nz(7), modifier).unwrap();
-        let (input, ready) = input.clear_rgba_waited([21, 47, 91, alpha]).unwrap();
+        let (input, ready) = input.clear_rgba_and_wait([21, 47, 91, alpha]).unwrap();
         // SAFETY: Matching native device/driver, exact allocator metadata and
         // completed foreign GENERAL release. The source remains untouched until
-        // the waited private read retires its import.
+        // the private read finishes and retires its import.
         let source =
             unsafe { device.import_source(input.export().unwrap(), input.layout(), ready) }
                 .unwrap();
         let image = source
-            .copy_into_private_waited(device.allocate_private(nz(13), nz(7)).unwrap())
+            .copy_into_private_and_wait(device.allocate_private(nz(13), nz(7)).unwrap())
             .unwrap();
         drop(input);
-        let image = gamma.apply_waited(image).unwrap();
+        let image = gamma.apply_and_wait(image).unwrap();
         let copy = image
-            .copy_into_waited(device.allocate(nz(13), nz(7), modifier).unwrap())
+            .copy_into_and_wait(device.allocate(nz(13), nz(7), modifier).unwrap())
             .unwrap();
         let (_, pixels) = readback(copy.destination);
         for pixel in pixels.chunks_exact(4) {
@@ -90,17 +90,17 @@ fn gamma_rejects_invalid_tables_or_unready_foreign_images() {
     let gamma = device.create_gamma(&[[0; 3], [65535; 3]]).unwrap();
     let image = device.allocate_private(nz(1), nz(1)).unwrap();
     assert_eq!(
-        gamma.apply_waited(image).err().unwrap().kind(),
+        gamma.apply_and_wait(image).err().unwrap().kind(),
         std::io::ErrorKind::InvalidInput
     );
     let (other, _) = self::device();
     let image = other
         .allocate_private(nz(1), nz(1))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     assert_eq!(
-        gamma.apply_waited(image).err().unwrap().kind(),
+        gamma.apply_and_wait(image).err().unwrap().kind(),
         std::io::ErrorKind::InvalidInput
     );
 }
@@ -129,9 +129,9 @@ fn gamma_clones_keep_upload_alive_through_concurrent_images() {
             std::thread::spawn(move || {
                 start.wait();
                 for value in [0, 1, 127, 128, 254, 255] {
-                    image = image.clear_waited([value; 3]).unwrap();
-                    image = gamma.apply_waited(image).unwrap();
-                    let copy = image.copy_into_waited(output).unwrap();
+                    image = image.clear_and_wait([value; 3]).unwrap();
+                    image = gamma.apply_and_wait(image).unwrap();
+                    let copy = image.copy_into_and_wait(output).unwrap();
                     image = copy.source;
                     let (returned, pixels) = readback(copy.destination);
                     for pixel in pixels.chunks_exact(4) {

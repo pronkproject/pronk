@@ -27,7 +27,7 @@ fn imported_source_retires_before_private_and_output_reuse() {
     let mut staging = worker.allocate(size, size, modifier).unwrap();
     let mut output = worker.allocate(size, size, modifier).unwrap();
     for rgb in [[255, 0, 0], [0, 255, 0], [0, 0, 255], [17, 85, 204]] {
-        let (initialized, fence) = source.clear_waited(rgb).unwrap();
+        let (initialized, fence) = source.clear_and_wait(rgb).unwrap();
         source = initialized;
         // SAFETY: Exact allocator metadata from the same physical GPU and
         // matching Vulkan creation profile. Clear completed and released to
@@ -35,11 +35,11 @@ fn imported_source_retires_before_private_and_output_reuse() {
         let imported =
             unsafe { worker.import_source(source.export().unwrap(), source.layout(), fence) }
                 .unwrap();
-        let (private, read_done) = imported.copy_into_waited(staging).unwrap();
+        let (private, read_done) = imported.copy_into_and_wait(staging).unwrap();
         assert_eq!(read_done.wait_blocking().unwrap(), Completion::Success);
-        source = source.clear_waited([255, 255, 255]).unwrap().0;
-        let copied = output.copy_from_waited(private).unwrap();
-        staging = copied.source.clear_waited([0, 0, 0]).unwrap().0;
+        source = source.clear_and_wait([255, 255, 255]).unwrap().0;
+        let copied = output.copy_from_and_wait(private).unwrap();
+        staging = copied.source.clear_and_wait([0, 0, 0]).unwrap().0;
         let (returned, pixels) = readback(copied.destination);
         assert!(pixels
             .chunks_exact(4)
@@ -60,7 +60,7 @@ fn imported_backing_survives_its_exporting_device() {
     let (image, fence) = producer
         .allocate(width, height, modifier)
         .unwrap()
-        .clear_waited([17, 85, 204])
+        .clear_and_wait([17, 85, 204])
         .unwrap();
     let fd = image.export().unwrap();
     let layout = image.layout();
@@ -72,7 +72,7 @@ fn imported_backing_survives_its_exporting_device() {
     // was destroyed, so no writer races the import's read.
     let source = unsafe { worker.import_source(fd, layout, fence) }.unwrap();
     let (staging, _) = source
-        .copy_into_waited(worker.allocate(width, height, modifier).unwrap())
+        .copy_into_and_wait(worker.allocate(width, height, modifier).unwrap())
         .unwrap();
     let (_, pixels) = readback(staging);
     assert!(pixels
@@ -91,15 +91,15 @@ fn completed_source_import_needs_no_separate_producer_record() {
     let (image, completion) = device
         .allocate(size, size, modifier)
         .unwrap()
-        .clear_waited([17, 85, 204])
+        .clear_and_wait([17, 85, 204])
         .unwrap();
     assert_eq!(completion.wait_blocking().unwrap(), Completion::Success);
-    // SAFETY: The waited clear completed successfully and released the exact
+    // SAFETY: The clear completed successfully and released the exact
     // same-device allocation to FOREIGN/GENERAL before import.
     let source =
         unsafe { device.import_ready_source(image.export().unwrap(), image.layout()) }.unwrap();
     let (staging, _) = source
-        .copy_into_waited(device.allocate(size, size, modifier).unwrap())
+        .copy_into_and_wait(device.allocate(size, size, modifier).unwrap())
         .unwrap();
     let (_, pixels) = readback(staging);
     assert!(pixels
@@ -118,14 +118,14 @@ fn source_copy_rejects_aliasing_its_destination() {
     let (image, fence) = device
         .allocate(size, size, modifier)
         .unwrap()
-        .clear_waited([1, 2, 3])
+        .clear_and_wait([1, 2, 3])
         .unwrap();
     // SAFETY: Same device's exact allocation metadata and completed foreign
     // release. The subsequent copy must reject the alias before any GPU access.
     let source =
         unsafe { device.import_source(image.export().unwrap(), image.layout(), fence) }.unwrap();
     assert!(
-        matches!(source.copy_into_waited(image), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
+        matches!(source.copy_into_and_wait(image), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
     );
 }
 
@@ -147,7 +147,7 @@ fn submitted_stage_separates_accounting_from_private_pixel_access() {
     let (source, producer) = device
         .allocate(size, size, modifier)
         .unwrap()
-        .clear_waited([17, 85, 204])
+        .clear_and_wait([17, 85, 204])
         .unwrap();
     // SAFETY: Exact same-device layout and completed foreign release. The
     // original is retained without another writer until native reads finish.
@@ -174,7 +174,7 @@ fn submitted_stage_separates_accounting_from_private_pixel_access() {
     let (private, completed) = pending.wait().unwrap();
     assert_eq!(completed.completion().unwrap(), Some(Completion::Success));
     assert_eq!(records[0].completion().unwrap(), Some(Completion::Success));
-    let _source = source.clear_waited([255; 3]).unwrap().0;
+    let _source = source.clear_and_wait([255; 3]).unwrap().0;
     let (_, pixels) = readback(private);
     assert!(pixels
         .chunks_exact(4)

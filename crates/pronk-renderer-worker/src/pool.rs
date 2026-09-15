@@ -145,9 +145,9 @@ impl PrivateBuffer {
     }
 
     /// Initialize private pixels without involving a compositor source.
-    pub fn clear_waited(self, rgb: [u8; 3]) -> io::Result<PrivateFrame> {
+    pub fn clear_and_wait(self, rgb: [u8; 3]) -> io::Result<PrivateFrame> {
         let Self { identity, image } = self;
-        image.clear_waited(rgb).map(|image| PrivateFrame {
+        image.clear_and_wait(rgb).map(|image| PrivateFrame {
             buffer: Self { identity, image },
             content_serial: None,
             alpha: SourceAlpha::Opaque,

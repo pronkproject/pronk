@@ -48,7 +48,7 @@ fn native_opaque_layers_match_reference_order_after_all_source_reuse() {
             let (image, fence) = device
                 .allocate(size, size, modifier)
                 .unwrap()
-                .clear_waited(colors[index])
+                .clear_and_wait(colors[index])
                 .unwrap();
             // SAFETY: Same native device, exact allocator profile and completed
             // foreign release. Original pixels remain unchanged through reading.
@@ -68,13 +68,13 @@ fn native_opaque_layers_match_reference_order_after_all_source_reuse() {
             );
         }
         let background = [17, 85, 204];
-        let (private, completion) = staging.compose_opaque_waited(layers, background).unwrap();
+        let (private, completion) = staging.compose_opaque_and_wait(layers, background).unwrap();
         assert_eq!(completion.wait_blocking().unwrap(), Completion::Success);
         for original in originals {
-            drop(original.clear_waited([255; 3]).unwrap());
+            drop(original.clear_and_wait([255; 3]).unwrap());
         }
-        let copied = output.copy_from_waited(private).unwrap();
-        staging = copied.source.clear_waited([0; 3]).unwrap().0;
+        let copied = output.copy_from_and_wait(private).unwrap();
+        staging = copied.source.clear_and_wait([0; 3]).unwrap().0;
         let (returned, actual) = readback(copied.destination);
         output = returned;
         let mut expected = vec![0; 64 * 64 * 4];
@@ -87,7 +87,7 @@ fn native_opaque_layers_match_reference_order_after_all_source_reuse() {
         assert_eq!(actual, expected, "layer order {order:?}");
     }
     let (empty, completion) = staging
-        .compose_opaque_waited(Vec::new(), [17, 85, 204])
+        .compose_opaque_and_wait(Vec::new(), [17, 85, 204])
         .unwrap();
     assert_eq!(completion.wait_blocking().unwrap(), Completion::Success);
     let (_, pixels) = readback(empty);
@@ -104,7 +104,7 @@ fn native_layer_list_rejects_duplicate_imports_of_one_allocation() {
     let (image, fence) = device
         .allocate(size, size, modifier)
         .unwrap()
-        .clear_waited([255, 0, 0])
+        .clear_and_wait([255, 0, 0])
         .unwrap();
     let mut layers = Vec::new();
     for _ in 0..2 {
@@ -118,7 +118,7 @@ fn native_layer_list_rejects_duplicate_imports_of_one_allocation() {
     }
     let destination = device.allocate(size, size, modifier).unwrap();
     let error = destination
-        .compose_opaque_waited(layers, [0; 3])
+        .compose_opaque_and_wait(layers, [0; 3])
         .err()
         .expect("duplicate source accepted");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);

@@ -30,14 +30,14 @@ impl SourceImage {
     /// the call. Successful return destroys the import after reading completes;
     /// no source lease belongs to subsequent private-image or output work.
     /// Errors return neither image for reuse. Run on a blocking graphics worker.
-    /// This waited API does not expose an early source-accounting record.
-    pub fn copy_into_private_waited(self, destination: PrivateImage) -> io::Result<PrivateImage> {
+    /// This blocking API does not expose an early source-accounting record.
+    pub fn copy_into_private_and_wait(self, destination: PrivateImage) -> io::Result<PrivateImage> {
         self.submit_private_copy(destination)?.wait()
     }
 
     /// Submit a source read into non-exportable private storage.
     ///
-    /// Validation and producer waits follow [`Self::copy_into_private_waited`].
+    /// Validation and producer waits follow [`Self::copy_into_private_and_wait`].
     /// Return exposes a native completion record without waiting for the copy.
     /// The pending owner retains both images until native retirement; it must
     /// remain on a blocking graphics worker because drop may wait for GPU work.

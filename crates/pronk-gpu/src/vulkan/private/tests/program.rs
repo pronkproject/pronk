@@ -36,10 +36,10 @@ fn shared_program_keeps_concurrent_image_bindings_independent() {
                     let crop = SourceRect::new(extent, [0, 0], extent).unwrap();
                     for iteration in 0..16 {
                         let rgb = [17 + index * 40, 85 + iteration * 7, 204];
-                        source = source.clear_waited(rgb).unwrap();
-                        destination = destination.clear_waited([0; 3]).unwrap();
+                        source = source.clear_and_wait(rgb).unwrap();
+                        destination = destination.clear_and_wait([0; 3]).unwrap();
                         let result = blender
-                            .blend_region_waited(
+                            .blend_region_and_wait(
                                 destination,
                                 source,
                                 crop,
@@ -49,7 +49,7 @@ fn shared_program_keeps_concurrent_image_bindings_independent() {
                             )
                             .unwrap();
                         source = result.source;
-                        let copied = result.destination.copy_into_waited(output).unwrap();
+                        let copied = result.destination.copy_into_and_wait(output).unwrap();
                         destination = copied.source;
                         let (returned, pixels) = readback(copied.destination);
                         output = returned;
@@ -78,18 +78,18 @@ fn program_rejects_images_from_another_logical_device() {
     let source = device
         .allocate_private(nz(17), nz(11))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     let destination = device
         .allocate_private(nz(17), nz(11))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     let extent = Extent::new(17, 11).unwrap();
     let crop = SourceRect::new(extent, [0, 0], extent).unwrap();
     assert_eq!(
         blender
-            .blend_region_waited(
+            .blend_region_and_wait(
                 destination,
                 source,
                 crop,

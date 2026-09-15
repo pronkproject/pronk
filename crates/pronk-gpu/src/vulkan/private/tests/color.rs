@@ -31,9 +31,9 @@ fn ordered_native_color_pipeline_matches_the_portable_reference() {
     let mut image = device.allocate_private(nz(11), nz(7)).unwrap();
     let mut output = device.allocate(nz(11), nz(7), modifier).unwrap();
     for rgb in [[0, 0, 0], [17, 85, 204], [1, 127, 254], [255, 255, 255]] {
-        image = image.clear_waited(rgb).unwrap();
+        image = image.clear_and_wait(rgb).unwrap();
         image = native.apply_and_wait(image).unwrap();
-        let copied = image.copy_into_waited(output).unwrap();
+        let copied = image.copy_into_and_wait(output).unwrap();
         image = copied.source;
         let expected = color
             .apply(rgb.map(|value| u16::from(value) * 257))
@@ -82,9 +82,9 @@ fn complete_output_color_matches_the_integer_reference() {
     let mut image = device.allocate_private(nz(13), nz(5)).unwrap();
     let mut output = device.allocate(nz(13), nz(5), modifier).unwrap();
     for rgb in [[0, 0, 0], [17, 85, 204], [1, 127, 254], [255, 255, 255]] {
-        image = image.clear_waited(rgb).unwrap();
+        image = image.clear_and_wait(rgb).unwrap();
         image = native.apply_and_wait(image).unwrap();
-        let copied = image.copy_into_waited(output).unwrap();
+        let copied = image.copy_into_and_wait(output).unwrap();
         image = copied.source;
         let expected = color
             .apply(rgb.map(|value| u16::from(value) * 257))
@@ -112,7 +112,7 @@ fn empty_output_color_still_rejects_unready_or_foreign_images() {
     let wrong_extent = worker
         .allocate_private(nz(2), nz(1))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     let error = match native.apply_and_wait(wrong_extent) {
         Ok(_) => panic!("wrong-sized image was accepted"),
@@ -123,7 +123,7 @@ fn empty_output_color_still_rejects_unready_or_foreign_images() {
     let foreign = other
         .allocate_private(nz(1), nz(1))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     let error = match native.apply_and_wait(foreign) {
         Ok(_) => panic!("foreign image was accepted"),

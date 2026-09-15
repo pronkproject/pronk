@@ -42,7 +42,7 @@ impl PendingStage {
     }
 
     /// Wait for successful source reads and return their initialized private
-    /// image. The completion record is returned for existing waited callers.
+    /// image. The completion record is returned for callers that wait here.
     pub fn wait(self) -> io::Result<(Image, SyncFile)> {
         let Self { job, completion } = self;
         let (sources, mut destination) = job.finish()?;

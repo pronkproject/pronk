@@ -19,7 +19,7 @@ fn rgba_sources_preserve_channels_through_private_bgra_output() {
     let mut private = worker.allocate_private(nz(31), nz(17)).unwrap();
     for value in 0..=255_u8 {
         let rgba = [value, 255 - value, value ^ 0x5a, value.wrapping_add(51)];
-        let (written, producer) = original.clear_rgba_waited(rgba).unwrap();
+        let (written, producer) = original.clear_rgba_and_wait(rgba).unwrap();
         let (written, raw) = readback(written);
         assert!(raw.chunks_exact(4).all(|pixel| pixel == rgba));
         // SAFETY: The exported allocation has the exact reported RGBA format
@@ -29,10 +29,10 @@ fn rgba_sources_preserve_channels_through_private_bgra_output() {
             unsafe { worker.import_source(written.export().unwrap(), written.layout(), producer) }
                 .unwrap();
         assert_eq!(source.layout().format, PackedFormat::Rgba8);
-        private = source.copy_into_private_waited(private).unwrap();
-        original = written.clear_waited([255; 3]).unwrap().0;
+        private = source.copy_into_private_and_wait(private).unwrap();
+        original = written.clear_and_wait([255; 3]).unwrap().0;
         let copied = private
-            .copy_into_waited(worker.allocate(nz(31), nz(17), modifier).unwrap())
+            .copy_into_and_wait(worker.allocate(nz(31), nz(17), modifier).unwrap())
             .unwrap();
         private = copied.source;
         let (_, actual) = readback(copied.destination);
@@ -74,13 +74,13 @@ fn reject_mismatched_byte_copies(
         let original = device
             .allocate_with_format(source, nz(16), nz(16), modifier)
             .unwrap()
-            .clear_waited([17, 85, 204])
+            .clear_and_wait([17, 85, 204])
             .unwrap();
         let output = device
             .allocate_with_format(destination, nz(16), nz(16), modifier)
             .unwrap();
         let error = if operation == 0 {
-            output.copy_from_waited(original.0).err().unwrap()
+            output.copy_from_and_wait(original.0).err().unwrap()
         } else {
             // SAFETY: An unchanged native allocation with exact packed metadata
             // and completed producer release is retained through rejection.
@@ -93,13 +93,13 @@ fn reject_mismatched_byte_copies(
             }
             .unwrap();
             match operation {
-                1 => source.copy_into_waited(output).err().unwrap(),
+                1 => source.copy_into_and_wait(output).err().unwrap(),
                 2 => source
-                    .copy_region_into_waited(output, crop, [0, 0], [0; 3])
+                    .copy_region_into_and_wait(output, crop, [0, 0], [0; 3])
                     .err()
                     .unwrap(),
                 _ => output
-                    .compose_opaque_waited(
+                    .compose_opaque_and_wait(
                         vec![
                             OpaqueLayer::new(source, crop, [0, 0]).with_transform(Transform {
                                 reflect_x: true,

@@ -31,7 +31,7 @@ impl Image {
     /// Use executor-owned staging as the source: destination reuse may wait,
     /// so no compositor-source lease belongs in this operation. Accepted work
     /// retains both images; errors do not return either image for reuse.
-    pub fn copy_from_waited(self, source: Image) -> io::Result<CopiedImages> {
+    pub fn copy_from_and_wait(self, source: Image) -> io::Result<CopiedImages> {
         if !Arc::ptr_eq(&self.device, &source.device) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

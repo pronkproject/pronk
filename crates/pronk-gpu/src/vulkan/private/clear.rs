@@ -13,7 +13,7 @@ impl PrivateImage {
     ///
     /// No external reuse wait exists for non-exportable storage. Accepted work
     /// retains the unique owner; errors do not return an image for reuse.
-    pub fn clear_waited(self, rgb: [u8; 3]) -> io::Result<Self> {
+    pub fn clear_and_wait(self, rgb: [u8; 3]) -> io::Result<Self> {
         let mut job = Job::new(Arc::clone(&self.device), self)?;
         let image = job.resources();
         let barrier = image.barrier(vk::AccessFlags::TRANSFER_WRITE);

@@ -19,7 +19,7 @@ fn rgb565_sources_keep_all_channel_levels_and_supply_opaque_alpha() {
             (rgb[2] * 65535).div_ceil(31) as u16,
             0,
         ];
-        let (written, producer) = original.clear_rgba16_waited(normalized).unwrap();
+        let (written, producer) = original.clear_rgba16_and_wait(normalized).unwrap();
         let (written, raw) = readback(written);
         assert_eq!(raw.len(), 13 * 7 * 2);
         let expected = ((rgb[0] << 11) | (rgb[1] << 5) | rgb[2]) as u16;
@@ -32,10 +32,10 @@ fn rgb565_sources_keep_all_channel_levels_and_supply_opaque_alpha() {
         let source =
             unsafe { worker.import_source(written.export().unwrap(), written.layout(), producer) }
                 .unwrap();
-        private = source.copy_into_private_waited(private).unwrap();
-        original = written.clear_waited([255; 3]).unwrap().0;
+        private = source.copy_into_private_and_wait(private).unwrap();
+        original = written.clear_and_wait([255; 3]).unwrap().0;
         let copied = private
-            .copy_into_waited(worker.allocate(nz(13), nz(7), modifier).unwrap())
+            .copy_into_and_wait(worker.allocate(nz(13), nz(7), modifier).unwrap())
             .unwrap();
         private = copied.source;
         let (_, output) = readback(copied.destination);

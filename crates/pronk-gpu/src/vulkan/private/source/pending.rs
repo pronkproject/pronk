@@ -22,7 +22,7 @@ use crate::vulkan::SourceImage;
 /// ```compile_fail
 /// use pronk_gpu::vulkan::{Image, PendingPrivateRead};
 /// fn publish_pending(read: PendingPrivateRead, output: Image) {
-///     read.copy_into_waited(output);
+///     read.copy_into_and_wait(output);
 /// }
 /// ```
 #[must_use = "wait for private pixels or deliberately retire the submitted read"]

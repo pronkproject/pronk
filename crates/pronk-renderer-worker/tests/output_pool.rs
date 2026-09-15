@@ -24,7 +24,11 @@ async fn private_pixels_cross_output_ownership_without_source_state() {
     .await
     .unwrap();
 
-    let source = private.take().unwrap().clear_waited([17, 34, 51]).unwrap();
+    let source = private
+        .take()
+        .unwrap()
+        .clear_and_wait([17, 34, 51])
+        .unwrap();
     let completed = output.claim(0).unwrap().copy_from(source).unwrap();
     let pending = output.submit(completed).unwrap();
     let finished = pending.wait().await;

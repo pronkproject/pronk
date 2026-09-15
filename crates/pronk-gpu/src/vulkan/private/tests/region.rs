@@ -61,7 +61,7 @@ fn exercise_region_reads(format: PackedFormat) {
         let seed = producer
             .allocate_with_format(format, nz(7), nz(5), modifier)
             .unwrap()
-            .clear_rgba_waited(inner)
+            .clear_rgba_and_wait(inner)
             .unwrap();
         // SAFETY: Exact local native layout and completed foreign release.
         // The seed is unchanged until the pattern copy completes.
@@ -70,7 +70,7 @@ fn exercise_region_reads(format: PackedFormat) {
                 .unwrap();
         let full = SourceRect::new(extent(7, 5), [0, 0], extent(7, 5)).unwrap();
         let pattern = imported
-            .copy_region_into_waited(
+            .copy_region_into_and_wait(
                 producer
                     .allocate_with_format(format, nz(32), nz(24), modifier)
                     .unwrap(),
@@ -87,15 +87,15 @@ fn exercise_region_reads(format: PackedFormat) {
         }
         .unwrap();
         let crop = SourceRect::new(source_size, origin, crop_size).unwrap();
-        private = private.clear_waited([255; 3]).unwrap();
+        private = private.clear_and_wait([255; 3]).unwrap();
         let pending = source
             .submit_private_region(private, crop, position, target_size, background)
             .unwrap();
         private = pending.wait().unwrap();
         // Downstream allocation and reuse have no part in the source read.
-        drop(pattern.0.clear_waited([255; 3]).unwrap());
+        drop(pattern.0.clear_and_wait([255; 3]).unwrap());
         let copied = private
-            .copy_into_waited(worker.allocate(nz(33), nz(35), modifier).unwrap())
+            .copy_into_and_wait(worker.allocate(nz(33), nz(35), modifier).unwrap())
             .unwrap();
         private = copied.source;
         let (_, actual) = readback(copied.destination);
@@ -152,7 +152,7 @@ fn invalid_private_regions_never_produce_partial_pixels() {
         let source = device
             .allocate(nz(16), nz(16), modifier)
             .unwrap()
-            .clear_waited([17, 85, 204])
+            .clear_and_wait([17, 85, 204])
             .unwrap();
         // SAFETY: The unchanged local native image and completed producer
         // release are retained throughout import and the rejected operation.

@@ -38,9 +38,9 @@ fn output_matrices_match_the_integer_reference() {
         let matrix = ColorMatrix::from_sign_magnitude(coefficients);
         let native = device.create_output_matrix(matrix).unwrap();
         for rgb in [[0, 0, 0], [17, 85, 204], [1, 127, 254], [255, 255, 255]] {
-            image = image.clear_waited(rgb).unwrap();
-            image = native.apply_waited(image).unwrap();
-            let copied = image.copy_into_waited(output).unwrap();
+            image = image.clear_and_wait(rgb).unwrap();
+            image = native.apply_and_wait(image).unwrap();
+            let copied = image.copy_into_and_wait(output).unwrap();
             image = copied.source;
             let expected = OutputColor {
                 degamma: None,
@@ -65,7 +65,7 @@ fn output_matrix_rejects_uninitialized_or_foreign_images() {
     let matrix = worker
         .create_output_matrix(ColorMatrix::from_sign_magnitude([0; 12]))
         .unwrap();
-    let error = match matrix.apply_waited(worker.allocate_private(nz(1), nz(1)).unwrap()) {
+    let error = match matrix.apply_and_wait(worker.allocate_private(nz(1), nz(1)).unwrap()) {
         Ok(_) => panic!("uninitialized image was accepted"),
         Err(error) => error,
     };
@@ -74,9 +74,9 @@ fn output_matrix_rejects_uninitialized_or_foreign_images() {
     let foreign = other
         .allocate_private(nz(1), nz(1))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
-    let error = match matrix.apply_waited(foreign) {
+    let error = match matrix.apply_and_wait(foreign) {
         Ok(_) => panic!("foreign image was accepted"),
         Err(error) => error,
     };

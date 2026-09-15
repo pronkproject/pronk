@@ -27,9 +27,9 @@ impl SourceImage {
     /// after native reading ends; successful return supplies the initialized
     /// staging image and actual completion covering only this source-to-stage
     /// operation. Source authority and protocol release remain caller duties.
-    pub fn copy_into_waited(self, destination: Image) -> io::Result<(Image, SyncFile)> {
+    pub fn copy_into_and_wait(self, destination: Image) -> io::Result<(Image, SyncFile)> {
         let copy = Copy::whole(self.layout(), destination.layout())?;
-        self.copy_waited(destination, copy)
+        self.copy_and_wait(destination, copy)
     }
 
     /// Copy a visible integral crop over a cleared private staging background.
@@ -42,9 +42,9 @@ impl SourceImage {
     /// A mismatched crop or fully offscreen placement is rejected before source
     /// waits or native submission. A caller with no visible source should clear
     /// private storage without acquiring a source use. All source authority,
-    /// destination availability and blocking-worker rules of `copy_into_waited`
+    /// destination availability and blocking-worker rules of `copy_into_and_wait`
     /// apply unchanged. Successful return initializes the complete destination.
-    pub fn copy_region_into_waited(
+    pub fn copy_region_into_and_wait(
         self,
         destination: Image,
         source: SourceRect,
@@ -58,10 +58,10 @@ impl SourceImage {
             placement,
             background,
         )?;
-        self.copy_waited(destination, copy)
+        self.copy_and_wait(destination, copy)
     }
 
-    fn copy_waited(self, destination: Image, copy: Copy) -> io::Result<(Image, SyncFile)> {
+    fn copy_and_wait(self, destination: Image, copy: Copy) -> io::Result<(Image, SyncFile)> {
         submit(
             destination,
             vec![(self, Transfer::Copy(copy.region))],
@@ -115,7 +115,7 @@ impl Image {
     /// Aliased allocations, mismatched devices, invalid crops and fully invisible
     /// layers are rejected before producer waits. Omit invisible source uses;
     /// an empty list initializes the background without reading any source.
-    pub fn compose_opaque_waited(
+    pub fn compose_opaque_and_wait(
         self,
         layers: Vec<OpaqueLayer>,
         background: [u8; 3],
@@ -126,7 +126,7 @@ impl Image {
     /// Submit private composition and return its native completion record.
     ///
     /// Validation and producer waits use the same blocking-worker contract as
-    /// [`Self::compose_opaque_waited`]. Return does not wait for the submitted
+    /// [`Self::compose_opaque_and_wait`]. Return does not wait for the submitted
     /// composition to finish. The returned owner retains all source imports
     /// and private storage, exposing pixels only after successful native wait.
     /// Its record covers accepted source reads, not later output operations.

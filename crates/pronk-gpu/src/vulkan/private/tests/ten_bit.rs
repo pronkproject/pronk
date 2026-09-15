@@ -17,7 +17,7 @@ fn ten_bit_sources_preserve_precision_before_eight_bit_output() {
             let alpha = code & 3;
             let normalized = rgb.map(|channel| (channel * 65535).div_ceil(1023) as u16);
             let (written, producer) = original
-                .clear_rgba16_waited([
+                .clear_rgba16_and_wait([
                     normalized[0],
                     normalized[1],
                     normalized[2],
@@ -40,11 +40,11 @@ fn ten_bit_sources_preserve_precision_before_eight_bit_output() {
                 worker.import_source(written.export().unwrap(), written.layout(), producer)
             }
             .unwrap();
-            private = source.copy_into_private_waited(private).unwrap();
-            original = written.clear_waited([255; 3]).unwrap().0;
+            private = source.copy_into_private_and_wait(private).unwrap();
+            original = written.clear_and_wait([255; 3]).unwrap().0;
 
             let copied = private
-                .copy_into_waited(
+                .copy_into_and_wait(
                     worker
                         .allocate_with_format(format, nz(8), nz(3), modifier)
                         .unwrap(),
@@ -61,7 +61,7 @@ fn ten_bit_sources_preserve_precision_before_eight_bit_output() {
             }
 
             let copied = private
-                .copy_into_waited(worker.allocate(nz(8), nz(3), modifier).unwrap())
+                .copy_into_and_wait(worker.allocate(nz(8), nz(3), modifier).unwrap())
                 .unwrap();
             private = copied.source;
             let (_, output) = readback(copied.destination);

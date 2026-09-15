@@ -63,7 +63,7 @@ impl Gamma {
     /// unchanged. No degamma, matrix, transfer-function inference or downstream
     /// dependency is introduced. Run on a blocking worker; errors return no
     /// image for reuse. Independent images may use clones concurrently.
-    pub fn apply_waited(&self, image: PrivateImage) -> io::Result<PrivateImage> {
+    pub fn apply_and_wait(&self, image: PrivateImage) -> io::Result<PrivateImage> {
         if !image.initialized || !Arc::ptr_eq(&image.device, &self.program.device) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

@@ -74,7 +74,7 @@ impl<'renderer, F: AsFd> PrivateProbe<'renderer, F> {
             Ok(image) => image,
             Err(error) => return Err(ProbePreparationError { candidate, error }),
         };
-        let image = match image.clear_waited([0, 0, 0]) {
+        let image = match image.clear_and_wait([0, 0, 0]) {
             Ok(image) => image,
             Err(error) => return Err(ProbePreparationError { candidate, error }),
         };

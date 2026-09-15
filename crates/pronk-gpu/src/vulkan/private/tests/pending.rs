@@ -15,7 +15,7 @@ fn private_read_is_accounted_before_pixels_are_extracted() {
     let (source, ready) = producer
         .allocate(nz(31), nz(17), modifier)
         .unwrap()
-        .clear_waited([17, 85, 204])
+        .clear_and_wait([17, 85, 204])
         .unwrap();
     // SAFETY: Exact matching native metadata and completed producer release;
     // the original is not reused until the pending read has completed.
@@ -40,9 +40,9 @@ fn private_read_is_accounted_before_pixels_are_extracted() {
     for record in records.into_iter().flatten() {
         assert_eq!(record.completion().unwrap(), Some(Completion::Success));
     }
-    drop(source.clear_waited([255; 3]).unwrap());
+    drop(source.clear_and_wait([255; 3]).unwrap());
     let copied = private
-        .copy_into_waited(worker.allocate(nz(31), nz(17), modifier).unwrap())
+        .copy_into_and_wait(worker.allocate(nz(31), nz(17), modifier).unwrap())
         .unwrap();
     let (_, pixels) = readback(copied.destination);
     assert!(pixels
@@ -57,7 +57,7 @@ fn abandoned_private_read_retires_before_source_reuse() {
     let (source, ready) = device
         .allocate(nz(31), nz(17), modifier)
         .unwrap()
-        .clear_waited([17, 85, 204])
+        .clear_and_wait([17, 85, 204])
         .unwrap();
     // SAFETY: Exact local allocation metadata and native producer release.
     // Source reuse follows the pending owner's blocking retirement.
@@ -73,5 +73,5 @@ fn abandoned_private_read_retires_before_source_reuse() {
     if let Some(record) = record {
         assert_eq!(record.completion().unwrap(), Some(Completion::Success));
     }
-    drop(source.clear_waited([255; 3]).unwrap());
+    drop(source.clear_and_wait([255; 3]).unwrap());
 }

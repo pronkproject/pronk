@@ -155,7 +155,7 @@ mod tests {
             let (image, completion) = producer
                 .allocate(size, size, modifier)
                 .unwrap()
-                .clear_waited(color)
+                .clear_and_wait(color)
                 .unwrap();
             // SAFETY: Exact compatible allocator metadata and a completed
             // foreign release. The original remains unchanged through reading.
@@ -184,7 +184,7 @@ mod tests {
         }
         assert_eq!(submitted.wait().unwrap().len(), 3);
         for image in originals {
-            image.clear_waited([255; 3]).unwrap();
+            image.clear_and_wait([255; 3]).unwrap();
         }
     }
 }

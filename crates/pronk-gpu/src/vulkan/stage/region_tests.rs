@@ -97,7 +97,7 @@ fn native_transformed_crops_match_the_cpu_reference_after_reuse() {
         LinearLayout::new(extent(96, 64), PackedRgbFormat::Argb8888, 0, 96 * 4).unwrap();
     for placement in [[-8, 4], [24, -8], [0, 0]] {
         for transform in blit_transforms() {
-            let (ready, fence) = seed.clear_waited([255, 0, 0]).unwrap();
+            let (ready, fence) = seed.clear_and_wait([255, 0, 0]).unwrap();
             seed = ready;
             // SAFETY: Exact same-device allocator metadata and completed foreign
             // release. The seed is not modified until this native read returns.
@@ -106,7 +106,7 @@ fn native_transformed_crops_match_the_cpu_reference_after_reuse() {
                     .unwrap();
             let full = SourceRect::new(extent(64, 32), [0, 0], extent(64, 32)).unwrap();
             let (pattern, fence) = source
-                .copy_region_into_waited(input, full, [0, 0], [0, 0, 255])
+                .copy_region_into_and_wait(input, full, [0, 0], [0, 0, 255])
                 .unwrap();
             input = pattern;
             // SAFETY: Matching physical-device/driver identities, exact compatible
@@ -117,15 +117,15 @@ fn native_transformed_crops_match_the_cpu_reference_after_reuse() {
             let crop = SourceRect::new(extent(128, 64), [16, 8], extent(96, 48)).unwrap();
             let background = [17, 85, 204];
             let (private, read_done) = staging
-                .compose_opaque_waited(
+                .compose_opaque_and_wait(
                     vec![OpaqueLayer::new(source, crop, placement).with_transform(transform)],
                     background,
                 )
                 .unwrap();
             assert_eq!(read_done.wait_blocking().unwrap(), Completion::Success);
-            input = input.clear_waited([255; 3]).unwrap().0;
-            let copied = output.copy_from_waited(private).unwrap();
-            staging = copied.source.clear_waited([0; 3]).unwrap().0;
+            input = input.clear_and_wait([255; 3]).unwrap().0;
+            let copied = output.copy_from_and_wait(private).unwrap();
+            staging = copied.source.clear_and_wait([0; 3]).unwrap().0;
             let (returned, pixels) = readback(copied.destination);
             output = returned;
             let mut expected = vec![0u8; 96 * 64 * 4];

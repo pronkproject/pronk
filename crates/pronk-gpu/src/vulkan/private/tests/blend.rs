@@ -47,7 +47,7 @@ fn acquire(producer: &Device, worker: &Device, modifier: u64, rgba: [u8; 4]) -> 
     let source = producer
         .allocate(nz(13), nz(9), modifier)
         .unwrap()
-        .clear_rgba_waited(rgba)
+        .clear_rgba_and_wait(rgba)
         .unwrap();
     // SAFETY: Identical native device identity, exact shared-image metadata and
     // submitted producer release. Source pixels remain unchanged until return.
@@ -55,15 +55,15 @@ fn acquire(producer: &Device, worker: &Device, modifier: u64, rgba: [u8; 4]) -> 
         unsafe { worker.import_source(source.0.export().unwrap(), source.0.layout(), source.1) }
             .unwrap();
     let private = imported
-        .copy_into_private_waited(worker.allocate_private(nz(13), nz(9)).unwrap())
+        .copy_into_private_and_wait(worker.allocate_private(nz(13), nz(9)).unwrap())
         .unwrap();
-    drop(source.0.clear_waited([255; 3]).unwrap());
+    drop(source.0.clear_and_wait([255; 3]).unwrap());
     private
 }
 
 fn assert_output(worker: &Device, modifier: u64, image: PrivateImage, expected: [u8; 4]) {
     let shared = worker.allocate(nz(13), nz(9), modifier).unwrap();
-    let copied = image.copy_into_waited(shared).unwrap();
+    let copied = image.copy_into_and_wait(shared).unwrap();
     let (_, bytes) = readback(copied.destination);
     for pixel in bytes.chunks_exact(4) {
         for channel in 0..4 {
@@ -96,9 +96,9 @@ fn native_blends_match_integer_reference_after_source_retirement() {
                 let destination = worker
                     .allocate_private(nz(13), nz(9))
                     .unwrap()
-                    .clear_waited(background)
+                    .clear_and_wait(background)
                     .unwrap();
-                let result = destination.blend_waited(source, blend).unwrap();
+                let result = destination.blend_and_wait(source, blend).unwrap();
                 assert_output(
                     &worker,
                     modifier,
@@ -148,11 +148,14 @@ fn native_blend_stack_preserves_intermediate_color_precision() {
     let mut destination = worker
         .allocate_private(nz(13), nz(9))
         .unwrap()
-        .clear_waited(background)
+        .clear_and_wait(background)
         .unwrap();
     for (rgba, blend) in layers {
         let source = acquire(&producer, &worker, modifier, rgba);
-        destination = destination.blend_waited(source, blend).unwrap().destination;
+        destination = destination
+            .blend_and_wait(source, blend)
+            .unwrap()
+            .destination;
     }
     assert_output(
         &worker,
@@ -171,12 +174,12 @@ fn private_blend_rejects_uninitialized_or_mismatched_images() {
         let b = worker
             .allocate_private(nz(13), nz(9))
             .unwrap()
-            .clear_waited([0; 3])
+            .clear_and_wait([0; 3])
             .unwrap();
         let (source, destination) = if initialize_source { (b, a) } else { (a, b) };
         assert_eq!(
             destination
-                .blend_waited(source, Blend::default())
+                .blend_and_wait(source, Blend::default())
                 .err()
                 .unwrap()
                 .kind(),
@@ -188,7 +191,7 @@ fn private_blend_rejects_uninitialized_or_mismatched_images() {
         let source = worker
             .allocate_private(nz(13), nz(9))
             .unwrap()
-            .clear_waited([0; 3])
+            .clear_and_wait([0; 3])
             .unwrap();
         let destination = if different_device {
             other.allocate_private(nz(13), nz(9))
@@ -196,11 +199,11 @@ fn private_blend_rejects_uninitialized_or_mismatched_images() {
             worker.allocate_private(nz(14), nz(9))
         }
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
         assert_eq!(
             destination
-                .blend_waited(source, Blend::default())
+                .blend_and_wait(source, Blend::default())
                 .err()
                 .unwrap()
                 .kind(),

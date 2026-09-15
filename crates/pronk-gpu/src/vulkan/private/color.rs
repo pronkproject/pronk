@@ -139,8 +139,8 @@ impl ColorPipelineProgram {
         check_image(&image, &self.device, self.extent)?;
         for stage in &self.stages {
             image = match stage {
-                ColorStage::Lookup(stage) => stage.apply_waited(image)?,
-                ColorStage::Matrix(stage) => stage.apply_waited(image)?,
+                ColorStage::Lookup(stage) => stage.apply_and_wait(image)?,
+                ColorStage::Matrix(stage) => stage.apply_and_wait(image)?,
                 ColorStage::Transfer(stage) => stage.apply_and_wait(image)?,
             };
         }

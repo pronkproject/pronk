@@ -43,13 +43,13 @@ fn private_pixels_survive_independent_shared_output_reuse() {
         [1, 127, 254],
         [255, 0, 128],
     ] {
-        let filled = private.clear_waited(rgb).unwrap();
-        let copied = filled.copy_into_waited(output).unwrap();
+        let filled = private.clear_and_wait(rgb).unwrap();
+        let copied = filled.copy_into_and_wait(output).unwrap();
         assert_eq!(
             copied.completion.wait_blocking().unwrap(),
             Completion::Success
         );
-        private = copied.source.clear_waited([77; 3]).unwrap();
+        private = copied.source.clear_and_wait([77; 3]).unwrap();
         let (returned, pixels) = readback(copied.destination);
         for pixel in pixels.chunks_exact(4) {
             assert_eq!(pixel, &[rgb[2], rgb[1], rgb[0], 255]);
@@ -65,28 +65,28 @@ fn private_copy_rejects_uninitialized_or_mismatched_images() {
     let private = device.allocate_private(nz(16), nz(16)).unwrap();
     let output = device.allocate(nz(16), nz(16), modifier).unwrap();
     assert_eq!(
-        private.copy_into_waited(output).err().unwrap().kind(),
+        private.copy_into_and_wait(output).err().unwrap().kind(),
         std::io::ErrorKind::InvalidInput,
     );
     let private = device
         .allocate_private(nz(16), nz(16))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     let output = device.allocate(nz(32), nz(16), modifier).unwrap();
     assert_eq!(
-        private.copy_into_waited(output).err().unwrap().kind(),
+        private.copy_into_and_wait(output).err().unwrap().kind(),
         std::io::ErrorKind::InvalidInput,
     );
     let (other, _) = self::device();
     let private = device
         .allocate_private(nz(16), nz(16))
         .unwrap()
-        .clear_waited([0; 3])
+        .clear_and_wait([0; 3])
         .unwrap();
     let output = other.allocate(nz(16), nz(16), modifier).unwrap();
     assert_eq!(
-        private.copy_into_waited(output).err().unwrap().kind(),
+        private.copy_into_and_wait(output).err().unwrap().kind(),
         std::io::ErrorKind::InvalidInput,
     );
 }
@@ -111,20 +111,20 @@ fn imported_pixels_retire_before_private_output_is_allocated() {
         let source = producer
             .allocate(nz(31), nz(17), modifier)
             .unwrap()
-            .clear_rgba_waited(rgba)
+            .clear_rgba_and_wait(rgba)
             .unwrap();
         // SAFETY: Matching native devices, exact exported layout and submitted
-        // producer release. The source stays unchanged until the waited read.
+        // producer release. The source stays unchanged until the read finishes.
         let imported = unsafe {
             worker.import_source(source.0.export().unwrap(), source.0.layout(), source.1)
         }
         .unwrap();
-        private = imported.copy_into_private_waited(private).unwrap();
+        private = imported.copy_into_private_and_wait(private).unwrap();
         // No downstream image exists during source reading. Reuse and destroy
         // the producer allocation before allocating the independent output.
-        drop(source.0.clear_waited([255; 3]).unwrap());
+        drop(source.0.clear_and_wait([255; 3]).unwrap());
         let output = worker.allocate(nz(31), nz(17), modifier).unwrap();
-        let copied = private.copy_into_waited(output).unwrap();
+        let copied = private.copy_into_and_wait(output).unwrap();
         copied.completion.wait_blocking().unwrap();
         private = copied.source;
         let (_, pixels) = readback(copied.destination);
@@ -143,7 +143,7 @@ fn private_source_copy_rejects_mismatched_extents_or_devices() {
         let source = producer
             .allocate(nz(16), nz(16), modifier)
             .unwrap()
-            .clear_waited([17, 85, 204])
+            .clear_and_wait([17, 85, 204])
             .unwrap();
         // SAFETY: The producer retains unchanged native pixels and the import
         // carries its exact layout and completed foreign-release dependency.
@@ -159,7 +159,7 @@ fn private_source_copy_rejects_mismatched_extents_or_devices() {
         .unwrap();
         assert_eq!(
             imported
-                .copy_into_private_waited(private)
+                .copy_into_private_and_wait(private)
                 .err()
                 .unwrap()
                 .kind(),

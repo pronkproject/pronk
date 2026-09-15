@@ -25,7 +25,7 @@ fn normalized_sixteen_bit_clears_quantize_to_the_destination() {
         0, 1, 128, 129, 256, 257, 32767, 32768, 65406, 65407, 65534, 65535,
     ] {
         let rgba = [value, 65535 - value, value ^ 0x5555, value];
-        let (rendered, completion) = image.clear_rgba16_waited(rgba).unwrap();
+        let (rendered, completion) = image.clear_rgba16_and_wait(rgba).unwrap();
         assert_eq!(completion.wait_blocking().unwrap(), Completion::Success);
         let (returned, pixels) = readback(rendered);
         let expected = [rgba[2], rgba[1], rgba[0], rgba[3]];
@@ -63,7 +63,7 @@ fn generated_colors_survive_repeated_foreign_handoffs() {
         [0, 0, 0],
         [255, 255, 255],
     ] {
-        let (rendered, completion) = image.clear_waited(rgb).unwrap();
+        let (rendered, completion) = image.clear_and_wait(rgb).unwrap();
         assert_eq!(completion.wait_blocking().unwrap(), Completion::Success);
         let (returned, pixels) = readback(rendered);
         for pixel in pixels.chunks_exact(4) {
@@ -87,7 +87,7 @@ fn explicit_alpha_survives_native_source_staging() {
     let mut staging = worker.allocate(size, size, modifier).unwrap();
     for alpha in [0, 1, 63, 127, 128, 254, 255] {
         let rgba = [17, 85, 204, alpha];
-        let (written, completion) = original.clear_rgba_waited(rgba).unwrap();
+        let (written, completion) = original.clear_rgba_and_wait(rgba).unwrap();
         // SAFETY: Matching devices and exact allocator metadata. The clear
         // completed writes and foreign GENERAL release; no writer runs until
         // the consumed source import has completed and been destroyed.
@@ -95,9 +95,9 @@ fn explicit_alpha_survives_native_source_staging() {
             worker.import_source(written.export().unwrap(), written.layout(), completion)
         }
         .unwrap();
-        let (copied, done) = source.copy_into_waited(staging).unwrap();
+        let (copied, done) = source.copy_into_and_wait(staging).unwrap();
         assert_eq!(done.wait_blocking().unwrap(), Completion::Success);
-        original = written.clear_waited([255; 3]).unwrap().0;
+        original = written.clear_and_wait([255; 3]).unwrap().0;
         let (returned, pixels) = readback(copied);
         for pixel in pixels.chunks_exact(4) {
             assert_eq!(pixel, &[rgba[2], rgba[1], rgba[0], alpha]);

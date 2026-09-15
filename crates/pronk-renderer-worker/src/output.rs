@@ -319,7 +319,7 @@ impl OutputDestination {
             source,
             destination,
             completion,
-        } = source.copy_into_waited(image)?;
+        } = source.copy_into_and_wait(image)?;
         Ok(CompletedOutput {
             pool,
             private: PrivateFrame {

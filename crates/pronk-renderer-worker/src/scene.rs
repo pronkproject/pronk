@@ -71,7 +71,7 @@ impl SceneComposer {
     /// allocations enter this operation. Predictable input mismatches return
     /// every buffer untouched. A native failure consumes all affected buffers
     /// because their pixel validity may be unknown.
-    pub fn compose_waited(
+    pub fn compose_and_wait(
         &self,
         inputs: SceneInputs,
     ) -> Result<ComposedFrame, SceneCompositionError> {
@@ -121,7 +121,7 @@ impl SceneComposer {
         }
         let composed = self
             .blender
-            .compose_waited(destination, background, layers)
+            .compose_and_wait(destination, background, layers)
             .map_err(SceneCompositionError::Native)?;
         let destination = self
             .color
@@ -359,10 +359,10 @@ mod tests {
             NonZeroUsize::new(2).unwrap(),
         )
         .unwrap();
-        let source = pool.take().unwrap().clear_waited([231, 57, 19]).unwrap();
+        let source = pool.take().unwrap().clear_and_wait([231, 57, 19]).unwrap();
         let destination = pool.take().unwrap();
         let result = composer
-            .compose_waited(SceneInputs {
+            .compose_and_wait(SceneInputs {
                 destination,
                 sources: vec![source],
                 background: [17, 85, 204],
@@ -414,7 +414,7 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
         )
         .unwrap();
-        let error = match composer.compose_waited(SceneInputs {
+        let error = match composer.compose_and_wait(SceneInputs {
             destination: pool.take().unwrap(),
             sources: Vec::new(),
             background: [0; 3],

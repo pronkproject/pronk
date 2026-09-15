@@ -50,7 +50,7 @@ impl OutputMatrix {
     /// Signed products use a two-word accumulator, then round and saturate with
     /// the CPU reference's rules. Alpha remains unchanged. Errors return no
     /// image for reuse.
-    pub fn apply_waited(&self, image: PrivateImage) -> io::Result<PrivateImage> {
+    pub fn apply_and_wait(&self, image: PrivateImage) -> io::Result<PrivateImage> {
         if !image.initialized || !Arc::ptr_eq(&image.device, &self.program.device) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
