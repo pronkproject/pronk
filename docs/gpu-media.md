@@ -164,11 +164,14 @@ Images use dedicated device-local memory. Their immutable `ImageLayout` reports
 packed channel order, dimensions, modifier, plane offset, pitch and allocation
 size directly from Vulkan. `Device::allocate` selects BGRA storage;
 `allocate_with_format` explicitly selects `PackedFormat::Bgra8`, `Rgba8`,
-`Bgr10A2` or `Rgb10A2`. The ten-bit variants describe three ten-bit color
-channels and two alpha bits, not a color space or HDR transfer function.
+`Bgr10A2`, `Rgb10A2` or `Rgb565`. The ten-bit variants describe three ten-bit
+color channels and two alpha bits, not a color space or HDR transfer function.
 Each format/modifier tuple is queried independently, without substitution.
 Images retain their device and loader; exported DMA-BUFs retain backing storage
-after image destruction. No image is mapped for CPU access.
+after image destruction. RGB565 uses two bytes per pixel with no stored alpha;
+the other packed formats use four. Linear source bounds derive their pixel
+size from that format, without assuming the output's storage. No image is
+mapped for CPU access.
 Allocation and export do not initialize pixels or establish producer completion.
 Do not publish a newly allocated image until rendering has initialized it.
 Keep each allocation within one compatible recipient scope for its lifetime.
@@ -307,8 +310,8 @@ alpha is copied without blending or color-space conversion.
 The CastKMS worker uses this operation for the source protocol's integral crop,
 top-left destination and complete output dimensions. Its private pool matches
 the output, with opaque black outside the primary plane. The supported import
-profile is one XRGB8888, XBGR8888, XRGB2101010 or XBGR2101010 memory plane with
-an explicit compatible modifier. The worker does not infer support for scene
+profile is one XRGB8888, XBGR8888, XRGB2101010, XBGR2101010 or RGB565 memory
+plane with an explicit compatible modifier. The worker does not infer support for scene
 properties absent from the source protocol. Admission still reserves private
 storage before claiming any source.
 
@@ -370,6 +373,12 @@ path's precision; it does not qualify HDR processing or ten-bit media output.
 without adding CPU pixel writes. Such inputs are quantized to the allocation's
 channel depth; Vulkan need not choose the nearest adjacent integer for every
 nonintegral value.
+
+RGB565 native tests check every five- and six-bit channel level, the packed
+source words and the opaque alpha supplied when converting into private RGBA.
+The source is overwritten before eight-bit output is allocated. Cropped cases
+also cover scaling and background initialization. Output transport remains
+BGRx; accepting a two-byte source does not add a two-byte PipeWire profile.
 
 ### Private shader blending
 
