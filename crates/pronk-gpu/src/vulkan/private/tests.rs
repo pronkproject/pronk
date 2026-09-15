@@ -7,6 +7,7 @@ mod formats;
 mod gamma;
 mod geometry;
 mod pending;
+mod profile;
 mod program;
 mod region;
 mod rgb565;

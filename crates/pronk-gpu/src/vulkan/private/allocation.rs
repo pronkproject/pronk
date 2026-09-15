@@ -11,16 +11,8 @@ use crate::vulkan::device::{native, unsupported};
 use crate::vulkan::Device;
 
 impl Device {
-    /// Allocate non-exportable RGBA32 floating-point shader and transfer storage.
-    ///
-    /// The allocation starts uninitialized. This queries the precise format,
-    /// optimal tiling, usage and extent; unsupported profiles do not fall back
-    /// to CPU memory or another format. Allocation limits remain caller policy.
-    pub fn allocate_private(
-        &self,
-        width: NonZeroU32,
-        height: NonZeroU32,
-    ) -> io::Result<PrivateImage> {
+    /// Check private intermediate storage without allocating an image.
+    pub fn check_private_image(&self, width: NonZeroU32, height: NonZeroU32) -> io::Result<()> {
         let instance = self.inner.instance();
         // SAFETY: The physical device belongs to this retained instance.
         let features =
@@ -33,7 +25,7 @@ impl Device {
                 "private RGBA32 storage or blits are unsupported",
             ));
         }
-        // SAFETY: Complete, scalar query for the image profile created below.
+        // SAFETY: Complete, scalar query for the private image profile.
         let limits = unsafe {
             instance.get_physical_device_image_format_properties(
                 self.inner.physical,
@@ -53,6 +45,21 @@ impl Device {
         {
             return Err(unsupported("private image extent is unsupported"));
         }
+        Ok(())
+    }
+
+    /// Allocate non-exportable RGBA32 floating-point shader and transfer storage.
+    ///
+    /// The allocation starts uninitialized. This queries the precise format,
+    /// optimal tiling, usage and extent; unsupported profiles do not fall back
+    /// to CPU memory or another format. Allocation limits remain caller policy.
+    pub fn allocate_private(
+        &self,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> io::Result<PrivateImage> {
+        self.check_private_image(width, height)?;
+        let instance = self.inner.instance();
         let create = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(FORMAT)

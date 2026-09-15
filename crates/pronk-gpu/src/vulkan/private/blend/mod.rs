@@ -42,6 +42,33 @@ impl Device {
 }
 
 impl Blender {
+    pub(super) fn device(&self) -> Device {
+        Device {
+            inner: Arc::clone(&self.program.device),
+        }
+    }
+
+    pub(super) fn check_geometry(
+        &self,
+        output: Extent,
+        source: Extent,
+        crop: SourceRect,
+        placement: DestinationRect,
+        transform: Transform,
+        blend: Blend,
+    ) -> io::Result<()> {
+        if let Some(parameters) =
+            Parameters::new(source, output, crop, placement, transform, blend)?
+        {
+            if parameters.groups[0] > self.program.max_groups[0]
+                || parameters.groups[1] > self.program.max_groups[1]
+            {
+                return Err(unsupported("private blend dispatch is unsupported"));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn check_destination(&self, destination: &PrivateImage) -> io::Result<()> {
         if !Arc::ptr_eq(&self.program.device, &destination.device) {
             return Err(io::Error::new(
@@ -72,21 +99,14 @@ impl Blender {
             .expect("private extent is nonzero");
         let output_extent = Extent::new(destination.width.get(), destination.height.get())
             .expect("private extent is nonzero");
-        if let Some(parameters) = Parameters::new(
-            source_extent,
+        self.check_geometry(
             output_extent,
+            source_extent,
             crop,
             placement,
             transform,
             blend,
-        )? {
-            if parameters.groups[0] > self.program.max_groups[0]
-                || parameters.groups[1] > self.program.max_groups[1]
-            {
-                return Err(unsupported("private blend dispatch is unsupported"));
-            }
-        }
-        Ok(())
+        )
     }
 
     /// Blend a crop using the lifetime, geometry and precision contract of

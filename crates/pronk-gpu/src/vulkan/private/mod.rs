@@ -12,12 +12,14 @@ mod blend;
 mod clear;
 mod gamma;
 mod output;
+mod profile;
 mod scene;
 mod source;
 
 pub use blend::{BlendedImages, Blender};
 pub use gamma::Gamma;
 pub use output::PrivateCopy;
+pub use profile::{LayerRequirements, SceneRequirements, SourceRequirements};
 pub use scene::{ComposedScene, PrivateLayer};
 pub use source::PendingPrivateRead;
 
