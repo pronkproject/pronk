@@ -30,6 +30,10 @@ path = "src/broker.rs"
 name = "pronk-capture-video-live-test"
 path = "src/video.rs"
 
+[[bin]]
+name = "pronk-capture-pattern-client"
+path = "src/pattern.rs"
+
 [dependencies]
 anyhow.workspace = true
 gstreamer.workspace = true

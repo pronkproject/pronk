@@ -16,4 +16,22 @@ fn main() {
     pkg_config::Config::new()
         .probe("libdrm")
         .expect("libdrm development files");
+
+    println!("cargo:rerun-if-changed=pattern.c");
+    let gtk = pkg_config::Config::new()
+        .cargo_metadata(false)
+        .probe("gtk+-3.0")
+        .expect("GTK 3 development files for the Wayland pattern client");
+    let mut pattern = cc::Build::new();
+    pattern
+        .file("pattern.c")
+        .warnings(true)
+        .warnings_into_errors(true);
+    for include in gtk.include_paths {
+        pattern.include(include);
+    }
+    pattern.compile("capture_pattern");
+    pkg_config::Config::new()
+        .probe("gtk+-3.0")
+        .expect("GTK 3 development files for the Wayland pattern client");
 }
