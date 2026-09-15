@@ -202,7 +202,7 @@ struct ReturnedFds {
 impl<'renderer, F: AsFd> ActiveRenderer<'renderer, F> {
     /// Claim the next changed source from the active scene.
     ///
-    /// `ENODATA` means no changed source is available. The exclusive borrow
+    /// `None` means no changed source is available. The exclusive borrow
     /// prevents safe code from representing a second outstanding source job
     /// through the same endpoint.
     ///
@@ -212,12 +212,14 @@ impl<'renderer, F: AsFd> ActiveRenderer<'renderer, F> {
     /// use std::os::fd::AsFd;
     ///
     /// fn claim_twice<F: AsFd + Debug>(renderer: &mut ActiveRenderer<'_, F>) {
-    ///     let first = renderer.dequeue_source().unwrap();
-    ///     let second = renderer.dequeue_source().unwrap();
+    ///     let first = renderer.try_dequeue_source().unwrap().unwrap();
+    ///     let second = renderer.try_dequeue_source().unwrap();
     ///     drop((first, second));
     /// }
     /// ```
-    pub fn dequeue_source<'job>(&'job mut self) -> io::Result<SourceJob<'job, 'renderer, F>> {
+    pub fn try_dequeue_source<'job>(
+        &'job mut self,
+    ) -> io::Result<Option<SourceJob<'job, 'renderer, F>>> {
         let mut result = empty_source_result();
         let request = DrmCastkmsRendererDequeueSource {
             result: (&mut result as *mut DrmCastkmsRendererSource) as u64,
@@ -225,17 +227,24 @@ impl<'renderer, F: AsFd> ActiveRenderer<'renderer, F> {
         };
         // SAFETY: The fixed-width input and writable result remain live
         // throughout the synchronous ioctl. Success installs fresh descriptors.
-        unsafe { drm_ioctl_castkms_renderer_dequeue_source(self.as_fd().as_raw_fd(), &request) }?;
+        if let Err(error) =
+            unsafe { drm_ioctl_castkms_renderer_dequeue_source(self.as_fd().as_raw_fd(), &request) }
+        {
+            if error == nix::errno::Errno::ENODATA {
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
         let job_id = NonZeroU64::new(result.job_id);
         match validate_source(result) {
-            Ok(source) => Ok(SourceJob {
+            Ok(source) => Ok(Some(SourceJob {
                 renderer: self,
                 id: source.id,
                 content_serial: source.content_serial,
                 image: source.image,
                 geometry: source.geometry,
                 producer: source.producer,
-            }),
+            })),
             Err(error) => {
                 if let Some(id) = job_id {
                     let _ = release_source(self.as_fd(), id, RENDERER_RELEASE_NO_ACCESS, None);
@@ -622,7 +631,7 @@ mod tests {
         let mut renderer = Renderer { fd: file };
         let mut active = active_renderer(&mut renderer);
         assert_eq!(
-            active.dequeue_source().unwrap_err().raw_os_error(),
+            active.try_dequeue_source().unwrap_err().raw_os_error(),
             Some(nix::libc::ENOTTY)
         );
     }
