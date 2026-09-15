@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 
 use drm_display_executor::scene::{
     blend::Blend,
-    color::OutputColor,
+    color::{ColorPipeline, OutputColor},
     geometry::{DestinationRect, Extent, SourceRect},
     transform::Transform,
 };
@@ -22,20 +22,21 @@ pub struct SourceRequirements {
 }
 
 /// Source storage and the operation needed to place one layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LayerRequirements {
+#[derive(Clone, Copy, Debug)]
+pub struct LayerRequirements<'a> {
     pub source: SourceRequirements,
     pub crop: SourceRect,
     pub destination: DestinationRect,
     pub transform: Transform,
     pub blend: Blend,
+    pub color: ColorPipeline<'a>,
 }
 
 /// One output and its layers in bottom-to-top order.
 #[derive(Clone, Copy, Debug)]
 pub struct SceneRequirements<'a> {
     pub output: Extent,
-    pub layers: &'a [LayerRequirements],
+    pub layers: &'a [LayerRequirements<'a>],
     pub color: OutputColor<'a>,
 }
 
@@ -54,12 +55,16 @@ impl Blender {
         )?;
         device.check_output_color(scene.output, scene.color)?;
         for layer in scene.layers {
+            let source_width = nonzero(layer.source.extent.width());
+            let source_height = nonzero(layer.source.extent.height());
             device.check_source_image(
                 layer.source.format,
-                nonzero(layer.source.extent.width()),
-                nonzero(layer.source.extent.height()),
+                source_width,
+                source_height,
                 layer.source.modifier,
             )?;
+            device.check_private_image(source_width, source_height)?;
+            device.check_color_pipeline(layer.source.extent, layer.color)?;
             self.check_geometry(
                 scene.output,
                 layer.source.extent,

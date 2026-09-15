@@ -1,6 +1,6 @@
 use drm_display_executor::scene::{
     blend::Blend,
-    color::{ColorMatrix, Lut, OutputColor},
+    color::{ColorMatrix, ColorPipeline, Lut, OutputColor},
     geometry::{DestinationRect, Extent, SourceRect},
     transform::Transform,
 };
@@ -31,6 +31,7 @@ fn complete_scene_support_is_checked_without_images() {
         },
         transform: Transform::default(),
         blend: Blend::default(),
+        color: ColorPipeline::new(&[]),
     }];
     let table = [[0; 3], [65535; 3]];
     let mut coefficients = [0; 12];

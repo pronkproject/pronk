@@ -8,17 +8,19 @@ use drm_display_executor::scene::{
     geometry::{DestinationRect, Extent, SourceRect},
     transform::Transform,
 };
-use pronk_gpu::vulkan::{Blender, Device, OutputColorProgram, PrivateLayer, SceneRequirements};
+use pronk_gpu::vulkan::{
+    Blender, ColorPipelineProgram, Device, OutputColorProgram, PrivateLayer, SceneRequirements,
+};
 
 use crate::{PrivateBuffer, PrivateFrame, SourceAlpha};
 
-#[derive(Clone, Copy)]
 struct LayerPlan {
     source: Extent,
     crop: SourceRect,
     destination: DestinationRect,
     transform: Transform,
     blend: Blend,
+    color: ColorPipelineProgram,
 }
 
 /// Prepared execution state for one qualified whole-scene profile.
@@ -40,13 +42,16 @@ impl SceneComposer {
         layers
             .try_reserve_exact(scene.layers.len())
             .map_err(io::Error::other)?;
-        layers.extend(scene.layers.iter().map(|layer| LayerPlan {
-            source: layer.source.extent,
-            crop: layer.crop,
-            destination: layer.destination,
-            transform: layer.transform,
-            blend: layer.blend,
-        }));
+        for layer in scene.layers {
+            layers.push(LayerPlan {
+                source: layer.source.extent,
+                crop: layer.crop,
+                destination: layer.destination,
+                transform: layer.transform,
+                blend: layer.blend,
+                color: device.create_color_pipeline(layer.source.extent, layer.color)?,
+            });
+        }
         Ok(Self {
             device: device.clone(),
             blender,
@@ -110,6 +115,10 @@ impl SceneComposer {
                 alpha,
                 ..
             } = frame;
+            let image = plan
+                .color
+                .apply_and_wait(image)
+                .map_err(SceneCompositionError::Native)?;
             source_identities.push(identity);
             layers.push(PrivateLayer::new(
                 image,
@@ -268,7 +277,10 @@ impl ComposedFrame {
 mod tests {
     use std::num::{NonZeroU32, NonZeroUsize};
 
-    use drm_display_executor::scene::{color::OutputColor, geometry::SourceRect};
+    use drm_display_executor::scene::{
+        color::{ColorOperation, ColorPipeline, OutputColor},
+        geometry::SourceRect,
+    };
     use pronk_gpu::vulkan::{LayerRequirements, PackedFormat, SourceRequirements};
 
     use super::*;
@@ -340,6 +352,7 @@ mod tests {
                 pixel: PixelBlend::Coverage,
                 plane_alpha: 32768,
             },
+            color: ColorPipeline::new(&[ColorOperation::SrgbEotf]),
         }];
         let composer = SceneComposer::new(
             &device,
@@ -397,6 +410,7 @@ mod tests {
             },
             transform: Transform::default(),
             blend: Blend::default(),
+            color: ColorPipeline::new(&[]),
         }];
         let composer = SceneComposer::new(
             &device,
