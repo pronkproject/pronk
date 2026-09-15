@@ -15,7 +15,10 @@ pub use output::{
     OutputScope, PendingOutput, PublishedOutput, ReadyOutput,
 };
 pub use pool::{PrivateBuffer, PrivateFrame, PrivatePool, RejectedBuffer};
-pub use reader::{RejectedSource, SourceOpportunity, SourceReader, SourceReaderStartError};
+pub use reader::{
+    RejectedSource, SourceAttempt, SourceAttemptError, SourceOpportunity, SourceReader,
+    SourceReaderStartError,
+};
 pub use source::{ImportError, ImportedSource};
 pub use submission::{
     PreparedSource, ReleasedSource, SourcePreparationError, SourceReleaseError,

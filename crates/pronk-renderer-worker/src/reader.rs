@@ -8,7 +8,8 @@ use castkms_renderer::{ActiveRenderer, SourceJob};
 use pronk_gpu::vulkan::Device;
 
 use crate::{
-    ImportedSource, PreparedSource, PrivateBuffer, PrivatePool, RejectedBuffer, SourceReleaseError,
+    ImportedSource, PreparedSource, PrivateBuffer, PrivatePool, RejectedBuffer, ReleasedSource,
+    SourceReleaseError,
 };
 
 /// Active source endpoint and its bounded private destination pool.
@@ -94,6 +95,42 @@ impl<'renderer, F: AsFd> SourceReader<'renderer, F> {
         }
     }
 
+    /// Attempt one source submission and resolve every claimed kernel job.
+    ///
+    /// Treat an error as terminal for the active renderer incarnation because
+    /// the failing operation may not reveal whether kernel ownership changed.
+    pub fn try_submit(&mut self) -> Result<SourceAttempt, SourceAttemptError> {
+        match self.try_prepare().map_err(SourceAttemptError::Prepare)? {
+            SourceOpportunity::NoDestination => Ok(SourceAttempt::NoDestination),
+            SourceOpportunity::NoSource => Ok(SourceAttempt::NoSource),
+            SourceOpportunity::Rejected(source) => match source.release() {
+                Ok((destination, cause)) => {
+                    self.return_destination(destination)
+                        .map_err(|_| SourceAttemptError::ReturnDestination)?;
+                    Ok(SourceAttempt::Rejected { cause })
+                }
+                Err(failure) => {
+                    let (source, error) = failure.into_parts();
+                    drop(source);
+                    Err(SourceAttemptError::ReleaseUnused(error))
+                }
+            },
+            SourceOpportunity::Prepared(source) => {
+                let submitted = source
+                    .submit()
+                    .map_err(|failure| SourceAttemptError::Submit(failure.into_error()))?;
+                submitted
+                    .release()
+                    .map(SourceAttempt::Submitted)
+                    .map_err(|failure| {
+                        let (source, error) = failure.into_parts();
+                        drop(source);
+                        SourceAttemptError::ReleaseSubmitted(error)
+                    })
+            }
+        }
+    }
+
     pub fn return_destination(&mut self, buffer: PrivateBuffer) -> Result<(), RejectedBuffer> {
         self.private.put(buffer)
     }
@@ -101,6 +138,30 @@ impl<'renderer, F: AsFd> SourceReader<'renderer, F> {
     pub fn into_parts(self) -> (ActiveRenderer<'renderer, F>, Device, PrivatePool) {
         (self.renderer, self.device, self.private)
     }
+}
+
+/// Result of one source-submission attempt.
+#[must_use = "handle idle, rejected, or submitted source work"]
+pub enum SourceAttempt {
+    NoDestination,
+    NoSource,
+    Rejected { cause: io::Error },
+    Submitted(ReleasedSource),
+}
+
+/// Terminal failure while resolving a source-submission attempt.
+#[derive(Debug, thiserror::Error)]
+pub enum SourceAttemptError {
+    #[error("prepare CastKMS source work: {0}")]
+    Prepare(#[source] io::Error),
+    #[error("release an unused CastKMS source: {0}")]
+    ReleaseUnused(#[source] io::Error),
+    #[error("return an unused private destination to its pool")]
+    ReturnDestination,
+    #[error("submit a native CastKMS source read: {0}")]
+    Submit(#[source] io::Error),
+    #[error("release a submitted CastKMS source read: {0}")]
+    ReleaseSubmitted(#[source] io::Error),
 }
 
 /// Failed source-reader setup retaining active renderer and device ownership.
@@ -172,4 +233,16 @@ impl<'job, 'renderer, F: AsFd> RejectedSource<'job, 'renderer, F> {
 fn restore(pool: &mut PrivatePool, destination: PrivateBuffer) -> io::Result<()> {
     pool.put(destination)
         .map_err(|_| io::Error::other("private destination pool rejected its own buffer"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn completed_source_attempt_can_move_to_a_blocking_worker() {
+        assert_send::<SourceAttempt>();
+    }
 }
