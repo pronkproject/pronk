@@ -271,11 +271,35 @@ accounting without extracting the private image. Both outcomes require a
 successful `wait` before private pixels are returned. Drop may block on native
 retirement, so the pending owner stays on a blocking graphics worker.
 
+`submit_private_region` uses the same ownership and completion contract for a
+cropped source, scaled into a bounded destination rectangle. Source and
+destination bounds are validated before producer waits. A partial rectangle
+first initializes the entire private image to an opaque background, including
+when storage contains an older frame. Native ordering makes that clear complete
+before the region overwrites it. Scaling uses Vulkan's nearest-texel blit and
+pixel-center sampling; rounding at texel boundaries is implementation-dependent,
+so arbitrary ratios are not a byte-exact CPU-reference scaling promise. Pixel
+alpha is copied without blending or color-space conversion.
+
+The CastKMS worker uses this operation for the source protocol's integral crop,
+top-left destination and complete output dimensions. Its private pool matches
+the output, with opaque black outside the primary plane. The supported import
+profile remains one XRGB8888 memory plane with an explicit compatible modifier;
+the worker does not infer support for scene properties absent from the source
+protocol. Admission still reserves private storage before claiming any source.
+
 Native tests close and collect a trusted source use before extracting private
 pixels, then overwrite the original before output conversion. They also check
 retirement when the pending owner is dropped. A fast GPU may complete before
 the observation; these tests do not claim forced unsignaled execution or crash
 recovery. A compile-fail example keeps pending work out of the output API.
+
+Region tests compare every output pixel after cropping, upscaling, downscaling
+and private-image reuse, with sampling ratios away from ambiguous texel
+boundaries. They include padding and full-output cases, reject invalid geometry,
+and overwrite the original before allocating an exported destination. These
+tests qualify the native operation, not live KMS scene negotiation or display
+parity with the built-in renderer.
 
 The native regression exercises all 256 values in each color and alpha channel
 through source-to-private-to-output conversion. It overwrites and destroys each
