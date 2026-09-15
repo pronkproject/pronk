@@ -12,7 +12,7 @@ use std::time::Instant;
 mod timing;
 pub use timing::{Report, Timings};
 
-use crate::pattern::{self, Plane};
+use crate::pattern::{self, Plane, Scene};
 
 /// Accepted reads and generator allocations, retained on the blocking worker.
 pub struct SubmittedRead {
@@ -68,7 +68,7 @@ pub fn submit_sources(
     worker: &Device,
     input: Vec<Image>,
     private: PrivateStorage,
-    scene: [Plane; 3],
+    scene: Scene,
     permits: Vec<Submission<Option<SyncFile>>>,
 ) -> Result<SubmittedRead> {
     let started = Instant::now();

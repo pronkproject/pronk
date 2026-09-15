@@ -31,10 +31,11 @@ video ports concurrently with GStreamer startup, which may wait for the link.
 No installed WirePlumber policy, service unit or casting session is changed.
 This fixture does not qualify the production classified connection policy.
 
-Three generated single-memory-plane modifier images belong to a separate
-producer Vulkan device instance: a 1920x1080 base, a 640x480 overlay and a
-128x128 cursor-sized top plane. The base uses packed ten-bit BGR with two alpha
-bits, the overlay uses eight-bit RGBA and the top plane uses eight-bit BGRA.
+Four generated single-memory-plane modifier images belong to a separate
+producer Vulkan device instance: a 1920x1080 base, a 640x480 overlay, a
+128x128 cursor-sized layer and a 128x64 RGB565 patch. The base uses packed
+ten-bit BGR with two alpha bits, the overlay uses eight-bit RGBA and the
+cursor-sized layer uses eight-bit BGRA.
 All fixture pixels are opaque. Exact per-format allocation checks apply to the
 selected modifier; unsupported source tuples fail without format substitution.
 The worker checks matching physical-device
@@ -78,7 +79,11 @@ independent geometry model supplies expected visible rectangles; unit tests
 check those against literal source and destination coordinates. The overlay
 starts at (640,320), and the top plane moves between (608,288), (672,288) and
 (736,288), overlapping both the overlay and exposed base. Layers have distinct
-frame-dependent colors and opaque alpha. Private source copies have independent
+frame-dependent colors and opaque alpha. The RGB565 patch is solid red at
+(32,864), covering base pixels and, in one placement, part of the background.
+Its endpoint channels are exact at both pixel depths; it remains distinct from
+background and overwritten source colors after the gamma operation.
+Private source copies have independent
 native completion records. The compute shader blends their completed pixels in
 bottom-to-top order, exercising cropped placement without retaining the imports.
 
@@ -92,7 +97,7 @@ releases before sample disposal or while that sample is held fail the test.
 All four images must be rewritten, and every sequence must arrive once in order.
 The transport consumer requires DMA-BUF memory and never maps raw pixels.
 
-Each three-source operation reserves three `SourceUse<Option<SyncFile>>`
+Each four-source operation reserves four `SourceUse<Option<SyncFile>>`
 submission permits before dispatch, one per source copy. `None` denotes the
 native already-completed sentinel, not future work or omitted accounting.
 The coordinator closes admission while the blocking source stage runs; that
@@ -109,7 +114,7 @@ Pending native owners remain on the blocking worker even when coordination
 fails. Channel closure prevents output work and runs native retirement there,
 not on the Tokio runtime thread. Source and output operations live in a renderer
 helper separate from PipeWire publication scheduling.
-The three-record budget matches the fixture's source-copy operations, not a
+The four-record budget matches the fixture's source-copy operations, not a
 frame or transport limit. No executor ioctl or kernel release message is
 exercised here; this
 connects the trusted accounting library to actual generated-source GPU work.

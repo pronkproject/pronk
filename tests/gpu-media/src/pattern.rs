@@ -52,6 +52,8 @@ pub struct Plane {
     pub color: [u8; 3],
 }
 
+pub type Scene = [Plane; 4];
+
 impl Plane {
     pub fn visible(self) -> CopyRegion {
         self.crop
@@ -60,8 +62,8 @@ impl Plane {
     }
 }
 
-/// Base plane, overlay and cursor-sized top plane, all with opaque pixels.
-pub fn scene(sequence: u32) -> [Plane; 3] {
+/// Base, overlay, cursor-sized layer and RGB565 patch, all with opaque pixels.
+pub fn scene(sequence: u32) -> Scene {
     let base = Plane {
         format: PackedFormat::Bgr10A2,
         crop: source_crop(),
@@ -85,6 +87,13 @@ pub fn scene(sequence: u32) -> [Plane; 3] {
             crop: full(128, 128),
             placement: [608 + (sequence % 3) as i32 * 64, 288],
             color: color((sequence + 13) % FRAMES),
+        },
+        Plane {
+            format: PackedFormat::Rgb565,
+            crop: full(128, 64),
+            placement: [32, 864],
+            // Endpoint colors are exact at both source and output depths.
+            color: [255, 0, 0],
         },
     ]
 }
@@ -169,10 +178,19 @@ mod tests {
     #[test]
     fn scene_layers_have_distinct_colors_and_known_overlap() {
         for sequence in 0..FRAMES {
-            let [base, overlay, cursor] = scene(sequence);
+            let [base, overlay, cursor, patch] = scene(sequence);
             assert_eq!(base.format, PackedFormat::Bgr10A2);
             assert_eq!(overlay.format, PackedFormat::Rgba8);
             assert_eq!(cursor.format, PackedFormat::Bgra8);
+            assert_eq!(patch.format, PackedFormat::Rgb565);
+            assert_eq!(patch.color, [255, 0, 0]);
+            assert_eq!(patch.visible().destination(), [32, 864]);
+            assert_eq!(patch.visible().extent(), Extent::new(128, 64).unwrap());
+            assert!(separated(
+                output_color(patch.color),
+                output_color(BACKGROUND)
+            ));
+            assert!(separated(output_color(patch.color), output_color([255; 3])));
             assert_eq!(base.visible(), visible(sequence));
             assert_eq!(overlay.crop.image(), Extent::new(640, 480).unwrap());
             assert_eq!(overlay.visible().destination(), [640, 320]);
