@@ -1603,6 +1603,7 @@ name = "pronk-renderer-pipewire"
 version = "0.1.0"
 dependencies = [
  "castkms-renderer",
+ "nix 0.29.0",
  "pronk-gpu",
  "pronk-pipewire",
  "pronk-renderer-worker",

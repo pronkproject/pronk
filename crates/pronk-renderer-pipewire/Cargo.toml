@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 castkms-renderer = { path = "../castkms-renderer" }
+nix.workspace = true
 pronk-pipewire = { path = "../pronk-pipewire" }
 pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
 pronk-renderer-worker = { path = "../pronk-renderer-worker" }

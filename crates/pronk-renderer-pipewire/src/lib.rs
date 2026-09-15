@@ -1,5 +1,6 @@
 //! Registration of userspace-rendered outputs with private PipeWire transport.
 
+mod active;
 mod output;
 mod registration;
 mod renderer;
@@ -7,7 +8,8 @@ mod video;
 pub use output::{OutputEvent, OutputFrame, OutputSession, PublishError};
 pub use registration::Registration;
 pub use renderer::{
-    RendererStream, RendererStreamConfig, RendererStreamError, RendererStreamState,
+    ActiveRendererStream, RendererStream, RendererStreamConfig, RendererStreamError,
+    RendererStreamState,
 };
 pub use video::{FramePublishError, StoppedVideo, Video, VideoEvent};
 
