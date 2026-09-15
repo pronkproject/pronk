@@ -42,6 +42,53 @@ impl Device {
 }
 
 impl Blender {
+    pub(super) fn check_destination(&self, destination: &PrivateImage) -> io::Result<()> {
+        if !Arc::ptr_eq(&self.program.device, &destination.device) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private scene destination belongs to another device",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_scaled_region(
+        &self,
+        destination: &PrivateImage,
+        source: &PrivateImage,
+        crop: SourceRect,
+        placement: DestinationRect,
+        transform: Transform,
+        blend: Blend,
+    ) -> io::Result<()> {
+        self.check_destination(destination)?;
+        if !Arc::ptr_eq(&destination.device, &source.device) || !source.initialized {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private scene needs initialized sources on the compositor device",
+            ));
+        }
+        let source_extent = Extent::new(source.width.get(), source.height.get())
+            .expect("private extent is nonzero");
+        let output_extent = Extent::new(destination.width.get(), destination.height.get())
+            .expect("private extent is nonzero");
+        if let Some(parameters) = Parameters::new(
+            source_extent,
+            output_extent,
+            crop,
+            placement,
+            transform,
+            blend,
+        )? {
+            if parameters.groups[0] > self.program.max_groups[0]
+                || parameters.groups[1] > self.program.max_groups[1]
+            {
+                return Err(unsupported("private blend dispatch is unsupported"));
+            }
+        }
+        Ok(())
+    }
+
     /// Blend a crop using the lifetime, geometry and precision contract of
     /// [`PrivateImage::blend_region_waited`], without recreating the program.
     /// Both images must belong to this program's logical device. Calls may run

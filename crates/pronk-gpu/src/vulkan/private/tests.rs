@@ -10,6 +10,7 @@ mod pending;
 mod program;
 mod region;
 mod rgb565;
+mod scene;
 mod ten_bit;
 
 fn device() -> (Device, u64) {
