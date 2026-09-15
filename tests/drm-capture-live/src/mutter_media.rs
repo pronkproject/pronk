@@ -93,16 +93,17 @@ async fn run(target: Target, socket: &Path) -> anyhow::Result<()> {
             shutdown_timeout: Duration::from_secs(5),
         },
     )?;
+    let generation = nz64(u64::from(std::process::id()));
     let video = Video::start(
         actor,
         VideoSourceConfig {
-            node_name: "pronk.mutter-media-test".into(),
+            node_name: format!("pronk.mutter-media-test-{generation}"),
             node_description: "Live Mutter capture".into(),
-            session_id: "private-test".into(),
+            session_id: format!("private-test-{generation}"),
             device_instance: "castkms-test".into(),
             connector_id: target.connector_id,
             output_index: 0,
-            media_generation: nz64(1),
+            media_generation: generation,
             refresh_hz: nz(30),
         },
         PipeWireRemote::AmbientDevelopment,
@@ -132,7 +133,7 @@ async fn run(target: Target, socket: &Path) -> anyhow::Result<()> {
         .arg("--remote")
         .arg(socket)
         .arg(format!("{}:capture_1", identity.node_name))
-        .arg("pronk-backend-media-1:input_1")
+        .arg(format!("pronk-backend-media-{}:input_1", identity.media_generation))
         .kill_on_drop(true)
         .spawn()
         .context("link media input")?;
