@@ -93,6 +93,9 @@ impl<'renderer, F: AsFd> SourceReader<'renderer, F> {
 
     /// Attempt one source submission and resolve every claimed kernel job.
     ///
+    /// Producer waits, native import and failed-submission cleanup may block.
+    /// Run on a blocking graphics worker, not an asynchronous executor thread.
+    ///
     /// Treat an error as terminal for the active renderer incarnation because
     /// the failing operation may not reveal whether kernel ownership changed.
     pub fn try_submit(&mut self) -> Result<SourceAttempt, SourceAttemptError> {

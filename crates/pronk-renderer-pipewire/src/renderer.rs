@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::task::{run, Started, TaskControl};
 use crate::types::{RendererStreamConfig, RendererStreamState};
 
-/// Candidate renderer and PipeWire generation owned by one Tokio task.
+/// Candidate renderer and PipeWire generation owned by one dedicated thread.
 ///
 /// Preparation leaves host execution selected. Explicit shutdown joins the
 /// task, stops PipeWire, and aborts the unpublished takeover candidate.
@@ -57,7 +57,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         let (state, receive) = watch::channel(RendererStreamState::Prepared);
         let (started, response) = oneshot::channel();
         let (activate, activation) = oneshot::channel();
-        let task = tokio::spawn(run(
+        let input = (
             renderer,
             device,
             config,
@@ -68,7 +68,19 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
                 state,
                 activation,
             },
-        ));
+        );
+        let task =
+            match crate::native_task::spawn(input, |(renderer, device, config, remote, control)| {
+                run(renderer, device, config, remote, control)
+            }) {
+                Ok(task) => task,
+                Err(((renderer, ..), error)) => {
+                    return Err(RendererStreamError {
+                        owner: Some(renderer.into_owner()),
+                        error,
+                    });
+                }
+            };
         let mut starting = Starting {
             stop: stop.clone(),
             task: Some(task),

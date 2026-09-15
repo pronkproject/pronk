@@ -303,6 +303,23 @@ an explicit compatible modifier. The worker does not infer support for scene
 properties absent from the source protocol. Admission still reserves private
 storage before claiming any source.
 
+Each `RendererStream` generation runs on a dedicated thread. Source submission
+can wait for producer fences, and error cleanup can wait for accepted native
+work; neither operation runs on the shared asynchronous executor. The generation
+does not permanently occupy a Tokio blocking-pool slot. Short copy and retirement
+jobs continue to use that pool, and transport uses the calling runtime's I/O and
+timer drivers. Thread creation failure returns the unpublished renderer owner.
+Joining includes thread-local native destruction, with panic reported to the
+stream's task owner.
+
+That isolation is not cancellation of a native wait. While a producer is stuck,
+its own generation cannot poll transport events or acknowledge shutdown; other
+generations and asynchronous service tasks remain independently scheduled.
+Source accounting stays with the generation until the native operation returns.
+Tests cover a blocked generation, another generation making progress, timers,
+nested native work with a one-slot blocking pool, panic and delayed thread-local
+destruction. They do not demonstrate recovery from a permanently hung GPU.
+
 Native tests close and collect a trusted source use before extracting private
 pixels, then overwrite the original before output conversion. They also check
 retirement when the pending owner is dropped. A fast GPU may complete before

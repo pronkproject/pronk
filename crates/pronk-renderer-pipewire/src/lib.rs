@@ -1,6 +1,7 @@
 //! Registration of userspace-rendered outputs with private PipeWire transport.
 
 mod active;
+mod native_task;
 mod output;
 mod registration;
 mod renderer;
