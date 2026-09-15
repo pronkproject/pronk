@@ -1,5 +1,5 @@
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use tokio::io::unix::AsyncFd;
 
@@ -30,6 +30,34 @@ impl SyncFile {
     /// evidence, and failed completion does not establish valid pixels.
     pub fn completion(&self) -> io::Result<Option<Completion>> {
         status(self.0.as_fd())
+    }
+
+    /// Combine two submitted completion records into one sync file.
+    ///
+    /// The returned record completes after both inputs and preserves an error
+    /// from either input. Merging does not consume or otherwise change either
+    /// source record. It joins already submitted native work; it cannot stand
+    /// in for work that userspace intends to submit later.
+    pub fn merge(&self, other: &Self) -> io::Result<Self> {
+        let mut data = MergeData {
+            name: merge_name(),
+            fd2: other.0.as_raw_fd(),
+            fence: -1,
+            flags: 0,
+            pad: 0,
+        };
+        // SAFETY: Both descriptors were validated as sync files. The writable
+        // UAPI structure lives through the ioctl and contains no pointers.
+        unsafe { merge(self.0.as_raw_fd(), &mut data) }?;
+        if data.fence < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sync-file merge returned no descriptor",
+            ));
+        }
+        // SAFETY: A successful merge returns one new descriptor owned by the
+        // caller. Validation below closes it on every error path.
+        Self::from_fd(unsafe { OwnedFd::from_raw_fd(data.fence) })
     }
 
     /// Wait without blocking a Tokio worker. Errors are not successful pixels.
@@ -70,6 +98,23 @@ struct FileInfo {
     sync_fence_info: u64,
 }
 
+#[repr(C)]
+struct MergeData {
+    name: [u8; 32],
+    fd2: i32,
+    fence: i32,
+    flags: u32,
+    pad: u32,
+}
+
+fn merge_name() -> [u8; 32] {
+    let mut name = [0; 32];
+    let label = b"pronk-source-reads";
+    name[..label.len()].copy_from_slice(label);
+    name
+}
+
+nix::ioctl_readwrite!(merge, b'>', 3, MergeData);
 nix::ioctl_readwrite!(file_info, b'>', 4, FileInfo);
 
 fn status(fd: BorrowedFd<'_>) -> io::Result<Option<Completion>> {
@@ -179,6 +224,11 @@ mod tests {
 
     #[test]
     fn uapi_layout() {
+        assert_eq!(std::mem::size_of::<MergeData>(), 48);
+        assert_eq!(std::mem::offset_of!(MergeData, fd2), 32);
+        assert_eq!(std::mem::offset_of!(MergeData, fence), 36);
+        assert_eq!(std::mem::offset_of!(MergeData, flags), 40);
+        assert_eq!(std::mem::offset_of!(MergeData, pad), 44);
         assert_eq!(std::mem::size_of::<FileInfo>(), 56);
         assert_eq!(std::mem::offset_of!(FileInfo, sync_fence_info), 48);
     }

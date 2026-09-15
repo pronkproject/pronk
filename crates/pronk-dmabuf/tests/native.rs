@@ -32,6 +32,14 @@ async fn empty_reservation_roundtrip() {
     let raw = i32::try_from(allocation.fd).unwrap();
     // SAFETY: The successful allocation returned a new descriptor to own.
     let buffer = unsafe { OwnedFd::from_raw_fd(raw) };
+    let first = export_dependencies(buffer.as_fd(), Access::Read).unwrap();
+    let second = export_dependencies(buffer.as_fd(), Access::Write).unwrap();
+    let merged = first.merge(&second).unwrap();
+    let flags = fcntl(merged.as_fd().as_raw_fd(), FcntlArg::F_GETFD).unwrap();
+    assert!(FdFlag::from_bits_retain(flags).contains(FdFlag::FD_CLOEXEC));
+    assert_eq!(first.completion().unwrap(), Some(Completion::Success));
+    assert_eq!(second.completion().unwrap(), Some(Completion::Success));
+    assert_eq!(merged.wait().await.unwrap(), Completion::Success);
     for access in [Access::Read, Access::Write, Access::ReadWrite] {
         let fence = export_dependencies(buffer.as_fd(), access).unwrap();
         assert_eq!(fence.completion().unwrap(), Some(Completion::Success));
