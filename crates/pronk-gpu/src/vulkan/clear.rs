@@ -32,6 +32,17 @@ impl Image {
     /// literally; successful completion does not make these pixels opaque or
     /// suitable for an opaque-only composition or media profile.
     pub fn clear_rgba_waited(self, rgba: [u8; 4]) -> io::Result<(Self, SyncFile)> {
+        self.clear_rgba16_waited(rgba.map(|channel| u16::from(channel) * 257))
+    }
+
+    /// Fill the image with normalized 16-bit RGBA channel values.
+    ///
+    /// Channels span zero through 65535 and are quantized to the destination's
+    /// packed format using Vulkan's normalized fixed-point conversion rules,
+    /// which permit either adjacent representable value. Higher-depth sources
+    /// need no CPU pixel writes. It does not change color space, premultiply alpha or imply
+    /// HDR. Ownership and native waits follow [`Self::clear_rgba_waited`].
+    pub fn clear_rgba16_waited(self, rgba: [u16; 4]) -> io::Result<(Self, SyncFile)> {
         let buffer = self.export()?;
         require_success(export_dependencies(buffer.as_fd(), Access::Write)?.wait_blocking()?)?;
         let mut job = Job::new(Arc::clone(&self.device), self)?;
@@ -41,7 +52,7 @@ impl Image {
         let acquire = image.acquire_barrier(vk::AccessFlags::TRANSFER_WRITE);
         let release = image.release_barrier(vk::AccessFlags::TRANSFER_WRITE);
         let color = vk::ClearColorValue {
-            float32: rgba.map(|channel| f32::from(channel) / 255.0),
+            float32: rgba.map(|channel| f32::from(channel) / 65535.0),
         };
         // SAFETY: The recording command buffer and image belong to this device.
         // Exclusive caller ownership and the completed reservation snapshot permit

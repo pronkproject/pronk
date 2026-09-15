@@ -14,6 +14,40 @@ fn native_failure_does_not_validate_pixels() {
 
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn normalized_sixteen_bit_clears_quantize_to_the_destination() {
+    let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
+    let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("select hex modifier");
+    let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16).unwrap();
+    let device = Device::open(node).unwrap();
+    let size = NonZeroU32::new(7).unwrap();
+    let mut image = device.allocate(size, size, modifier).unwrap();
+    for value in [
+        0, 1, 128, 129, 256, 257, 32767, 32768, 65406, 65407, 65534, 65535,
+    ] {
+        let rgba = [value, 65535 - value, value ^ 0x5555, value];
+        let (rendered, completion) = image.clear_rgba16_waited(rgba).unwrap();
+        assert_eq!(completion.wait_blocking().unwrap(), Completion::Success);
+        let (returned, pixels) = readback(rendered);
+        let expected = [rgba[2], rgba[1], rgba[0], rgba[3]];
+        for pixel in pixels.chunks_exact(4) {
+            for (actual, channel) in pixel.iter().zip(expected) {
+                // Vulkan permits either neighboring fixed-point value. Exact
+                // representable values, including both endpoints, are unique.
+                let scaled = u32::from(channel) * 255;
+                let lower = scaled / 65535;
+                let upper = scaled.div_ceil(65535);
+                assert!(
+                    (lower..=upper).contains(&u32::from(*actual)),
+                    "normalized RGBA {rgba:?}: pixel {pixel:?}"
+                );
+            }
+        }
+        image = returned;
+    }
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
 fn generated_colors_survive_repeated_foreign_handoffs() {
     let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
     let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("select hex modifier");
