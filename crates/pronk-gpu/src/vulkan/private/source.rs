@@ -5,14 +5,18 @@ use std::os::fd::AsFd;
 use std::sync::Arc;
 
 use ash::vk;
+use drm_display_executor::scene::geometry::{Extent, SourceRect};
 use pronk_dmabuf::{export_dependencies, import_completion, Access};
 
 use super::PrivateImage;
 use crate::vulkan::submission::{require_success, Job};
 use crate::vulkan::SourceImage;
 
+mod geometry;
 mod pending;
 pub use pending::PendingPrivateRead;
+
+use geometry::Blit;
 
 impl SourceImage {
     /// Read the entire source into same-sized, non-exportable private storage.
@@ -46,6 +50,12 @@ impl SourceImage {
                 "private source copy needs matching images on one device",
             ));
         }
+        let extent = Extent::new(self.layout().width.get(), self.layout().height.get())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let crop = SourceRect::new(extent, [0, 0], extent)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let blit = Blit::new(extent, extent, crop, [0, 0], extent)?;
+        debug_assert!(blit.fills_destination);
         self.wait_for_producer()?;
         require_success(export_dependencies(self.fd.as_fd(), Access::Read)?.wait_blocking()?)?;
         let mut job = Job::new(Arc::clone(&self.device), (self, destination))?;
@@ -67,22 +77,6 @@ impl SourceImage {
             .src_queue_family_index(job.device.queue_family)
             .dst_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
             .src_access_mask(vk::AccessFlags::TRANSFER_READ);
-        let layers = vk::ImageSubresourceLayers::default()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .layer_count(1);
-        let offsets = [
-            vk::Offset3D::default(),
-            vk::Offset3D {
-                x: destination.width.get() as i32,
-                y: destination.height.get() as i32,
-                z: 1,
-            },
-        ];
-        let blit = vk::ImageBlit::default()
-            .src_subresource(layers)
-            .src_offsets(offsets)
-            .dst_subresource(layers)
-            .dst_offsets(offsets);
         // SAFETY: The source import contract supplies GENERAL foreign release
         // and producer completion. Queried formats support blits, and private
         // allocation checked signed extents. The unique private allocation is
@@ -103,7 +97,7 @@ impl SourceImage {
                 vk::ImageLayout::GENERAL,
                 destination.raw,
                 vk::ImageLayout::GENERAL,
-                &[blit],
+                &[blit.region],
                 vk::Filter::NEAREST,
             );
             job.device.raw.cmd_pipeline_barrier(
