@@ -1,13 +1,14 @@
 //! Generic DRM capture and PipeWire adapter for production media sessions.
 
 use std::num::{NonZeroU32, NonZeroU64};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use pronk_capture::allocation::Heap;
 use pronk_capture::{Actor, Config as ActorConfig, Layout};
-use pronk_capture_broker::{Provider, Session, Target};
+use pronk_capture_broker::Session;
 use pronk_capture_pipewire::Video;
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoSourceConfig, MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
@@ -21,8 +22,6 @@ use crate::media_session::{MediaStartRequest, MediaStopReason, MediaSuspendReaso
 /// Immutable identity and resource policy for one display's capture pipeline.
 #[derive(Debug, Clone)]
 pub struct DrmCapturePipelineConfig {
-    pub device_major: u32,
-    pub device_minor: u32,
     pub connector_id: NonZeroU32,
     pub output_index: u32,
     pub session_id: String,
@@ -42,12 +41,12 @@ pub struct DrmCapturePipelineConfig {
 
 struct ActiveCapture {
     generation: NonZeroU64,
-    video: Video<Session>,
+    video: Video<OwnedFd>,
 }
 
 /// Sole owner of one generic DRM capture session and its PipeWire producer.
 pub struct DrmCapturePipeline {
-    provider: Provider,
+    session: Option<Session>,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: DrmCapturePipelineConfig,
     active: Option<ActiveCapture>,
@@ -68,12 +67,12 @@ impl std::fmt::Debug for DrmCapturePipeline {
 
 impl DrmCapturePipeline {
     pub fn new(
-        provider: Provider,
+        session: Session,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: DrmCapturePipelineConfig,
     ) -> Self {
         Self {
-            provider,
+            session: Some(session),
             producer_remotes,
             config,
             active: None,
@@ -109,24 +108,15 @@ impl DrmCapturePipeline {
         &self,
         request: MediaStartRequest,
         cancellation: CancellationToken,
-    ) -> Result<(Actor<Session>, Layout), MediaPipelineError> {
-        let session = self
-            .provider
-            .acquire(
-                Target {
-                    device_major: self.config.device_major,
-                    device_minor: self.config.device_minor,
-                    crtc_id: request.route.target.as_nonzero(),
-                    connector_id: self.config.connector_id,
-                },
-                cancellation,
-            )
-            .await
-            .map_err(|error| {
-                MediaPipelineError::new(format!("acquire capture session: {error}"))
-            })?;
-        let client = session
-            .into_capture()
+    ) -> Result<(Actor<OwnedFd>, Layout), MediaPipelineError> {
+        if cancellation.is_cancelled() {
+            return Err(MediaPipelineError::new("capture start was cancelled"));
+        }
+        let client = self
+            .session
+            .as_ref()
+            .ok_or_else(|| MediaPipelineError::new("capture session has been released"))?
+            .open_capture()
             .map_err(|error| MediaPipelineError::new(format!("open capture session: {error}")))?;
         let offer = client.describe().map_err(|error| {
             MediaPipelineError::new(format!("describe capture output: {error}"))
@@ -160,10 +150,10 @@ impl DrmCapturePipeline {
 
     async fn prepare_video(
         &self,
-        actor: Actor<Session>,
+        actor: Actor<OwnedFd>,
         generation: NonZeroU64,
         cancellation: CancellationToken,
-    ) -> Result<Video<Session>, MediaPipelineError> {
+    ) -> Result<Video<OwnedFd>, MediaPipelineError> {
         let remote = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
@@ -193,7 +183,7 @@ impl DrmCapturePipeline {
 
     fn media_target(
         &self,
-        video: &Video<Session>,
+        video: &Video<OwnedFd>,
         layout: Layout,
         generation: NonZeroU64,
     ) -> DeviceMediaTarget {
@@ -224,15 +214,13 @@ impl DrmCapturePipeline {
                 "capture stop requested generation {generation}; active generation is {actual}"
             )));
         }
-        let session = active
+        let capture = active
             .video
             .shutdown()
             .await
             .map_err(|error| MediaPipelineError::new(format!("stop capture video: {error}")))?;
-        session
-            .release()
-            .await
-            .map_err(|error| MediaPipelineError::new(format!("release capture session: {error}")))
+        drop(capture);
+        Ok(())
     }
 }
 
@@ -256,21 +244,17 @@ impl CapturePipelinePort for DrmCapturePipeline {
             .prepare_video(actor, generation, cancellation.clone())
             .await?;
         if cancellation.is_cancelled() {
-            let session = video.shutdown().await.map_err(|error| {
+            let capture = video.shutdown().await.map_err(|error| {
                 MediaPipelineError::new(format!("cancel capture video: {error}"))
             })?;
-            session.release().await.map_err(|error| {
-                MediaPipelineError::new(format!("release cancelled capture session: {error}"))
-            })?;
+            drop(capture);
             return Err(MediaPipelineError::new("capture start was cancelled"));
         }
         if video.identity().media_generation != generation {
-            let session = video.shutdown().await.map_err(|error| {
+            let capture = video.shutdown().await.map_err(|error| {
                 MediaPipelineError::new(format!("stop stale capture video: {error}"))
             })?;
-            session.release().await.map_err(|error| {
-                MediaPipelineError::new(format!("release stale capture session: {error}"))
-            })?;
+            drop(capture);
             return Err(MediaPipelineError::new(
                 "PipeWire source returned a stale media generation",
             ));
@@ -329,10 +313,16 @@ impl CapturePipelinePort for DrmCapturePipeline {
         _reason: MediaStopReason,
         _cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        let Some(generation) = self.active.as_ref().map(|active| active.generation) else {
+        if let Some(generation) = self.active.as_ref().map(|active| active.generation) {
+            self.stop_active(generation).await?;
+        }
+        let Some(session) = self.session.take() else {
             return Ok(());
         };
-        self.stop_active(generation).await
+        session
+            .release()
+            .await
+            .map_err(|error| MediaPipelineError::new(format!("release display session: {error}")))
     }
 }
 

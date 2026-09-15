@@ -73,24 +73,13 @@ pub struct Session {
     done: Option<oneshot::Receiver<Result<(), Error>>>,
 }
 
-impl AsFd for Session {
-    fn as_fd(&self) -> BorrowedFd<'_> {
+impl Session {
+    fn capture(&self) -> BorrowedFd<'_> {
         self.capture
             .as_ref()
             .expect("live session owns capture")
             .as_fd()
     }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        self.monitor.take();
-        self.capture.take();
-        self.release.take();
-    }
-}
-
-impl Session {
     /// Borrow the monitor-control capability without exposing capture through it.
     pub fn monitor(&self) -> BorrowedFd<'_> {
         self.monitor
@@ -111,17 +100,16 @@ impl Session {
         monitor::detach_monitor(self.monitor())
     }
 
-    /// Validate the current image offer and move the whole session into the client.
+    /// Open a capture client while retaining the display session itself.
     ///
     /// Inactive or unauthorized outputs fail with the kernel's error and request
-    /// session release. The monitor-control descriptor remains owned but is not
-    /// exposed through the DRM capture client. Call this after display activation;
-    /// it does not wait for a modeset or reserve the returned offer. Dropping the
-    /// client requests release even if no stream was opened. For observed release,
-    /// recover the session with `Client::into_owner` and call [`Self::release`].
-    /// Neither path acknowledges completion of outstanding destination writes.
-    pub fn into_capture(self) -> std::io::Result<drm_capture::Client<Self>> {
-        drm_capture::Client::from_owner(self)
+    /// session release. The client receives a close-on-exec duplicate of only
+    /// the capture descriptor. Call this after display activation; it does not
+    /// wait for a modeset or reserve the returned offer. Dropping the client
+    /// leaves monitor control and broker ownership with the session.
+    pub fn open_capture(&self) -> std::io::Result<drm_capture::Client> {
+        let capture = self.capture().try_clone_to_owned()?;
+        drm_capture::Client::from_fd(capture)
     }
 
     pub async fn release(mut self) -> Result<(), Error> {
@@ -133,6 +121,14 @@ impl Session {
             .expect("live session owns completion")
             .await
             .map_err(|_| Error::WorkerStopped)?
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.monitor.take();
+        self.capture.take();
+        self.release.take();
     }
 }
 
