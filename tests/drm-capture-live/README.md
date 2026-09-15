@@ -19,6 +19,13 @@ The binaries cover distinct boundaries:
   held frames, ordinary display replacement, and retained old-session storage.
 - `pronk-capture-handoff-live-test /dev/dri/cardN`: real capture frames with
   **synthetic** PipeWire events, including stale releases and retirement.
+- `pronk-capture-broker-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID`:
+  acquisition through a live Mutter broker, actor capture, explicit release,
+  revocation of a retained capture descriptor, and reacquisition. It requires
+  an isolated session bus whose Mutter owns the active output. It does not
+  open a DRM primary descriptor or modeset, and refuses to replace an existing
+  owner of the Pronk bus name. Unlike the fixture probes, Mutter must already
+  be displaying content. Obtain the exact output IDs from that test device.
 - `pronk-capture-pipewire-live-test /dev/dri/cardN /path/to/private/socket`:
   twelve real frames through PipeWire and GStreamer, checking every pixel,
   retained DMA-BUF memory, changing content, and a held sample across six
@@ -48,5 +55,5 @@ is driven concurrently with capture because the media actor acknowledges
 startup only after receiving media.
 
 These tests use reference CPU composition. They do not qualify delegated GPU
-composition, hardware encoding, the installed service sandbox, Mutter's live
-broker, receiver decoding, or end-to-end television playback.
+composition, hardware encoding, the installed service sandbox, receiver
+decoding, or end-to-end television playback.
