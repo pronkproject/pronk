@@ -6,7 +6,7 @@ impl crate::Rendered {
     /// Write a binary PPM image. The renderer's opaque alpha is omitted.
     pub fn write_ppm(&self, output: &mut impl Write) -> io::Result<()> {
         write!(output, "P6\n{} {}\n255\n", self.width, self.height)?;
-        for pixel in self.pixels.chunks_exact(4) {
+        for pixel in self.pixels.as_chunks::<4>().0 {
             output.write_all(&pixel[..3])?;
         }
         Ok(())
