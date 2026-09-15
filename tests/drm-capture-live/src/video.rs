@@ -57,7 +57,7 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
             shutdown_timeout: Duration::from_secs(5),
         },
     )?;
-    let video = Video::start(
+    let video = Video::prepare(
         actor,
         VideoSourceConfig {
             node_name: "pronk.video-owner-test".into(),
@@ -83,6 +83,14 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
         .spawn()
         .context("start video port link")?;
     let mut consumer = pipewire_consumer::Consumer::start(socket, &video.identity().node_name)?;
+    ensure!(link.wait().await?.success(), "video port link failed");
+    ensure!(
+        tokio::time::timeout(Duration::from_millis(250), consumer.next())
+            .await
+            .is_err(),
+        "prepared capture produced a frame before activation"
+    );
+    video.activate().await?;
     let mut held = None;
     let mut changed = 0;
     let mut received = 0;
@@ -117,6 +125,5 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
     drop(video.shutdown().await?);
     ensure!(*state.borrow() == State::Stopped, "shutdown state");
     drop(control);
-    ensure!(link.wait().await?.success(), "video port link failed");
     Ok(())
 }
