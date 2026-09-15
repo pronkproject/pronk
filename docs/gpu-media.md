@@ -644,12 +644,19 @@ edges, one-pixel footprints and quarter-turn rejection. See the
 
 ## Qualified complete scenes
 
-`SceneComposer` prepares one ordered visual profile before source acquisition.
-It retains every layer's exact packed format, modifier and source extent with
-its crop, destination, transform, blend and color program. The output extent
-and output color program belong to the same nominal profile. An adapter can
-query each source requirement while validating a newly dequeued scene without
-exposing the composer's native programs or private-buffer identity.
+`SceneStorageProfile` gives one output extent and ordered set of source storage
+requirements a reusable nominal identity. Its private pool can serve successive
+jobs whose scene operations vary while their output and layer storage remain
+compatible. Creating a structurally identical storage profile does not confer
+that identity; reuse must be explicit.
+
+`SceneComposer` prepares one ordered visual program before source acquisition.
+It retains every layer's exact crop, destination, transform, blend and color
+program and validates their packed format, modifier and source extent against
+its `SceneStorageProfile`. The output color program belongs to the same qualified
+scene. An adapter can query each source requirement while validating a newly
+dequeued scene without exposing the composer's native programs or private
+buffer identity.
 
 The associated `ScenePool` gives every layer a distinct source-sized private
 storage role. Final-image and source-stage capacities are independent, but a
@@ -664,9 +671,10 @@ Composition rechecks the nominal profile and exact layer role before applying
 per-layer color, alpha-aware bottom-to-top blending and final output color.
 Structurally identical composers cannot exchange their private buffers.
 
-`QualifiedSceneJob` binds the checked kernel job to the only native profile
-derived from its metadata. It imports every layer under a nominal job identity
-while leaving the job's sole release authority untouched. `PreparedSceneReads`
+`QualifiedSceneJob` validates the checked kernel job against an existing
+`SceneStorageProfile` and binds it to the resulting native program. It imports every
+layer under a nominal job identity while leaving the job's sole release
+authority untouched. `PreparedSceneReads`
 validates the complete ordered import and private-stage set before submitting
 any GPU access. A source's DRM fourcc determines whether its fourth channel is
 padding or pixel alpha and must agree with the imported Vulkan layout.

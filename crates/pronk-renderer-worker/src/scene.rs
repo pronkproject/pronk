@@ -29,20 +29,104 @@ struct LayerPlan {
 
 /// Prepared execution state for one qualified whole-scene profile.
 pub struct SceneComposer {
-    profile: Arc<()>,
-    device: Device,
+    storage: SceneStorageProfile,
     blender: Blender,
     color: OutputColorProgram,
-    output: Extent,
     layers: Vec<LayerPlan>,
+}
+
+/// Reusable private storage identity for compatible complete scenes.
+#[derive(Clone)]
+pub struct SceneStorageProfile {
+    profile: Arc<()>,
+    device: Device,
+    output: Extent,
+    sources: Vec<SourceRequirements>,
+}
+
+impl SceneStorageProfile {
+    /// Define the ordered private storage roles for one scene layout.
+    pub fn new(
+        device: &Device,
+        output: Extent,
+        sources: &[SourceRequirements],
+    ) -> io::Result<Self> {
+        if sources.len() > MAX_SCENE_LAYERS {
+            return Err(invalid("scene exceeds its private layer limit"));
+        }
+        let mut owned_sources = Vec::new();
+        owned_sources
+            .try_reserve_exact(sources.len())
+            .map_err(io::Error::other)?;
+        owned_sources.extend_from_slice(sources);
+        Ok(Self {
+            profile: Arc::new(()),
+            device: device.clone(),
+            output,
+            sources: owned_sources,
+        })
+    }
+
+    pub fn output(&self) -> Extent {
+        self.output
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    pub fn source_requirements(&self, index: usize) -> Option<SourceRequirements> {
+        self.sources.get(index).copied()
+    }
+
+    /// Allocate bounded final and source storage reusable across scene jobs.
+    pub fn create_pool(
+        &self,
+        final_capacity: NonZeroUsize,
+        source_capacity: NonZeroUsize,
+    ) -> io::Result<ScenePool> {
+        ScenePool::new(
+            &self.device,
+            self.output,
+            self.sources.iter().map(|source| source.extent),
+            final_capacity,
+            source_capacity,
+            &self.profile,
+        )
+    }
+
+    fn accepts(&self, scene: SceneRequirements<'_>) -> bool {
+        self.output == scene.output
+            && self.sources.len() == scene.layers.len()
+            && self
+                .sources
+                .iter()
+                .zip(scene.layers)
+                .all(|(source, layer)| *source == layer.source)
+    }
 }
 
 impl SceneComposer {
     /// Qualify and prepare one complete scene before source acquisition.
     pub fn new(device: &Device, scene: SceneRequirements<'_>) -> io::Result<Self> {
-        if scene.layers.len() > MAX_SCENE_LAYERS {
-            return Err(invalid("scene exceeds its private layer limit"));
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(scene.layers.len())
+            .map_err(io::Error::other)?;
+        sources.extend(scene.layers.iter().map(|layer| layer.source));
+        let storage = SceneStorageProfile::new(device, scene.output, &sources)?;
+        Self::with_storage(&storage, scene)
+    }
+
+    /// Qualify scene operations against an existing private storage layout.
+    pub fn with_storage(
+        storage: &SceneStorageProfile,
+        scene: SceneRequirements<'_>,
+    ) -> io::Result<Self> {
+        if !storage.accepts(scene) {
+            return Err(invalid("scene does not match its private storage layout"));
         }
+        let device = &storage.device;
         let blender = device.create_blender()?;
         blender.check_scene(scene)?;
         let color = device.create_output_color(scene.output, scene.color)?;
@@ -61,17 +145,15 @@ impl SceneComposer {
             });
         }
         Ok(Self {
-            profile: Arc::new(()),
-            device: device.clone(),
+            storage: storage.clone(),
             blender,
             color,
-            output: scene.output,
             layers,
         })
     }
 
     pub fn output(&self) -> Extent {
-        self.output
+        self.storage.output
     }
 
     pub fn layer_count(&self) -> usize {
@@ -100,13 +182,21 @@ impl SceneComposer {
                     .expect("source image extents are nonzero"),
                 modifier: layout.modifier,
             }
-            && source.is_owned_by(&self.device)
-            && destination.is_owned_by(&self.device)
-            && destination.matches_scene(&self.profile, SceneBufferRole::Source(index))
+            && source.is_owned_by(&self.storage.device)
+            && destination.is_owned_by(&self.storage.device)
+            && destination.matches_scene(&self.storage.profile, SceneBufferRole::Source(index))
     }
 
     pub(crate) fn profile(&self) -> &Arc<()> {
-        &self.profile
+        &self.storage.profile
+    }
+
+    pub(crate) fn device(&self) -> &Device {
+        &self.storage.device
+    }
+
+    pub fn storage(&self) -> &SceneStorageProfile {
+        &self.storage
     }
 
     /// Allocate independently bounded final and source storage for this profile.
@@ -118,15 +208,7 @@ impl SceneComposer {
         final_capacity: NonZeroUsize,
         source_capacity: NonZeroUsize,
     ) -> io::Result<ScenePool> {
-        let sources = self.layers.iter().map(|layer| layer.source.extent);
-        ScenePool::new(
-            &self.device,
-            self.output,
-            sources,
-            final_capacity,
-            source_capacity,
-            &self.profile,
-        )
+        self.storage.create_pool(final_capacity, source_capacity)
     }
 
     /// Compose qualified source frames and apply the complete output color path.
@@ -218,11 +300,14 @@ impl SceneComposer {
 
     fn check_inputs(&self, inputs: &SceneInputs) -> io::Result<()> {
         if inputs.destination.extent()
-            != (nonzero(self.output.width()), nonzero(self.output.height()))
-            || !inputs.destination.is_owned_by(&self.device)
+            != (
+                nonzero(self.storage.output.width()),
+                nonzero(self.storage.output.height()),
+            )
+            || !inputs.destination.is_owned_by(&self.storage.device)
             || !inputs
                 .destination
-                .matches_scene(&self.profile, SceneBufferRole::Destination)
+                .matches_scene(&self.storage.profile, SceneBufferRole::Destination)
         {
             return Err(invalid(
                 "scene destination does not match its qualified output",
@@ -239,10 +324,10 @@ impl SceneComposer {
                     nonzero(plan.source.extent.width()),
                     nonzero(plan.source.extent.height()),
                 )
-                || !source.is_owned_by(&self.device)
+                || !source.is_owned_by(&self.storage.device)
                 || !source
                     .buffer
-                    .matches_scene(&self.profile, SceneBufferRole::Source(index))
+                    .matches_scene(&self.storage.profile, SceneBufferRole::Source(index))
             {
                 return Err(invalid("scene source does not match its qualified layer"));
             }
@@ -715,7 +800,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires explicit Vulkan GPU and modifier selection"]
-    fn identical_scene_profiles_do_not_share_private_storage() {
+    fn private_storage_is_shared_only_through_its_explicit_profile() {
         let (device, modifier) = device();
         let extent = Extent::new(4, 3).unwrap();
         let source = SourceRequirements {
@@ -771,6 +856,45 @@ mod tests {
         assert!(pool
             .restore(SceneBuffers {
                 destination,
+                sources,
+            })
+            .is_ok());
+        assert_eq!(pool.available(), 1);
+
+        let moved_layers = [LayerRequirements {
+            destination: DestinationRect {
+                position: [1, 0],
+                extent,
+            },
+            ..layers[0]
+        }];
+        let moved_scene = SceneRequirements {
+            output: extent,
+            layers: &moved_layers,
+            color: OutputColor::default(),
+        };
+        let shared = SceneComposer::with_storage(first.storage(), moved_scene).unwrap();
+        let mut pool = first
+            .create_pool(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        let SceneBuffers {
+            destination,
+            mut sources,
+        } = pool.take().unwrap().unwrap();
+        let mut source = sources
+            .pop()
+            .unwrap()
+            .clear_and_wait([17, 85, 204])
+            .unwrap();
+        source.content_serial = Some(serial);
+        let frames = SceneFrames::new(serial, vec![source]).unwrap();
+        let composed = shared
+            .compose_and_wait(SceneInputs::new(destination, frames, [0; 3]))
+            .unwrap();
+        let (sources, destination) = composed.into_parts();
+        assert!(pool
+            .restore(SceneBuffers {
+                destination: destination.buffer,
                 sources,
             })
             .is_ok());

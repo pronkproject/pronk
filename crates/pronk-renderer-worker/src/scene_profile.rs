@@ -9,15 +9,15 @@ use drm_display_executor::scene::{
     color::{ColorMatrix, ColorOperation, ColorPipeline, Lut, OutputColor},
     transform::Transform,
 };
-use pronk_gpu::vulkan::{Device, LayerRequirements, SceneRequirements, SourceRequirements};
+use pronk_gpu::vulkan::{LayerRequirements, SceneRequirements, SourceRequirements};
 
 use crate::source::packed_format;
-use crate::SceneComposer;
+use crate::{SceneComposer, SceneStorageProfile};
 
 impl SceneComposer {
     /// Qualify one checked complete-scene job for native execution.
     pub(crate) fn from_scene_job<F: AsFd>(
-        device: &Device,
+        storage: &SceneStorageProfile,
         job: &SceneJob<'_, '_, F>,
     ) -> io::Result<Self> {
         let mut colors = Vec::new();
@@ -56,8 +56,8 @@ impl SceneComposer {
                 color: ColorPipeline::new(color),
             });
         }
-        Self::new(
-            device,
+        Self::with_storage(
+            storage,
             SceneRequirements {
                 output: job.output(),
                 layers: &layers,

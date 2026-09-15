@@ -28,7 +28,7 @@ pub use reader::{
 pub use reads::{ReadCollectionError, SubmittedReads};
 pub use scene::{
     ComposedFrame, RejectedScene, RejectedSceneFrames, SceneComposer, SceneCompositionError,
-    SceneFrames, SceneInputs,
+    SceneFrames, SceneInputs, SceneStorageProfile,
 };
 pub use scene_job::{
     QualifiedSceneJob, QualifySceneJobError, ReleaseSceneJobError, ReleasedSceneReads,

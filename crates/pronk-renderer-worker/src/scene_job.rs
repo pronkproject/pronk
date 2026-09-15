@@ -3,10 +3,8 @@
 use std::io;
 use std::os::fd::AsFd;
 
+use crate::{SceneComposer, SceneFrames, SceneSource, SceneStorageProfile, SubmittedSceneReads};
 use castkms_renderer::{SceneJob, SourceReleaseError};
-use pronk_gpu::vulkan::Device;
-
-use crate::{SceneComposer, SceneFrames, SceneSource, SubmittedSceneReads};
 
 /// A complete-scene job and the only composer qualified from its metadata.
 #[must_use = "release the scene without access or submit its bound native reads"]
@@ -17,10 +15,10 @@ pub struct QualifiedSceneJob<'job, 'renderer, F: AsFd> {
 
 impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
     pub fn new(
-        device: &Device,
+        storage: &SceneStorageProfile,
         job: SceneJob<'job, 'renderer, F>,
     ) -> Result<Self, QualifySceneJobError<SceneJob<'job, 'renderer, F>>> {
-        match SceneComposer::from_scene_job(device, &job) {
+        match SceneComposer::from_scene_job(storage, &job) {
             Ok(composer) => Ok(Self { job, composer }),
             Err(cause) => Err(QualifySceneJobError { job, cause }),
         }
@@ -35,7 +33,7 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
     }
 
     /// Import every layer under this job's nominal scene identity.
-    pub fn import_sources(&self, device: &Device) -> io::Result<Vec<SceneSource>> {
+    pub fn import_sources(&self) -> io::Result<Vec<SceneSource>> {
         let mut sources = Vec::new();
         sources
             .try_reserve_exact(self.job.layers().len())
@@ -43,7 +41,7 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
         for layer in self.job.layers() {
             sources.push(SceneSource::import(
                 self.composer.profile(),
-                device,
+                self.composer.device(),
                 layer,
                 self.job.producer_completion(),
             )?);
