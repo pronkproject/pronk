@@ -220,3 +220,82 @@ fn normalize_detach(result: io::Result<()>) -> io::Result<()> {
         result => result,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn modes() -> Vec<EdidMode> {
+        vec![
+            EdidMode::new(1920, 1080, 60_000).unwrap(),
+            EdidMode::new(1280, 720, 60_000).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn active_output_uses_the_advertised_timing() {
+        let observation =
+            active_observation(&modes(), NonZeroU32::new(17).unwrap(), 1280, 720, 59_940, 5)
+                .unwrap();
+        assert_eq!(observation.grant_state, DisplayGrantState::Active);
+        let route = observation.topology.route.unwrap();
+        assert_eq!(route.target.get(), 17);
+        assert_eq!(route.mode.refresh_millihz, 59_940);
+        assert_eq!(route.mode.flags, 5);
+    }
+
+    #[test]
+    fn unadvertised_output_dimensions_are_rejected() {
+        assert!(
+            active_observation(&modes(), NonZeroU32::new(17).unwrap(), 1024, 768, 60_000, 0,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn expected_capture_states_have_bounded_meanings() {
+        assert!(matches!(
+            classify_capture_error(
+                io::Error::from_raw_os_error(libc::ENODEV),
+                unavailable_observation()
+            )
+            .unwrap(),
+            Observation::State(KernelDisplayObservation {
+                grant_state: DisplayGrantState::Pending,
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_capture_error(
+                io::Error::from_raw_os_error(libc::EACCES),
+                unavailable_observation()
+            )
+            .unwrap(),
+            Observation::State(KernelDisplayObservation {
+                grant_state: DisplayGrantState::SuspendedForeignContent,
+                ..
+            })
+        ));
+        assert!(matches!(
+            classify_capture_error(
+                io::Error::from_raw_os_error(libc::EKEYREVOKED),
+                unavailable_observation()
+            )
+            .unwrap(),
+            Observation::Revoked
+        ));
+        assert!(classify_capture_error(
+            io::Error::from_raw_os_error(libc::EIO),
+            unavailable_observation()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn teardown_accepts_authority_that_is_already_gone() {
+        for errno in [libc::ECANCELED, libc::EKEYREVOKED, libc::ENODEV] {
+            assert!(normalize_detach(Err(io::Error::from_raw_os_error(errno))).is_ok());
+        }
+        assert!(normalize_detach(Err(io::Error::from_raw_os_error(libc::EIO))).is_err());
+    }
+}
