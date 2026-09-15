@@ -160,16 +160,16 @@ impl OutputPool {
         }
         let image = self
             .images
-            .get_mut(slot)
+            .get(slot)
             .ok_or_else(|| invalid("completed output has an invalid image slot"))?;
         if image.is_some() {
             return Err(invalid("completed output has an invalid image slot"));
         }
-        *image = Some(destination);
         match self.access.complete(finished)? {
             AccessReady::Publish(permit) if permit.slot() == slot => Ok(ReadyOutput {
                 pool,
                 private,
+                destination,
                 permit,
             }),
             _ => Err(invalid("producer completion returned the wrong slot")),
@@ -181,6 +181,7 @@ impl OutputPool {
         let ReadyOutput {
             pool,
             private,
+            destination,
             permit,
         } = output;
         if !Arc::ptr_eq(&self.identity, &pool) {
@@ -195,6 +196,7 @@ impl OutputPool {
                 buffer,
                 PublishedOutput {
                     pool,
+                    image: destination,
                     publication,
                     content_serial,
                 },
@@ -205,24 +207,45 @@ impl OutputPool {
     /// Begin waiting for readers after the transport returns an output.
     pub fn begin_return(&mut self, output: PublishedOutput) -> io::Result<OutputReturn> {
         let PublishedOutput {
-            pool, publication, ..
+            pool,
+            image,
+            publication,
+            ..
         } = output;
         if !Arc::ptr_eq(&self.identity, &pool) {
             return Err(invalid("published output belongs to another pool"));
         }
         self.access
             .returned(publication)
-            .map(|pending| OutputReturn { pool, pending })
+            .map(|pending| OutputReturn {
+                pool,
+                image,
+                pending,
+            })
     }
 
     /// Make a returned slot writable only after all native readers retire.
     pub fn finish_return(&mut self, returned: CompletedReturn) -> io::Result<usize> {
-        let CompletedReturn { pool, finished } = returned;
+        let CompletedReturn {
+            pool,
+            image,
+            finished,
+        } = returned;
         if !Arc::ptr_eq(&self.identity, &pool) {
             return Err(invalid("completed return belongs to another pool"));
         }
         match self.access.complete(finished)? {
-            AccessReady::Writable { slot } => Ok(slot),
+            AccessReady::Writable { slot } => {
+                let destination = self
+                    .images
+                    .get_mut(slot)
+                    .ok_or_else(|| invalid("completed return has an invalid image slot"))?;
+                if destination.is_some() {
+                    return Err(invalid("completed return has an occupied image slot"));
+                }
+                *destination = Some(image);
+                Ok(slot)
+            }
             AccessReady::Publish(_) => Err(invalid("reader completion became a publication")),
         }
     }
@@ -339,6 +362,7 @@ pub struct FinishedOutput {
 pub struct ReadyOutput {
     pool: Arc<()>,
     private: PrivateFrame,
+    destination: Image,
     permit: PublishPermit,
 }
 
@@ -346,6 +370,7 @@ pub struct ReadyOutput {
 #[must_use = "retain the publication until transport releases the output"]
 pub struct PublishedOutput {
     pool: Arc<()>,
+    image: Image,
     publication: Publication,
     content_serial: Option<std::num::NonZeroU64>,
 }
@@ -368,6 +393,7 @@ impl PublishedOutput {
 #[must_use = "wait for native readers before reusing the output"]
 pub struct OutputReturn {
     pool: Arc<()>,
+    image: Image,
     pending: PendingAccess,
 }
 
@@ -375,6 +401,7 @@ impl OutputReturn {
     pub async fn wait(self) -> CompletedReturn {
         CompletedReturn {
             pool: self.pool,
+            image: self.image,
             finished: self.pending.wait().await,
         }
     }
@@ -384,6 +411,7 @@ impl OutputReturn {
 #[must_use = "apply the completed reader wait to its output pool"]
 pub struct CompletedReturn {
     pool: Arc<()>,
+    image: Image,
     finished: FinishedAccess,
 }
 

@@ -71,11 +71,13 @@ impl OutputSession {
         output: ReadyOutput,
         pts_ns: i64,
         discontinuity: bool,
-    ) -> Result<(PrivateBuffer, VideoFrame), PublishError> {
-        let (private, published) = self.pool.publish(output).map_err(|error| PublishError {
-            private: None,
-            retirement: None,
-            error,
+    ) -> Result<(PrivateBuffer, VideoFrame), Box<PublishError>> {
+        let (private, published) = self.pool.publish(output).map_err(|error| {
+            Box::new(PublishError {
+                private: None,
+                retirement: None,
+                error,
+            })
         })?;
         match self
             .transport
@@ -85,11 +87,11 @@ impl OutputSession {
             Err(error) => {
                 let (published, error) = error.into_parts();
                 let retirement = self.pool.begin_return(published).ok();
-                Err(PublishError {
+                Err(Box::new(PublishError {
                     private: Some(private),
                     retirement,
                     error,
-                })
+                }))
             }
         }
     }
