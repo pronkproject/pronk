@@ -4,12 +4,12 @@ use std::io;
 use std::num::NonZeroU64;
 use std::os::fd::AsFd;
 
-use castkms_renderer::SourceJob;
+use castkms_renderer::{SourceGeometry, SourceJob};
 use pronk_gpu::vulkan::{PendingPrivateRead, SourceImage};
 
 use crate::{ImportedSource, PrivateBuffer, PrivateFrame};
 
-/// A fullscreen source paired with independently available private storage.
+/// A source region paired with independently available private output storage.
 ///
 /// ```compile_fail
 /// use pronk_renderer_worker::PreparedSource;
@@ -24,26 +24,32 @@ pub struct PreparedSource<'job, 'renderer, F: AsFd> {
     job: SourceJob<'job, 'renderer, F>,
     image: SourceImage,
     destination: PrivateBuffer,
+    geometry: SourceGeometry,
 }
 
 impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
-    /// Validate the initial fullscreen profile before native source access.
+    /// Match the complete output to private storage before native source access.
     pub fn new(
         source: ImportedSource<'job, 'renderer, F>,
         destination: PrivateBuffer,
     ) -> Result<Self, SourcePreparationError<ImportedSource<'job, 'renderer, F>>> {
-        if let Err(error) = validate(&source, &destination) {
+        if let Err(error) = validate_destination(source.geometry, destination.extent()) {
             return Err(SourcePreparationError {
                 source: Box::new(source),
                 destination,
                 error,
             });
         }
-        let ImportedSource { job, image, .. } = source;
+        let ImportedSource {
+            job,
+            image,
+            geometry,
+        } = source;
         Ok(Self {
             job,
             image,
             destination,
+            geometry,
         })
     }
 
@@ -55,6 +61,7 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
             job,
             image,
             destination,
+            geometry,
         } = self;
         match job.release_without_access() {
             Ok(()) => {
@@ -68,6 +75,7 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
                         job,
                         image,
                         destination,
+                        geometry,
                     }),
                     error,
                 })
@@ -90,12 +98,19 @@ impl<'job, 'renderer, F: AsFd> PreparedSource<'job, 'renderer, F> {
             job,
             image,
             destination,
+            geometry,
         } = self;
         let PrivateBuffer {
             identity,
             image: destination,
         } = destination;
-        match image.submit_private_copy(destination) {
+        match image.submit_private_region(
+            destination,
+            geometry.source(),
+            [0, 0],
+            geometry.destination(),
+            [0; 3],
+        ) {
             Ok(pending) => Ok(SubmittedSource {
                 job,
                 identity,
@@ -236,25 +251,81 @@ impl ReleasedSource {
     }
 }
 
-fn validate<F: AsFd>(
-    source: &ImportedSource<'_, '_, F>,
-    destination: &PrivateBuffer,
+fn validate_destination(
+    geometry: SourceGeometry,
+    private: (std::num::NonZeroU32, std::num::NonZeroU32),
 ) -> io::Result<()> {
-    let image = source.job.image().extent();
-    let geometry = source.geometry;
-    let crop = geometry.source();
-    let private = destination.extent();
-    if crop.origin() != [0, 0]
-        || crop.extent() != image
-        || geometry.destination() != image
-        || geometry.output() != image
-        || private.0.get() != image.width()
-        || private.1.get() != image.height()
+    if private.0.get() != geometry.output().width() || private.1.get() != geometry.output().height()
     {
         return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "renderer source is outside the fullscreen reference profile",
+            io::ErrorKind::InvalidInput,
+            "private destination dimensions do not match the complete output",
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use drm_display_executor::scene::geometry::{Extent, SourceRect};
+
+    use super::*;
+
+    fn extent(width: u32, height: u32) -> Extent {
+        Extent::new(width, height).unwrap()
+    }
+
+    fn private(width: u32, height: u32) -> (NonZeroU32, NonZeroU32) {
+        (
+            NonZeroU32::new(width).unwrap(),
+            NonZeroU32::new(height).unwrap(),
+        )
+    }
+
+    #[test]
+    fn output_sized_storage_accepts_crops_scaling_and_padding() {
+        let image = extent(1920, 1080);
+        let output = extent(1280, 720);
+        for (origin, crop, destination) in [
+            ([0, 0], image, output),
+            ([20, 30], extent(640, 360), output),
+            ([20, 30], extent(640, 360), extent(320, 180)),
+            ([1919, 1079], extent(1, 1), output),
+        ] {
+            let geometry = SourceGeometry::new(
+                SourceRect::new(image, origin, crop).unwrap(),
+                destination,
+                output,
+            )
+            .unwrap();
+            assert!(validate_destination(geometry, private(1280, 720)).is_ok());
+        }
+    }
+
+    #[test]
+    fn private_storage_must_match_output_not_source_or_plane() {
+        let image = extent(1920, 1080);
+        let geometry = SourceGeometry::new(
+            SourceRect::new(image, [20, 30], extent(640, 360)).unwrap(),
+            extent(320, 180),
+            extent(1280, 720),
+        )
+        .unwrap();
+        for dimensions in [
+            private(1920, 1080),
+            private(640, 360),
+            private(320, 180),
+            private(1281, 720),
+            private(1280, 721),
+        ] {
+            assert_eq!(
+                validate_destination(geometry, dimensions)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
 }

@@ -15,6 +15,7 @@ pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
 thiserror.workspace = true
 
 [dev-dependencies]
+drm-display-executor = { path = "../drm-display-executor" }
 tokio.workspace = true
 
 [lints]
