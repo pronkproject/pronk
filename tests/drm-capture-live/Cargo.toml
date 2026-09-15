@@ -10,12 +10,18 @@ publish = false
 name = "pronk-capture-actor-live-test"
 path = "src/actor.rs"
 
+[[bin]]
+name = "pronk-capture-handoff-live-test"
+path = "src/handoff.rs"
+
 [dependencies]
 anyhow.workspace = true
 drm-capture = { path = "../../crates/drm-capture" }
 nix.workspace = true
 pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
 pronk-capture = { path = "../../crates/pronk-capture" }
+pronk-capture-pipewire = { path = "../../crates/pronk-capture-pipewire" }
+pronk-pipewire = { path = "../../crates/pronk-pipewire" }
 tokio.workspace = true
 
 [build-dependencies]
