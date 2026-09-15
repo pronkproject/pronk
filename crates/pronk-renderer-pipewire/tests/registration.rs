@@ -88,6 +88,8 @@ async fn publication_survives_until_the_matching_release() {
         .publish(ready, 123, true)
         .unwrap_or_else(|error| panic!("publish: {}", error.error()));
     assert!(private.put(source).is_ok());
+    assert_eq!(frame.content_serial(), None);
+    let frame = frame.into_frame();
     assert_eq!(frame.buffer_id.get(), 1);
     assert_eq!(frame.sequence, 1);
     assert_eq!(frame.pts_ns, 123);
@@ -121,6 +123,7 @@ async fn publication_survives_until_the_matching_release() {
         .publish(ready, 456, false)
         .unwrap_or_else(|error| panic!("publish: {}", error.error()));
     assert!(private.put(source).is_ok());
+    let frame = frame.into_frame();
     assert_eq!(frame.buffer_id.get(), 2);
 
     let reclaimed = match transport

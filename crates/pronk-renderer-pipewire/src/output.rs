@@ -1,7 +1,7 @@
 //! Publication ownership across asynchronous PipeWire handoff.
 
 use std::io;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use pronk_pipewire::{
     PipeWireBufferTransport, VideoDamage, VideoFrame, VideoNodeIdentity, VideoSourceActorEvent,
@@ -71,7 +71,7 @@ impl OutputSession {
         output: ReadyOutput,
         pts_ns: i64,
         discontinuity: bool,
-    ) -> Result<(PrivateBuffer, VideoFrame), Box<PublishError>> {
+    ) -> Result<(PrivateBuffer, OutputFrame), Box<PublishError>> {
         let (private, published) = self.pool.publish(output).map_err(|error| {
             Box::new(PublishError {
                 private: None,
@@ -79,11 +79,18 @@ impl OutputSession {
                 error,
             })
         })?;
+        let content_serial = published.content_serial();
         match self
             .transport
             .begin_publish(published, pts_ns, discontinuity)
         {
-            Ok(frame) => Ok((private, frame)),
+            Ok(frame) => Ok((
+                private,
+                OutputFrame {
+                    frame,
+                    content_serial,
+                },
+            )),
             Err(error) => {
                 let (published, error) = error.into_parts();
                 let retirement = self.pool.begin_return(published).ok();
@@ -127,6 +134,27 @@ impl OutputSession {
                 .collect::<io::Result<Vec<_>>>()
                 .map(|returns| OutputEvent::Reclaimed(returns.into_boxed_slice())),
         }
+    }
+}
+
+/// PipeWire description for one output with its source-content identity.
+#[must_use = "submit the frame to PipeWire or stop its output generation"]
+pub struct OutputFrame {
+    frame: VideoFrame,
+    content_serial: Option<NonZeroU64>,
+}
+
+impl OutputFrame {
+    pub fn content_serial(&self) -> Option<NonZeroU64> {
+        self.content_serial
+    }
+
+    pub fn frame(&self) -> &VideoFrame {
+        &self.frame
+    }
+
+    pub fn into_frame(self) -> VideoFrame {
+        self.frame
     }
 }
 

@@ -2,7 +2,7 @@
 
 mod output;
 mod registration;
-pub use output::{OutputEvent, OutputSession, PublishError};
+pub use output::{OutputEvent, OutputFrame, OutputSession, PublishError};
 pub use registration::Registration;
 
 use std::io;
