@@ -11,6 +11,7 @@ use drm_display_executor::scene::{
 };
 use pronk_gpu::vulkan::{
     Blender, ColorPipelineProgram, Device, OutputColorProgram, PrivateLayer, SceneRequirements,
+    SourceRequirements,
 };
 
 use crate::pool::SceneBufferRole;
@@ -18,7 +19,7 @@ use crate::scene_pool::{ScenePool, MAX_SCENE_LAYERS};
 use crate::{PrivateBuffer, PrivateFrame, SourceAlpha};
 
 struct LayerPlan {
-    source: Extent,
+    source: SourceRequirements,
     crop: SourceRect,
     destination: DestinationRect,
     transform: Transform,
@@ -51,7 +52,7 @@ impl SceneComposer {
             .map_err(io::Error::other)?;
         for layer in scene.layers {
             layers.push(LayerPlan {
-                source: layer.source.extent,
+                source: layer.source,
                 crop: layer.crop,
                 destination: layer.destination,
                 transform: layer.transform,
@@ -77,6 +78,11 @@ impl SceneComposer {
         self.layers.len()
     }
 
+    /// Return the exact external image profile qualified for one layer.
+    pub fn source_requirements(&self, index: usize) -> Option<SourceRequirements> {
+        self.layers.get(index).map(|layer| layer.source)
+    }
+
     /// Allocate independently bounded final and source storage for this profile.
     ///
     /// A final image may remain checked out while a smaller set of source
@@ -86,7 +92,7 @@ impl SceneComposer {
         final_capacity: NonZeroUsize,
         source_capacity: NonZeroUsize,
     ) -> io::Result<ScenePool> {
-        let sources = self.layers.iter().map(|layer| layer.source);
+        let sources = self.layers.iter().map(|layer| layer.source.extent);
         ScenePool::new(
             &self.device,
             self.output,
@@ -202,7 +208,11 @@ impl SceneComposer {
             ));
         }
         for (index, (source, plan)) in inputs.frames.layers.iter().zip(&self.layers).enumerate() {
-            if source.extent() != (nonzero(plan.source.width()), nonzero(plan.source.height()))
+            if source.extent()
+                != (
+                    nonzero(plan.source.extent.width()),
+                    nonzero(plan.source.extent.height()),
+                )
                 || !source.is_owned_by(&self.device)
                 || !source
                     .buffer
@@ -526,6 +536,8 @@ mod tests {
         .unwrap();
         assert_eq!(composer.output(), extent);
         assert_eq!(composer.layer_count(), 1);
+        assert_eq!(composer.source_requirements(0), Some(source));
+        assert_eq!(composer.source_requirements(1), None);
         let mut pool = composer
             .create_pool(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(2).unwrap())
             .unwrap();

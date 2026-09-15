@@ -642,6 +642,34 @@ placements after source and staging reuse. Geometry tests check reversed pixel
 edges, one-pixel footprints and quarter-turn rejection. See the
 [Vulkan blit contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdBlitImage.html).
 
+## Qualified complete scenes
+
+`SceneComposer` prepares one ordered visual profile before source acquisition.
+It retains every layer's exact packed format, modifier and source extent with
+its crop, destination, transform, blend and color program. The output extent
+and output color program belong to the same nominal profile. An adapter can
+query each source requirement while validating a newly dequeued scene without
+exposing the composer's native programs or private-buffer identity.
+
+The associated `ScenePool` gives every layer a distinct source-sized private
+storage role. Final-image and source-stage capacities are independent, but a
+new scene reservation is available only when one final image and all source
+stages can be checked out together. Downstream retention can therefore stop
+new source admission without making an admitted compositor read wait for an
+output allocation. Completed source stages return independently after
+composition while final images remain with PipeWire or an encoder.
+
+`SceneFrames` accepts ordered layers only under one nonzero content serial.
+Composition rechecks the nominal profile and exact layer role before applying
+per-layer color, alpha-aware bottom-to-top blending and final output color.
+Structurally identical composers cannot exchange their private buffers.
+
+The version-6 raw scene records are bound, but no production code dequeues or
+parses them yet. That adapter must retain the complete packet under one kernel
+job, import all layers against the requirements above, aggregate their concrete
+native completion, release the job once and only then wait for private pixels.
+The older single-source job is not a per-layer substitute for that transaction.
+
 ## Current scope
 
 The generated-image media harness uses the non-exportable shader path. Three
