@@ -131,13 +131,25 @@ pub const DMA_BUF_SYNC_WRITE: u64 = 2;
 pub const DMA_BUF_SYNC_START: u64 = 0;
 pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
-pub const RENDERER_VERSION: u32 = 5;
+pub const RENDERER_VERSION: u32 = 6;
 pub const RENDERER_PROBE_PRIVATE: u32 = 1;
 pub const RENDERER_PROBE_STARTUP_IMAGE: u32 = 2;
 pub const RENDERER_RELEASE_NO_ACCESS: u32 = 1;
 pub const RENDERER_RELEASE_CPU_DONE: u32 = 2;
 pub const RENDERER_RELEASE_SUBMITTED: u32 = 3;
 pub const RENDERER_MAX_PLANES: usize = 4;
+pub const RENDERER_SCENE_VERSION: u32 = 1;
+pub const RENDERER_SCENE_MAX_BYTES: usize = 65_536;
+pub const RENDERER_SCENE_MAX_LAYERS: usize = 24;
+pub const RENDERER_SCENE_MAX_COLOR_OPS: usize = 16;
+pub const RENDERER_LAYER_PRIMARY: u32 = 0;
+pub const RENDERER_LAYER_OVERLAY: u32 = 1;
+pub const RENDERER_LAYER_CURSOR: u32 = 2;
+pub const RENDERER_COLOR_BYPASS: u32 = 0;
+pub const RENDERER_COLOR_SRGB_EOTF: u32 = 1;
+pub const RENDERER_COLOR_SRGB_INVERSE_EOTF: u32 = 2;
+pub const RENDERER_COLOR_MATRIX: u32 = 3;
+pub const RENDERER_COLOR_LUT: u32 = 4;
 pub const EXECUTION_HOST_V1: u32 = 1;
 pub const EXECUTION_GPU_V1: u32 = 2;
 
@@ -478,6 +490,57 @@ pub struct DrmCastkmsRendererReleaseSource {
     pub kind: u32,
     pub flags: u32,
     pub reserved: [u32; 3],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererDequeueScene {
+    pub result: u64,
+    pub capacity: u32,
+    pub flags: u32,
+    pub reserved: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererScene {
+    pub version: u32,
+    pub bytes: u32,
+    pub job_id: u64,
+    pub content_serial: u64,
+    pub width: u32,
+    pub height: u32,
+    pub layer_count: u32,
+    pub producer_fd: i32,
+    pub output_color_count: u32,
+    pub reserved: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererLayer {
+    pub bytes: u32,
+    pub kind: u32,
+    pub zpos: u32,
+    pub format: u32,
+    pub modifier: u64,
+    pub width: u32,
+    pub height: u32,
+    pub source: [u32; 4],
+    pub position: [i32; 2],
+    pub destination: [u32; 2],
+    pub color_encoding: u32,
+    pub color_range: u32,
+    pub plane_count: u32,
+    pub color_count: u32,
+    pub planes: [DrmCastkmsRendererSourcePlane; RENDERER_MAX_PLANES],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererColor {
+    pub kind: u32,
+    pub payload_bytes: u32,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -888,6 +951,12 @@ nix::ioctl_write_ptr!(
     0x4b,
     DrmCastkmsRendererReleaseSource
 );
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_dequeue_scene,
+    b'd',
+    0x4c,
+    DrmCastkmsRendererDequeueScene
+);
 
 // DRM_COMMAND_BASE (0x40) + DRM_CASTKMS_CAPTURE_QUERY_CAPS (0x00).
 nix::ioctl_readwrite!(
@@ -1061,7 +1130,7 @@ mod tests {
 
     #[test]
     fn renderer_operations_match_the_uapi_layouts() {
-        assert_eq!(RENDERER_VERSION, 5);
+        assert_eq!(RENDERER_VERSION, 6);
         assert_eq!(RENDERER_PROBE_PRIVATE, 1);
         assert_eq!(RENDERER_PROBE_STARTUP_IMAGE, 2);
         assert_eq!(EXECUTION_HOST_V1, 1);
@@ -1105,6 +1174,24 @@ mod tests {
         assert_eq!(std::mem::offset_of!(DrmCastkmsRendererSource, planes), 80);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererDequeueSource>(), 24);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererReleaseSource>(), 32);
+        assert_eq!(RENDERER_SCENE_VERSION, 1);
+        assert_eq!(RENDERER_SCENE_MAX_BYTES, 65_536);
+        assert_eq!(RENDERER_SCENE_MAX_LAYERS, 24);
+        assert_eq!(RENDERER_SCENE_MAX_COLOR_OPS, 16);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererDequeueScene>(), 24);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererDequeueScene>(), 8);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererScene>(), 48);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererScene>(), 8);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererScene, job_id), 8);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererScene, producer_fd),
+            36
+        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererLayer>(), 144);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererLayer>(), 8);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererLayer, modifier), 16);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererLayer, planes), 80);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererColor>(), 8);
     }
 
     #[test]
