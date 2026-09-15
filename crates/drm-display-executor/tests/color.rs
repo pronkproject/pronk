@@ -4,7 +4,7 @@ use drm_display_executor::render::cpu::{
 };
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
-    color::{Lut, LutError, OutputColor},
+    color::{ColorMatrix, Lut, LutError, OutputColor},
     format::PackedRgbFormat,
     geometry::Extent,
 };
@@ -83,6 +83,8 @@ fn output_table_follows_blending_and_leaves_padding_untouched() {
         [0; 3],
         &[layer],
         OutputColor {
+            degamma: None,
+            matrix: None,
             gamma: Some(Lut::new(&[[0; 3], [16384; 3], [65535; 3]]).unwrap()),
         },
     )
@@ -111,6 +113,8 @@ fn table_sees_full_precision_and_transforms_uncovered_background() {
         [0; 3],
         &[layer],
         OutputColor {
+            degamma: None,
+            matrix: None,
             gamma: Some(Lut::new(&entries).unwrap()),
         },
     )
@@ -121,9 +125,57 @@ fn table_sees_full_precision_and_transforms_uncovered_background() {
         [255; 3],
         &[],
         OutputColor {
+            degamma: None,
+            matrix: None,
             gamma: Some(Lut::new(&[[257, 514, 771]]).unwrap()),
         },
     )
     .unwrap();
     assert_eq!(output, [1, 2, 3, 255]);
+}
+
+#[test]
+fn output_color_applies_degamma_matrix_then_gamma() {
+    let degamma = [[1000, 2000, 3000]];
+    let gamma = [[111, 222, 333], [444, 555, 666]];
+    let mut coefficients = [0; 12];
+    coefficients[0] = 1 << 32;
+    coefficients[6] = 1 << 32;
+    coefficients[9] = 1 << 32;
+    assert_eq!(
+        OutputColor {
+            degamma: Some(Lut::new(&degamma).unwrap()),
+            matrix: Some(ColorMatrix::from_sign_magnitude(coefficients)),
+            gamma: Some(Lut::new(&gamma).unwrap()),
+        }
+        .apply([9, 8, 7]),
+        [116, 237, 343]
+    );
+}
+
+#[test]
+fn output_matrix_clamps_signed_and_extreme_results() {
+    let negative_one = (1 << 63) | (1 << 32);
+    let mut negative = [0; 12];
+    negative[0] = negative_one;
+    negative[5] = 1 << 32;
+    negative[10] = 1 << 32;
+    assert_eq!(
+        OutputColor {
+            degamma: None,
+            matrix: Some(ColorMatrix::from_sign_magnitude(negative)),
+            gamma: None,
+        }
+        .apply([12345, 456, 789]),
+        [0, 456, 789]
+    );
+    assert_eq!(
+        OutputColor {
+            degamma: None,
+            matrix: Some(ColorMatrix::from_sign_magnitude([i64::MAX as u64; 12])),
+            gamma: None,
+        }
+        .apply([u16::MAX; 3]),
+        [u16::MAX; 3]
+    );
 }

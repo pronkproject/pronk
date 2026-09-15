@@ -50,19 +50,76 @@ impl<'a> Lut<'a> {
             ((a * (MAX - fraction) + b * fraction + MAX / 2) / MAX) as u16
         })
     }
+
+    fn sample_extended(self, input: [i32; 3]) -> [i32; 3] {
+        self.sample(input.map(|value| value.clamp(0, i32::from(u16::MAX)) as u16))
+            .map(i32::from)
+    }
 }
 
-/// Post-composition color selection; identity unless a gamma table is supplied.
+/// A three-by-four matrix of DRM S31.32 sign-magnitude coefficients.
 ///
-/// No degamma, matrix, transfer-function inference or per-plane color operations
-/// are implied. The table operates after blending, before output byte encoding.
+/// Each row transforms RGB and adds its fourth coefficient in normalized channel
+/// units. Results retain signed extended range until their pipeline boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColorMatrix {
+    coefficients: [u64; 12],
+}
+
+impl ColorMatrix {
+    pub const fn from_sign_magnitude(coefficients: [u64; 12]) -> Self {
+        Self { coefficients }
+    }
+
+    pub const fn sign_magnitude(self) -> [u64; 12] {
+        self.coefficients
+    }
+
+    fn apply(self, input: [i32; 3]) -> [i32; 3] {
+        let signed = |raw: u64| {
+            let magnitude = i128::from(raw & !(1 << 63));
+            if raw >> 63 == 0 {
+                magnitude
+            } else {
+                -magnitude
+            }
+        };
+        std::array::from_fn(|row| {
+            let mut sum = signed(self.coefficients[row * 4 + 3]);
+            for (channel, input) in input.iter().enumerate() {
+                sum += signed(self.coefficients[row * 4 + channel]) * i128::from(*input);
+            }
+            // The wide accumulator covers all coefficients and i32 inputs.
+            // Saturation preserves a defined extended range for hostile values.
+            ((sum + (1 << 31)) >> 32).clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32
+        })
+    }
+}
+
+/// Post-composition degamma, matrix and gamma before output quantization.
+///
+/// Lookup tables clamp their input. The matrix uses signed extended-range
+/// arithmetic; its result is clamped before the final table or output.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OutputColor<'a> {
+    pub degamma: Option<Lut<'a>>,
+    pub matrix: Option<ColorMatrix>,
     pub gamma: Option<Lut<'a>>,
 }
 
 impl OutputColor<'_> {
     pub fn apply(self, input: [u16; 3]) -> [u16; 3] {
-        self.gamma.map_or(input, |table| table.sample(input))
+        let mut channels = input.map(i32::from);
+        if let Some(degamma) = self.degamma {
+            channels = degamma.sample_extended(channels);
+        }
+        if let Some(matrix) = self.matrix {
+            channels = matrix.apply(channels);
+        }
+        channels = channels.map(|value| value.clamp(0, i32::from(u16::MAX)));
+        if let Some(gamma) = self.gamma {
+            channels = gamma.sample_extended(channels);
+        }
+        channels.map(|value| value as u16)
     }
 }

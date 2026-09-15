@@ -41,6 +41,8 @@ pub fn render(input: &[u8]) -> Result<Rendered> {
     ensure!(fixture.sources.len() <= 64, "too many fixture sources");
     ensure!(fixture.layers.len() <= 256, "too many fixture layers");
     let color = OutputColor {
+        degamma: None,
+        matrix: None,
         gamma: fixture.output.gamma.as_deref().map(Lut::new).transpose()?,
     };
     let extent = Extent::new(fixture.output.width, fixture.output.height)?;
