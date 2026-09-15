@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use pronk_capture::allocation::Heap;
 use pronk_capture::{Actor, Config as ActorConfig, Layout};
-use pronk_capture_broker::Session;
+use pronk_capture_broker::CaptureAccess;
 use pronk_capture_pipewire::Video;
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoSourceConfig, MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
@@ -44,9 +44,9 @@ struct ActiveCapture {
     video: Video<OwnedFd>,
 }
 
-/// Sole owner of one generic DRM capture session and its PipeWire producer.
+/// Sole owner of capture access and its per-generation PipeWire producer.
 pub struct DrmCapturePipeline {
-    session: Option<Session>,
+    capture: CaptureAccess,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: DrmCapturePipelineConfig,
     active: Option<ActiveCapture>,
@@ -67,12 +67,12 @@ impl std::fmt::Debug for DrmCapturePipeline {
 
 impl DrmCapturePipeline {
     pub fn new(
-        session: Session,
+        capture: CaptureAccess,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: DrmCapturePipelineConfig,
     ) -> Self {
         Self {
-            session: Some(session),
+            capture,
             producer_remotes,
             config,
             active: None,
@@ -113,10 +113,8 @@ impl DrmCapturePipeline {
             return Err(MediaPipelineError::new("capture start was cancelled"));
         }
         let client = self
-            .session
-            .as_ref()
-            .ok_or_else(|| MediaPipelineError::new("capture session has been released"))?
-            .open_capture()
+            .capture
+            .open()
             .map_err(|error| MediaPipelineError::new(format!("open capture session: {error}")))?;
         let offer = client.describe().map_err(|error| {
             MediaPipelineError::new(format!("describe capture output: {error}"))
@@ -316,13 +314,7 @@ impl CapturePipelinePort for DrmCapturePipeline {
         if let Some(generation) = self.active.as_ref().map(|active| active.generation) {
             self.stop_active(generation).await?;
         }
-        let Some(session) = self.session.take() else {
-            return Ok(());
-        };
-        session
-            .release()
-            .await
-            .map_err(|error| MediaPipelineError::new(format!("release display session: {error}")))
+        Ok(())
     }
 }
 
