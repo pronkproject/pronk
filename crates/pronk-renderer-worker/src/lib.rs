@@ -7,6 +7,7 @@ mod reader;
 mod reads;
 mod scene;
 mod scene_pool;
+mod scene_profile;
 mod scene_reads;
 mod source;
 mod submission;

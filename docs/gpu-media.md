@@ -682,8 +682,10 @@ complete packet under one kernel job, including all installed descriptors,
 geometry, stacking and color payloads. Output color remains an ordered raw
 operation list: the current record gives both degamma and gamma tables the same
 LUT kind while omitting absent stages, so one LUT cannot be assigned to its
-display-order slot unambiguously. The UAPI needs stage identity before Pronk can
-construct `OutputColor` without guessing.
+display-order slot unambiguously. Pronk qualifies every unambiguous empty,
+matrix, two-LUT or LUT/matrix arrangement and rejects a lone LUT as unsupported.
+The UAPI needs stage identity before that final valid configuration can be
+accepted without guessing.
 
 Once that contract is explicit, the adapter can import all layers against the
 requirements above, transfer the prepared aggregate completion, release the

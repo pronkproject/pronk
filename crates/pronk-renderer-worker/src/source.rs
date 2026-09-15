@@ -183,6 +183,10 @@ fn source_format(fourcc: u32) -> io::Result<SourceFormat> {
     Ok(SourceFormat { packed, alpha })
 }
 
+pub(crate) fn packed_format(fourcc: u32) -> io::Result<PackedFormat> {
+    source_format(fourcc).map(|format| format.packed)
+}
+
 pub(crate) fn source_alpha(fourcc: u32, packed: PackedFormat) -> io::Result<SourceAlpha> {
     let format = source_format(fourcc)?;
     if format.packed != packed {
