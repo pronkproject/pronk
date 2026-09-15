@@ -183,8 +183,8 @@ impl<'job, 'renderer, F: AsFd> SubmittedSource<'job, 'renderer, F> {
 
 /// A failed CastKMS release retaining the complete worker state for retry.
 pub struct SourceReleaseError<S> {
-    source: Box<S>,
-    error: io::Error,
+    pub(crate) source: Box<S>,
+    pub(crate) error: io::Error,
 }
 
 impl<S> SourceReleaseError<S> {
@@ -194,6 +194,10 @@ impl<S> SourceReleaseError<S> {
 
     pub fn into_source(self) -> S {
         *self.source
+    }
+
+    pub fn into_parts(self) -> (S, io::Error) {
+        (*self.source, self.error)
     }
 }
 

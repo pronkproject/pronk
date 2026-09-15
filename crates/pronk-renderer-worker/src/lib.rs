@@ -3,6 +3,7 @@
 mod activation;
 mod output;
 mod pool;
+mod reader;
 mod source;
 mod submission;
 
@@ -12,6 +13,7 @@ pub use output::{
     OutputScope, PendingOutput, PublishedOutput, ReadyOutput,
 };
 pub use pool::{PrivateBuffer, PrivatePool, RejectedBuffer};
+pub use reader::{RejectedSource, SourceOpportunity, SourceReader, SourceReaderStartError};
 pub use source::{ImportError, ImportedSource};
 pub use submission::{
     PreparedSource, ReleasedSource, SourcePreparationError, SourceReleaseError,

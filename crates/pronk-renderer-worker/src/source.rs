@@ -64,6 +64,10 @@ impl<J> ImportError<J> {
     pub fn into_job(self) -> J {
         *self.job
     }
+
+    pub fn into_parts(self) -> (J, io::Error) {
+        (*self.job, self.error)
+    }
 }
 
 fn import<F: AsFd>(device: &Device, job: &SourceJob<'_, '_, F>) -> io::Result<SourceImage> {
