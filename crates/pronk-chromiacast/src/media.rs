@@ -857,20 +857,6 @@ impl ChromiacastMediaSession {
                 caps.width, caps.height, configuration.mode.width, configuration.mode.height
             )));
         }
-        let caps_millihz = u64::from(caps.framerate_numerator.get())
-            .checked_mul(1_000)
-            .ok_or_else(|| MediaSessionError::InvalidRequest("video refresh overflows".into()))?;
-        let configured_millihz = u64::from(configuration.mode.refresh_millihz)
-            .checked_mul(u64::from(caps.framerate_denominator.get()))
-            .ok_or_else(|| {
-                MediaSessionError::InvalidRequest("configured refresh overflows".into())
-            })?;
-        if caps_millihz != configured_millihz {
-            return Err(MediaSessionError::InvalidRequest(
-                "video caps refresh differs from the configured mode".into(),
-            ));
-        }
-
         let audio = match audio_profile {
             Some(_) => {
                 let remote: StdOwnedFd = remotes
