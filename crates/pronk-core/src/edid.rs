@@ -95,6 +95,11 @@ impl GeneratedCastDisplayEdid {
         &self.edid
     }
 
+    /// Advertised modes in preference order.
+    pub fn modes(&self) -> &[EdidMode] {
+        &self.modes
+    }
+
     /// Whether two generated EDIDs describe the same monitor configuration,
     /// allowing only their presentation names to differ.
     pub fn has_same_monitor_configuration(&self, other: &Self) -> bool {
