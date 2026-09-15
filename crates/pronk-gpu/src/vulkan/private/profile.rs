@@ -5,6 +5,7 @@ use std::num::NonZeroU32;
 
 use drm_display_executor::scene::{
     blend::Blend,
+    color::OutputColor,
     geometry::{DestinationRect, Extent, SourceRect},
     transform::Transform,
 };
@@ -35,14 +36,15 @@ pub struct LayerRequirements {
 pub struct SceneRequirements<'a> {
     pub output: Extent,
     pub layers: &'a [LayerRequirements],
+    pub color: OutputColor<'a>,
 }
 
 impl Blender {
     /// Check one complete scene without importing, allocating or reading images.
     ///
     /// Every source format/modifier pair is queried for DMA-BUF import and blit
-    /// support. The output is queried for private intermediate storage, and all
-    /// geometry is checked against the compositor's dispatch limits. Exact
+    /// support. The output is queried for private intermediate storage. Color
+    /// stages and geometry are checked against their compute limits. Exact
     /// memory-plane layouts and available memory remain per-image obligations.
     pub fn check_scene(&self, scene: SceneRequirements<'_>) -> io::Result<()> {
         let device: Device = self.device();
@@ -50,6 +52,7 @@ impl Blender {
             nonzero(scene.output.width()),
             nonzero(scene.output.height()),
         )?;
+        device.check_output_color(scene.output, scene.color)?;
         for layer in scene.layers {
             device.check_source_image(
                 layer.source.format,

@@ -4,6 +4,7 @@ use std::io::{self, Cursor};
 use std::sync::Arc;
 
 use ash::vk;
+use drm_display_executor::scene::geometry::Extent;
 
 use super::table::Table;
 use crate::vulkan::device::{native, unsupported, DeviceInner};
@@ -20,27 +21,7 @@ pub(super) struct Program {
 
 impl Program {
     pub(super) fn new(device: Arc<DeviceInner>, entries: &[[u16; 3]]) -> io::Result<Self> {
-        // SAFETY: The retained owner keeps the physical device and instance live.
-        let queues = unsafe {
-            device
-                .instance()
-                .get_physical_device_queue_family_properties(device.physical)
-        };
-        let limits = unsafe {
-            device
-                .instance()
-                .get_physical_device_properties(device.physical)
-        }
-        .limits;
-        if !queues[device.queue_family as usize]
-            .queue_flags
-            .contains(vk::QueueFlags::COMPUTE)
-            || limits.max_compute_work_group_size[0] < 8
-            || limits.max_compute_work_group_size[1] < 8
-            || limits.max_compute_work_group_invocations < 64
-        {
-            return Err(unsupported("private gamma compute program is unsupported"));
-        }
+        let limits = requirements(&device, entries.len())?;
         let table = Table::new(Arc::clone(&device), entries)?;
         let mut owner = Self {
             device,
@@ -108,6 +89,57 @@ impl Program {
         }
         Ok(owner)
     }
+}
+
+fn requirements(device: &DeviceInner, entries: usize) -> io::Result<vk::PhysicalDeviceLimits> {
+    if !(1..=65536).contains(&entries) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "output color lookup table size is invalid",
+        ));
+    }
+    // SAFETY: The retained owner keeps the physical device and instance live.
+    let queues = unsafe {
+        device
+            .instance()
+            .get_physical_device_queue_family_properties(device.physical)
+    };
+    let limits = unsafe {
+        device
+            .instance()
+            .get_physical_device_properties(device.physical)
+    }
+    .limits;
+    if !queues[device.queue_family as usize]
+        .queue_flags
+        .contains(vk::QueueFlags::COMPUTE)
+        || limits.max_compute_work_group_size[0] < 8
+        || limits.max_compute_work_group_size[1] < 8
+        || limits.max_compute_work_group_invocations < 64
+    {
+        return Err(unsupported("private gamma compute program is unsupported"));
+    }
+    let size = entries as u64 * 16;
+    if size > u64::from(limits.max_storage_buffer_range) {
+        return Err(unsupported(
+            "gamma table exceeds native storage-buffer range",
+        ));
+    }
+    Ok(limits)
+}
+
+pub(super) fn check_support(
+    device: &DeviceInner,
+    entries: usize,
+    extent: Extent,
+) -> io::Result<()> {
+    let limits = requirements(device, entries)?;
+    if extent.width().div_ceil(8) > limits.max_compute_work_group_count[0]
+        || extent.height().div_ceil(8) > limits.max_compute_work_group_count[1]
+    {
+        return Err(unsupported("private gamma dispatch is unsupported"));
+    }
+    Ok(())
 }
 
 impl Drop for Program {

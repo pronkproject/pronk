@@ -4,7 +4,7 @@ use std::io;
 use std::sync::Arc;
 
 use ash::vk;
-use drm_display_executor::scene::color::ColorMatrix;
+use drm_display_executor::scene::{color::ColorMatrix, geometry::Extent};
 
 use super::PrivateImage;
 use crate::vulkan::device::unsupported;
@@ -15,6 +15,13 @@ mod bindings;
 mod pipeline;
 use bindings::Bindings;
 use pipeline::Program;
+
+pub(super) fn check_support(
+    device: &crate::vulkan::device::DeviceInner,
+    extent: Extent,
+) -> io::Result<()> {
+    pipeline::check_support(device, extent)
+}
 
 /// Immutable signed color matrix program for one logical device.
 #[derive(Clone)]

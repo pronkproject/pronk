@@ -1,6 +1,13 @@
-use drm_display_executor::scene::color::{ColorMatrix, Lut, OutputColor};
+use drm_display_executor::scene::{
+    color::{ColorMatrix, Lut, OutputColor},
+    geometry::Extent,
+};
 
 use super::*;
+
+fn extent(width: u32, height: u32) -> Extent {
+    Extent::new(width, height).unwrap()
+}
 
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
@@ -28,7 +35,7 @@ fn complete_output_color_matches_the_integer_reference() {
         matrix: Some(matrix),
         gamma: Some(Lut::new(&gamma_entries).unwrap()),
     };
-    let native = device.create_output_color(color).unwrap();
+    let native = device.create_output_color(extent(13, 5), color).unwrap();
     let mut image = device.allocate_private(nz(13), nz(5)).unwrap();
     let mut output = device.allocate(nz(13), nz(5), modifier).unwrap();
     for rgb in [[0, 0, 0], [17, 85, 204], [1, 127, 254], [255, 255, 255]] {
@@ -51,9 +58,21 @@ fn complete_output_color_matches_the_integer_reference() {
 #[ignore = "requires explicit Vulkan GPU selection"]
 fn empty_output_color_still_rejects_unready_or_foreign_images() {
     let (worker, _) = device();
-    let native = worker.create_output_color(OutputColor::default()).unwrap();
+    let native = worker
+        .create_output_color(extent(1, 1), OutputColor::default())
+        .unwrap();
     let error = match native.apply_waited(worker.allocate_private(nz(1), nz(1)).unwrap()) {
         Ok(_) => panic!("uninitialized image was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let wrong_extent = worker
+        .allocate_private(nz(2), nz(1))
+        .unwrap()
+        .clear_waited([0; 3])
+        .unwrap();
+    let error = match native.apply_waited(wrong_extent) {
+        Ok(_) => panic!("wrong-sized image was accepted"),
         Err(error) => error,
     };
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);

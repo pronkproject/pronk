@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use ash::vk;
 use drm_display_executor::scene::color::ColorMatrix;
+use drm_display_executor::scene::geometry::Extent;
 
 use crate::vulkan::device::{native, unsupported, DeviceInner};
 
@@ -20,29 +21,7 @@ pub(super) struct Program {
 
 impl Program {
     pub(super) fn new(device: Arc<DeviceInner>, matrix: ColorMatrix) -> io::Result<Self> {
-        // SAFETY: The retained owner keeps the physical device and instance live.
-        let queues = unsafe {
-            device
-                .instance()
-                .get_physical_device_queue_family_properties(device.physical)
-        };
-        let limits = unsafe {
-            device
-                .instance()
-                .get_physical_device_properties(device.physical)
-        }
-        .limits;
-        if !device.shader_int64
-            || !queues[device.queue_family as usize]
-                .queue_flags
-                .contains(vk::QueueFlags::COMPUTE)
-            || limits.max_compute_work_group_size[0] < 8
-            || limits.max_compute_work_group_size[1] < 8
-            || limits.max_compute_work_group_invocations < 64
-            || limits.max_push_constants_size < PARAMETER_SIZE as u32
-        {
-            return Err(unsupported("exact output matrices are unsupported"));
-        }
+        let limits = requirements(&device)?;
         let mut owner = Self {
             device,
             descriptors: vk::DescriptorSetLayout::null(),
@@ -117,6 +96,43 @@ impl Program {
         }
         Ok(owner)
     }
+}
+
+fn requirements(device: &DeviceInner) -> io::Result<vk::PhysicalDeviceLimits> {
+    // SAFETY: The retained owner keeps the physical device and instance live.
+    let queues = unsafe {
+        device
+            .instance()
+            .get_physical_device_queue_family_properties(device.physical)
+    };
+    let limits = unsafe {
+        device
+            .instance()
+            .get_physical_device_properties(device.physical)
+    }
+    .limits;
+    if !device.shader_int64
+        || !queues[device.queue_family as usize]
+            .queue_flags
+            .contains(vk::QueueFlags::COMPUTE)
+        || limits.max_compute_work_group_size[0] < 8
+        || limits.max_compute_work_group_size[1] < 8
+        || limits.max_compute_work_group_invocations < 64
+        || limits.max_push_constants_size < PARAMETER_SIZE as u32
+    {
+        return Err(unsupported("exact output matrices are unsupported"));
+    }
+    Ok(limits)
+}
+
+pub(super) fn check_support(device: &DeviceInner, extent: Extent) -> io::Result<()> {
+    let limits = requirements(device)?;
+    if extent.width().div_ceil(8) > limits.max_compute_work_group_count[0]
+        || extent.height().div_ceil(8) > limits.max_compute_work_group_count[1]
+    {
+        return Err(unsupported("output matrix dispatch is unsupported"));
+    }
+    Ok(())
 }
 
 impl Drop for Program {

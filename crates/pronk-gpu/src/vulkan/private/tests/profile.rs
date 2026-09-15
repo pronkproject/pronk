@@ -1,5 +1,6 @@
 use drm_display_executor::scene::{
     blend::Blend,
+    color::{ColorMatrix, Lut, OutputColor},
     geometry::{DestinationRect, Extent, SourceRect},
     transform::Transform,
 };
@@ -31,12 +32,22 @@ fn complete_scene_support_is_checked_without_images() {
         transform: Transform::default(),
         blend: Blend::default(),
     }];
-    blender
-        .check_scene(SceneRequirements {
-            output: extent(1280, 720),
-            layers: &layers,
-        })
-        .unwrap();
+    let table = [[0; 3], [65535; 3]];
+    let mut coefficients = [0; 12];
+    coefficients[0] = 1 << 32;
+    coefficients[5] = 1 << 32;
+    coefficients[10] = 1 << 32;
+    let color = OutputColor {
+        degamma: Some(Lut::new(&table).unwrap()),
+        matrix: Some(ColorMatrix::from_sign_magnitude(coefficients)),
+        gamma: Some(Lut::new(&table).unwrap()),
+    };
+    let result = blender.check_scene(SceneRequirements {
+        output: extent(1280, 720),
+        layers: &layers,
+        color,
+    });
+    assert_eq!(result.is_ok(), device.supports_shader_int64());
 
     let mut bad_modifier = layers;
     bad_modifier[0].source.modifier = u64::MAX;
@@ -45,6 +56,7 @@ fn complete_scene_support_is_checked_without_images() {
             .check_scene(SceneRequirements {
                 output: extent(1280, 720),
                 layers: &bad_modifier,
+                color: OutputColor::default(),
             })
             .unwrap_err()
             .kind(),
@@ -58,6 +70,7 @@ fn complete_scene_support_is_checked_without_images() {
             .check_scene(SceneRequirements {
                 output: extent(1280, 720),
                 layers: &wrong_source,
+                color: OutputColor::default(),
             })
             .unwrap_err()
             .kind(),
@@ -74,6 +87,7 @@ fn background_only_scene_still_checks_private_output_support() {
         .check_scene(SceneRequirements {
             output: extent(64, 64),
             layers: &[],
+            color: OutputColor::default(),
         })
         .is_ok());
     assert_eq!(
@@ -81,6 +95,7 @@ fn background_only_scene_still_checks_private_output_support() {
             .check_scene(SceneRequirements {
                 output: extent(u32::MAX, 1),
                 layers: &[],
+                color: OutputColor::default(),
             })
             .unwrap_err()
             .kind(),

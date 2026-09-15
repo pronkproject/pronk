@@ -4,6 +4,7 @@ use std::io;
 use std::sync::Arc;
 
 use ash::vk;
+use drm_display_executor::scene::geometry::Extent;
 
 use super::PrivateImage;
 use crate::vulkan::device::unsupported;
@@ -15,6 +16,14 @@ mod pipeline;
 mod table;
 use bindings::Bindings;
 use pipeline::Program;
+
+pub(super) fn check_support(
+    device: &crate::vulkan::device::DeviceInner,
+    entries: usize,
+    extent: Extent,
+) -> io::Result<()> {
+    pipeline::check_support(device, entries, extent)
+}
 
 /// Immutable RGB lookup data and compute program for one logical device.
 ///
