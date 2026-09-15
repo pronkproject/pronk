@@ -35,8 +35,12 @@ The binaries cover distinct boundaries:
   It requires an initial key frame, increasing encoded timestamps, and at
   least twelve decoded images including changed display content. Pixel checks
   allow a small tolerance for lossy encoding. It uses the software encoder.
+- `pronk-capture-video-live-test /dev/dri/cardN /path/to/private/socket`:
+  the continuous `Video` owner drives capture without a test-managed frame
+  loop. A real consumer verifies changing pixels and a held sample, followed
+  by joined shutdown and the owner's terminal state.
 
-For either media probe, the wrapper starts an isolated PipeWire server, runs
+For the media probes, the wrapper starts an isolated PipeWire server, runs
 the supplied already-built executable, and stops only that server:
 
 ```sh
