@@ -50,6 +50,11 @@ The binaries cover distinct boundaries:
   Use an isolated session bus and the disposable compositor's Wayland socket.
   Set `PIPEWIRE_REMOTE` to the same private socket passed on the command line.
   The two-argument wrapper below does not start Mutter or run that probe.
+- `pronk-capture-idle-revoke-live-test /dev/dri/cardN /path/to/private/socket`:
+  revoke a grant before any consumer attaches to its PipeWire source. The
+  video owner must report failure and join shutdown without waiting for a
+  capture request or returning a successful capture owner. The source uses
+  `PIPEWIRE_REMOTE`, as with the other two-argument probes.
 
 For the media probes, the wrapper starts an isolated PipeWire server, runs
 the supplied already-built executable, and stops only that server:
