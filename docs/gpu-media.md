@@ -151,6 +151,15 @@ fail without falling back to linear storage or another device. Modifier choice
 must be negotiated with the intended importer; allocator support alone does
 not qualify an encoder or a PipeWire consumer.
 
+Source imports have separate native requirements: importable storage, a
+single memory plane and source-side blits. Their Vulkan images declare only
+transfer-source usage. Writable allocations still require both blit directions
+and export support. A source layout therefore need not also be an acceptable
+destination. The exact image-usage flags are shared between capability queries
+and image creation; format, modifier, dimensions and backing checks remain
+mandatory. Read-only image usage is not revocation of a DMA-BUF descriptor or
+protection against another import of the same allocation.
+
 Images use dedicated device-local memory. Their immutable `ImageLayout` reports
 packed channel order, dimensions, modifier, plane offset, pitch and allocation
 size directly from Vulkan. `Device::allocate` selects BGRA storage;

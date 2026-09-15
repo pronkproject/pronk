@@ -9,10 +9,8 @@ use super::device::{native, unsupported, Device, DeviceInner};
 
 mod format;
 pub use format::PackedFormat;
-
-pub(super) const USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::from_raw(
-    vk::ImageUsageFlags::TRANSFER_SRC.as_raw() | vk::ImageUsageFlags::TRANSFER_DST.as_raw(),
-);
+mod usage;
+pub(super) use usage::ImageUse;
 
 /// Allocator-reported single-memory-plane packed layout, without CPU mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +74,7 @@ impl Device {
             width.get(),
             height.get(),
             modifier,
-            vk::ExternalMemoryFeatureFlags::EXPORTABLE,
+            ImageUse::OwnedStorage,
         )?;
         let modifiers = [modifier];
         let mut tiling =
@@ -97,7 +95,7 @@ impl Device {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(USAGE)
+            .usage(ImageUse::OwnedStorage.flags())
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         // SAFETY: Matching format/modifier/usage capabilities were queried; input
@@ -187,7 +185,7 @@ impl Device {
         width: u32,
         height: u32,
         modifier: u64,
-        sharing: vk::ExternalMemoryFeatureFlags,
+        usage: ImageUse,
     ) -> io::Result<()> {
         let instance = self.inner.instance();
         let physical = self.inner.physical;
@@ -208,12 +206,10 @@ impl Device {
         unsafe {
             instance.get_physical_device_format_properties2(physical, packed.native(), &mut format)
         };
-        let needed = vk::FormatFeatureFlags::BLIT_SRC | vk::FormatFeatureFlags::BLIT_DST;
-        if !entries.iter().any(|entry| {
-            entry.drm_format_modifier == modifier
-                && entry.drm_format_modifier_plane_count == 1
-                && entry.drm_format_modifier_tiling_features.contains(needed)
-        }) {
+        if !entries
+            .iter()
+            .any(|entry| usage.supports_modifier(entry, modifier))
+        {
             return Err(unsupported("modifier does not support single-plane blits"));
         }
         let mut tiling = vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
@@ -227,7 +223,7 @@ impl Device {
             .format(packed.native())
             .ty(vk::ImageType::TYPE_2D)
             .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(USAGE);
+            .usage(usage.flags());
         let mut memory = vk::ExternalImageFormatProperties::default();
         let mut properties = vk::ImageFormatProperties2::default().push_next(&mut memory);
         // SAFETY: Valid query chain for enabled capabilities; outputs are live.
@@ -242,7 +238,7 @@ impl Device {
             || !memory
                 .external_memory_properties
                 .external_memory_features
-                .contains(sharing)
+                .contains(usage.sharing())
         {
             return Err(unsupported(
                 "image dimensions or requested DMA-BUF sharing are unsupported",

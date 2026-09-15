@@ -8,7 +8,7 @@ use ash::vk;
 use pronk_dmabuf::{export_dependencies, Access, SyncFile};
 
 use super::device::{native, DeviceInner};
-use super::image::USAGE;
+use super::image::ImageUse;
 use super::{Device, ImageLayout};
 
 /// One imported source use with its explicit producer dependency retained.
@@ -37,12 +37,14 @@ impl Device {
     /// Both descriptors are consumed on success and failure. The explicit
     /// producer dependency remains separate from a later reservation snapshot.
     /// Import performs no source reading and does not wait for the producer.
+    /// Native usage requires reading the selected format and modifier, not
+    /// writing it or exporting newly allocated storage in the same layout.
     ///
     /// # Safety
     ///
     /// The descriptor and metadata must identify a compatible image allocation
     /// on this physical GPU, satisfying Vulkan external-memory requirements for
-    /// the reported format, dimensions and transfer usage. The supplied submitted
+    /// the reported format, dimensions and read-only transfer usage. The submitted
     /// fence must cover all producer writes and release in GENERAL layout with
     /// foreign queue ownership. Failed producer completion is allowed as input,
     /// but must not authorize reading invalid pixels. Native bounds checks
@@ -96,7 +98,7 @@ impl Device {
             layout.width.get(),
             layout.height.get(),
             layout.modifier,
-            vk::ExternalMemoryFeatureFlags::IMPORTABLE,
+            ImageUse::ImportedSource,
         )?;
         let planes = [vk::SubresourceLayout::default()
             .offset(layout.offset)
@@ -120,7 +122,7 @@ impl Device {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(USAGE)
+            .usage(ImageUse::ImportedSource.flags())
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         // SAFETY: Capability queries and the caller's external-image contract
