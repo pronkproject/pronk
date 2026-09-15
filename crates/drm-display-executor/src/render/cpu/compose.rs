@@ -11,7 +11,7 @@ use crate::scene::color::OutputColor;
 use crate::scene::geometry::{CopyRegion, Extent, GeometryError, SourceRect};
 use crate::scene::transform::Transform;
 
-/// One integral, unscaled layer with explicit orthogonal transform and blending.
+/// One integral crop with nearest-neighbor scaling, transform and blending.
 ///
 /// The default is premultiplied pixel alpha and fully opaque plane alpha. Source
 /// pixels must be in the same encoded RGB domain as the background and output;
@@ -23,6 +23,7 @@ pub struct Layer<'a> {
     destination: [i32; 2],
     blend: Blend,
     transform: Transform,
+    destination_extent: Option<Extent>,
 }
 
 impl<'a> Layer<'a> {
@@ -38,6 +39,7 @@ impl<'a> Layer<'a> {
             destination,
             blend: Blend::default(),
             transform: Transform::default(),
+            destination_extent: None,
         })
     }
 
@@ -47,22 +49,51 @@ impl<'a> Layer<'a> {
         self
     }
 
-    /// Select source-axis reflection and rotation without scaling the crop.
+    /// Select source-axis reflection and rotation before destination scaling.
     pub fn with_transform(mut self, transform: Transform) -> Self {
         self.transform = transform;
         self
     }
 
+    /// Scale the transformed crop to these dimensions before clipping.
+    ///
+    /// Sampling uses destination pixel centers and selects the containing
+    /// source pixel. Without an explicit extent, placement remains one-to-one.
+    /// The extent stays fixed if a subsequent call changes the transform.
+    pub fn with_destination_extent(mut self, extent: Extent) -> Self {
+        self.destination_extent = Some(extent);
+        self
+    }
+
+    fn destination_extent(&self) -> Extent {
+        self.destination_extent
+            .unwrap_or_else(|| self.transform.extent(self.source.extent()))
+    }
+
     fn visible(&self, output: Extent) -> Option<CopyRegion> {
-        let transformed = self.transform.extent(self.source.extent());
-        // Region source coordinates belong to the transformed crop grid,
-        // not the original image. sample() applies the inverse transform.
-        SourceRect::new(transformed, [0, 0], transformed)
-            .expect("complete transformed crop")
+        let destination = self.destination_extent();
+        // Region source coordinates belong to the destination grid. sample()
+        // maps their pixel centers back through scaling and transformation.
+        SourceRect::new(destination, [0, 0], destination)
+            .expect("complete destination grid")
             .clip_to(self.destination, output)
     }
 
-    fn sample(&self, transformed: [u32; 2]) -> (Rgb, u16) {
+    fn sample(&self, destination: [u32; 2]) -> (Rgb, u16) {
+        let transformed_extent = self.transform.extent(self.source.extent());
+        let destination_extent = self.destination_extent();
+        let transformed = [
+            sample_center(
+                destination[0],
+                transformed_extent.width(),
+                destination_extent.width(),
+            ),
+            sample_center(
+                destination[1],
+                transformed_extent.height(),
+                destination_extent.height(),
+            ),
+        ];
         let local = self
             .transform
             .source_at(self.source.extent(), transformed)
@@ -76,6 +107,11 @@ impl<'a> Layer<'a> {
             self.image.layout().format(),
         )
     }
+}
+
+fn sample_center(pixel: u32, source: u32, destination: u32) -> u32 {
+    // A full u32 destination and source can require 65 product bits.
+    (((2 * u128::from(pixel) + 1) * u128::from(source)) / (2 * u128::from(destination))) as u32
 }
 
 /// Compose layers in bottom-to-top order over an opaque RGB background.

@@ -272,3 +272,65 @@ fn no_visible_layers_still_initializes_the_opaque_background() {
         [204, 85, 17, 255]
     );
 }
+
+#[test]
+fn scaling_samples_centers_before_clipping() {
+    let input: Vec<_> = (1..=4).flat_map(|red| [0, 0, red, 255]).collect();
+    let image = Image::new(&input, layout(4, 1, Format::Argb8888)).unwrap();
+    for (width, placement, expected) in [
+        (8, -1, vec![1, 2, 2, 3, 3]),
+        (2, 1, vec![9, 2, 4, 9, 9]),
+        (3, 0, vec![1, 3, 4, 9, 9]),
+        (u32::MAX, i32::MIN, vec![3; 5]),
+    ] {
+        let layer = Layer::new(image, [0, 0], extent(4, 1), [placement, 0])
+            .unwrap()
+            .with_destination_extent(extent(width, 1));
+        let mut bytes = [0; 20];
+        compose(
+            &mut ImageMut::new(&mut bytes, layout(5, 1, Format::Argb8888)).unwrap(),
+            [9, 0, 0],
+            &[layer],
+        )
+        .unwrap();
+        assert_eq!(
+            bytes
+                .chunks_exact(4)
+                .map(|pixel| pixel[2])
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn scaling_uses_the_rotated_crop_and_preserves_explicit_extent() {
+    let input: Vec<_> = (1..=6).flat_map(|red| [0, 0, red, 255]).collect();
+    let image = Image::new(&input, layout(3, 2, Format::Argb8888)).unwrap();
+    let transform = Transform {
+        rotation: Rotation::Rotate90,
+        ..Transform::default()
+    };
+    let base = Layer::new(image, [1, 0], extent(2, 2), [0, 0]).unwrap();
+    for layer in [
+        base.with_transform(transform)
+            .with_destination_extent(extent(4, 2)),
+        base.with_destination_extent(extent(4, 2))
+            .with_transform(transform),
+    ] {
+        let mut bytes = [0; 32];
+        compose(
+            &mut ImageMut::new(&mut bytes, layout(4, 2, Format::Argb8888)).unwrap(),
+            [0; 3],
+            &[layer],
+        )
+        .unwrap();
+        assert_eq!(
+            bytes
+                .chunks_exact(4)
+                .map(|pixel| pixel[2])
+                .collect::<Vec<_>>(),
+            [3, 3, 6, 6, 2, 2, 5, 5]
+        );
+    }
+}
