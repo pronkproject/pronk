@@ -14,6 +14,7 @@ pub mod drm_capture_pipeline;
 pub mod gpu_output;
 pub mod kernel_display;
 pub mod kernel_display_port;
+pub mod kernel_display_with_capture;
 pub mod kernel_session_provider;
 pub mod manager;
 pub mod media_driver;
