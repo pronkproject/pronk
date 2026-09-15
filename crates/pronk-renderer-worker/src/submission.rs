@@ -178,7 +178,7 @@ impl<J> SourceSubmissionError<J> {
 #[must_use = "release the submitted source completion to CastKMS"]
 pub struct SubmittedSource<'job, 'renderer, F: AsFd> {
     job: SourceJob<'job, 'renderer, F>,
-    identity: std::sync::Arc<()>,
+    identity: std::sync::Arc<crate::pool::BufferIdentity>,
     alpha: SourceAlpha,
     pending: PendingPrivateRead,
 }
@@ -242,7 +242,7 @@ impl<S> SourceReleaseError<S> {
 /// Dropping or waiting for this owner may block while the GPU retires the read.
 #[must_use = "retire native work before using or discarding its private pixels"]
 pub struct ReleasedSource {
-    identity: std::sync::Arc<()>,
+    identity: std::sync::Arc<crate::pool::BufferIdentity>,
     alpha: SourceAlpha,
     content_serial: NonZeroU64,
     pending: PendingPrivateRead,

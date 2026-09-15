@@ -2,11 +2,12 @@
 
 use std::io;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::Arc;
 
 use drm_display_executor::scene::geometry::Extent;
 use pronk_gpu::vulkan::Device;
 
-use crate::pool::{MAX_PRIVATE_POOL_BYTES, PRIVATE_PIXEL_BYTES};
+use crate::pool::{SceneBinding, SceneBufferRole, MAX_PRIVATE_POOL_BYTES, PRIVATE_PIXEL_BYTES};
 use crate::{PrivateBuffer, PrivatePool, RejectedBuffer};
 
 /// Maximum source layers retained by one prepared scene profile.
@@ -29,6 +30,7 @@ impl ScenePool {
         output: Extent,
         source_extents: impl ExactSizeIterator<Item = Extent> + Clone,
         depth: NonZeroUsize,
+        profile: &Arc<()>,
     ) -> io::Result<Self> {
         validate_request(output, source_extents.clone(), depth)?;
         let mut allocated_bytes = 0;
@@ -38,18 +40,20 @@ impl ScenePool {
             nonzero(output.height()),
             depth,
             &mut allocated_bytes,
+            Some(SceneBinding::new(profile, SceneBufferRole::Destination)),
         )?;
         let mut sources = Vec::new();
         sources
             .try_reserve_exact(source_extents.len())
             .map_err(io::Error::other)?;
-        for extent in source_extents {
+        for (index, extent) in source_extents.enumerate() {
             sources.push(PrivatePool::new_accounted(
                 device,
                 nonzero(extent.width()),
                 nonzero(extent.height()),
                 depth,
                 &mut allocated_bytes,
+                Some(SceneBinding::new(profile, SceneBufferRole::Source(index))),
             )?);
         }
         Ok(Self {
@@ -252,6 +256,7 @@ mod tests {
             output,
             sources.into_iter(),
             NonZeroUsize::new(2).unwrap(),
+            &Arc::new(()),
         )
         .unwrap();
         assert_eq!(pool.depth().get(), 2);
@@ -279,6 +284,7 @@ mod tests {
             output,
             sources.into_iter(),
             NonZeroUsize::new(1).unwrap(),
+            &Arc::new(()),
         )
         .unwrap();
         let mut buffers = pool.take().unwrap().unwrap();

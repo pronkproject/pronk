@@ -2,6 +2,7 @@
 
 use std::io;
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::Arc;
 
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
@@ -12,6 +13,7 @@ use pronk_gpu::vulkan::{
     Blender, ColorPipelineProgram, Device, OutputColorProgram, PrivateLayer, SceneRequirements,
 };
 
+use crate::pool::SceneBufferRole;
 use crate::scene_pool::{ScenePool, MAX_SCENE_LAYERS};
 use crate::{PrivateBuffer, PrivateFrame, SourceAlpha};
 
@@ -26,6 +28,7 @@ struct LayerPlan {
 
 /// Prepared execution state for one qualified whole-scene profile.
 pub struct SceneComposer {
+    profile: Arc<()>,
     device: Device,
     blender: Blender,
     color: OutputColorProgram,
@@ -57,6 +60,7 @@ impl SceneComposer {
             });
         }
         Ok(Self {
+            profile: Arc::new(()),
             device: device.clone(),
             blender,
             color,
@@ -76,7 +80,7 @@ impl SceneComposer {
     /// Allocate bounded private storage matching this checked profile.
     pub fn create_pool(&self, depth: NonZeroUsize) -> io::Result<ScenePool> {
         let sources = self.layers.iter().map(|layer| layer.source);
-        ScenePool::new(&self.device, self.output, sources, depth)
+        ScenePool::new(&self.device, self.output, sources, depth, &self.profile)
     }
 
     /// Compose qualified source frames and apply the complete output color path.
@@ -170,6 +174,9 @@ impl SceneComposer {
         if inputs.destination.extent()
             != (nonzero(self.output.width()), nonzero(self.output.height()))
             || !inputs.destination.is_owned_by(&self.device)
+            || !inputs
+                .destination
+                .matches_scene(&self.profile, SceneBufferRole::Destination)
         {
             return Err(invalid(
                 "scene destination does not match its qualified output",
@@ -180,9 +187,12 @@ impl SceneComposer {
                 "scene source count does not match its qualified layers",
             ));
         }
-        for (source, plan) in inputs.frames.layers.iter().zip(&self.layers) {
+        for (index, (source, plan)) in inputs.frames.layers.iter().zip(&self.layers).enumerate() {
             if source.extent() != (nonzero(plan.source.width()), nonzero(plan.source.height()))
                 || !source.is_owned_by(&self.device)
+                || !source
+                    .buffer
+                    .matches_scene(&self.profile, SceneBufferRole::Source(index))
             {
                 return Err(invalid("scene source does not match its qualified layer"));
             }
@@ -537,6 +547,7 @@ mod tests {
             extent,
             [extent, extent].into_iter(),
             NonZeroUsize::new(1).unwrap(),
+            &Arc::new(()),
         )
         .unwrap();
         let SceneBuffers {
@@ -554,6 +565,87 @@ mod tests {
         let rejected = SceneFrames::new(serial, frames).err().unwrap();
         assert_eq!(rejected.cause().kind(), io::ErrorKind::InvalidInput);
         let (frames, _) = rejected.into_parts();
+        let sources = frames.into_iter().map(|frame| frame.buffer).collect();
+        assert!(pool
+            .restore(SceneBuffers {
+                destination,
+                sources,
+            })
+            .is_ok());
+        assert_eq!(pool.available(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+    fn equal_extent_layer_swaps_are_rejected_before_native_work() {
+        let (device, modifier) = device();
+        let extent = Extent::new(4, 3).unwrap();
+        let source = SourceRequirements {
+            format: PackedFormat::Bgra8,
+            extent,
+            modifier,
+        };
+        let layers = [
+            LayerRequirements {
+                source,
+                crop: SourceRect::new(extent, [0, 0], extent).unwrap(),
+                destination: DestinationRect {
+                    position: [0, 0],
+                    extent,
+                },
+                transform: Transform::default(),
+                blend: Blend::default(),
+                color: ColorPipeline::new(&[]),
+            },
+            LayerRequirements {
+                source,
+                crop: SourceRect::new(extent, [0, 0], extent).unwrap(),
+                destination: DestinationRect {
+                    position: [1, 0],
+                    extent,
+                },
+                transform: Transform::default(),
+                blend: Blend::default(),
+                color: ColorPipeline::new(&[]),
+            },
+        ];
+        let composer = SceneComposer::new(
+            &device,
+            SceneRequirements {
+                output: extent,
+                layers: &layers,
+                color: OutputColor::default(),
+            },
+        )
+        .unwrap();
+        let mut pool = composer.create_pool(NonZeroUsize::new(1).unwrap()).unwrap();
+        let SceneBuffers {
+            destination,
+            sources,
+        } = pool.take().unwrap().unwrap();
+        let serial = NonZeroU64::new(73).unwrap();
+        let mut frames: Vec<_> = sources
+            .into_iter()
+            .map(|source| {
+                let mut frame = source.clear_and_wait([17, 85, 204]).unwrap();
+                frame.content_serial = Some(serial);
+                frame
+            })
+            .collect();
+        frames.swap(0, 1);
+        let frames = SceneFrames::new(serial, frames).unwrap();
+
+        let error = composer
+            .compose_and_wait(SceneInputs::new(destination, frames, [0; 3]))
+            .err()
+            .unwrap();
+        let SceneCompositionError::Rejected(rejected) = error else {
+            panic!("layer role mismatch reached native work");
+        };
+        let (inputs, _) = rejected.into_parts();
+        let (destination, frames, _) = inputs.into_parts();
+        let (_, mut frames) = frames.into_parts();
+        frames.swap(0, 1);
         let sources = frames.into_iter().map(|frame| frame.buffer).collect();
         assert!(pool
             .restore(SceneBuffers {

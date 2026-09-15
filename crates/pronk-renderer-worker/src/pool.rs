@@ -16,11 +16,39 @@ pub(crate) const PRIVATE_PIXEL_BYTES: u64 = 16;
 
 /// A fixed-size pool of non-exportable rendering buffers.
 pub struct PrivatePool {
-    identity: Arc<()>,
+    identity: Arc<BufferIdentity>,
     device: Device,
     available: Vec<PrivateBuffer>,
     capacity: NonZeroUsize,
     extent: (NonZeroU32, NonZeroU32),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SceneBufferRole {
+    Destination,
+    Source(usize),
+}
+
+pub(crate) struct SceneBinding {
+    profile: Arc<()>,
+    role: SceneBufferRole,
+}
+
+impl SceneBinding {
+    pub(crate) fn new(profile: &Arc<()>, role: SceneBufferRole) -> Self {
+        Self {
+            profile: Arc::clone(profile),
+            role,
+        }
+    }
+
+    fn matches(&self, profile: &Arc<()>, role: SceneBufferRole) -> bool {
+        Arc::ptr_eq(&self.profile, profile) && self.role == role
+    }
+}
+
+pub(crate) struct BufferIdentity {
+    scene: Option<SceneBinding>,
 }
 
 impl PrivatePool {
@@ -32,7 +60,7 @@ impl PrivatePool {
         capacity: NonZeroUsize,
     ) -> io::Result<Self> {
         let mut allocated_bytes = 0;
-        Self::new_accounted(device, width, height, capacity, &mut allocated_bytes)
+        Self::new_accounted(device, width, height, capacity, &mut allocated_bytes, None)
     }
 
     pub(crate) fn new_accounted(
@@ -41,9 +69,10 @@ impl PrivatePool {
         height: NonZeroU32,
         capacity: NonZeroUsize,
         allocated_bytes: &mut u64,
+        scene: Option<SceneBinding>,
     ) -> io::Result<Self> {
         validate_request(width, height, capacity)?;
-        let identity = Arc::new(());
+        let identity = Arc::new(BufferIdentity { scene });
         let mut available = Vec::new();
         available
             .try_reserve_exact(capacity.get())
@@ -148,7 +177,7 @@ fn invalid(message: &'static str) -> io::Error {
 /// storage or manufacture extra entries for a pool.
 #[must_use = "render into the reserved buffer or return it to its private pool"]
 pub struct PrivateBuffer {
-    pub(super) identity: Arc<()>,
+    pub(super) identity: Arc<BufferIdentity>,
     pub(super) image: PrivateImage,
 }
 
@@ -159,6 +188,13 @@ impl PrivateBuffer {
 
     pub(super) fn is_owned_by(&self, device: &Device) -> bool {
         self.image.is_owned_by(device)
+    }
+
+    pub(super) fn matches_scene(&self, profile: &Arc<()>, role: SceneBufferRole) -> bool {
+        self.identity
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.matches(profile, role))
     }
 
     /// Initialize private pixels without involving a compositor source.
