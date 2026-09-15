@@ -588,6 +588,23 @@ mod tests {
     }
 
     #[test]
+    fn maps_virtual_connector_names_to_output_indices() {
+        assert_eq!(output_index_from_connector_type_id(1).unwrap(), 0);
+        assert_eq!(
+            output_index_from_connector_type_id(MAX_CASTKMS_OUTPUTS as u32).unwrap(),
+            MAX_CASTKMS_OUTPUTS as u32 - 1
+        );
+        assert!(matches!(
+            output_index_from_connector_type_id(0),
+            Err(CardProbeError::InvalidConnectorTypeId(0))
+        ));
+        assert!(matches!(
+            output_index_from_connector_type_id(MAX_CASTKMS_OUTPUTS as u32 + 1),
+            Err(CardProbeError::InvalidConnectorTypeId(_))
+        ));
+    }
+
+    #[test]
     fn only_disconnected_outputs_are_available() {
         assert!(OutputConnection::Disconnected.is_available());
         assert!(!OutputConnection::Connected.is_available());
