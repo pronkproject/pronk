@@ -728,6 +728,12 @@ source stages to their profile pool and yields only the final private frame for
 output delivery. A profile mismatch returns every source and the final frame
 without changing any pool.
 
+The renderer-to-PipeWire scheduler treats single-source and complete-scene
+readers through one private frame-source contract. Both paths share cadence,
+output availability, publication, return and cancellation handling. Complete
+scenes specialize only the blocking wait/composition operation and the atomic
+return of source stages before their final frame enters output copying.
+
 The version-6 raw scene records are bound, but no production code dequeues or
 parses them into a GPU profile yet. `castkms-renderer` does own and validate the
 complete packet under one kernel job, including all installed descriptors,

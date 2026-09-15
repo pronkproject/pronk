@@ -8,6 +8,7 @@ mod renderer;
 mod task;
 mod types;
 mod video;
+pub use active::run_complete_scenes;
 pub use output::{OutputEvent, OutputFrame, OutputSession, PublishError};
 pub use registration::Registration;
 pub use renderer::{ActiveRendererStream, RendererStream, RendererStreamError};
