@@ -26,15 +26,16 @@ impl<'renderer, F: AsFd> SourceReader<'renderer, F> {
         private: PrivatePool,
     ) -> Result<Self, SourceReaderStartError<'renderer, F>> {
         let configuration = renderer.configuration();
-        if private.extent() != (configuration.width(), configuration.height()) {
+        if let Err(error) = validate_pool(
+            &private,
+            &device,
+            (configuration.width(), configuration.height()),
+        ) {
             return Err(SourceReaderStartError {
                 renderer,
                 device,
                 private: Box::new(private),
-                error: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "private pool dimensions do not match the active output",
-                ),
+                error,
             });
         }
         Ok(Self {
@@ -231,6 +232,26 @@ fn restore(pool: &mut PrivatePool, destination: PrivateBuffer) -> io::Result<()>
         .map_err(|_| io::Error::other("private destination pool rejected its own buffer"))
 }
 
+fn validate_pool(
+    pool: &PrivatePool,
+    device: &Device,
+    extent: (std::num::NonZeroU32, std::num::NonZeroU32),
+) -> io::Result<()> {
+    if !pool.is_owned_by(device) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private pool belongs to a different logical Vulkan device",
+        ));
+    }
+    if pool.extent() != extent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private pool dimensions do not match the active output",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +261,41 @@ mod tests {
     #[test]
     fn completed_source_attempt_can_move_to_a_blocking_worker() {
         assert_send::<SourceAttempt>();
+    }
+
+    #[test]
+    #[ignore = "requires PRONK_GPU_RENDER_NODE"]
+    fn source_pool_validation_rejects_foreign_devices_before_admission() {
+        let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
+        let device = Device::open(&node).unwrap();
+        let other = Device::open(&node).unwrap();
+        assert_eq!(device.identity(), other.identity());
+        let width = 64.try_into().unwrap();
+        let height = 32.try_into().unwrap();
+        let mut pool = PrivatePool::new(&device, width, height, 1.try_into().unwrap()).unwrap();
+        validate_pool(&pool, &device, (width, height)).unwrap();
+        validate_pool(&pool, &device.clone(), (width, height)).unwrap();
+        assert_eq!(
+            validate_pool(&pool, &other, (width, height))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput,
+        );
+        assert_eq!(
+            validate_pool(&pool, &device, (height, width))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput,
+        );
+        let buffer = pool.take().unwrap();
+        assert!(pool.take().is_none());
+        validate_pool(&pool, &device, (width, height)).unwrap();
+        assert_eq!(
+            validate_pool(&pool, &other, (width, height))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput,
+        );
+        assert!(pool.put(buffer).is_ok());
     }
 }

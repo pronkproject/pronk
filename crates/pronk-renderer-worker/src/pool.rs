@@ -15,6 +15,7 @@ const PRIVATE_PIXEL_BYTES: u64 = 16;
 /// A fixed-size pool of non-exportable rendering buffers.
 pub struct PrivatePool {
     identity: Arc<()>,
+    device: Device,
     available: Vec<PrivateBuffer>,
     capacity: NonZeroUsize,
     extent: (NonZeroU32, NonZeroU32),
@@ -45,6 +46,7 @@ impl PrivatePool {
         }
         Ok(Self {
             identity,
+            device: device.clone(),
             available,
             capacity,
             extent: (width, height),
@@ -61,6 +63,14 @@ impl PrivatePool {
 
     pub fn extent(&self) -> (NonZeroU32, NonZeroU32) {
         self.extent
+    }
+
+    /// Whether the pool uses the supplied logical Vulkan device instance.
+    ///
+    /// Ownership remains known while every buffer is checked out. Opening the
+    /// same physical GPU again does not produce a compatible private owner.
+    pub fn is_owned_by(&self, device: &Device) -> bool {
+        self.device.is_same_instance(device)
     }
 
     /// Reserve one buffer before attempting to claim a source.
