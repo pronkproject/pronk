@@ -192,4 +192,13 @@ mod tests {
         assert_eq!(target.connector_id, 29);
         assert_eq!(target.profile, GrantProfile::DisplayCecAudioV1);
     }
+
+    #[test]
+    fn brokered_sessions_reject_audio_requests() {
+        assert!(matches!(
+            validate_brokered_features(true),
+            Err(KernelSessionError::UnsupportedAudio)
+        ));
+        assert!(validate_brokered_features(false).is_ok());
+    }
 }
