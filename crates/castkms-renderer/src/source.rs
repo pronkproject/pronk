@@ -8,7 +8,7 @@ use castkms_sys::{
     drm_ioctl_castkms_renderer_dequeue_source, drm_ioctl_castkms_renderer_release_source,
     DrmCastkmsRendererDequeueSource, DrmCastkmsRendererReleaseSource, DrmCastkmsRendererSource,
     DrmCastkmsRendererSourcePlane, DRM_FORMAT_MOD_INVALID, RENDERER_MAX_PLANES,
-    RENDERER_RELEASE_CPU_DONE, RENDERER_RELEASE_NO_ACCESS,
+    RENDERER_RELEASE_CPU_DONE, RENDERER_RELEASE_NO_ACCESS, RENDERER_RELEASE_SUBMITTED,
 };
 use drm_display_executor::scene::geometry::{Extent, SourceRect};
 use nix::fcntl::{fcntl, FcntlArg};
@@ -136,6 +136,14 @@ impl<F: AsFd> SourceJob<'_, '_, F> {
     /// Promise that all synchronous CPU source access has ended.
     pub fn release_cpu(self) -> Result<(), SourceReleaseError<Self>> {
         self.release(RENDERER_RELEASE_CPU_DONE, None)
+    }
+
+    /// Transfer a native sync file covering every submitted source read.
+    pub fn release_submitted(
+        self,
+        completion: BorrowedFd<'_>,
+    ) -> Result<(), SourceReleaseError<Self>> {
+        self.release(RENDERER_RELEASE_SUBMITTED, Some(completion))
     }
 
     fn release(
@@ -556,6 +564,27 @@ mod tests {
         };
         let error = job.release_cpu().unwrap_err();
         assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
+        assert_eq!(error.into_job().content_serial().get(), 14);
+    }
+
+    #[test]
+    fn failed_submitted_release_retains_job_and_completion_owner() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut renderer = Renderer { fd: file };
+        let mut active = active_renderer(&mut renderer);
+        let source = validate_source(source_result()).unwrap();
+        let job = SourceJob {
+            renderer: &mut active,
+            id: source.id,
+            content_serial: source.content_serial,
+            image: source.image,
+            geometry: source.geometry,
+            producer: source.producer,
+        };
+        let completion = std::fs::File::open("/dev/null").unwrap();
+        let error = job.release_submitted(completion.as_fd()).unwrap_err();
+        assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
+        assert!(fcntl(completion.as_raw_fd(), FcntlArg::F_GETFD).is_ok());
         assert_eq!(error.into_job().content_serial().get(), 14);
     }
 
