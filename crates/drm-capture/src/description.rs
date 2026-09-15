@@ -84,6 +84,7 @@ mod tests {
             id: 7,
             width: 640,
             height: 480,
+            refresh_millihz: 60_000,
             format: u32::from_le_bytes(*b"XR24"),
             max_requests: 4,
             ..Default::default()
@@ -93,8 +94,8 @@ mod tests {
     #[test]
     fn description_matches_the_kernel_layout() {
         assert_eq!(size_of::<Describe>(), 48);
-        assert_eq!(offset_of!(Describe, modifier), 24);
-        assert_eq!(offset_of!(Describe, reserved), 32);
+        assert_eq!(offset_of!(Describe, modifier), 32);
+        assert_eq!(offset_of!(Describe, reserved), 40);
         assert_eq!(nix::request_code_read!(b'd', 0, 48), 0x8030_6400);
     }
 
@@ -104,11 +105,12 @@ mod tests {
         assert_eq!(output.offer.get(), 7);
         assert_eq!(output.max_requests.get(), 4);
         assert_eq!((output.width.get(), output.height.get()), (640, 480));
+        assert_eq!(output.refresh_millihz.get(), 60_000);
     }
 
     #[test]
     fn malformed_description_is_not_a_usable_offer() {
-        for field in 0..7 {
+        for field in 0..8 {
             let mut raw = valid();
             match field {
                 0 => raw.id = 0,
@@ -117,7 +119,8 @@ mod tests {
                 3 => raw.format = 0,
                 4 => raw.max_requests = 0,
                 5 => raw.modifier = INVALID_MODIFIER,
-                _ => raw.reserved[1] = 1,
+                6 => raw.refresh_millihz = 0,
+                _ => raw.reserved = 1,
             }
             assert_eq!(raw.decode().unwrap_err().kind(), io::ErrorKind::InvalidData);
         }
