@@ -4,7 +4,9 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd};
 
 use castkms_renderer::{FormatModifier, SourceGeometry, SourceJob, SourceReleaseError};
-use castkms_sys::{DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888};
+use castkms_sys::{
+    DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888,
+};
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{Device, ImageLayout, PackedFormat, SourceImage};
 
@@ -134,6 +136,8 @@ fn source_format(fourcc: u32) -> io::Result<PackedFormat> {
     match fourcc {
         DRM_FORMAT_XRGB8888 => Ok(PackedFormat::Bgra8),
         DRM_FORMAT_XBGR8888 => Ok(PackedFormat::Rgba8),
+        DRM_FORMAT_XRGB2101010 => Ok(PackedFormat::Bgr10A2),
+        DRM_FORMAT_XBGR2101010 => Ok(PackedFormat::Rgb10A2),
         _ => Err(unsupported(
             "renderer source is not a supported opaque packed RGB format",
         )),
@@ -158,6 +162,14 @@ mod tests {
             source_format(DRM_FORMAT_XBGR8888).unwrap(),
             PackedFormat::Rgba8
         );
+        assert_eq!(
+            source_format(DRM_FORMAT_XRGB2101010).unwrap(),
+            PackedFormat::Bgr10A2
+        );
+        assert_eq!(
+            source_format(DRM_FORMAT_XBGR2101010).unwrap(),
+            PackedFormat::Rgb10A2
+        );
     }
 
     #[test]
@@ -165,10 +177,14 @@ mod tests {
         for fourcc in [
             u32::from_le_bytes(*b"AR24"),
             u32::from_le_bytes(*b"AB24"),
+            u32::from_le_bytes(*b"AR30"),
+            u32::from_le_bytes(*b"AB30"),
             u32::from_le_bytes(*b"NV12"),
             u32::from_le_bytes(*b"RG16"),
             DRM_FORMAT_XRGB8888 | (1 << 31),
             DRM_FORMAT_XBGR8888 | (1 << 31),
+            DRM_FORMAT_XRGB2101010 | (1 << 31),
+            DRM_FORMAT_XBGR2101010 | (1 << 31),
             0,
         ] {
             assert_eq!(
