@@ -1520,6 +1520,7 @@ name = "pronk-drm-capture-live-test"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "castkms-renderer",
  "cc",
  "drm-capture",
  "gstreamer",

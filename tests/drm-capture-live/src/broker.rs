@@ -1,11 +1,11 @@
 //! Requires an isolated test session bus with the live Mutter broker.
-//! Does not open a DRM primary descriptor or change the displayed configuration.
+//! Does not open a DRM primary descriptor or submit a modeset directly.
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
 use pronk_capture::{allocation::Heap, Actor, Config, Layout};
@@ -31,9 +31,7 @@ async fn main() -> anyhow::Result<()> {
         connector_id: NonZeroU32::new(args[2].parse()?).context("zero connector")?,
     };
     tokio::time::timeout(Duration::from_secs(30), run(target)).await??;
-    println!(
-        "PASS: live Mutter broker acquisition, actor capture, explicit release and reacquisition"
-    );
+    println!("PASS: live Mutter broker capture, renderer startup, release and reacquisition");
     Ok(())
 }
 
@@ -58,8 +56,10 @@ async fn run(target: Target) -> anyhow::Result<()> {
     let mut held = None;
     for pass in 0..2 {
         let session = provider.acquire(target, CancellationToken::new()).await?;
-        let client = session.open_capture()?;
+        session.attach_monitor(None)?;
+        let (client, mut renderer) = wait_for_output(&session).await?;
         let witness = client.as_fd().try_clone_to_owned()?;
+        let renderer_witness = renderer.as_fd().try_clone_to_owned()?;
         let offer = client.describe()?;
         let buffers = heap.allocate(
             Layout {
@@ -80,6 +80,32 @@ async fn run(target: Target) -> anyhow::Result<()> {
         )?;
         let frame = actor.capture().await?;
         ensure!(!frame.timestamp().is_zero(), "missing capture timestamp");
+        let description = renderer.describe()?;
+        let candidate = renderer.begin_takeover(description)?;
+        let configuration = candidate.configuration();
+        ensure!(
+            configuration.width() == offer.width && configuration.height() == offer.height,
+            "renderer and capture output geometry differs"
+        );
+        let startup = candidate.startup_image()?;
+        ensure!(
+            startup.width() == offer.width && startup.height() == offer.height,
+            "startup image geometry differs"
+        );
+        ensure!(
+            startup.pitch().get()
+                >= offer
+                    .width
+                    .get()
+                    .checked_mul(4)
+                    .context("capture width exceeds the startup image pitch domain")?,
+            "startup image pitch is too small"
+        );
+        ensure!(
+            startup.content_serial().is_some(),
+            "captured HOST content has no identity"
+        );
+        candidate.abort()?;
         if let Some(old) = &held {
             ensure!(
                 actor
@@ -90,11 +116,14 @@ async fn run(target: Target) -> anyhow::Result<()> {
             );
         }
         eprintln!(
-            "broker pass={pass} capture={}x{} request={}",
+            "broker pass={pass} capture={}x{} request={} startup_serial={}",
             frame.layout().width,
             frame.layout().height,
-            frame.request().get()
+            frame.request().get(),
+            startup.content_serial().unwrap()
         );
+        drop(startup);
+        drop(renderer);
         drop(actor.shutdown().await?);
         session.release().await?;
         let revoked = drm_capture::Client::from_fd(witness)
@@ -104,8 +133,48 @@ async fn run(target: Target) -> anyhow::Result<()> {
             revoked.raw_os_error() == Some(nix::libc::EKEYREVOKED),
             "unexpected released-grant error: {revoked}"
         );
+        let revoked = castkms_renderer::Renderer::from_fd(renderer_witness)
+            .err()
+            .context("released renderer capability remained active")?;
+        ensure!(
+            revoked.raw_os_error() == Some(nix::libc::EKEYREVOKED),
+            "unexpected released-renderer error: {revoked}"
+        );
         held = Some(frame);
     }
     drop(held);
     Ok(())
+}
+
+async fn wait_for_output(
+    session: &pronk_capture_broker::Session,
+) -> anyhow::Result<(drm_capture::Client, castkms_renderer::Renderer)> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let capture = match session.open_capture() {
+            Ok(capture) => capture,
+            Err(error) if transient(&error) && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let renderer = match session.open_renderer() {
+            Ok(renderer) => renderer,
+            Err(error) if transient(&error) && Instant::now() < deadline => {
+                drop(capture);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        return Ok((capture, renderer));
+    }
+}
+
+fn transient(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(nix::libc::EACCES | nix::libc::EAGAIN | nix::libc::ENODEV | nix::libc::ESTALE)
+    )
 }

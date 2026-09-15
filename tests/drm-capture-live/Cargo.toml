@@ -44,6 +44,7 @@ path = "src/idle_revoke.rs"
 
 [dependencies]
 anyhow.workspace = true
+castkms-renderer = { path = "../../crates/castkms-renderer" }
 pronk-capture-receiver-test = { path = "../capture-receiver" }
 gstreamer.workspace = true
 gstreamer-app.workspace = true
