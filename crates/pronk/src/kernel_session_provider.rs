@@ -7,7 +7,7 @@ use pronk_capture_broker::{Provider as BrokerProvider, Session as BrokerSession}
 use pronk_core::grant::{
     GrantAcquisitionError, GrantLease, GrantProfile, GrantProvider, GrantTarget,
 };
-use pronk_core::output::CastKmsOutput;
+use pronk_core::output::{CastKmsOutput, OutputConnection};
 use tokio_util::sync::CancellationToken;
 
 pub enum KernelSession {
@@ -43,6 +43,14 @@ pub enum KernelSessionError {
 
 #[async_trait]
 pub trait KernelSessionProvider: std::fmt::Debug + Send + Sync + 'static {
+    /// Return whether acquiring the output is worth attempting.
+    ///
+    /// The result is only a preliminary selection rule. The provider must
+    /// still arbitrate ownership when `acquire` runs.
+    fn may_acquire(&self, output: &CastKmsOutput) -> bool {
+        output.is_available()
+    }
+
     async fn acquire(
         &self,
         output: &CastKmsOutput,
@@ -53,6 +61,10 @@ pub trait KernelSessionProvider: std::fmt::Debug + Send + Sync + 'static {
 
 #[async_trait]
 impl KernelSessionProvider for BrokerProvider {
+    fn may_acquire(&self, output: &CastKmsOutput) -> bool {
+        broker_may_acquire(output)
+    }
+
     async fn acquire(
         &self,
         output: &CastKmsOutput,
@@ -81,6 +93,13 @@ impl KernelSessionProvider for BrokerProvider {
             error => KernelSessionError::Broker(error),
         })
     }
+}
+
+fn broker_may_acquire(output: &CastKmsOutput) -> bool {
+    matches!(
+        output.connection,
+        OutputConnection::Connected | OutputConnection::Disconnected
+    )
 }
 
 fn validate_brokered_features(audio_enabled: bool) -> Result<(), KernelSessionError> {
