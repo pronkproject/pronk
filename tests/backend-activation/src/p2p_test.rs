@@ -18,7 +18,7 @@ use pronk::device_session_port::{
     DeviceSessionStopReason,
 };
 use pronk::display::{DisplaySetupStage, MediaRuntime};
-use pronk::display_state::RoutedMode;
+use pronk::display_state::{MediaState, RoutedMode};
 use pronk::kernel_session_provider::LegacyKernelSessionProvider;
 use pronk::manager::{
     BackendConfig, InventoryEvent, ManagerActor, OutputInventoryProvider,
@@ -58,6 +58,7 @@ use test_grant_provider::UnreachableGrantProvider;
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
+const PRODUCTION_MEDIA_TIMEOUT: Duration = Duration::from_secs(20);
 const CONNECTION_GENERATION_ONE: u64 = 41;
 const CONNECTION_GENERATION_TWO: u64 = 42;
 
@@ -106,11 +107,12 @@ async fn main() -> anyhow::Result<()> {
     if real_display_setup {
         let manager_path = temporary_socket_path("real-display");
         let mut manager =
-            ActivationLauncher::start(&socket_activate, &mock_backend, &manager_path, None, None)?;
+            ActivationLauncher::start_gstreamer(&socket_activate, &mock_backend, &manager_path)?;
         manager.wait_until_listening().await?;
         run_real_display_setup(&manager_path).await?;
         manager.stop()?;
         println!("p2p_brokered_display_setup=pass");
+        println!("p2p_production_media_running=pass");
         return Ok(());
     }
 
@@ -704,11 +706,35 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
         terminal.error_code,
         terminal.error.as_deref().unwrap_or("no diagnostic"),
     );
-    let displays = manager.handle().list_displays().await?;
-    let added = displays
-        .iter()
-        .find(|display| display.display_id == operation.display_id())
-        .context("manager did not retain the added display")?;
+    let added = timeout(PRODUCTION_MEDIA_TIMEOUT, async {
+        loop {
+            if let Some(display) = manager
+                .handle()
+                .list_displays()
+                .await?
+                .into_iter()
+                .find(|display| display.display_id == operation.display_id())
+            {
+                match display.runtime.media {
+                    MediaState::Running => break Ok(display),
+                    MediaState::Failed => {
+                        bail!(
+                            "production media failed: {}",
+                            display
+                                .runtime
+                                .last_error
+                                .as_deref()
+                                .unwrap_or("no diagnostic")
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("production media did not reach Running")??;
     ensure!(
         added.device.device_id == "living-room"
             && added.prepared.generated_edid().display_name()
