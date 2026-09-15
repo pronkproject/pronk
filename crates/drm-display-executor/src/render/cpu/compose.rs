@@ -67,7 +67,10 @@ impl<'a> Layer<'a> {
         self
     }
 
-    /// Apply ordered source color operations before this layer is blended.
+    /// Apply ordered operations to stored RGB before this layer is blended.
+    ///
+    /// Pixel alpha is unchanged. Premultiplied RGB is transformed in its stored
+    /// representation without an unpremultiply or repremultiply step.
     pub fn with_color(mut self, color: ColorPipeline<'a>) -> Self {
         self.color = color;
         self

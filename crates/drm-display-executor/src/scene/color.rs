@@ -116,7 +116,10 @@ pub enum ColorOperation<'a> {
     Lut(Lut<'a>),
 }
 
-/// Borrowed ordered color operations with explicit boundary arithmetic.
+/// Borrowed ordered RGB operations with explicit boundary arithmetic.
+///
+/// A pipeline receives the stored RGB channels as-is and does not transform an
+/// alpha channel. It inserts no unpremultiply or repremultiply step.
 #[derive(Clone, Copy, Debug)]
 pub struct ColorPipeline<'a> {
     operations: &'a [ColorOperation<'a>],
@@ -131,7 +134,7 @@ impl<'a> ColorPipeline<'a> {
         self.operations
     }
 
-    /// Apply operations in order and clamp the final normalized result.
+    /// Apply operations to RGB in order and clamp the final normalized result.
     ///
     /// Matrices preserve signed extended range between adjacent matrices and
     /// bypasses. Curves and lookup tables clamp their input and produce values

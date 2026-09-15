@@ -87,6 +87,60 @@ fn ordered_native_color_pipeline_matches_the_portable_reference() {
 
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn complete_source_color_pipeline_preserves_imported_alpha() {
+    let (device, modifier) = device();
+    let (producer, _) = self::device();
+    assert_eq!(device.identity(), producer.identity());
+    assert!(device.supports_shader_int64());
+    let matrix =
+        ColorMatrix::from_sign_magnitude([1 << 32, 0, 0, 0, 0, 1 << 32, 0, 0, 0, 0, 1 << 32, 0]);
+    let table = [[0; 3], [65_535; 3]];
+    let operations = [
+        ColorOperation::SrgbEotf,
+        ColorOperation::Matrix(matrix),
+        ColorOperation::SrgbInverseEotf,
+        ColorOperation::Lut(Lut::new(&table).unwrap()),
+    ];
+    let color = ColorPipeline::new(&operations);
+    let native = device.create_color_pipeline(extent(13, 7), color).unwrap();
+    let mut output = device.allocate(nz(13), nz(7), modifier).unwrap();
+    for alpha in [0, 1, 127, 128, 254, 255] {
+        let input = producer
+            .allocate(nz(13), nz(7), modifier)
+            .unwrap()
+            .clear_rgba_and_wait([21, 47, 91, alpha])
+            .unwrap();
+        // SAFETY: Matching native device identity, exact exported metadata and
+        // completed producer release. The source remains unchanged through the
+        // blocking private copy.
+        let source =
+            unsafe { device.import_source(input.0.export().unwrap(), input.0.layout(), input.1) }
+                .unwrap();
+        let private = source
+            .copy_into_private_and_wait(device.allocate_private(nz(13), nz(7)).unwrap())
+            .unwrap();
+        drop(input.0);
+        let private = native.apply_and_wait(private).unwrap();
+        let copied = private.copy_into_and_wait(output).unwrap();
+        let expected = color
+            .apply([21, 47, 91].map(|value| value * 257))
+            .map(|value| ((u32::from(value) + 128) / 257) as u8);
+        let (returned, pixels) = readback(copied.destination);
+        for pixel in pixels.chunks_exact(4) {
+            for (actual, expected) in pixel[..3]
+                .iter()
+                .zip([expected[2], expected[1], expected[0]])
+            {
+                assert!(actual.abs_diff(expected) <= 1);
+            }
+            assert_eq!(pixel[3], alpha);
+        }
+        output = returned;
+    }
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
 fn complete_output_color_matches_the_integer_reference() {
     let (device, modifier) = device();
     assert!(device.supports_shader_int64());

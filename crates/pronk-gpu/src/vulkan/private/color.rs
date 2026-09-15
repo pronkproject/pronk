@@ -30,6 +30,9 @@ enum ColorStage {
 }
 
 /// Immutable native implementation of an ordered RGB color pipeline.
+///
+/// Every stage preserves the image's alpha channel. Stored RGB is transformed
+/// directly without an unpremultiply or repremultiply step.
 #[derive(Clone)]
 pub struct ColorPipelineProgram {
     device: Arc<super::super::device::DeviceInner>,
@@ -168,7 +171,7 @@ impl Device {
 }
 
 impl ColorPipelineProgram {
-    /// Apply every non-bypass operation to one matching private image.
+    /// Apply every non-bypass RGB operation to one matching private image.
     pub fn apply_and_wait(&self, mut image: PrivateImage) -> io::Result<PrivateImage> {
         check_image(&image, &self.device, self.extent)?;
         for stage in &self.stages {
