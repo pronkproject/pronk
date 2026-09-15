@@ -4,4 +4,7 @@ mod source;
 mod submission;
 
 pub use source::{ImportError, ImportedSource};
-pub use submission::{PreparedSource, SourcePreparationError, SourceReleaseError};
+pub use submission::{
+    PreparedSource, ReleasedSource, SourcePreparationError, SourceReleaseError,
+    SourceSubmissionError, SubmittedSource,
+};
