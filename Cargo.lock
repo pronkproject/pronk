@@ -1602,10 +1602,12 @@ dependencies = [
 name = "pronk-renderer-pipewire"
 version = "0.1.0"
 dependencies = [
+ "castkms-renderer",
  "pronk-gpu",
  "pronk-pipewire",
  "pronk-renderer-worker",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -7,12 +7,12 @@ license.workspace = true
 publish = false
 
 [dependencies]
+castkms-renderer = { path = "../castkms-renderer" }
 pronk-pipewire = { path = "../pronk-pipewire" }
-pronk-renderer-worker = { path = "../pronk-renderer-worker" }
-
-[dev-dependencies]
 pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
+pronk-renderer-worker = { path = "../pronk-renderer-worker" }
 tokio.workspace = true
+tokio-util.workspace = true
 
 [lints]
 workspace = true
