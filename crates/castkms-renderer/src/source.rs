@@ -85,6 +85,25 @@ pub struct SourceGeometry {
 }
 
 impl SourceGeometry {
+    /// Describe an integral crop placed at the top-left of a complete output.
+    ///
+    /// The destination may scale the crop but must fit inside the output.
+    /// Geometry grants no source access and does not establish native support
+    /// for the image's format, modifier or sampling operation.
+    pub fn new(source: SourceRect, destination: Extent, output: Extent) -> io::Result<Self> {
+        if destination.width() > output.width() || destination.height() > output.height() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source destination exceeds the output dimensions",
+            ));
+        }
+        Ok(Self {
+            source,
+            destination,
+            output,
+        })
+    }
+
     pub fn source(self) -> SourceRect {
         self.source
     }
@@ -517,6 +536,28 @@ mod tests {
         assert_eq!(source.geometry.source().extent().width(), 1920);
         assert_eq!(source.geometry.destination().height(), 1080);
         assert!(source.producer.is_some());
+    }
+
+    #[test]
+    fn geometry_preserves_cropping_scaling_and_output_padding() {
+        let image = Extent::new(1920, 1080).unwrap();
+        let crop = SourceRect::new(image, [20, 30], Extent::new(640, 360).unwrap()).unwrap();
+        let destination = Extent::new(1280, 720).unwrap();
+        let geometry = SourceGeometry::new(crop, destination, image).unwrap();
+        assert_eq!(geometry.source(), crop);
+        assert_eq!(geometry.destination(), destination);
+        assert_eq!(geometry.output(), image);
+        for destination in [
+            Extent::new(1921, 1080).unwrap(),
+            Extent::new(1920, 1081).unwrap(),
+        ] {
+            assert_eq!(
+                SourceGeometry::new(crop, destination, image)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
     }
 
     #[test]
