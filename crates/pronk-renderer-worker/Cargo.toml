@@ -12,6 +12,7 @@ castkms-sys = { path = "../castkms-sys" }
 nix.workspace = true
 pronk-dmabuf = { path = "../pronk-dmabuf" }
 pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
+thiserror.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

@@ -7,7 +7,9 @@ mod reader;
 mod source;
 mod submission;
 
-pub use activation::{PrivateProbe, ProbePreparationError};
+pub use activation::{
+    activate_with_private_probe, PrivateProbe, ProbePreparationError, RendererActivationError,
+};
 pub use output::{
     CompletedOutput, CompletedReturn, FinishedOutput, OutputDestination, OutputPool, OutputReturn,
     OutputScope, PendingOutput, PublishedOutput, ReadyOutput,

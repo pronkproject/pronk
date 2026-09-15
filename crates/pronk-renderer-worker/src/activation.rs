@@ -3,8 +3,45 @@
 use std::io;
 use std::os::fd::AsFd;
 
-use castkms_renderer::{SubmittedCandidate, TakeoverCandidate};
+use castkms_renderer::{ActiveRenderer, Renderer, SubmittedCandidate, TakeoverCandidate};
 use pronk_gpu::vulkan::{Device, PrivateImage};
+
+/// Activate delegated rendering after qualifying private GPU execution.
+pub fn activate_with_private_probe<'renderer, F: AsFd>(
+    device: &Device,
+    renderer: &'renderer mut Renderer<F>,
+) -> Result<ActiveRenderer<'renderer, F>, RendererActivationError> {
+    let description = renderer
+        .describe()
+        .map_err(RendererActivationError::Observe)?;
+    let candidate = renderer
+        .begin_takeover(description)
+        .map_err(RendererActivationError::Reserve)?;
+    let probe = PrivateProbe::prepare(device, candidate).map_err(|failure| {
+        let (candidate, error) = failure.into_parts();
+        drop(candidate);
+        RendererActivationError::Prepare(error)
+    })?;
+    let submitted = probe.submit().map_err(RendererActivationError::Submit)?;
+    submitted
+        .activate()
+        .map_err(|failure| RendererActivationError::Activate(failure.into_error()))
+}
+
+/// Stage at which private renderer activation failed.
+#[derive(Debug, thiserror::Error)]
+pub enum RendererActivationError {
+    #[error("observe CastKMS execution before renderer takeover: {0}")]
+    Observe(#[source] io::Error),
+    #[error("reserve CastKMS renderer takeover: {0}")]
+    Reserve(#[source] io::Error),
+    #[error("prepare private GPU takeover probe: {0}")]
+    Prepare(#[source] io::Error),
+    #[error("submit private GPU takeover probe: {0}")]
+    Submit(#[source] io::Error),
+    #[error("activate CastKMS GPU execution: {0}")]
+    Activate(#[source] io::Error),
+}
 
 /// A takeover candidate paired with completed work over private GPU storage.
 ///

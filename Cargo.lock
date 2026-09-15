@@ -1617,6 +1617,7 @@ dependencies = [
  "nix 0.29.0",
  "pronk-dmabuf",
  "pronk-gpu",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
