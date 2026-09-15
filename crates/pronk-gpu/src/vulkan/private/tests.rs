@@ -7,6 +7,7 @@ mod gamma;
 mod geometry;
 mod pending;
 mod program;
+mod region;
 
 fn device() -> (Device, u64) {
     let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");

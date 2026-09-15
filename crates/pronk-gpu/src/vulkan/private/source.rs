@@ -42,20 +42,45 @@ impl SourceImage {
     /// The pending owner retains both images until native retirement; it must
     /// remain on a blocking graphics worker because drop may wait for GPU work.
     pub fn submit_private_copy(self, destination: PrivateImage) -> io::Result<PendingPrivateRead> {
-        if !Arc::ptr_eq(&self.device, &destination.device)
-            || (self.layout().width, self.layout().height) != destination.extent()
-        {
+        if (self.layout().width, self.layout().height) != destination.extent() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "private source copy needs matching images on one device",
+                "private source copy needs matching image dimensions",
             ));
         }
-        let extent = Extent::new(self.layout().width.get(), self.layout().height.get())
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let crop = SourceRect::new(extent, [0, 0], extent)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let blit = Blit::new(extent, extent, crop, [0, 0], extent)?;
-        debug_assert!(blit.fills_destination);
+        let extent = image_extent(self.layout().width.get(), self.layout().height.get())?;
+        let crop = SourceRect::new(extent, [0, 0], extent).map_err(invalid)?;
+        self.submit_private_region(destination, crop, [0, 0], extent, [0; 3])
+    }
+
+    /// Read a cropped source into a bounded region of private storage.
+    ///
+    /// The region is scaled using Vulkan's nearest-texel blit filter. Sampling
+    /// uses pixel centers; rounding at texel boundaries is implementation-defined.
+    /// Every pixel outside the region is initialized to the opaque background,
+    /// including when the destination contains an older completed frame.
+    /// Source alpha is copied, without blending or color-space conversion.
+    ///
+    /// Ownership, producer waits, submission accounting and blocking destruction
+    /// follow [`Self::submit_private_copy`]. No exported destination is involved.
+    pub fn submit_private_region(
+        self,
+        destination: PrivateImage,
+        crop: SourceRect,
+        position: [u32; 2],
+        extent: Extent,
+        background: [u8; 3],
+    ) -> io::Result<PendingPrivateRead> {
+        if !Arc::ptr_eq(&self.device, &destination.device) {
+            return Err(invalid("private source read needs images on one device"));
+        }
+        let blit = Blit::new(
+            image_extent(self.layout().width.get(), self.layout().height.get())?,
+            image_extent(destination.width.get(), destination.height.get())?,
+            crop,
+            position,
+            extent,
+        )?;
         self.wait_for_producer()?;
         require_success(export_dependencies(self.fd.as_fd(), Access::Read)?.wait_blocking()?)?;
         let mut job = Job::new(Arc::clone(&self.device), (self, destination))?;
@@ -78,9 +103,10 @@ impl SourceImage {
             .dst_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
             .src_access_mask(vk::AccessFlags::TRANSFER_READ);
         // SAFETY: The source import contract supplies GENERAL foreign release
-        // and producer completion. Queried formats support blits, and private
-        // allocation checked signed extents. The unique private allocation is
-        // never exported, so cannot alias the source. The job owns both images.
+        // and producer completion. Queried formats support blits, and both
+        // rectangles have checked bounds and signed edges. The unique private
+        // allocation cannot alias the source. The job owns both images and
+        // orders background initialization before the region overwrites it.
         unsafe {
             job.device.raw.cmd_pipeline_barrier(
                 job.command(),
@@ -91,6 +117,41 @@ impl SourceImage {
                 &[],
                 &acquire,
             );
+            if !blit.fills_destination {
+                let color = vk::ClearColorValue {
+                    float32: [
+                        f32::from(background[0]) / 255.0,
+                        f32::from(background[1]) / 255.0,
+                        f32::from(background[2]) / 255.0,
+                        1.0,
+                    ],
+                };
+                job.device.raw.cmd_clear_color_image(
+                    job.command(),
+                    destination.raw,
+                    vk::ImageLayout::GENERAL,
+                    &color,
+                    &[range],
+                );
+                let cleared = vk::ImageMemoryBarrier::default()
+                    .image(destination.raw)
+                    .old_layout(vk::ImageLayout::GENERAL)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .subresource_range(range);
+                job.device.raw.cmd_pipeline_barrier(
+                    job.command(),
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[cleared],
+                );
+            }
             job.device.raw.cmd_blit_image(
                 job.command(),
                 source.raw,
@@ -117,4 +178,12 @@ impl SourceImage {
         }
         Ok(PendingPrivateRead::new(job, completion))
     }
+}
+
+fn image_extent(width: u32, height: u32) -> io::Result<Extent> {
+    Extent::new(width, height).map_err(invalid)
+}
+
+fn invalid(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, error)
 }
