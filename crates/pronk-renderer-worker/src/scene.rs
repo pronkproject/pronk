@@ -125,7 +125,7 @@ impl SceneComposer {
             .map_err(SceneCompositionError::Native)?;
         let destination = self
             .color
-            .apply_waited(composed.destination)
+            .apply_and_wait(composed.destination)
             .map_err(SceneCompositionError::Native)?;
         for (identity, image) in source_identities.into_iter().zip(composed.sources) {
             returned_sources.push(PrivateBuffer { identity, image });

@@ -1,0 +1,34 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, rgba32f) uniform image2D pixels;
+layout(push_constant) uniform Parameters {
+    uvec2 extent;
+    uint inverse;
+} parameters;
+
+void main() {
+    uvec2 point = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(point, parameters.extent)))
+        return;
+    vec4 pixel = imageLoad(pixels, ivec2(point));
+    vec3 input_value = clamp(pixel.rgb, 0.0, 1.0);
+    vec3 result;
+    if (parameters.inverse != 0) {
+        bvec3 linear = lessThanEqual(input_value, vec3(0.0031308));
+        result = mix(
+            1.055 * pow(input_value, vec3(1.0 / 2.4)) - 0.055,
+            12.92 * input_value,
+            linear
+        );
+    } else {
+        bvec3 linear = lessThanEqual(input_value, vec3(0.04045));
+        result = mix(
+            pow((input_value + 0.055) / 1.055, vec3(2.4)),
+            input_value / 12.92,
+            linear
+        );
+    }
+    result = floor(clamp(result, 0.0, 1.0) * 65535.0 + 0.5) / 65535.0;
+    imageStore(pixels, ivec2(point), vec4(result, pixel.a));
+}

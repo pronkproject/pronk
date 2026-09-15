@@ -17,9 +17,10 @@ mod output;
 mod profile;
 mod scene;
 mod source;
+mod transfer;
 
 pub use blend::{BlendedImages, Blender};
-pub use color::OutputColorProgram;
+pub use color::{ColorPipelineProgram, OutputColorProgram};
 pub use gamma::Gamma;
 pub use matrix::OutputMatrix;
 pub use output::PrivateCopy;
