@@ -31,19 +31,20 @@ impl Bus {
 
 struct Mutter {
     state: Arc<State>,
+    monitor: Mutex<Option<OwnedFd>>,
     capture: Mutex<Option<OwnedFd>>,
 }
 
 #[zbus::interface(name = "org.gnome.Mutter.CastKms")]
 impl Mutter {
-    async fn create_capture_grant(
+    async fn create_display_session(
         &self,
         major: u32,
         minor: u32,
         crtc: u32,
         connector: u32,
         #[zbus(header)] header: Header<'_>,
-    ) -> zbus::fdo::Result<(BusFd, u64)> {
+    ) -> zbus::fdo::Result<(BusFd, BusFd, u64)> {
         self.state.requests.lock().unwrap().push((
             major,
             minor,
@@ -55,16 +56,22 @@ impl Mutter {
         if let Some(gate) = &self.state.gate {
             gate.notified().await;
         }
+        let monitor = self
+            .monitor
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| zbus::fdo::Error::Failed("monitor already issued".into()))?;
         let capture = self
             .capture
             .lock()
             .unwrap()
             .take()
             .ok_or_else(|| zbus::fdo::Error::Failed("capture already issued".into()))?;
-        Ok((capture.into(), 91))
+        Ok((monitor.into(), capture.into(), 91))
     }
 
-    fn release_capture_grant(
+    fn release_display_session(
         &self,
         id: u64,
         #[zbus(header)] header: Header<'_>,
@@ -85,6 +92,7 @@ impl Mutter {
 
 struct Fixture {
     _server: zbus::Connection,
+    monitor_peer: std::os::unix::net::UnixStream,
     _peer: std::os::unix::net::UnixStream,
     provider: Provider,
     state: Arc<State>,
@@ -98,6 +106,7 @@ impl Fixture {
             release_error,
             ..State::default()
         });
+        let (monitor, monitor_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (capture, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (server, client) = UnixStream::pair().unwrap();
         let server = Builder::unix_stream(server)
@@ -111,6 +120,7 @@ impl Fixture {
                 PATH,
                 Mutter {
                     state: Arc::clone(&state),
+                    monitor: Mutex::new(Some(monitor.into())),
                     capture: Mutex::new(Some(capture.into())),
                 },
             )
@@ -121,6 +131,7 @@ impl Fixture {
         let (server, connection) = tokio::try_join!(server.build(), client.build()).unwrap();
         Self {
             _server: server,
+            monitor_peer,
             _peer: peer,
             provider: Provider::new(
                 connection,
@@ -156,6 +167,16 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
         .acquire(target(), CancellationToken::new())
         .await
         .unwrap();
+    fixture.monitor_peer.write_all(&[0x37]).unwrap();
+    let mut monitor =
+        std::os::unix::net::UnixStream::from(session.monitor().try_clone_to_owned().unwrap());
+    monitor
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut monitor_byte = [0];
+    monitor.read_exact(&mut monitor_byte).unwrap();
+    assert_eq!(monitor_byte, [0x37]);
+    drop(monitor);
     fixture._peer.write_all(&[0x49]).unwrap();
     let mut capture =
         std::os::unix::net::UnixStream::from(session.as_fd().try_clone_to_owned().unwrap());
@@ -177,11 +198,16 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
         &[(91, ":1.88".into())]
     );
     assert_eq!(fixture.provider.slots.available_permits(), 1);
+    fixture
+        .monitor_peer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(fixture.monitor_peer.read(&mut [0]).unwrap(), 0);
 }
 
 #[tokio::test]
 async fn dropping_a_session_requests_release() {
-    let fixture = Fixture::new(false, false).await;
+    let mut fixture = Fixture::new(false, false).await;
     let session = fixture
         .provider
         .acquire(target(), CancellationToken::new())
@@ -190,6 +216,11 @@ async fn dropping_a_session_requests_release() {
     drop(session);
     notified(&fixture.state.released).await;
     assert_eq!(fixture.state.releases.lock().unwrap().len(), 1);
+    fixture
+        .monitor_peer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(fixture.monitor_peer.read(&mut [0]).unwrap(), 0);
 }
 
 #[tokio::test]
@@ -291,4 +322,9 @@ async fn rejecting_a_non_capture_descriptor_releases_the_session() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     assert_eq!(fixture._peer.read(&mut [0]).unwrap(), 0);
+    fixture
+        .monitor_peer
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    assert_eq!(fixture.monitor_peer.read(&mut [0]).unwrap(), 0);
 }
