@@ -2,8 +2,10 @@
 
 mod output;
 mod registration;
+mod video;
 pub use output::{OutputEvent, OutputFrame, OutputSession, PublishError};
 pub use registration::Registration;
+pub use video::{FramePublishError, StoppedVideo, Video, VideoEvent};
 
 use std::io;
 
