@@ -40,6 +40,10 @@ fn main() {
         DrmCastkmsRendererSubmitProbe,
         "drm_castkms_renderer_submit_probe"
     );
+    layout!(
+        DrmCastkmsRendererCommitTakeover,
+        "drm_castkms_renderer_commit_takeover"
+    );
     layout!(DrmCastkmsCaptureFormat, "drm_castkms_capture_format");
     layout!(DrmCastkmsCaptureQueryCaps, "drm_castkms_capture_query_caps");
     layout!(DrmCastkmsCaptureStart, "drm_castkms_capture_start");
