@@ -648,7 +648,10 @@ edges, one-pixel footprints and quarter-turn rejection. See the
 requirements a reusable nominal identity. Its private pool can serve successive
 jobs whose scene operations vary while their output and layer storage remain
 compatible. Creating a structurally identical storage profile does not confer
-that identity; reuse must be explicit.
+that identity; reuse must be explicit. Construction checks every external
+format/modifier import and every required private extent before the identity or
+pool exists, so an active storage profile does not defer basic layout discovery
+until a source-bearing job has been claimed.
 
 `SceneComposer` prepares one ordered visual program before source acquisition.
 It retains every layer's exact crop, destination, transform, blend and color

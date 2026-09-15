@@ -54,6 +54,13 @@ impl SceneStorageProfile {
         if sources.len() > MAX_SCENE_LAYERS {
             return Err(invalid("scene exceeds its private layer limit"));
         }
+        device.check_private_image(nonzero(output.width()), nonzero(output.height()))?;
+        for source in sources {
+            let width = nonzero(source.extent.width());
+            let height = nonzero(source.extent.height());
+            device.check_source_image(source.format, width, height, source.modifier)?;
+            device.check_private_image(width, height)?;
+        }
         let mut owned_sources = Vec::new();
         owned_sources
             .try_reserve_exact(sources.len())
@@ -803,6 +810,16 @@ mod tests {
     fn private_storage_is_shared_only_through_its_explicit_profile() {
         let (device, modifier) = device();
         let extent = Extent::new(4, 3).unwrap();
+        assert!(SceneStorageProfile::new(
+            &device,
+            extent,
+            &[SourceRequirements {
+                format: PackedFormat::Bgra8,
+                extent,
+                modifier: u64::MAX,
+            }],
+        )
+        .is_err());
         let source = SourceRequirements {
             format: PackedFormat::Bgra8,
             extent,
