@@ -23,8 +23,9 @@ pronk-capture-pipewire = { path = "../pronk-capture-pipewire" }
 pronk-core = { path = "../pronk-core" }
 pronk-dbus = { path = "../pronk-dbus" }
 pronk-dmabuf = { path = "../pronk-dmabuf" }
-pronk-gpu = { path = "../pronk-gpu" }
+pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
 pronk-pipewire = { path = "../pronk-pipewire" }
+pronk-renderer-pipewire = { path = "../pronk-renderer-pipewire" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

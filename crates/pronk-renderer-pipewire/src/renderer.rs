@@ -109,6 +109,10 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         self.handle().state.clone()
     }
 
+    pub fn state(&self) -> RendererStreamState {
+        self.handle().state.borrow().clone()
+    }
+
     pub fn layout(&self) -> VideoBufferLayout {
         self.handle().layout
     }
@@ -187,6 +191,15 @@ impl<F: AsFd + Send + 'static> ActiveRendererStream<F> {
             .as_ref()
             .expect("live active renderer stream owns its handle")
             .state
+            .clone()
+    }
+
+    pub fn state(&self) -> RendererStreamState {
+        self.handle
+            .as_ref()
+            .expect("live active renderer stream owns its handle")
+            .state
+            .borrow()
             .clone()
     }
 

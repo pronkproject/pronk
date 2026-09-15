@@ -1325,6 +1325,7 @@ dependencies = [
  "pronk-dmabuf",
  "pronk-gpu",
  "pronk-pipewire",
+ "pronk-renderer-pipewire",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",

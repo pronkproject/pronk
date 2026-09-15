@@ -23,6 +23,7 @@ pub mod media_remote;
 pub mod media_session;
 pub mod mutter_grant_provider;
 pub mod preparation;
+pub mod renderer_capture_pipeline;
 pub mod replaceable_device_session;
 mod slot;
 pub mod system_authorization;
