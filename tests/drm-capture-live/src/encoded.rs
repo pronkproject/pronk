@@ -148,7 +148,7 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
                     decoder.push(frame)?;
                     received += 1;
                 }
-                pixels = decoder.next() => {
+                pixels = decoder.next(640, 480) => {
                     let pixels = pixels?;
                     decoded += 1;
                 if decoded == 1 { ensure!(pixels == 0x49, "incorrect first decoded image"); }

@@ -73,19 +73,27 @@ impl Decoder {
         Ok(())
     }
 
-    pub async fn next(&mut self) -> anyhow::Result<u8> {
+    pub async fn next(&mut self, width: u32, height: u32) -> anyhow::Result<u8> {
         let sample = self.output.recv().await.context("decoder stopped")?;
         let info = gstreamer_video::VideoInfo::from_caps(sample.caps().context("decoded caps")?)?;
         ensure!(
-            info.width() == 640
-                && info.height() == 480
+            width > 0
+                && height > 0
+                && info.width() == width
+                && info.height() == height
                 && info.format() == gstreamer_video::VideoFormat::Bgrx,
             "decoded layout"
         );
         let buffer = sample.buffer().context("decoded pixels")?.map_readable()?;
         let stride = usize::try_from(info.stride()[0])?;
+        let width = usize::try_from(width)?;
+        let height = usize::try_from(height)?;
+        let row = width.checked_mul(4).context("decoded row size overflow")?;
+        let extent = stride
+            .checked_mul(height)
+            .context("decoded image size overflow")?;
         ensure!(
-            stride >= 2560 && buffer.len() >= stride * 480,
+            stride >= row && buffer.len() >= extent,
             "short decoded image"
         );
         let value = if buffer[0].abs_diff(0x49) <= 4 {
@@ -93,8 +101,8 @@ impl Decoder {
         } else {
             0x68
         };
-        for y in 0..480 {
-            for x in 0..640 {
+        for y in 0..height {
+            for x in 0..width {
                 for channel in 0..3 {
                     ensure!(
                         buffer[y * stride + x * 4 + channel].abs_diff(value) <= 4,
