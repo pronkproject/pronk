@@ -40,16 +40,21 @@ The binaries cover distinct boundaries:
   the continuous `Video` owner drives capture without a test-managed frame
   loop. A real consumer verifies changing pixels and a held sample, followed
   by joined shutdown and the owner's terminal state.
-- `pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID /path/to/private/socket`:
-  a fullscreen Wayland client changes its image under the disposable Mutter.
-  The probe obtains authority from Mutter, starts the continuous capture owner,
-  and feeds the production H.264 actor and local decoder. It requires twelve
-  decoded images and both known colors at the offered output dimensions.
+- Live Mutter media:
+  `pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
+  WIDTH HEIGHT /path/to/pipewire-0-pronk-backend` runs a fullscreen Wayland
+  client whose image changes under the disposable Mutter.
+  The probe obtains authority from Mutter through the application capture
+  port, configures the production H.264 actor, and only then admits capture
+  frames. It requires twelve decoded images and both known colors at the
+  requested output dimensions.
   The sibling `pronk-capture-pattern-client` executable must be built alongside
   the probe. It never opens a DRM primary descriptor or replaces a bus owner.
   Use an isolated session bus and the disposable compositor's Wayland socket.
-  Set `PIPEWIRE_REMOTE` to the same private socket passed on the command line.
-  The two-argument wrapper below does not start Mutter or run that probe.
+  Its PipeWire server must expose the sibling `pipewire-0-pronk-core` socket
+  and run Pronk's versioned WirePlumber policy. The policy authorizes the two
+  classified clients and links their exact private nodes. The two-argument
+  wrapper below does not start Mutter, WirePlumber, or that probe.
 - `pronk-capture-idle-revoke-live-test /dev/dri/cardN /path/to/private/socket`:
   revoke a grant before any consumer attaches to its PipeWire source. The
   video owner must report failure and join shutdown without waiting for a
@@ -82,7 +87,8 @@ receiver selection. For example, inside the disposable compositor environment:
 
 ```sh
 pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
-    /path/to/private/socket --receiver RECEIVER_IP:8009
+    WIDTH HEIGHT /path/to/pipewire-0-pronk-backend \
+    --receiver RECEIVER_IP:8009
 ```
 
 The probe authenticates the receiver and launches its mirroring application,
