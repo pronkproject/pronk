@@ -63,12 +63,26 @@ struct OutputClaim {
 }
 
 impl OutputSlotPool {
+    #[cfg(test)]
     pub(crate) fn reserve(
         &mut self,
         device: &DeviceInfo,
         outputs: &[CastKmsOutput],
         preferred: Option<&CastKmsOutputId>,
     ) -> Result<OutputReservation, OutputReservationError> {
+        self.reserve_where(device, outputs, preferred, CastKmsOutput::is_available)
+    }
+
+    pub(crate) fn reserve_where<F>(
+        &mut self,
+        device: &DeviceInfo,
+        outputs: &[CastKmsOutput],
+        preferred: Option<&CastKmsOutputId>,
+        may_acquire: F,
+    ) -> Result<OutputReservation, OutputReservationError>
+    where
+        F: Fn(&CastKmsOutput) -> bool,
+    {
         let device_key = DeviceKey::from_device(device);
         if self.devices.contains_key(&device_key) {
             return Err(OutputReservationError::DeviceAlreadyClaimed {
@@ -78,9 +92,8 @@ impl OutputSlotPool {
         }
         validate_inventory(outputs)?;
 
-        let available = |output: &&CastKmsOutput| {
-            output.is_available() && !self.claims.contains_key(&output.id)
-        };
+        let available =
+            |output: &&CastKmsOutput| may_acquire(output) && !self.claims.contains_key(&output.id);
         let selected = preferred
             .and_then(|preferred| {
                 outputs
