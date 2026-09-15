@@ -339,13 +339,18 @@ fn abort_candidate<F: AsFd>(candidate: TakeoverCandidate<'_, F>, error: io::Erro
 }
 
 fn combine_abort(error: io::Error, abort: io::Result<()>) -> io::Error {
-    match abort {
-        Ok(()) => error,
-        Err(abort) => io::Error::new(
-            error.kind(),
-            format!("{error}; abort renderer takeover: {abort}"),
-        ),
+    let mut failure = Some(error);
+    if let Err(error) = abort {
+        add_failure(&mut failure, "abort renderer takeover", error);
     }
+    failure.expect("setup failure initializes error accumulation")
+}
+
+fn add_failure(failure: &mut Option<io::Error>, operation: &str, error: io::Error) {
+    *failure = Some(match failure.take() {
+        Some(primary) => io::Error::new(primary.kind(), format!("{primary}; {operation}: {error}")),
+        None => io::Error::new(error.kind(), format!("{operation}: {error}")),
+    });
 }
 
 async fn finish_candidate<F: AsFd>(
@@ -355,7 +360,7 @@ async fn finish_candidate<F: AsFd>(
     mut failure: Option<io::Error>,
 ) -> io::Result<()> {
     if let Err(error) = probe.abort() {
-        failure.get_or_insert(error);
+        add_failure(&mut failure, "abort renderer takeover", error);
     }
     drop(private);
     finish_video(video, failure).await
@@ -364,7 +369,7 @@ async fn finish_candidate<F: AsFd>(
 async fn finish_video(video: Video, mut failure: Option<io::Error>) -> io::Result<()> {
     let stopped = video.shutdown().await;
     if let Err(error) = stopped.finish().await {
-        failure.get_or_insert(error);
+        add_failure(&mut failure, "stop renderer video", error);
     }
     failure.map_or(Ok(()), Err)
 }
@@ -392,7 +397,7 @@ impl GenerationOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::combine_abort;
+    use super::{add_failure, combine_abort};
     use std::io;
 
     #[test]
@@ -413,5 +418,28 @@ mod tests {
     fn successful_takeover_abort_returns_the_original_error() {
         let error = combine_abort(io::Error::other("allocation failed"), Ok(()));
         assert_eq!(error.to_string(), "allocation failed");
+    }
+
+    #[test]
+    fn cleanup_accumulates_every_failure_under_the_primary_error_class() {
+        let mut failure = Some(io::Error::new(io::ErrorKind::BrokenPipe, "renderer failed"));
+        add_failure(
+            &mut failure,
+            "abort renderer takeover",
+            io::Error::from_raw_os_error(nix::libc::EBUSY),
+        );
+        add_failure(
+            &mut failure,
+            "stop renderer video",
+            io::Error::other("PipeWire stopped"),
+        );
+
+        let failure = failure.unwrap();
+        assert_eq!(failure.kind(), io::ErrorKind::BrokenPipe);
+        assert!(failure.to_string().starts_with("renderer failed;"));
+        assert!(failure.to_string().contains("abort renderer takeover:"));
+        assert!(failure
+            .to_string()
+            .ends_with("stop renderer video: PipeWire stopped"));
     }
 }
