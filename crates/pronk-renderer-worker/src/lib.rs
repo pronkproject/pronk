@@ -23,7 +23,10 @@ pub use reader::{
     SourceReaderStartError,
 };
 pub use reads::{ReadCollectionError, SubmittedReads};
-pub use scene::{ComposedFrame, RejectedScene, SceneComposer, SceneCompositionError, SceneInputs};
+pub use scene::{
+    ComposedFrame, RejectedScene, RejectedSceneFrames, SceneComposer, SceneCompositionError,
+    SceneFrames, SceneInputs,
+};
 pub use scene_pool::{
     RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool, MAX_SCENE_LAYERS,
 };

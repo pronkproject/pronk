@@ -100,7 +100,7 @@ impl SceneComposer {
         let mut source_identities = Vec::new();
         let mut layers = Vec::new();
         let mut returned_sources = Vec::new();
-        let capacity = inputs.sources.len();
+        let capacity = inputs.frames.layers.len();
         if let Err(cause) = reserve(&mut source_identities, capacity)
             .and_then(|()| reserve(&mut layers, capacity))
             .and_then(|()| reserve(&mut returned_sources, capacity))
@@ -112,9 +112,12 @@ impl SceneComposer {
         }
         let SceneInputs {
             destination,
-            sources,
+            frames:
+                SceneFrames {
+                    layers: sources,
+                    content_serial,
+                },
             background,
-            content_serial,
         } = inputs;
         let PrivateBuffer {
             identity: destination_identity,
@@ -172,12 +175,12 @@ impl SceneComposer {
                 "scene destination does not match its qualified output",
             ));
         }
-        if inputs.sources.len() != self.layers.len() {
+        if inputs.frames.layers.len() != self.layers.len() {
             return Err(invalid(
                 "scene source count does not match its qualified layers",
             ));
         }
-        for (source, plan) in inputs.sources.iter().zip(&self.layers) {
+        for (source, plan) in inputs.frames.layers.iter().zip(&self.layers) {
             if source.extent() != (nonzero(plan.source.width()), nonzero(plan.source.height()))
                 || !source.is_owned_by(&self.device)
             {
@@ -212,12 +215,119 @@ fn reserve<T>(storage: &mut Vec<T>, capacity: usize) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
+/// Private layer frames carrying one complete scene content identity.
+///
+/// Construction verifies that every layer carries the complete scene's content
+/// identity. This prevents independently completed old and new frames from
+/// being assembled into a torn scene.
+pub struct SceneFrames {
+    layers: Vec<PrivateFrame>,
+    content_serial: NonZeroU64,
+}
+
+impl SceneFrames {
+    pub fn new(
+        content_serial: NonZeroU64,
+        layers: Vec<PrivateFrame>,
+    ) -> Result<Self, RejectedSceneFrames> {
+        if !scene_serials_match(
+            content_serial,
+            layers.iter().map(PrivateFrame::content_serial),
+        ) {
+            return Err(RejectedSceneFrames {
+                layers,
+                cause: invalid("scene layers do not share its content identity"),
+            });
+        }
+        Ok(Self {
+            layers,
+            content_serial,
+        })
+    }
+
+    pub fn content_serial(&self) -> NonZeroU64 {
+        self.content_serial
+    }
+
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    pub fn into_parts(self) -> (NonZeroU64, Vec<PrivateFrame>) {
+        (self.content_serial, self.layers)
+    }
+}
+
+/// Layer frames rejected without losing their private buffer owners.
+pub struct RejectedSceneFrames {
+    layers: Vec<PrivateFrame>,
+    cause: io::Error,
+}
+
+impl std::fmt::Debug for RejectedSceneFrames {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RejectedSceneFrames")
+            .field("layer_count", &self.layers.len())
+            .field("cause", &self.cause)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for RejectedSceneFrames {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "reject complete scene frames: {}", self.cause)
+    }
+}
+
+impl std::error::Error for RejectedSceneFrames {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+impl RejectedSceneFrames {
+    pub fn cause(&self) -> &io::Error {
+        &self.cause
+    }
+
+    pub fn into_parts(self) -> (Vec<PrivateFrame>, io::Error) {
+        (self.layers, self.cause)
+    }
+}
+
+fn scene_serials_match(
+    content_serial: NonZeroU64,
+    serials: impl Iterator<Item = Option<NonZeroU64>>,
+) -> bool {
+    serials
+        .into_iter()
+        .all(|serial| serial == Some(content_serial))
+}
+
 /// Buffers and immutable frame metadata for one scene execution.
 pub struct SceneInputs {
-    pub destination: PrivateBuffer,
-    pub sources: Vec<PrivateFrame>,
-    pub background: [u8; 3],
-    pub content_serial: NonZeroU64,
+    destination: PrivateBuffer,
+    frames: SceneFrames,
+    background: [u8; 3],
+}
+
+impl SceneInputs {
+    pub fn new(destination: PrivateBuffer, frames: SceneFrames, background: [u8; 3]) -> Self {
+        Self {
+            destination,
+            frames,
+            background,
+        }
+    }
+
+    pub fn into_parts(self) -> (PrivateBuffer, SceneFrames, [u8; 3]) {
+        (self.destination, self.frames, self.background)
+    }
 }
 
 /// Rejected inputs whose pixels and pool ownership remain unchanged.
@@ -335,6 +445,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn complete_scene_identity_rejects_missing_or_mixed_layer_serials() {
+        let serial = NonZeroU64::new(73).unwrap();
+        assert!(scene_serials_match(serial, std::iter::empty()));
+        assert!(scene_serials_match(
+            serial,
+            [Some(serial), Some(serial)].into_iter()
+        ));
+        assert!(!scene_serials_match(serial, [None].into_iter()));
+        assert!(!scene_serials_match(
+            serial,
+            [Some(serial), NonZeroU64::new(74)].into_iter()
+        ));
+    }
+
     fn device() -> (Device, u64) {
         let node = std::env::var_os("PRONK_GPU_RENDER_NODE").expect("select render node");
         let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("select hex modifier");
@@ -382,18 +507,16 @@ mod tests {
             destination,
             mut sources,
         } = pool.take().unwrap().unwrap();
-        let source = sources
+        let mut source = sources
             .pop()
             .unwrap()
             .clear_and_wait([231, 57, 19])
             .unwrap();
+        let content_serial = NonZeroU64::new(73).unwrap();
+        source.content_serial = Some(content_serial);
+        let frames = SceneFrames::new(content_serial, vec![source]).unwrap();
         let result = composer
-            .compose_and_wait(SceneInputs {
-                destination,
-                sources: vec![source],
-                background: [17, 85, 204],
-                content_serial: NonZeroU64::new(73).unwrap(),
-            })
+            .compose_and_wait(SceneInputs::new(destination, frames, [17, 85, 204]))
             .unwrap();
         let (sources, frame) = result.into_parts();
         assert_eq!(frame.content_serial(), NonZeroU64::new(73));
@@ -402,6 +525,43 @@ mod tests {
         assert!(pool.restore_sources(sources).is_ok());
         assert!(pool.restore_destination(frame.buffer).is_ok());
         assert_eq!(pool.available(), 2);
+    }
+
+    #[test]
+    #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+    fn mixed_scene_identity_returns_every_private_owner() {
+        let (device, _) = device();
+        let extent = Extent::new(4, 3).unwrap();
+        let mut pool = ScenePool::new(
+            &device,
+            extent,
+            [extent, extent].into_iter(),
+            NonZeroUsize::new(1).unwrap(),
+        )
+        .unwrap();
+        let SceneBuffers {
+            destination,
+            sources,
+        } = pool.take().unwrap().unwrap();
+        let serial = NonZeroU64::new(73).unwrap();
+        let mut frames: Vec<_> = sources
+            .into_iter()
+            .map(|source| source.clear_and_wait([17, 85, 204]).unwrap())
+            .collect();
+        frames[0].content_serial = Some(serial);
+        frames[1].content_serial = NonZeroU64::new(74);
+
+        let rejected = SceneFrames::new(serial, frames).err().unwrap();
+        assert_eq!(rejected.cause().kind(), io::ErrorKind::InvalidInput);
+        let (frames, _) = rejected.into_parts();
+        let sources = frames.into_iter().map(|frame| frame.buffer).collect();
+        assert!(pool
+            .restore(SceneBuffers {
+                destination,
+                sources,
+            })
+            .is_ok());
+        assert_eq!(pool.available(), 1);
     }
 
     #[test]
@@ -441,21 +601,21 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
         )
         .unwrap();
-        let error = match composer.compose_and_wait(SceneInputs {
-            destination: pool.take().unwrap(),
-            sources: Vec::new(),
-            background: [0; 3],
-            content_serial: NonZeroU64::new(1).unwrap(),
-        }) {
-            Ok(_) => panic!("source-count mismatch was accepted"),
-            Err(error) => error,
-        };
+        let frames = SceneFrames::new(NonZeroU64::new(1).unwrap(), Vec::new()).unwrap();
+        let error =
+            match composer.compose_and_wait(SceneInputs::new(pool.take().unwrap(), frames, [0; 3]))
+            {
+                Ok(_) => panic!("source-count mismatch was accepted"),
+                Err(error) => error,
+            };
         let SceneCompositionError::Rejected(rejected) = error else {
             panic!("input mismatch reached native work");
         };
         assert_eq!(rejected.cause().kind(), io::ErrorKind::InvalidInput);
         let (inputs, _) = rejected.into_parts();
-        assert!(pool.put(inputs.destination).is_ok());
+        let (destination, frames, _) = inputs.into_parts();
+        assert!(frames.is_empty());
+        assert!(pool.put(destination).is_ok());
         assert_eq!(pool.available(), 1);
     }
 }
