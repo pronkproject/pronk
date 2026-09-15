@@ -213,6 +213,7 @@ mod tests {
             node_path: PathBuf::from("/dev/dri/card9"),
             device_major: 226,
             device_minor: 9,
+            crtc_id: index + 20,
             connector_id: index + 40,
             connector_name: format!("Virtual-{}", index + 1),
             connection,
@@ -289,6 +290,13 @@ mod tests {
         let duplicate = vec![outputs[0].clone(), outputs[0].clone()];
         assert_eq!(
             pool.reserve(&device("two"), &duplicate, None),
+            Err(OutputReservationError::InvalidInventory)
+        );
+
+        let mut missing_crtc = outputs.clone();
+        missing_crtc[0].crtc_id = 0;
+        assert_eq!(
+            pool.reserve(&device("two"), &missing_crtc, None),
             Err(OutputReservationError::InvalidInventory)
         );
     }

@@ -920,6 +920,7 @@ mod tests {
                 node_path: "/dev/dri/card42".into(),
                 device_major: 226,
                 device_minor: 42,
+                crtc_id: 57,
                 connector_id: 77,
                 connector_name: "Virtual-1".into(),
                 connection: OutputConnection::Connected,

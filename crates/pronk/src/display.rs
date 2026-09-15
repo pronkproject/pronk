@@ -1344,6 +1344,7 @@ mod tests {
             node_path: PathBuf::from("/dev/dri/card9"),
             device_major: 226,
             device_minor: 9,
+            crtc_id: 20,
             connector_id: 40,
             connector_name: "Virtual-1".into(),
             connection: OutputConnection::Disconnected,

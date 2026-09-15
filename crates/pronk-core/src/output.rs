@@ -518,6 +518,7 @@ mod tests {
             node_path: PathBuf::from("/dev/dri/card9"),
             device_major: 226,
             device_minor: 9,
+            crtc_id: connector_id + 100,
             connector_id,
             connector_name: format!("Virtual-{}", output_index + 1),
             connection: OutputConnection::Disconnected,
@@ -548,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_stable_outputs_and_connectors() {
+    fn rejects_duplicate_stable_outputs_and_kms_objects() {
         let duplicate_output = vec![
             output("/sys/devices/castkms", 0, 10),
             output("/sys/devices/castkms", 0, 11),
@@ -565,6 +566,33 @@ mod tests {
         assert!(matches!(
             finish_output_inventory(duplicate_connector),
             Err(OutputDiscoveryError::DuplicateConnector { .. })
+        ));
+
+        let mut duplicate_crtc = vec![
+            output("/sys/devices/castkms", 0, 10),
+            output("/sys/devices/castkms", 1, 11),
+        ];
+        duplicate_crtc[1].crtc_id = duplicate_crtc[0].crtc_id;
+        assert!(matches!(
+            finish_output_inventory(duplicate_crtc),
+            Err(OutputDiscoveryError::DuplicateCrtc { .. })
+        ));
+    }
+
+    #[test]
+    fn resolves_one_possible_crtc() {
+        assert_eq!(crtc_id_from_mask(1 << 1, &[17, 23]).unwrap(), 23);
+        assert!(matches!(
+            crtc_id_from_mask(0, &[17]),
+            Err(CardProbeError::AmbiguousCrtc(0))
+        ));
+        assert!(matches!(
+            crtc_id_from_mask(3, &[17, 23]),
+            Err(CardProbeError::AmbiguousCrtc(3))
+        ));
+        assert!(matches!(
+            crtc_id_from_mask(1 << 2, &[17, 23]),
+            Err(CardProbeError::InvalidCrtcMask(4))
         ));
     }
 

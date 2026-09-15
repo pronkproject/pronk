@@ -892,6 +892,7 @@ fn mock_outputs() -> Vec<CastKmsOutput> {
             node_path: PathBuf::from("/dev/dri/card9"),
             device_major: 226,
             device_minor: 9,
+            crtc_id: 20 + output_index,
             connector_id: 40 + output_index,
             connector_name: format!("Virtual-{}", output_index + 1),
             connection: OutputConnection::Disconnected,
