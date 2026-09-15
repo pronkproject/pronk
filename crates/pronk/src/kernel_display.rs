@@ -87,7 +87,8 @@ fn validate_poll_interval(poll_interval: Duration) -> Result<(), KernelDisplayEr
 impl KernelDisplayPort for CastKmsDisplayMonitor {
     fn metadata(&self) -> KernelDisplayMetadata {
         KernelDisplayMetadata {
-            grant_id: self.client().client().grant_id(),
+            session_id: std::num::NonZeroU64::new(u64::from(self.client().client().grant_id()))
+                .expect("validated CastKMS grants have nonzero identity"),
         }
     }
 

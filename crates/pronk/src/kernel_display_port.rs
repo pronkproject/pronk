@@ -4,6 +4,7 @@
 //! its ioctl types nor its file-descriptor ownership leak into the slot actor.
 
 use std::fmt;
+use std::num::NonZeroU64;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -12,7 +13,7 @@ use crate::display_state::{DisplayGrantState, DisplayTopology};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KernelDisplayMetadata {
-    pub grant_id: u32,
+    pub session_id: NonZeroU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

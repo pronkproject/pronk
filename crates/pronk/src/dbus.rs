@@ -811,6 +811,7 @@ pub enum LifecycleSignalError {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
     use std::sync::Arc;
 
     use futures_util::StreamExt;
@@ -925,7 +926,7 @@ mod tests {
                 connector_name: "Virtual-1".into(),
                 connection: OutputConnection::Connected,
             },
-            grant_id: 9,
+            kernel_session_id: NonZeroU64::new(9).unwrap(),
             grant_state: crate::display_state::DisplayGrantState::Active,
             runtime: crate::display_state::DisplayRuntimeState::attached(state_revision),
         }

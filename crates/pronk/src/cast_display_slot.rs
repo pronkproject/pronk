@@ -573,7 +573,7 @@ fn initial_snapshot(resources: &AddedCastDisplayResources) -> AddedCastDisplaySn
         device: resources.device.clone(),
         prepared: resources.prepared.clone(),
         output: resources.slot.output().clone(),
-        grant_id: metadata.grant_id,
+        kernel_session_id: metadata.session_id,
         grant_state: observation.grant_state,
         runtime,
     }

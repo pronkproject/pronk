@@ -450,7 +450,7 @@ pub struct AddedCastDisplay {
 /// Bounded read-only projection of a manager-owned added display.
 ///
 /// This is an internal control-plane snapshot. The public D-Bus adapter uses a
-/// narrower protocol type and never exposes DRM node paths or grant IDs.
+/// narrower protocol type and never exposes DRM node paths or kernel session IDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddedCastDisplaySnapshot {
     pub display_id: CastDisplayId,
@@ -458,7 +458,7 @@ pub struct AddedCastDisplaySnapshot {
     pub device: DeviceInfo,
     pub prepared: PreparedCastDevice,
     pub output: pronk_core::output::CastKmsOutput,
-    pub grant_id: u32,
+    pub kernel_session_id: NonZeroU64,
     pub grant_state: DisplayGrantState,
     pub runtime: DisplayRuntimeState,
 }

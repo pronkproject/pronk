@@ -100,7 +100,8 @@ impl CastKmsKernelActor {
         }
         let initial = query_observation(&client)?;
         let metadata = KernelDisplayMetadata {
-            grant_id: client.grant_id(),
+            session_id: NonZeroU64::new(u64::from(client.grant_id()))
+                .expect("validated CastKMS grants have nonzero identity"),
         };
         if config.device_control.is_some() {
             let capabilities = client.query_cec_capabilities().map_err(|error| {
