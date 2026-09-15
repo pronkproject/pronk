@@ -6,7 +6,9 @@ mod renderer;
 mod video;
 pub use output::{OutputEvent, OutputFrame, OutputSession, PublishError};
 pub use registration::Registration;
-pub use renderer::{RendererStream, RendererStreamConfig, RendererStreamError};
+pub use renderer::{
+    RendererStream, RendererStreamConfig, RendererStreamError, RendererStreamState,
+};
 pub use video::{FramePublishError, StoppedVideo, Video, VideoEvent};
 
 use std::io;

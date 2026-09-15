@@ -8,7 +8,7 @@ use castkms_renderer::Renderer;
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{PipeWireRemote, VideoNodeIdentity, VideoSourceConfig};
 use pronk_renderer_worker::{OutputPool, PrivateProbe};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -28,8 +28,17 @@ pub struct RendererStreamConfig {
 /// task, stops PipeWire, and aborts the unpublished takeover candidate.
 pub struct RendererStream<F> {
     identity: VideoNodeIdentity,
+    state: watch::Receiver<RendererStreamState>,
     stop: CancellationToken,
     task: Option<JoinHandle<(F, io::Result<()>)>>,
+}
+
+/// Observable lifetime of one renderer stream task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RendererStreamState {
+    Prepared,
+    Stopped,
+    Failed(String),
 }
 
 impl<F: AsFd + Send + 'static> RendererStream<F> {
@@ -41,8 +50,17 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         remote: PipeWireRemote,
     ) -> Result<Self, RendererStreamError<F>> {
         let stop = CancellationToken::new();
+        let (state, receive) = watch::channel(RendererStreamState::Prepared);
         let (started, response) = oneshot::channel();
-        let task = tokio::spawn(run(renderer, device, config, remote, stop.clone(), started));
+        let task = tokio::spawn(run(
+            renderer,
+            device,
+            config,
+            remote,
+            stop.clone(),
+            started,
+            state,
+        ));
         let mut starting = Starting {
             stop: stop.clone(),
             task: Some(task),
@@ -51,6 +69,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         match response.await {
             Ok(Started::Ready(identity)) => Ok(Self {
                 identity,
+                state: receive,
                 stop,
                 task: Some(starting.take_task()),
             }),
@@ -61,6 +80,10 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
 
     pub fn identity(&self) -> &VideoNodeIdentity {
         &self.identity
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<RendererStreamState> {
+        self.state.clone()
     }
 
     /// Stop transport, abort the candidate, and return the renderer owner.
@@ -181,8 +204,13 @@ async fn run<F: AsFd + Send + 'static>(
     remote: PipeWireRemote,
     stop: CancellationToken,
     started: oneshot::Sender<Started>,
+    state: watch::Sender<RendererStreamState>,
 ) -> (F, io::Result<()>) {
     let result = run_generation(&mut renderer, &device, config, remote, &stop, started).await;
+    state.send_replace(match &result {
+        Ok(()) => RendererStreamState::Stopped,
+        Err(error) => RendererStreamState::Failed(error.to_string()),
+    });
     (renderer.into_owner(), result)
 }
 
@@ -279,6 +307,7 @@ mod tests {
     fn renderer_stream_ownership_can_cross_tasks() {
         assert_send::<RendererStream<std::fs::File>>();
         assert_send::<RendererStreamError<std::fs::File>>();
+        assert_send::<RendererStreamState>();
     }
 
     #[tokio::test]
