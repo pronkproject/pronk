@@ -2,6 +2,7 @@
 
 use std::io;
 use std::num::NonZeroU64;
+use std::os::fd::BorrowedFd;
 
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::SourceImage;
@@ -17,6 +18,16 @@ pub struct SceneSource {
 }
 
 impl SceneSource {
+    /// Import one checked scene layer without consuming its aggregate job.
+    pub fn import(
+        device: &pronk_gpu::vulkan::Device,
+        layer: &castkms_renderer::SceneLayer,
+        producer: Option<BorrowedFd<'_>>,
+    ) -> io::Result<Self> {
+        crate::source::import_image(device, layer.image(), producer)
+            .map(|(image, alpha)| Self { image, alpha })
+    }
+
     /// Bind the DRM format's alpha meaning to a compatible native import.
     pub fn from_drm_format(image: SourceImage, format: u32) -> Result<Self, RejectedSceneSource> {
         match crate::source::source_alpha(format, image.layout().format) {

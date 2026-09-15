@@ -1,7 +1,7 @@
 //! Checked adaptation of one claimed CastKMS source into Vulkan ownership.
 
 use std::io;
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
 use castkms_renderer::{FormatModifier, SourceGeometry, SourceJob, SourceReleaseError};
 use castkms_sys::{
@@ -93,7 +93,14 @@ fn import<F: AsFd>(
     device: &Device,
     job: &SourceJob<'_, '_, F>,
 ) -> io::Result<(SourceImage, SourceAlpha)> {
-    let source = job.image();
+    import_image(device, job.image(), job.producer_completion())
+}
+
+pub(crate) fn import_image(
+    device: &Device,
+    source: &castkms_renderer::SourceImage,
+    producer: Option<BorrowedFd<'_>>,
+) -> io::Result<(SourceImage, SourceAlpha)> {
     let format = source_format(source.format())?;
     let modifier = match source.modifier() {
         FormatModifier::Explicit(modifier) => modifier,
@@ -127,8 +134,7 @@ fn import<F: AsFd>(
         allocation_size,
     };
     let fd = plane.as_fd().try_clone_to_owned()?;
-    let producer = job
-        .producer_completion()
+    let producer = producer
         .map(|producer| SyncFile::from_fd(producer.try_clone_to_owned()?))
         .transpose()?;
     // The kernel-issued job retains source-read authority and reports the
