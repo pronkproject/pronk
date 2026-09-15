@@ -31,6 +31,18 @@ pub(crate) async fn run<F: AsFd>(
     let mut source_tick = time::interval(source_interval);
     source_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    let result = run_until_stopped(&mut reader, video, &mut pipeline, &mut source_tick, stop).await;
+    pipeline.shutdown().await;
+    result
+}
+
+async fn run_until_stopped<F: AsFd>(
+    reader: &mut SourceReader<'_, F>,
+    video: &mut Video,
+    pipeline: &mut Pipeline,
+    source_tick: &mut time::Interval,
+    stop: &CancellationToken,
+) -> io::Result<()> {
     loop {
         pipeline.dispatch_outputs(video)?;
         tokio::select! {
@@ -68,7 +80,7 @@ pub(crate) async fn run<F: AsFd>(
                         pipeline.published = true;
                     }
                     Err(error) => {
-                        return Err(pipeline.recover_publication(error, &mut reader)?);
+                        return Err(pipeline.recover_publication(error, reader)?);
                     }
                 }
             }
@@ -174,6 +186,17 @@ impl Pipeline {
         }
         Ok(cause)
     }
+
+    async fn shutdown(&mut self) {
+        stop_tasks(&mut self.source_reads).await;
+        stop_tasks(&mut self.output_copies).await;
+        stop_tasks(&mut self.producer_waits).await;
+        stop_tasks(&mut self.reader_waits).await;
+    }
+}
+
+async fn stop_tasks<T: 'static>(tasks: &mut JoinSet<T>) {
+    tasks.shutdown().await;
 }
 
 fn take_pair<L, R>(left: &mut VecDeque<L>, right: &mut VecDeque<R>) -> Option<(L, R)> {
@@ -200,9 +223,11 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::take_pair;
+    use super::{stop_tasks, take_pair};
     use pronk_renderer_worker::CompletedOutput;
     use std::collections::VecDeque;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinSet;
 
     fn assert_send<T: Send>() {}
 
@@ -222,5 +247,25 @@ mod tests {
         let mut right = VecDeque::from([2]);
         assert_eq!(take_pair(&mut left, &mut right), None);
         assert_eq!(right, [2]);
+    }
+
+    #[tokio::test]
+    async fn stopping_waits_for_a_running_blocking_operation() {
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let mut tasks = JoinSet::new();
+        tasks.spawn_blocking(move || {
+            let _ = entered.send(());
+            let _ = release_rx.blocking_recv();
+        });
+        entered_rx.await.unwrap();
+
+        let stopping = tokio::spawn(async move {
+            stop_tasks(&mut tasks).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!stopping.is_finished());
+        release.send(()).unwrap();
+        stopping.await.unwrap();
     }
 }
