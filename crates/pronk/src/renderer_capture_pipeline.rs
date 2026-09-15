@@ -90,8 +90,12 @@ struct ActiveMonitor {
 }
 
 impl ActiveMonitor {
-    async fn shutdown(mut self) -> Result<(), MediaPipelineError> {
+    fn cancel(&self) {
         self.stop.cancel();
+    }
+
+    async fn shutdown(mut self) -> Result<(), MediaPipelineError> {
+        self.cancel();
         self.task
             .take()
             .expect("live active renderer monitor owns its task")
@@ -433,6 +437,7 @@ async fn shutdown_active(
     stream: ActiveRendererStream<OwnedFd>,
     monitor: ActiveMonitor,
 ) -> Result<(), MediaPipelineError> {
+    monitor.cancel();
     let (stream, monitor) = tokio::join!(stream.shutdown(), monitor.shutdown());
     let stream = stream.map_err(|error| stream_error("stop active renderer", error));
     match (stream, monitor) {
@@ -585,9 +590,11 @@ mod tests {
 
     #[tokio::test]
     async fn orderly_monitor_shutdown_does_not_report_failure() {
-        let (_, receive) = tokio::sync::watch::channel(RendererStreamState::Active);
+        let (state, receive) = tokio::sync::watch::channel(RendererStreamState::Active);
         let (events, mut event_rx) = mpsc::unbounded_channel();
         let monitor = monitor_active_renderer(NonZeroU64::new(9).unwrap(), receive, events);
+        monitor.cancel();
+        state.send_replace(RendererStreamState::Stopped);
         monitor.shutdown().await.unwrap();
         assert_eq!(event_rx.recv().await, None);
     }
