@@ -4,14 +4,14 @@ use std::io;
 
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
-    geometry::{Extent, SourceRect},
+    geometry::{DestinationRect, Extent, SourceRect},
     transform::{Rotation, Transform},
 };
 
-pub(super) const PARAMETER_SIZE: usize = 13 * 4;
+pub(super) const PARAMETER_SIZE: usize = 16 * 4;
 
 pub(super) struct Parameters {
-    words: [u32; 13],
+    words: [u32; 16],
     pub(super) groups: [u32; 2],
 }
 
@@ -20,7 +20,7 @@ impl Parameters {
         source: Extent,
         destination: Extent,
         crop: SourceRect,
-        placement: [i32; 2],
+        placement: DestinationRect,
         transform: Transform,
         blend: Blend,
     ) -> io::Result<Option<Self>> {
@@ -31,11 +31,26 @@ impl Parameters {
             ));
         }
         let transformed = transform.extent(crop.extent());
-        let whole = SourceRect::new(transformed, [0, 0], transformed)
-            .expect("whole transformed crop is valid");
-        let Some(visible) = whole.clip_to(placement, destination) else {
+        let whole = SourceRect::new(placement.extent, [0, 0], placement.extent)
+            .expect("whole destination grid is valid");
+        let Some(visible) = whole.clip_to(placement.position, destination) else {
             return Ok(None);
         };
+        for (source, destination) in [
+            (transformed.width(), placement.extent.width()),
+            (transformed.height(), placement.extent.height()),
+        ] {
+            // The shader evaluates (2 * pixel + 1) * source / (2 * destination).
+            // Bound both numerator and denominator before any native work.
+            if 2 * u64::from(destination) > u64::from(u32::MAX)
+                || (2 * u64::from(destination) - 1) * u64::from(source) > u64::from(u32::MAX)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "private blend scaling exceeds integer shader limits",
+                ));
+            }
+        }
         let mode = match blend.pixel {
             PixelBlend::None => 0,
             PixelBlend::Premultiplied => 1,
@@ -70,6 +85,9 @@ impl Parameters {
                 width,
                 height,
                 flags,
+                0, // Align the following uvec2 to eight bytes in GLSL.
+                placement.extent.width(),
+                placement.extent.height(),
             ],
             groups: [width.div_ceil(8), height.div_ceil(8)],
         }))
@@ -81,5 +99,35 @@ impl Parameters {
             bytes.copy_from_slice(&word.to_ne_bytes());
         }
         bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scaling_rejects_overflow_before_submission() {
+        let source = Extent::new(16384, 16384).unwrap();
+        let crop = SourceRect::new(source, [0, 0], source).unwrap();
+        for (width, accepted) in [(131072, true), (131073, false), (u32::MAX, false)] {
+            let placement = DestinationRect {
+                position: [-100, 0],
+                extent: Extent::new(width, 1).unwrap(),
+            };
+            let result = Parameters::new(
+                source,
+                source,
+                crop,
+                placement,
+                Transform::default(),
+                Blend::default(),
+            );
+            if accepted {
+                assert!(result.unwrap().is_some());
+            } else {
+                assert_eq!(result.err().unwrap().kind(), io::ErrorKind::Unsupported);
+            }
+        }
     }
 }

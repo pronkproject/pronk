@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ash::vk;
 use drm_display_executor::scene::{
     blend::Blend,
-    geometry::{Extent, SourceRect},
+    geometry::{DestinationRect, Extent, SourceRect},
     transform::Transform,
 };
 
@@ -52,6 +52,30 @@ impl Blender {
         source: PrivateImage,
         crop: SourceRect,
         placement: [i32; 2],
+        transform: Transform,
+        blend: Blend,
+    ) -> io::Result<BlendedImages> {
+        self.blend_scaled_region_waited(
+            destination,
+            source,
+            crop,
+            DestinationRect {
+                position: placement,
+                extent: transform.extent(crop.extent()),
+            },
+            transform,
+            blend,
+        )
+    }
+
+    /// Blend with explicit destination dimensions using the contract of
+    /// [`PrivateImage::blend_scaled_region_waited`] and a reusable program.
+    pub fn blend_scaled_region_waited(
+        &self,
+        destination: PrivateImage,
+        source: PrivateImage,
+        crop: SourceRect,
+        placement: DestinationRect,
         transform: Transform,
         blend: Blend,
     ) -> io::Result<BlendedImages> {
@@ -122,6 +146,33 @@ impl PrivateImage {
         transform: Transform,
         blend: Blend,
     ) -> io::Result<BlendedImages> {
+        self.blend_scaled_region_waited(
+            source,
+            crop,
+            DestinationRect {
+                position: placement,
+                extent: transform.extent(crop.extent()),
+            },
+            transform,
+            blend,
+        )
+    }
+
+    /// Scale the transformed crop with nearest-neighbor sampling, then blend.
+    ///
+    /// Destination pixel centers select the containing source pixel, matching
+    /// the CPU reference. Clipping preserves that sampling grid. The checked
+    /// integer shader supports axis products up to `u32::MAX`; larger visible
+    /// placements return `Unsupported` before submission. Device, precision and
+    /// ownership requirements follow [`Self::blend_region_waited`].
+    pub fn blend_scaled_region_waited(
+        self,
+        source: PrivateImage,
+        crop: SourceRect,
+        placement: DestinationRect,
+        transform: Transform,
+        blend: Blend,
+    ) -> io::Result<BlendedImages> {
         self.blend_with(None, source, crop, placement, transform, blend)
     }
 
@@ -130,7 +181,7 @@ impl PrivateImage {
         program: Option<Arc<Program>>,
         source: PrivateImage,
         crop: SourceRect,
-        placement: [i32; 2],
+        placement: DestinationRect,
         transform: Transform,
         blend: Blend,
     ) -> io::Result<BlendedImages> {

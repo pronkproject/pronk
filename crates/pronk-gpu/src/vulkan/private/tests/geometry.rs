@@ -6,7 +6,7 @@ use drm_display_executor::{
     scene::{
         blend::{Blend, PixelBlend},
         format::PackedRgbFormat,
-        geometry::{Extent, SourceRect},
+        geometry::{DestinationRect, Extent, SourceRect},
         transform::{Rotation, Transform},
     },
 };
@@ -20,6 +20,16 @@ fn extent(width: u32, height: u32) -> Extent {
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
 fn native_cropped_blends_match_all_orthogonal_transforms() {
+    check_transformed_blends(false);
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn native_scaled_blends_match_all_orthogonal_transforms() {
+    check_transformed_blends(true);
+}
+
+fn check_transformed_blends(scaled: bool) {
     let (producer, modifier) = device();
     let (worker, _) = device();
     assert_eq!(producer.identity(), worker.identity());
@@ -74,6 +84,7 @@ fn native_cropped_blends_match_all_orthogonal_transforms() {
         plane_alpha: 39123,
     };
     let background = [17, 85, 204];
+    let blender = worker.create_blender().unwrap();
     for rotation in [
         Rotation::Rotate0,
         Rotation::Rotate90,
@@ -87,52 +98,82 @@ fn native_cropped_blends_match_all_orthogonal_transforms() {
                     reflect_x,
                     reflect_y,
                 };
-                for placement in [
-                    [-3, 2],
-                    [5, -2],
-                    [0, 0],
-                    [16, 10],
-                    [i32::MIN, 0],
-                    [i32::MAX, 0],
-                ] {
-                    let destination = worker
-                        .allocate_private(nz(17), nz(11))
-                        .unwrap()
-                        .clear_waited(background)
-                        .unwrap();
-                    let result = destination
-                        .blend_region_waited(source, crop, placement, transform, blend)
-                        .unwrap();
-                    source = result.source;
-                    let copied = result
-                        .destination
-                        .copy_into_waited(worker.allocate(nz(17), nz(11), modifier).unwrap())
-                        .unwrap();
-                    let (_, actual) = readback(copied.destination);
-                    let layer = Layer::new(
-                        CpuImage::new(&reference, source_layout).unwrap(),
-                        [2, 1],
-                        extent(13, 9),
-                        placement,
-                    )
-                    .unwrap()
-                    .with_transform(transform)
-                    .with_blend(blend);
-                    let mut expected = vec![0; 17 * 11 * 4];
-                    compose(
-                        &mut ImageMut::new(&mut expected, output_layout).unwrap(),
-                        background,
-                        &[layer],
-                    )
-                    .unwrap();
-                    for (actual, expected) in actual.chunks_exact(4).zip(expected.chunks_exact(4)) {
-                        for channel in 0..3 {
-                            assert!(
-                                actual[channel].abs_diff(expected[channel]) <= 1,
-                                "{actual:?} != {expected:?}: {placement:?}, {transform:?}"
-                            );
+                let sizes = if scaled {
+                    vec![
+                        extent(23, 17),
+                        extent(26, 18),
+                        extent(7, 5),
+                        extent(1, 1),
+                        extent(19, 3),
+                    ]
+                } else {
+                    vec![transform.extent(crop.extent())]
+                };
+                for size in sizes {
+                    for placement in [
+                        [-3, 2],
+                        [5, -2],
+                        [0, 0],
+                        [16, 10],
+                        [i32::MIN, 0],
+                        [i32::MAX, 0],
+                    ] {
+                        let destination = worker
+                            .allocate_private(nz(17), nz(11))
+                            .unwrap()
+                            .clear_waited(background)
+                            .unwrap();
+                        let result = if scaled {
+                            blender.blend_scaled_region_waited(
+                                destination,
+                                source,
+                                crop,
+                                DestinationRect {
+                                    position: placement,
+                                    extent: size,
+                                },
+                                transform,
+                                blend,
+                            )
+                        } else {
+                            destination
+                                .blend_region_waited(source, crop, placement, transform, blend)
                         }
-                        assert_eq!(actual[3], expected[3]);
+                        .unwrap();
+                        source = result.source;
+                        let copied = result
+                            .destination
+                            .copy_into_waited(worker.allocate(nz(17), nz(11), modifier).unwrap())
+                            .unwrap();
+                        let (_, actual) = readback(copied.destination);
+                        let layer = Layer::new(
+                            CpuImage::new(&reference, source_layout).unwrap(),
+                            [2, 1],
+                            extent(13, 9),
+                            placement,
+                        )
+                        .unwrap()
+                        .with_transform(transform)
+                        .with_destination_extent(size)
+                        .with_blend(blend);
+                        let mut expected = vec![0; 17 * 11 * 4];
+                        compose(
+                            &mut ImageMut::new(&mut expected, output_layout).unwrap(),
+                            background,
+                            &[layer],
+                        )
+                        .unwrap();
+                        for (actual, expected) in
+                            actual.chunks_exact(4).zip(expected.chunks_exact(4))
+                        {
+                            for channel in 0..3 {
+                                assert!(
+                                    actual[channel].abs_diff(expected[channel]) <= 1,
+                                    "{actual:?} != {expected:?}: {placement:?}, {size:?}, {transform:?}"
+                                );
+                            }
+                            assert_eq!(actual[3], expected[3]);
+                        }
                     }
                 }
             }

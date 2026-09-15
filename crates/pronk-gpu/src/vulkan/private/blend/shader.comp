@@ -9,19 +9,22 @@ layout(push_constant) uniform Parameters {
     uint plane_alpha;
     uvec2 crop_origin;
     uvec2 crop_extent;
-    uvec2 transformed_origin;
+    uvec2 placement_origin;
     uvec2 destination_origin;
     uvec2 visible_extent;
     uint transform_flags;
+    uvec2 placement_extent;
 } parameters;
 
 void main() {
     uvec2 invocation = gl_GlobalInvocationID.xy;
     if (any(greaterThanEqual(invocation, parameters.visible_extent)))
         return;
-    uvec2 local = parameters.transformed_origin + invocation;
+    uvec2 local = parameters.placement_origin + invocation;
     uvec2 extent = parameters.crop_extent;
     uint rotation = parameters.transform_flags & 3;
+    uvec2 transformed_extent = (rotation == 1 || rotation == 3) ? extent.yx : extent;
+    local = ((2 * local + 1) * transformed_extent) / (2 * parameters.placement_extent);
     if (rotation == 1)
         local = uvec2(extent.x - 1 - local.y, local.x);
     else if (rotation == 2)
