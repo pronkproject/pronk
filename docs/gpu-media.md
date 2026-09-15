@@ -355,11 +355,13 @@ device, not shader blending, color conversion or asynchronous source accounting.
 RGBA source tests separately check the native byte order and all 256 values in
 each channel through private storage into BGRA output. Their original images
 are overwritten before exported output is allocated. Cropped RGBA tests include
-scaling and background initialization. Ordinary byte-copy paths reject different
-packed formats, while private-image blits perform channel conversion. Neither
-the worker's XBGR import support nor the native alpha-preservation tests expand
-the worker's accepted blend policy; alpha-bearing DRM formats remain rejected.
-PipeWire output is still BGRx, independently of the source channel order.
+scaling and background initialization. Ordinary byte-copy paths reject
+different packed formats, while private-image blits perform channel conversion.
+The installed single-source worker preserves an alpha-bearing format's fourth
+channel but has no overlapping layer that would interpret it. The complete-scene
+path binds X padding or pixel alpha to each imported format and applies the
+scene's qualified blend mode after source color processing. PipeWire output
+remains BGRx independently of source channel order and alpha semantics.
 
 Ten-bit native tests generate all 1024 color values in both packed orders,
 check the original words, then overwrite the originals after reading into
@@ -741,20 +743,24 @@ output copying through publication is serialized after that ordered boundary;
 source staging and scene composition remain concurrent and independently
 bounded.
 
-The version-6 raw scene records are bound, but no production code dequeues or
-parses them into a GPU profile yet. `castkms-renderer` does own and validate the
-complete packet under one kernel job, including all installed descriptors,
-geometry, stacking and color payloads. Output color remains an ordered raw
-operation list: the current record gives both degamma and gamma tables the same
-LUT kind while omitting absent stages, so one LUT cannot be assigned to its
-display-order slot unambiguously. Pronk qualifies every unambiguous empty,
-matrix, two-LUT or LUT/matrix arrangement and rejects a lone LUT as unsupported.
-The UAPI needs stage identity before that final valid configuration can be
-accepted without guessing.
+The version-6 scene records can be decoded, qualified and executed by the
+complete-scene reader above. `castkms-renderer` owns and validates the complete
+packet under one kernel job, including all installed descriptors, geometry,
+stacking and color payloads. The installed renderer generation still selects
+the older single-source reader; it does not yet construct a reusable scene
+storage profile or call the complete-scene scheduler.
 
-Once that contract is explicit, a production loop can dequeue each aggregate
-job, reserve its independent private stages and drive the qualified transaction
-above. The older single-source job is not a per-layer substitute for that
+Output color also remains an ordered raw operation list: the current record
+gives both degamma and gamma tables the same LUT kind while omitting absent
+stages, so one LUT cannot be assigned to its display-order slot unambiguously.
+Pronk qualifies every unambiguous empty, matrix, two-LUT or LUT/matrix
+arrangement and rejects a lone LUT as unsupported. The UAPI needs stage
+identity before that final valid configuration can be accepted without
+guessing. The current record also lacks explicit layer transform and blend
+fields; its adapter therefore uses identity transforms, premultiplied pixel
+alpha and full plane alpha. Production activation must consume a versioned
+profile that states those operations rather than silently extending those
+defaults. The older single-source job is not a per-layer substitute for that
 transaction.
 
 ## Current scope
