@@ -1813,12 +1813,18 @@ async fn fail_active(
     events: &mpsc::UnboundedSender<KernelDisplayEvent>,
     error: String,
 ) -> Result<(), KernelDisplayError> {
+    let media_generation = active
+        .as_ref()
+        .map(|generation| generation.media_generation);
     let cleanup = stop_active(client, video, active).await;
     let diagnostic = match &cleanup {
         Ok(()) => error,
         Err(cleanup) => format!("{error}; cleanup also failed: {cleanup}"),
     };
-    let _ = events.send(KernelDisplayEvent::MediaFailed(diagnostic));
+    let _ = events.send(KernelDisplayEvent::MediaFailed {
+        media_generation,
+        error: diagnostic,
+    });
     cleanup.map_err(|cleanup| {
         KernelDisplayError::new(
             "recover failed media generation",
@@ -1942,10 +1948,16 @@ mod tests {
 
     #[test]
     fn asynchronous_media_failure_is_an_explicit_kernel_port_event() {
-        let event = KernelDisplayEvent::MediaFailed("source disappeared".into());
+        let event = KernelDisplayEvent::MediaFailed {
+            media_generation: NonZeroU64::new(7),
+            error: "source disappeared".into(),
+        };
         assert_eq!(
             event,
-            KernelDisplayEvent::MediaFailed("source disappeared".into())
+            KernelDisplayEvent::MediaFailed {
+                media_generation: NonZeroU64::new(7),
+                error: "source disappeared".into(),
+            }
         );
         let _ = MediaState::Failed;
     }

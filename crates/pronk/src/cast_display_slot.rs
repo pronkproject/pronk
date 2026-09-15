@@ -243,10 +243,10 @@ async fn run_slot(
             event = kernel.next_event() => match event {
                 Ok(event) => {
                     let revoked = event == KernelDisplayEvent::Revoked;
-                    let media_failure = match &event {
-                        KernelDisplayEvent::MediaFailed(error) => Some(error.clone()),
-                        _ => None,
-                    };
+                    let media_failure = current_media_failure(
+                        state.borrow().runtime.media_generation,
+                        &event,
+                    );
                     apply_kernel_event(&state, &events, event);
                     media_policy.observe(media_policy_input(&state.borrow(), &device_session));
                     if let Some(error) = media_failure {
@@ -603,7 +603,7 @@ fn apply_kernel_event(
     events: &mpsc::UnboundedSender<CastDisplaySlotEvent>,
     event: KernelDisplayEvent,
 ) {
-    state.send_modify(|snapshot| match event {
+    let changed = state.send_if_modified(|snapshot| match event {
         KernelDisplayEvent::Changed(observation) => {
             let grant_changed = snapshot.grant_state != observation.grant_state;
             let topology_changed = snapshot.runtime.observe_topology(observation.topology);
@@ -612,6 +612,7 @@ fn apply_kernel_event(
                 snapshot.runtime.revision = snapshot.runtime.revision.saturating_add(1);
             }
             snapshot.state_revision = snapshot.runtime.revision;
+            true
         }
         KernelDisplayEvent::Revoked => {
             snapshot.grant_state = DisplayGrantState::Revoked;
@@ -626,16 +627,39 @@ fn apply_kernel_event(
                 Some("CastKMS grant was revoked".into()),
             );
             snapshot.state_revision = snapshot.runtime.revision;
+            true
         }
-        KernelDisplayEvent::MediaFailed(error) => {
-            let media_generation = snapshot.runtime.media_generation;
-            snapshot
-                .runtime
-                .observe_media(media_generation, MediaState::Failed, Some(error));
-            snapshot.state_revision = snapshot.runtime.revision;
+        KernelDisplayEvent::MediaFailed {
+            media_generation,
+            error,
+        } => {
+            let current = snapshot.runtime.media_generation;
+            if media_generation.is_none_or(|generation| generation.get() == current) {
+                snapshot
+                    .runtime
+                    .observe_media(current, MediaState::Failed, Some(error));
+                snapshot.state_revision = snapshot.runtime.revision;
+                true
+            } else {
+                false
+            }
         }
     });
-    publish(state, events);
+    if changed {
+        publish(state, events);
+    }
+}
+
+fn current_media_failure(current: u64, event: &KernelDisplayEvent) -> Option<String> {
+    match event {
+        KernelDisplayEvent::MediaFailed {
+            media_generation,
+            error,
+        } if media_generation.is_none_or(|generation| generation.get() == current) => {
+            Some(error.clone())
+        }
+        _ => None,
+    }
 }
 
 fn publish(
@@ -680,6 +704,7 @@ pub enum CastDisplaySlotActorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU64;
 
     fn device(
         availability: DeviceAvailability,
@@ -756,6 +781,28 @@ mod tests {
         assert!(state.complete_request(7, &recovered, 2, &recovered));
         assert!(state.ready);
         assert_eq!(state.session_generation, 2);
+    }
+
+    #[test]
+    fn media_failure_only_applies_to_its_current_generation() {
+        let current = KernelDisplayEvent::MediaFailed {
+            media_generation: NonZeroU64::new(7),
+            error: "renderer stopped".into(),
+        };
+        assert_eq!(
+            current_media_failure(7, &current).as_deref(),
+            Some("renderer stopped")
+        );
+        assert_eq!(current_media_failure(8, &current), None);
+
+        let untagged = KernelDisplayEvent::MediaFailed {
+            media_generation: None,
+            error: "grant failed".into(),
+        };
+        assert_eq!(
+            current_media_failure(8, &untagged).as_deref(),
+            Some("grant failed")
+        );
     }
 
     #[test]

@@ -26,7 +26,10 @@ pub struct KernelDisplayObservation {
 pub enum KernelDisplayEvent {
     Changed(KernelDisplayObservation),
     Revoked,
-    MediaFailed(String),
+    MediaFailed {
+        media_generation: Option<NonZeroU64>,
+        error: String,
+    },
 }
 
 #[derive(Debug, Error)]
