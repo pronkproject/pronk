@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use pronk::display_state::{RouteTarget, RoutedMode};
-use pronk::media_pipeline_port::CapturePipelinePort;
+use pronk::media_pipeline_port::{CaptureEventPort, CapturePipelinePort};
 use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk::renderer_capture_pipeline::{RendererCapturePipeline, RendererCapturePipelineConfig};
 use pronk_capture_broker::{Provider, Target};

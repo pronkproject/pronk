@@ -20,6 +20,15 @@ pub struct PreparedCaptureMedia {
     pub configuration: DeviceMediaConfiguration,
 }
 
+/// Asynchronous capture-pipeline state with exact generation identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureEvent {
+    Failed {
+        media_generation: NonZeroU64,
+        error: String,
+    },
+}
+
 /// Fresh consumer-class PipeWire connections for one backend generation.
 #[derive(Debug)]
 pub struct DeviceMediaRemoteSet {
@@ -76,6 +85,12 @@ pub trait CapturePipelinePort: fmt::Debug + Send + 'static {
         reason: MediaStopReason,
         cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError>;
+}
+
+/// Sole-consumer event boundary paired with a capture pipeline.
+#[async_trait]
+pub trait CaptureEventPort: fmt::Debug + Send + 'static {
+    async fn next_event(&mut self) -> Option<CaptureEvent>;
 }
 
 /// Authority-limited connection minter. It creates consumer connections but

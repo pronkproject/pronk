@@ -20,7 +20,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
-use crate::media_pipeline_port::{CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia};
+use crate::media_pipeline_port::{
+    CaptureEvent, CaptureEventPort, CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia,
+};
 use crate::media_session::{MediaStartRequest, MediaStopReason, MediaSuspendReason};
 
 /// Immutable GPU and media policy for one display's renderer pipeline.
@@ -59,25 +61,17 @@ pub struct RendererCapturePipeline {
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
     generation: Option<Generation>,
-    events: mpsc::UnboundedSender<RendererCapturePipelineEvent>,
-}
-
-/// Terminal active-renderer event carrying its exact media generation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RendererCapturePipelineEvent {
-    Failed {
-        media_generation: NonZeroU64,
-        error: String,
-    },
+    events: mpsc::UnboundedSender<CaptureEvent>,
 }
 
 /// Sole consumer of asynchronous renderer-pipeline health.
 pub struct RendererCapturePipelineEvents {
-    events: mpsc::UnboundedReceiver<RendererCapturePipelineEvent>,
+    events: mpsc::UnboundedReceiver<CaptureEvent>,
 }
 
-impl RendererCapturePipelineEvents {
-    pub async fn next_event(&mut self) -> Option<RendererCapturePipelineEvent> {
+#[async_trait]
+impl CaptureEventPort for RendererCapturePipelineEvents {
+    async fn next_event(&mut self) -> Option<CaptureEvent> {
         self.events.recv().await
     }
 }
@@ -452,7 +446,7 @@ async fn shutdown_active(
 fn monitor_active_renderer(
     media_generation: NonZeroU64,
     mut state: tokio::sync::watch::Receiver<RendererStreamState>,
-    events: mpsc::UnboundedSender<RendererCapturePipelineEvent>,
+    events: mpsc::UnboundedSender<CaptureEvent>,
 ) -> ActiveMonitor {
     let stop = CancellationToken::new();
     let cancellation = stop.clone();
@@ -467,7 +461,7 @@ fn monitor_active_renderer(
                 RendererStreamState::Prepared | RendererStreamState::Active => None,
             };
             if let Some(error) = failure {
-                let _ = events.send(RendererCapturePipelineEvent::Failed {
+                let _ = events.send(CaptureEvent::Failed {
                     media_generation,
                     error,
                 });
@@ -478,7 +472,7 @@ fn monitor_active_renderer(
                 _ = cancellation.cancelled() => return,
                 changed = state.changed() => {
                     if changed.is_err() {
-                        let _ = events.send(RendererCapturePipelineEvent::Failed {
+                        let _ = events.send(CaptureEvent::Failed {
                             media_generation,
                             error: "renderer stream health channel closed".into(),
                         });
@@ -580,7 +574,7 @@ mod tests {
         state.send_replace(RendererStreamState::Failed("device lost".into()));
         assert_eq!(
             event_rx.recv().await,
-            Some(RendererCapturePipelineEvent::Failed {
+            Some(CaptureEvent::Failed {
                 media_generation: generation,
                 error: "device lost".into(),
             })
