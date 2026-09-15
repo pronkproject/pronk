@@ -28,6 +28,17 @@ The binaries cover distinct boundaries:
   submit a modeset directly, and refuses to replace an existing owner of the
   Pronk bus name. Unlike the fixture probes, Mutter must already be displaying
   content. Obtain the exact output IDs from that test device.
+- Delegated GPU rendering:
+  `pronk-renderer-pipewire-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
+  WIDTH HEIGHT REFRESH_MILLIHZ /dev/dri/renderDN MODIFIER
+  /path/to/pipewire-0-pronk-backend`
+  transfers renderer authority from the Mutter broker into the application
+  capture port, activates GPU takeover only after a private PipeWire consumer
+  is ready, and requires twelve increasing DMA-BUF frame sequences while one
+  output remains held. Use the exact Vulkan render node and a supported output
+  modifier; hexadecimal modifiers may use a `0x` prefix.
+  Like the live Mutter media probe, it requires the sibling pattern client,
+  the classified core/backend sockets, and the versioned WirePlumber policy.
 - `pronk-capture-pipewire-live-test /dev/dri/cardN /path/to/private/socket`:
   twelve real frames through PipeWire and GStreamer, checking every pixel,
   retained DMA-BUF memory, changing content, and a held sample across six
@@ -119,7 +130,8 @@ units, not capture descriptors or raw images. The qualification executable
 combines capture and networking only for testing; it is not the installed
 backend's process or sandbox boundary.
 
-These tests use reference CPU composition. They do not qualify delegated GPU
-composition, hardware encoding, or the installed service sandbox. The default
-probes do not exercise receiver transport; even the optional receiver probe
-needs visual confirmation to establish television playback.
+The capture probes use reference CPU composition. The renderer PipeWire probe
+qualifies delegated GPU composition through raw DMA-BUF delivery, but not
+hardware encoding or the installed service sandbox. The default probes do not
+exercise receiver transport; even the optional receiver probe needs visual
+confirmation to establish television playback.

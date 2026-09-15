@@ -31,6 +31,10 @@ name = "pronk-renderer-activation-live-test"
 path = "src/renderer_activation.rs"
 
 [[bin]]
+name = "pronk-renderer-pipewire-live-test"
+path = "src/renderer_pipewire.rs"
+
+[[bin]]
 name = "pronk-capture-video-live-test"
 path = "src/video.rs"
 
