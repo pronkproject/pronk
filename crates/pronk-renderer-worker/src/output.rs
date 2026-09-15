@@ -13,6 +13,10 @@ use pronk_gpu::vulkan::{Device, Image, ImageLayout, PrivateCopy};
 
 use crate::{PrivateBuffer, PrivateFrame};
 
+/// Maximum visible and native storage retained by one exported output pool.
+pub const MAX_OUTPUT_POOL_BYTES: u64 = 512 * 1024 * 1024;
+const OUTPUT_PIXEL_BYTES: u64 = 4;
+
 /// GPU images and access state for one immutable recipient scope.
 pub struct OutputPool {
     identity: Arc<()>,
@@ -42,15 +46,21 @@ impl OutputPool {
         modifier: u64,
         capacity: NonZeroUsize,
     ) -> io::Result<Self> {
-        if capacity.get() > MAX_OUTPUT_BUFFERS {
-            return Err(invalid("output pool exceeds its supported capacity"));
-        }
+        validate_request(width, height, capacity)?;
         let mut images = Vec::new();
         images
             .try_reserve_exact(capacity.get())
             .map_err(io::Error::other)?;
+        let mut allocation_bytes = 0_u64;
         for _ in 0..capacity.get() {
-            images.push(Some(device.allocate(width, height, modifier)?));
+            let image = device.allocate(width, height, modifier)?;
+            allocation_bytes = allocation_bytes
+                .checked_add(image.layout().allocation_size)
+                .ok_or_else(|| invalid("output pool allocation size overflowed"))?;
+            if allocation_bytes > MAX_OUTPUT_POOL_BYTES {
+                return Err(invalid("output pool exceeds its native byte limit"));
+            }
+            images.push(Some(image));
         }
         let layout = images[0]
             .as_ref()
@@ -251,6 +261,25 @@ impl OutputPool {
     }
 }
 
+fn validate_request(
+    width: NonZeroU32,
+    height: NonZeroU32,
+    capacity: NonZeroUsize,
+) -> io::Result<()> {
+    if capacity.get() > MAX_OUTPUT_BUFFERS {
+        return Err(invalid("output pool exceeds its supported capacity"));
+    }
+    let bytes = u64::from(width.get())
+        .checked_mul(u64::from(height.get()))
+        .and_then(|pixels| pixels.checked_mul(OUTPUT_PIXEL_BYTES))
+        .and_then(|bytes| bytes.checked_mul(capacity.get() as u64))
+        .ok_or_else(|| invalid("output pool byte size overflowed"))?;
+    if bytes > MAX_OUTPUT_POOL_BYTES {
+        return Err(invalid("output pool exceeds its logical byte limit"));
+    }
+    Ok(())
+}
+
 /// Exclusive ownership of one writable exported image.
 ///
 /// ```compile_fail
@@ -417,4 +446,28 @@ pub struct CompletedReturn {
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nz32(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).unwrap()
+    }
+
+    fn nzsize(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
+    #[test]
+    fn output_pool_policy_accepts_the_initial_four_k_budget() {
+        validate_request(nz32(3840), nz32(2160), nzsize(4)).unwrap();
+    }
+
+    #[test]
+    fn output_pool_policy_rejects_excess_count_or_storage() {
+        assert!(validate_request(nz32(1), nz32(1), nzsize(MAX_OUTPUT_BUFFERS + 1)).is_err());
+        assert!(validate_request(nz32(7680), nz32(4320), nzsize(5)).is_err());
+    }
 }
