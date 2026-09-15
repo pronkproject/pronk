@@ -99,7 +99,7 @@ impl VideoSourceConfig {
         }
 
         let expected = buffers[0].layout;
-        validate_layout(expected)?;
+        expected.validate()?;
         let explicit = buffers[0].timelines.is_some();
         for (index, buffer) in buffers.iter().enumerate() {
             if buffer.layout != expected {
@@ -126,42 +126,45 @@ fn validate_string(field: &'static str, value: &str) -> Result<(), Configuration
     Ok(())
 }
 
-fn validate_layout(layout: VideoBufferLayout) -> Result<(), ConfigurationError> {
-    let width = layout.width.get();
-    let height = layout.height.get();
-    if width > MAX_FRAME_DIMENSION || height > MAX_FRAME_DIMENSION {
-        return Err(ConfigurationError::FrameDimensions { width, height });
-    }
-    if layout.pitch.get() > i32::MAX as u32 {
-        return Err(ConfigurationError::InvalidPitch(layout.pitch.get()));
-    }
-    if layout.size.get() > i32::MAX as u64 {
-        return Err(ConfigurationError::InvalidSize(layout.size.get()));
-    }
-    let offset = u64::from(layout.storage.offset());
-    if offset >= layout.size.get() {
-        return Err(ConfigurationError::InvalidOffset(layout.storage.offset()));
-    }
-    let linear = match layout.storage {
-        VideoBufferStorage::MappableLinear => true,
-        VideoBufferStorage::DrmModifier { modifier, .. } => {
-            // DRM_FORMAT_MOD_INVALID is a negotiation sentinel, not an image layout.
-            if modifier == 0x00ff_ffff_ffff_ffff {
-                return Err(ConfigurationError::InvalidModifier(modifier));
+impl VideoBufferLayout {
+    /// Validate the complete layout shared by every PipeWire buffer.
+    pub fn validate(self) -> Result<(), ConfigurationError> {
+        let width = self.width.get();
+        let height = self.height.get();
+        if width > MAX_FRAME_DIMENSION || height > MAX_FRAME_DIMENSION {
+            return Err(ConfigurationError::FrameDimensions { width, height });
+        }
+        if self.pitch.get() > i32::MAX as u32 {
+            return Err(ConfigurationError::InvalidPitch(self.pitch.get()));
+        }
+        if self.size.get() > i32::MAX as u64 {
+            return Err(ConfigurationError::InvalidSize(self.size.get()));
+        }
+        let offset = u64::from(self.storage.offset());
+        if offset >= self.size.get() {
+            return Err(ConfigurationError::InvalidOffset(self.storage.offset()));
+        }
+        let linear = match self.storage {
+            VideoBufferStorage::MappableLinear => true,
+            VideoBufferStorage::DrmModifier { modifier, .. } => {
+                // DRM_FORMAT_MOD_INVALID is a negotiation sentinel, not an image layout.
+                if modifier == 0x00ff_ffff_ffff_ffff {
+                    return Err(ConfigurationError::InvalidModifier(modifier));
+                }
+                modifier == 0
             }
-            modifier == 0
+        };
+        if linear {
+            if self.pitch.get() < width * 4 {
+                return Err(ConfigurationError::InvalidPitch(self.pitch.get()));
+            }
+            let minimum_size = offset + u64::from(self.pitch.get()) * u64::from(height);
+            if self.size.get() < minimum_size {
+                return Err(ConfigurationError::InvalidSize(self.size.get()));
+            }
         }
-    };
-    if linear {
-        if layout.pitch.get() < width * 4 {
-            return Err(ConfigurationError::InvalidPitch(layout.pitch.get()));
-        }
-        let minimum_size = offset + u64::from(layout.pitch.get()) * u64::from(height);
-        if layout.size.get() < minimum_size {
-            return Err(ConfigurationError::InvalidSize(layout.size.get()));
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -317,16 +320,16 @@ mod layout_tests {
             },
         ] {
             let mut image = layout(storage);
-            assert!(validate_layout(image).is_ok());
+            assert!(image.validate().is_ok());
             image.size = NonZeroU64::new(511).unwrap();
             assert!(matches!(
-                validate_layout(image),
+                image.validate(),
                 Err(ConfigurationError::InvalidSize(511))
             ));
             image.size = NonZeroU64::new(512).unwrap();
             image.pitch = NonZeroU32::new(63).unwrap();
             assert!(matches!(
-                validate_layout(image),
+                image.validate(),
                 Err(ConfigurationError::InvalidPitch(63))
             ));
         }
@@ -335,11 +338,11 @@ mod layout_tests {
             offset: 64,
         });
         assert!(matches!(
-            validate_layout(image),
+            image.validate(),
             Err(ConfigurationError::InvalidSize(512))
         ));
         image.size = NonZeroU64::new(576).unwrap();
-        assert!(validate_layout(image).is_ok());
+        assert!(image.validate().is_ok());
     }
 
     #[test]
@@ -351,21 +354,21 @@ mod layout_tests {
         // Only the graphics API interprets the modifier's byte geometry.
         image.pitch = NonZeroU32::new(16).unwrap();
         image.size = NonZeroU64::new(128).unwrap();
-        assert!(validate_layout(image).is_ok());
+        assert!(image.validate().is_ok());
         image.size = NonZeroU64::new(64).unwrap();
         assert!(matches!(
-            validate_layout(image),
+            image.validate(),
             Err(ConfigurationError::InvalidOffset(64))
         ));
         image.size = NonZeroU64::new(i32::MAX as u64 + 1).unwrap();
         assert!(matches!(
-            validate_layout(image),
+            image.validate(),
             Err(ConfigurationError::InvalidSize(_))
         ));
         image.size = NonZeroU64::new(512).unwrap();
         image.pitch = NonZeroU32::new(i32::MAX as u32 + 1).unwrap();
         assert!(matches!(
-            validate_layout(image),
+            image.validate(),
             Err(ConfigurationError::InvalidPitch(_))
         ));
     }
@@ -377,13 +380,13 @@ mod layout_tests {
             offset: 0,
         });
         assert!(matches!(
-            validate_layout(image),
+            image.validate(),
             Err(ConfigurationError::InvalidModifier(_))
         ));
         image.storage = VideoBufferStorage::MappableLinear;
         image.width = NonZeroU32::new(MAX_FRAME_DIMENSION + 1).unwrap();
         assert!(matches!(
-            validate_layout(image),
+            image.validate(),
             Err(ConfigurationError::FrameDimensions { .. })
         ));
     }
