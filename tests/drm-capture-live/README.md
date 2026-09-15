@@ -4,8 +4,9 @@ These opt-in tests modeset a display. Use an **unused Rust CastKMS device in
 a disposable VM**, not a desktop output. The fixture requires DRM master and
 the Rust driver's version; heap tests also require `/dev/dma_heap/system`.
 The kernel must provide the matching generic capture interface and the
-built-in reference renderer. Build the programs before entering a privileged
-test environment:
+built-in reference renderer. Building also requires libdrm and GTK 3 development
+files; GTK supplies the Wayland pattern client. Build the programs before
+entering a privileged test environment:
 
 ```sh
 cargo build --locked -p pronk-drm-capture-live-test
@@ -39,6 +40,16 @@ The binaries cover distinct boundaries:
   the continuous `Video` owner drives capture without a test-managed frame
   loop. A real consumer verifies changing pixels and a held sample, followed
   by joined shutdown and the owner's terminal state.
+- `pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID /path/to/private/socket`:
+  a fullscreen Wayland client changes its image under the disposable Mutter.
+  The probe obtains authority from Mutter, starts the continuous capture owner,
+  and feeds the production H.264 actor and local decoder. It requires twelve
+  decoded images and both known colors at the offered output dimensions.
+  The sibling `pronk-capture-pattern-client` executable must be built alongside
+  the probe. It never opens a DRM primary descriptor or replaces a bus owner.
+  Use an isolated session bus and the disposable compositor's Wayland socket.
+  Set `PIPEWIRE_REMOTE` to the same private socket passed on the command line.
+  The two-argument wrapper below does not start Mutter or run that probe.
 
 For the media probes, the wrapper starts an isolated PipeWire server, runs
 the supplied already-built executable, and stops only that server:
