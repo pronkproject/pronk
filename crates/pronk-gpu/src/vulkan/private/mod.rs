@@ -42,6 +42,7 @@ pub struct PrivateImage {
     device: Arc<DeviceInner>,
     raw: vk::Image,
     memory: vk::DeviceMemory,
+    allocation_size: u64,
     width: NonZeroU32,
     height: NonZeroU32,
     initialized: bool,
@@ -50,6 +51,11 @@ pub struct PrivateImage {
 impl PrivateImage {
     pub fn extent(&self) -> (NonZeroU32, NonZeroU32) {
         (self.width, self.height)
+    }
+
+    /// Number of device-memory bytes dedicated to the image.
+    pub fn allocation_size(&self) -> u64 {
+        self.allocation_size
     }
 
     fn range(&self) -> vk::ImageSubresourceRange {

@@ -26,6 +26,7 @@ fn private_pixels_survive_independent_shared_output_reuse() {
     let mut private = device.allocate_private(nz(31), nz(17)).unwrap();
     let mut output = device.allocate(nz(31), nz(17), modifier).unwrap();
     assert_eq!(private.extent(), (nz(31), nz(17)));
+    assert!(private.allocation_size() >= 31 * 17 * 16);
     drop(device);
     for rgb in [
         [0; 3],

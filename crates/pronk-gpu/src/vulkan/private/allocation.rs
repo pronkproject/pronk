@@ -70,16 +70,17 @@ impl Device {
             .initial_layout(vk::ImageLayout::UNDEFINED);
         // SAFETY: The exact profile passed its physical-device capability query.
         let raw = unsafe { self.inner.raw.create_image(&create, None) }.map_err(native)?;
+        // SAFETY: Image and physical device are retained and belong together.
+        let requirements = unsafe { self.inner.raw.get_image_memory_requirements(raw) };
         let mut image = PrivateImage {
             device: Arc::clone(&self.inner),
             raw,
             memory: vk::DeviceMemory::null(),
+            allocation_size: requirements.size,
             width,
             height,
             initialized: false,
         };
-        // SAFETY: Image and physical device are retained and belong together.
-        let requirements = unsafe { self.inner.raw.get_image_memory_requirements(raw) };
         let properties =
             unsafe { instance.get_physical_device_memory_properties(self.inner.physical) };
         let memory_type = properties.memory_types[..properties.memory_type_count as usize]
