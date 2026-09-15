@@ -31,6 +31,14 @@ pub struct SourcePlane {
 }
 
 impl SourcePlane {
+    pub(super) fn from_parts(dma_buf: OwnedFd, pitch: NonZeroU32, offset: u32) -> Self {
+        Self {
+            dma_buf,
+            pitch,
+            offset,
+        }
+    }
+
     pub fn pitch(&self) -> NonZeroU32 {
         self.pitch
     }
@@ -57,6 +65,25 @@ pub struct SourceImage {
 }
 
 impl SourceImage {
+    pub(super) fn from_parts(
+        format: u32,
+        modifier: FormatModifier,
+        extent: Extent,
+        planes: [Option<SourcePlane>; RENDERER_MAX_PLANES],
+        plane_count: usize,
+    ) -> Self {
+        debug_assert!((1..=RENDERER_MAX_PLANES).contains(&plane_count));
+        debug_assert!(planes[..plane_count].iter().all(Option::is_some));
+        debug_assert!(planes[plane_count..].iter().all(Option::is_none));
+        Self {
+            format,
+            modifier,
+            extent,
+            planes,
+            plane_count,
+        }
+    }
+
     pub fn format(&self) -> u32 {
         self.format
     }
@@ -191,6 +218,13 @@ pub struct SourceReleaseError<J> {
 }
 
 impl<J> SourceReleaseError<J> {
+    pub(super) fn new(job: J, error: io::Error) -> Self {
+        Self {
+            job: Box::new(job),
+            error,
+        }
+    }
+
     pub fn error(&self) -> &io::Error {
         &self.error
     }
@@ -420,11 +454,11 @@ fn take_returned_fd(
     Some(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
-fn has_close_on_exec(fd: &OwnedFd) -> bool {
+pub(super) fn has_close_on_exec(fd: &OwnedFd) -> bool {
     fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD).is_ok_and(|flags| flags & nix::libc::FD_CLOEXEC != 0)
 }
 
-fn release_source(
+pub(super) fn release_source(
     fd: BorrowedFd<'_>,
     id: NonZeroU64,
     kind: u32,

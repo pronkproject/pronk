@@ -3,11 +3,13 @@
 //! A renderer descriptor grants no modesetting or final-image capture access.
 //! Its operations reserve one takeover candidate and optionally copy the most
 //! recent HOST result into independent, read-only storage. An active renderer
-//! can claim one source job whose consuming release records how source access
-//! ended.
+//! can claim one source or complete-scene job whose consuming release records
+//! how source access ended.
 
+mod scene;
 mod source;
 
+pub use scene::{ColorEncoding, ColorOperation, ColorRange, LayerKind, SceneJob, SceneLayer};
 pub use source::{
     FormatModifier, SourceGeometry, SourceImage, SourceJob, SourcePlane, SourceReleaseError,
 };

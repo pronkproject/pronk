@@ -675,11 +675,18 @@ transaction; cleanup retires any accepted native work without pretending that
 a normal aggregate release remains possible.
 
 The version-6 raw scene records are bound, but no production code dequeues or
-parses them yet. That adapter must retain the complete packet under one kernel
-job, import all layers against the requirements above, transfer the prepared
-aggregate completion, release the job once and only then wait for private
-pixels. The older single-source job is not a per-layer substitute for that
-transaction.
+parses them into a GPU profile yet. `castkms-renderer` does own and validate the
+complete packet under one kernel job, including all installed descriptors,
+geometry, stacking and color payloads. Output color remains an ordered raw
+operation list: the current record gives both degamma and gamma tables the same
+LUT kind while omitting absent stages, so one LUT cannot be assigned to its
+display-order slot unambiguously. The UAPI needs stage identity before Pronk can
+construct `OutputColor` without guessing.
+
+Once that contract is explicit, the adapter can import all layers against the
+requirements above, transfer the prepared aggregate completion, release the
+job once and only then wait for private pixels. The older single-source job is
+not a per-layer substitute for that transaction.
 
 ## Current scope
 
