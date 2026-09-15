@@ -1489,7 +1489,9 @@ dependencies = [
  "drm-capture",
  "nix 0.29.0",
  "pkg-config",
+ "pronk-capture",
  "pronk-dmabuf",
+ "tokio",
 ]
 
 [[package]]

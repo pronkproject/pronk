@@ -151,23 +151,30 @@ void capture_fixture_flip(const struct fixture *fixture)
 	drmModeAtomicFree(update);
 }
 
-void capture_fixture_check_pixels(const struct fixture *fixture, unsigned char expected)
+void capture_buffer_check_pixels(int dma, uint32_t width, uint32_t height,
+				uint32_t stride, unsigned char expected)
 {
 	struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ };
 	const unsigned char *pixels;
-	size_t size = fixture->destination.allocation.size;
-	uint32_t stride = fixture->destination.allocation.pitch;
+	size_t size = (size_t)stride * height;
 
-	pixels = mmap(NULL, size, PROT_READ, MAP_SHARED, fixture->destination.dma, 0);
+	REQUIRE(width <= UINT32_MAX / 4 && stride >= width * 4 && size);
+	pixels = mmap(NULL, size, PROT_READ, MAP_SHARED, dma, 0);
 	REQUIRE(pixels != MAP_FAILED);
-	REQUIRE(ioctl(fixture->destination.dma, DMA_BUF_IOCTL_SYNC, &sync) == 0);
-	for (unsigned int y = 0; y < 480; y++) {
-		for (unsigned int x = 0; x < 640 * 4; x++)
+	REQUIRE(ioctl(dma, DMA_BUF_IOCTL_SYNC, &sync) == 0);
+	for (unsigned int y = 0; y < height; y++) {
+		for (unsigned int x = 0; x < width * 4; x++)
 			REQUIRE(pixels[y * stride + x] == (x % 4 == 3 ? 0xff : expected));
 	}
 	sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
-	REQUIRE(ioctl(fixture->destination.dma, DMA_BUF_IOCTL_SYNC, &sync) == 0);
+	REQUIRE(ioctl(dma, DMA_BUF_IOCTL_SYNC, &sync) == 0);
 	REQUIRE(munmap((void *)pixels, size) == 0);
+}
+
+void capture_fixture_check_pixels(const struct fixture *fixture, unsigned char expected)
+{
+	capture_buffer_check_pixels(fixture->destination.dma, 640, 480,
+				    fixture->destination.allocation.pitch, expected);
 }
 
 void capture_fixture_close(struct fixture *fixture)

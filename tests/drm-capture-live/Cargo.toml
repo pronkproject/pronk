@@ -6,11 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "pronk-capture-actor-live-test"
+path = "src/actor.rs"
+
 [dependencies]
 anyhow.workspace = true
 drm-capture = { path = "../../crates/drm-capture" }
 nix.workspace = true
 pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
+pronk-capture = { path = "../../crates/pronk-capture" }
+tokio.workspace = true
 
 [build-dependencies]
 cc = "1"
