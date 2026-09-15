@@ -9,6 +9,7 @@ pub mod device_session;
 pub mod device_session_port;
 pub mod display;
 pub mod display_state;
+pub mod drm_capture_pipeline;
 pub mod gpu_output;
 pub mod kernel_display;
 pub mod kernel_display_port;

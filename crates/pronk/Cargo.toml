@@ -17,6 +17,9 @@ futures-util.workspace = true
 nix.workspace = true
 pronk-backend-host = { path = "../pronk-backend-host" }
 pronk-backend-protocol = { path = "../pronk-backend-protocol" }
+pronk-capture = { path = "../pronk-capture" }
+pronk-capture-broker = { path = "../pronk-capture-broker" }
+pronk-capture-pipewire = { path = "../pronk-capture-pipewire" }
 pronk-core = { path = "../pronk-core" }
 pronk-dbus = { path = "../pronk-dbus" }
 pronk-dmabuf = { path = "../pronk-dmabuf" }
