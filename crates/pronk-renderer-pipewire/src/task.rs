@@ -5,7 +5,7 @@ use std::io;
 use std::os::fd::AsFd;
 use std::time::Duration;
 
-use castkms_renderer::Renderer;
+use castkms_renderer::{Renderer, TakeoverCandidate};
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
 use pronk_renderer_worker::{OutputPool, PrivatePool, PrivateProbe, SourceReader};
@@ -260,11 +260,13 @@ async fn prepare_generation<'renderer, F: AsFd>(
     let description = renderer.describe()?;
     let candidate = renderer.begin_takeover(description)?;
     let configuration = candidate.configuration();
-    let probe = PrivateProbe::prepare(device, candidate).map_err(|failure| {
-        let (candidate, error) = failure.into_parts();
-        drop(candidate);
-        error
-    })?;
+    let probe = match PrivateProbe::prepare(device, candidate) {
+        Ok(probe) => probe,
+        Err(failure) => {
+            let (candidate, error) = failure.into_parts();
+            return Err(abort_candidate(candidate, error));
+        }
+    };
     let private = match PrivatePool::new(
         device,
         configuration.width(),
@@ -273,27 +275,39 @@ async fn prepare_generation<'renderer, F: AsFd>(
     ) {
         Ok(private) => private,
         Err(error) => {
-            drop(probe);
             let _ = started.send(Started::Failed);
-            return Err(error);
+            return Err(abort_probe(probe, error));
         }
     };
-    let output = OutputPool::new(
+    let output = match OutputPool::new(
         device,
         configuration.width(),
         configuration.height(),
         config.output_modifier,
         config.output_capacity,
     )
-    .await?;
-    let registration = Registration::new(output)?;
+    .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            drop(private);
+            return Err(abort_probe(probe, error));
+        }
+    };
+    let registration = match Registration::new(output) {
+        Ok(registration) => registration,
+        Err(error) => {
+            drop(private);
+            return Err(abort_probe(probe, error));
+        }
+    };
     let layout = registration.layout();
     let video = match Video::start(registration, config.pipewire, remote).await {
         Ok(video) => video,
         Err(error) => {
-            drop(probe);
             let _ = started.send(Started::Failed);
-            return Err(error);
+            drop(private);
+            return Err(abort_probe(probe, error));
         }
     };
     let identity = video.identity().clone();
@@ -314,6 +328,24 @@ async fn prepare_generation<'renderer, F: AsFd>(
         private,
         source_interval: Duration::from_nanos(interval_ns),
     })
+}
+
+fn abort_probe<F: AsFd>(probe: PrivateProbe<'_, F>, error: io::Error) -> io::Error {
+    combine_abort(error, probe.abort())
+}
+
+fn abort_candidate<F: AsFd>(candidate: TakeoverCandidate<'_, F>, error: io::Error) -> io::Error {
+    combine_abort(error, candidate.abort())
+}
+
+fn combine_abort(error: io::Error, abort: io::Result<()>) -> io::Error {
+    match abort {
+        Ok(()) => error,
+        Err(abort) => io::Error::new(
+            error.kind(),
+            format!("{error}; abort renderer takeover: {abort}"),
+        ),
+    }
 }
 
 async fn finish_candidate<F: AsFd>(
@@ -355,5 +387,31 @@ impl GenerationOutcome {
             activated: true,
             result,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combine_abort;
+    use std::io;
+
+    #[test]
+    fn takeover_abort_failure_preserves_the_setup_error_class() {
+        let error = combine_abort(
+            io::Error::new(io::ErrorKind::Unsupported, "unsupported layout"),
+            Err(io::Error::from_raw_os_error(nix::libc::EBUSY)),
+        );
+
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            error.to_string(),
+            "unsupported layout; abort renderer takeover: Device or resource busy (os error 16)"
+        );
+    }
+
+    #[test]
+    fn successful_takeover_abort_returns_the_original_error() {
+        let error = combine_abort(io::Error::other("allocation failed"), Ok(()));
+        assert_eq!(error.to_string(), "allocation failed");
     }
 }
