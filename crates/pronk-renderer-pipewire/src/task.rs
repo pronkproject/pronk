@@ -5,9 +5,7 @@ use std::io;
 use std::os::fd::AsFd;
 use std::time::Duration;
 
-use castkms_renderer::{
-    CapabilityProfile, ProfileRegistration, RegisteredCandidate, Renderer, TakeoverCandidate,
-};
+use castkms_renderer::{ProfileRegistration, RegisteredCandidate, Renderer, TakeoverCandidate};
 use drm_display_executor::scene::geometry::Extent;
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
@@ -264,14 +262,14 @@ async fn prepare_generation<'renderer, F: AsFd>(
     let configuration = candidate.configuration();
     let output_extent = Extent::new(configuration.width().get(), configuration.height().get())
         .expect("candidate output dimensions are nonzero");
-    let (profile, storage) = match PrimarySceneProfile::discover(device, output_extent) {
-        Ok(profile) => profile.into_parts(),
+    let profile = match PrimarySceneProfile::discover(device, output_extent) {
+        Ok(profile) => profile,
         Err(error) => {
             let _ = started.send(Started::Failed);
             return Err(abort_candidate(candidate, error));
         }
     };
-    let scene_pool = match storage.create_pool(config.private_capacity, config.private_capacity) {
+    let scene_pool = match profile.create_pool(config.private_capacity, config.private_capacity) {
         Ok(scene_pool) => scene_pool,
         Err(error) => {
             let _ = started.send(Started::Failed);
@@ -309,9 +307,8 @@ async fn prepare_generation<'renderer, F: AsFd>(
             return Err(abort_candidate(candidate, error));
         }
     };
-    let profile = CapabilityProfile::Renderer(profile);
-    let candidate = match candidate.register_profile(&profile) {
-        Ok(candidate) => candidate,
+    let (candidate, storage) = match profile.register(candidate) {
+        Ok(registered) => registered,
         Err(failure) => {
             let (candidate, error) = failure.into_parts();
             drop(scene_pool);

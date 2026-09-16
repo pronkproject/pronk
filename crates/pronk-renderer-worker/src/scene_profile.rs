@@ -1,12 +1,13 @@
 //! Adapt checked CastKMS scene metadata into a qualified native profile.
 
 use std::io;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::fd::AsFd;
 
 use castkms_renderer::{
-    CapabilityFormat, ColorOperation as WireColor, FormatModifier, RendererCapability, SceneJob,
-    StorageProvenance,
+    CapabilityFormat, CapabilityProfile, ColorOperation as WireColor, FormatModifier,
+    ProfileRegistrationError, RegisteredCandidate, RendererCapability, SceneJob, StorageProvenance,
+    TakeoverCandidate,
 };
 use castkms_sys::{
     DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
@@ -22,7 +23,7 @@ use pronk_gpu::vulkan::{Device, PackedFormat};
 use pronk_gpu::vulkan::{LayerRequirements, SceneRequirements, SourceRequirements};
 
 use crate::source::packed_format;
-use crate::{SceneComposer, SceneStorageProfile};
+use crate::{SceneComposer, ScenePool, SceneStorageProfile};
 
 /// One advertised primary-plane contract paired with its private storage policy.
 pub struct PrimarySceneProfile {
@@ -70,8 +71,25 @@ impl PrimarySceneProfile {
         })
     }
 
-    pub fn into_parts(self) -> (RendererCapability, SceneStorageProfile) {
-        (self.capability, self.storage)
+    pub fn create_pool(
+        &self,
+        final_capacity: NonZeroUsize,
+        source_capacity: NonZeroUsize,
+    ) -> io::Result<ScenePool> {
+        self.storage.create_pool(final_capacity, source_capacity)
+    }
+
+    /// Register the advertised contract and release its matching storage policy.
+    pub fn register<'renderer, F: AsFd>(
+        self,
+        candidate: TakeoverCandidate<'renderer, F>,
+    ) -> Result<
+        (RegisteredCandidate<'renderer, F>, SceneStorageProfile),
+        ProfileRegistrationError<'renderer, F>,
+    > {
+        candidate
+            .register_profile(&CapabilityProfile::Renderer(self.capability))
+            .map(|candidate| (candidate, self.storage))
     }
 }
 
@@ -298,14 +316,12 @@ mod tests {
         let node = std::env::var_os("PRONK_GPU_RENDER_NODE").unwrap();
         let device = Device::open(node).unwrap();
         let output = drm_display_executor::scene::geometry::Extent::new(1920, 1080).unwrap();
-        let (capability, storage) = PrimarySceneProfile::discover(&device, output)
-            .unwrap()
-            .into_parts();
-        let options = storage.source_options(0).unwrap();
+        let profile = PrimarySceneProfile::discover(&device, output).unwrap();
+        let options = profile.storage.source_options(0).unwrap();
 
         assert!(!options.is_empty());
         assert!(options.iter().all(|source| {
-            capability.formats().iter().any(|format| {
+            profile.capability.formats().iter().any(|format| {
                 source_formats()
                     .into_iter()
                     .find(|(packed, _)| *packed == source.format)
