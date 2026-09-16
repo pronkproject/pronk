@@ -1,10 +1,11 @@
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-use drm_capture::{Client, Destination, Plane, RequestId};
+use drm_capture::{Client, Description, Destination, Plane, RequestId};
 use pronk_dmabuf::{export_dependencies, Access};
 
 use crate::names::Registration;
+use crate::setup::{self, Setup};
 use crate::worker::{Backend, Completed};
 use crate::{invalid, Buffer, Config, Layout};
 
@@ -32,24 +33,16 @@ impl<F: AsFd> Native<F> {
         if config.capacity > offer.max_requests {
             return Err(invalid("capture capacity exceeds the current offer"));
         }
-        client.open_stream(registration.stream, offer.offer, config.capacity)?;
-        for (slot, buffer) in buffers.iter().enumerate() {
-            let planes = [Plane {
-                buffer: buffer.as_fd(),
-                stride: buffer.stride,
-                offset: 0,
-            }];
-            client.register_destination(
-                registration.destination(slot),
-                &Destination {
-                    width: offer.width,
-                    height: offer.height,
-                    format: offer.format,
-                    modifier: offer.modifier,
-                    planes: &planes,
-                },
-            )?;
-        }
+        setup::initialize(
+            &StreamSetup {
+                client: &client,
+                registration: &registration,
+                buffers,
+                offer,
+                capacity: config.capacity,
+            },
+            buffers.len(),
+        )?;
         Ok((
             Self {
                 client,
@@ -62,6 +55,49 @@ impl<F: AsFd> Native<F> {
                 height: offer.height,
             },
         ))
+    }
+}
+
+struct StreamSetup<'a, F> {
+    client: &'a Client<F>,
+    registration: &'a Registration,
+    buffers: &'a [Buffer],
+    offer: Description,
+    capacity: std::num::NonZeroU32,
+}
+
+impl<F: AsFd> Setup for StreamSetup<'_, F> {
+    fn open_stream(&self) -> io::Result<()> {
+        self.client
+            .open_stream(self.registration.stream, self.offer.offer, self.capacity)
+    }
+
+    fn register_destination(&self, slot: usize) -> io::Result<()> {
+        let buffer = &self.buffers[slot];
+        let planes = [Plane {
+            buffer: buffer.as_fd(),
+            stride: buffer.stride,
+            offset: 0,
+        }];
+        self.client.register_destination(
+            self.registration.destination(slot),
+            &Destination {
+                width: self.offer.width,
+                height: self.offer.height,
+                format: self.offer.format,
+                modifier: self.offer.modifier,
+                planes: &planes,
+            },
+        )
+    }
+
+    fn close_stream(&self) -> io::Result<()> {
+        self.client.close_stream(self.registration.stream)
+    }
+
+    fn unregister_destination(&self, slot: usize) -> io::Result<()> {
+        self.client
+            .unregister_destination(self.registration.destination(slot))
     }
 }
 

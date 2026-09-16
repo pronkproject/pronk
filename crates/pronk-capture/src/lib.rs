@@ -9,6 +9,7 @@ mod names;
 mod native;
 mod pool;
 mod session;
+mod setup;
 mod worker;
 
 pub use pool::BufferHandle;
