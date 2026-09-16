@@ -524,7 +524,18 @@ impl<'renderer, F: AsFd> SubmittedCandidate<'renderer, F> {
     pub fn activate(
         mut self,
     ) -> Result<ActiveRenderer<'renderer, F>, ActivationError<'renderer, F>> {
-        let generation = self.candidate.registration.execution_generation;
+        let description = match activated_description(
+            self.candidate.registration,
+            self.candidate.host_capability,
+        ) {
+            Ok(description) => description,
+            Err(error) => {
+                return Err(ActivationError {
+                    submitted: self,
+                    error,
+                });
+            }
+        };
         let request = DrmCastkmsRendererCommitTakeover {
             candidate_id: self.candidate.candidate.id.get(),
             ..Default::default()
@@ -545,10 +556,7 @@ impl<'renderer, F: AsFd> SubmittedCandidate<'renderer, F> {
         self.candidate.candidate.active = false;
         Ok(ActiveRenderer {
             submitted: self,
-            description: Description {
-                profile: Profile::GpuV1,
-                generation,
-            },
+            description,
         })
     }
 
@@ -556,6 +564,26 @@ impl<'renderer, F: AsFd> SubmittedCandidate<'renderer, F> {
     pub fn abort(self) -> io::Result<()> {
         self.candidate.abort()
     }
+}
+
+fn activated_description(
+    registration: ProfileRegistration,
+    host_capability: bool,
+) -> io::Result<Description> {
+    let generation = registration
+        .execution_generation
+        .get()
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| io::Error::from_raw_os_error(nix::libc::EOVERFLOW))?;
+    Ok(Description {
+        profile: if host_capability {
+            Profile::HostV1
+        } else {
+            Profile::GpuV1
+        },
+        generation,
+    })
 }
 
 /// A failed activation retaining the submitted candidate for inspection or retry.
@@ -969,6 +997,32 @@ mod tests {
         ] {
             assert!(validate_registration(invalid, expected()).is_err());
         }
+    }
+
+    #[test]
+    fn activation_advances_to_the_registered_contract() {
+        let registration = ProfileRegistration::from_values(13, 17, 7).unwrap();
+        assert_eq!(
+            activated_description(registration, false).unwrap(),
+            Description {
+                profile: Profile::GpuV1,
+                generation: NonZeroU64::new(8).unwrap(),
+            }
+        );
+        assert_eq!(
+            activated_description(registration, true).unwrap(),
+            Description {
+                profile: Profile::HostV1,
+                generation: NonZeroU64::new(8).unwrap(),
+            }
+        );
+        let exhausted = ProfileRegistration::from_values(13, 17, u64::MAX).unwrap();
+        assert_eq!(
+            activated_description(exhausted, false)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(nix::libc::EOVERFLOW)
+        );
     }
 
     #[test]
