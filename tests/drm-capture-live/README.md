@@ -59,6 +59,12 @@ The binaries cover distinct boundaries:
   the continuous `Video` owner drives capture without a test-managed frame
   loop. A real consumer verifies changing pixels and a held sample, followed
   by joined shutdown and the owner's terminal state.
+- `pronk-capture-pipeline-live-test /dev/dri/cardN /path/to/private/socket`:
+  the application's `DrmCapturePipeline` runs three media generations under
+  one grant. It checks activation, changing pixels, retained storage across
+  generations, and orderly stop without a false health event. It uses the
+  versioned WirePlumber policy and classified core/backend sockets. The test
+  does not qualify broker issuance, hardware encoding, or a receiver.
 - Live Mutter media:
   `pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
   WIDTH HEIGHT /path/to/pipewire-0-pronk-backend` runs a fullscreen Wayland
@@ -97,6 +103,20 @@ Pass the encoded probe instead to exercise H.264; that additionally requires
 the `x264enc`, `h264parse`, and `avdec_h264` GStreamer plugins. Encoder startup
 is driven concurrently with capture because the media actor acknowledges
 startup only after receiving media.
+
+For the application pipeline probe, use the wrapper that also starts the
+versioned WirePlumber policy in an isolated configuration:
+
+```sh
+sh tests/drm-capture-live/run-pipeline.sh \
+    /path/to/pronk-capture-pipeline-live-test /dev/dri/cardN
+```
+
+It additionally requires WirePlumber 0.5.15 or newer, `pw-dump`, and `jq`.
+The private server and policy are stopped afterward; installed configuration
+and host services are not changed. WirePlumber links the consumer to its exact
+producer target while both use their classified sockets. Run it only in the
+disposable VM, like the other fixture probes.
 
 ## Optional receiver test
 

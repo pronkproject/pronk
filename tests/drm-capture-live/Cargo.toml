@@ -39,6 +39,10 @@ name = "pronk-capture-video-live-test"
 path = "src/video.rs"
 
 [[bin]]
+name = "pronk-capture-pipeline-live-test"
+path = "src/pipeline.rs"
+
+[[bin]]
 name = "pronk-capture-pattern-client"
 path = "src/pattern.rs"
 

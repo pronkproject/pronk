@@ -13,13 +13,14 @@ pub struct Consumer {
 }
 
 impl Consumer {
-    pub fn start(socket: &Path, node: &str) -> anyhow::Result<Self> {
+    pub fn start(socket: &Path, node: &str, autoconnect: bool) -> anyhow::Result<Self> {
         gst::init()?;
         let socket = UnixStream::connect(socket)?;
         let pipeline = gst::parse::launch(
             "pipewiresrc name=source autoconnect=false stream-properties=props,node.name=pronk.capture-test-consumer ! video/x-raw,format=BGRx,width=640,height=480,framerate=30/1 ! appsink name=sink sync=false enable-last-sample=false"
         )?.downcast::<gst::Pipeline>().map_err(|_| anyhow::anyhow!("expected pipeline"))?;
         let source = pipeline.by_name("source").context("source")?;
+        source.set_property("autoconnect", autoconnect);
         source.set_property("fd", socket.as_raw_fd());
         source.set_property("target-object", node);
         let sink = pipeline

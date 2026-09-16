@@ -81,7 +81,8 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
         .kill_on_drop(true)
         .spawn()
         .context("start video port link")?;
-    let mut consumer = pipewire_consumer::Consumer::start(socket, &video.identity().node_name)?;
+    let mut consumer =
+        pipewire_consumer::Consumer::start(socket, &video.identity().node_name, false)?;
     ensure!(link.wait().await?.success(), "video port link failed");
     ensure!(
         tokio::time::timeout(Duration::from_millis(250), consumer.next())

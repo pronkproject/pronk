@@ -88,7 +88,7 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
         .kill_on_drop(true)
         .spawn()
         .context("start private port link")?;
-    let mut consumer = pipewire_consumer::Consumer::start(socket, &identity.node_name)?;
+    let mut consumer = pipewire_consumer::Consumer::start(socket, &identity.node_name, false)?;
     let mut ready = BTreeSet::new();
     let mut expected = BTreeMap::new();
     let mut published = 0u64;
