@@ -7,8 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use drm_capture::Access as CaptureAccess;
 use nix::libc;
-use pronk_core::edid::EdidMode;
+use pronk_core::edid::{EdidMode, ValidatedEdid};
 use tokio::time::{interval, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
 
 use crate::display_state::{
     ActiveRoute, AttachmentState, DisplayGrantState, DisplayTopology, RouteTarget, RoutedMode,
@@ -23,6 +24,25 @@ use crate::renderer_session::RendererAccess;
 pub const DEFAULT_TOPOLOGY_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Debug)]
+pub struct KernelDisplayConfig {
+    pub crtc_id: NonZeroU32,
+    pub modes: Vec<EdidMode>,
+    pub poll_interval: Duration,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AttachError {
+    #[error("monitor attachment was cancelled")]
+    Cancelled,
+    #[error("prepare display observation: {0}")]
+    Configuration(#[source] KernelDisplayError),
+    #[error("attach monitor: {0}")]
+    Rejected(#[source] io::Error),
+    #[error("monitor attachment worker failed: {0}")]
+    Worker(#[source] tokio::task::JoinError),
+}
+
+#[derive(Debug)]
 pub struct KernelDisplay {
     session: Option<KernelSession>,
     capture: CaptureAccess,
@@ -33,19 +53,24 @@ pub struct KernelDisplay {
 }
 
 impl KernelDisplay {
-    pub fn new(
+    fn prepare(
         session: KernelSession,
-        capture: CaptureAccess,
-        crtc_id: NonZeroU32,
-        modes: Vec<EdidMode>,
-        poll_interval: Duration,
+        config: KernelDisplayConfig,
     ) -> Result<Self, KernelDisplayError> {
+        let KernelDisplayConfig {
+            crtc_id,
+            modes,
+            poll_interval,
+        } = config;
         if modes.is_empty() || poll_interval.is_zero() {
             return Err(KernelDisplayError::new(
                 "configure display observation",
                 "advertised modes and a nonzero poll interval are required",
             ));
         }
+        let capture = session.capture_access().map_err(|error| {
+            KernelDisplayError::new("retain capture for display observation", error.to_string())
+        })?;
         let mut poll = interval(poll_interval);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
         poll.reset();
@@ -57,6 +82,62 @@ impl KernelDisplay {
             current: unavailable_observation(),
             poll,
         })
+    }
+
+    /// Attach a monitor while retaining responsibility for a late completion.
+    ///
+    /// Observation is configured before the monitor changes. Once a blocking
+    /// attach has started, cancellation joins it and retires any attached
+    /// monitor before returning. Dropping the whole future instead relies on
+    /// the session owner's release behavior when the worker finishes.
+    pub async fn attach(
+        session: KernelSession,
+        edid: Option<ValidatedEdid>,
+        config: KernelDisplayConfig,
+        cancellation: CancellationToken,
+    ) -> Result<Self, AttachError> {
+        if cancellation.is_cancelled() {
+            if let Err(error) = session.release().await {
+                tracing::warn!(%error, "cancelled attachment could not release its unused session");
+            }
+            return Err(AttachError::Cancelled);
+        }
+        let display = Self::prepare(session, config).map_err(AttachError::Configuration)?;
+        let mut task = tokio::task::spawn_blocking(move || {
+            let result = display
+                .session()
+                .attach_monitor(edid.as_ref().map(ValidatedEdid::as_bytes));
+            (display, result)
+        });
+        let joined = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => (&mut task).await,
+            joined = &mut task => joined,
+        };
+        let (mut display, result) = joined.map_err(AttachError::Worker)?;
+        match result {
+            Ok(()) if !cancellation.is_cancelled() => Ok(display),
+            Ok(()) => {
+                if let Err(error) = Box::new(display).detach().await {
+                    tracing::warn!(%error, "cancelled attachment could not retire its monitor");
+                }
+                Err(AttachError::Cancelled)
+            }
+            Err(error) => {
+                let session = display
+                    .session
+                    .take()
+                    .expect("prepared display owns its session");
+                if let Err(error) = session.release().await {
+                    tracing::warn!(%error, "unsuccessful attachment could not release its session");
+                }
+                if cancellation.is_cancelled() {
+                    Err(AttachError::Cancelled)
+                } else {
+                    Err(AttachError::Rejected(error))
+                }
+            }
+        }
     }
 
     fn session(&self) -> &KernelSession {

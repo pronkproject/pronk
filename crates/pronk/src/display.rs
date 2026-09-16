@@ -31,7 +31,9 @@ use crate::device_recovery::{
 use crate::device_session::{BackendDeviceSession, BackendDeviceSessionEvents};
 use crate::device_session_port::DeviceSessionEventPort;
 use crate::display_state::{DisplayGrantState, DisplayRuntimeState};
-use crate::kernel_display::{KernelDisplay, DEFAULT_TOPOLOGY_POLL_INTERVAL};
+use crate::kernel_display::{
+    AttachError, KernelDisplay, KernelDisplayConfig, DEFAULT_TOPOLOGY_POLL_INTERVAL,
+};
 use crate::kernel_display_port::KernelDisplayPort;
 use crate::kernel_display_with_capture::KernelDisplayWithCapture;
 use crate::kernel_session::{KernelSession, KernelSessionError};
@@ -592,60 +594,21 @@ async fn attach_kernel_session(
     modes: Vec<EdidMode>,
     cancellation: &CancellationToken,
 ) -> Result<AttachedKernelSession, DisplaySetupError> {
-    if cancellation.is_cancelled() {
-        if let Err(error) = session.release().await {
-            warn!(%error, "cancelled setup could not release its unused session");
-        }
-        return Err(DisplaySetupError::Cancelled);
-    }
-    let display_capture = session
-        .capture_access()
-        .map_err(DisplaySetupError::KernelAccess)?;
-    let mut task = tokio::task::spawn_blocking(move || {
-        let result = session.attach_monitor(Some(edid.as_bytes()));
-        (session, result)
-    });
-    let (session, result) = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => {
-            let joined = (&mut task).await;
-            if let Ok((session, Ok(()))) = joined {
-                match KernelDisplay::new(
-                    session,
-                    display_capture,
-                    crtc_id,
-                    modes,
-                    DEFAULT_TOPOLOGY_POLL_INTERVAL,
-                ) {
-                    Ok(kernel) => {
-                        if let Err(error) = Box::new(kernel).detach().await {
-                            warn!(%error, "cancelled setup could not release its monitor");
-                        }
-                    }
-                    Err(error) => {
-                        warn!(%error, "cancelled setup could not construct cleanup");
-                    }
-                }
-            }
-            return Err(DisplaySetupError::Cancelled);
-        }
-        joined = &mut task => joined.map_err(DisplaySetupError::AttachTask)?,
-    };
-    result.map_err(DisplaySetupError::KernelAttach)?;
-    let mut kernel = KernelDisplay::new(
+    let mut kernel = KernelDisplay::attach(
         session,
-        display_capture,
-        crtc_id,
-        modes,
-        DEFAULT_TOPOLOGY_POLL_INTERVAL,
+        Some(edid),
+        KernelDisplayConfig {
+            crtc_id,
+            modes,
+            poll_interval: DEFAULT_TOPOLOGY_POLL_INTERVAL,
+        },
+        cancellation.clone(),
     )
-    .map_err(DisplaySetupError::KernelDisplay)?;
-    if cancellation.is_cancelled() {
-        if let Err(error) = Box::new(kernel).detach().await {
-            warn!(%error, "cancelled setup could not release its monitor");
-        }
-        return Err(DisplaySetupError::Cancelled);
-    }
+    .await
+    .map_err(|error| match error {
+        AttachError::Cancelled => DisplaySetupError::Cancelled,
+        error => DisplaySetupError::KernelAttach(error),
+    })?;
     let media_renderer = match kernel.take_renderer_access() {
         Ok(renderer) => renderer,
         Err(error) => {
@@ -1184,11 +1147,7 @@ pub enum DisplaySetupError {
     #[error("derive kernel access: {0}")]
     KernelAccess(#[source] io::Error),
     #[error("attach selected Device through monitor control: {0}")]
-    KernelAttach(#[source] io::Error),
-    #[error("construct kernel display: {0}")]
-    KernelDisplay(#[source] crate::kernel_display_port::KernelDisplayError),
-    #[error("CastKMS attach task failed: {0}")]
-    AttachTask(tokio::task::JoinError),
+    KernelAttach(#[source] AttachError),
     #[error("start CastKMS display monitor: {0}")]
     Monitor(String),
 }
@@ -1213,14 +1172,14 @@ impl DisplaySetupError {
             Self::KernelSession(_) => OperationErrorCode::AuthorizationFailed,
             Self::Backend(error) => backend_session_error_code(error),
             Self::Prepare(error) => prepare_device_error_code(error),
-            Self::KernelAttach(_) => OperationErrorCode::AttachmentFailed,
+            Self::KernelAttach(AttachError::Cancelled) => OperationErrorCode::Cancelled,
+            Self::KernelAttach(AttachError::Rejected(_)) => OperationErrorCode::AttachmentFailed,
             Self::CallerMonitor(_)
             | Self::CallerTask(_)
             | Self::ReservationConsumed
             | Self::Reserve(_)
-            | Self::AttachTask(_)
+            | Self::KernelAttach(_)
             | Self::KernelAccess(_)
-            | Self::KernelDisplay(_)
             | Self::Monitor(_) => OperationErrorCode::Internal,
         }
     }

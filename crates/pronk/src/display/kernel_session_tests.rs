@@ -20,6 +20,7 @@ struct State {
     release_done: tokio::sync::Notify,
     gate: Option<(Mutex<bool>, Condvar)>,
     fail_attach: bool,
+    panic_attach: bool,
     fail_detach: bool,
     omit_renderer: bool,
 }
@@ -52,6 +53,7 @@ impl KernelSessionControl for Control {
         assert_eq!(edid.unwrap().len(), 128);
         self.state.record("attach");
         self.state.entered.notify_one();
+        assert!(!self.state.panic_attach, "injected monitor-control failure");
         if let Some((ready, wake)) = &self.state.gate {
             let (ready, _) = wake
                 .wait_timeout_while(ready.lock().unwrap(), Duration::from_secs(5), |ready| {
@@ -303,4 +305,62 @@ async fn missing_media_authority_retires_the_attached_monitor() {
         state.events.lock().unwrap().as_slice(),
         &["attach", "detach", "session release"]
     );
+}
+
+#[tokio::test]
+async fn invalid_observation_is_rejected_before_attachment() {
+    let state = Arc::new(State::default());
+    let result = KernelDisplay::attach(
+        session(&state).await,
+        None,
+        KernelDisplayConfig {
+            crtc_id: NonZeroU32::new(17).unwrap(),
+            modes: Vec::new(),
+            poll_interval: DEFAULT_TOPOLOGY_POLL_INTERVAL,
+        },
+        CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(result, Err(AttachError::Configuration(_))));
+    notified(&state.release_done).await;
+    assert!(!state.events.lock().unwrap().contains(&"attach"));
+}
+
+#[tokio::test]
+async fn abandoned_attachment_releases_authority_after_the_worker_finishes() {
+    let state = Arc::new(State {
+        gate: Some((Mutex::new(false), Condvar::new())),
+        ..State::default()
+    });
+    let task = tokio::spawn(attach(session(&state).await, CancellationToken::new()));
+    notified(&state.entered).await;
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    state.resume();
+    notified(&state.release_done).await;
+    assert!(!state.attached.load(Ordering::SeqCst));
+    assert_eq!(
+        state
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| **event == "session release")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_panicking_attachment_worker_still_releases_its_session() {
+    let state = Arc::new(State {
+        panic_attach: true,
+        ..State::default()
+    });
+    assert!(matches!(
+        attach(session(&state).await, CancellationToken::new()).await,
+        Err(DisplaySetupError::KernelAttach(AttachError::Worker(_)))
+    ));
+    notified(&state.release_done).await;
+    assert!(!state.attached.load(Ordering::SeqCst));
 }
