@@ -117,7 +117,7 @@ async fn run(
     let runtime = socket.parent().context("private socket has no directory")?;
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
-    let mut capture = DrmCapturePipeline::new(
+    let (mut capture, _capture_events) = DrmCapturePipeline::new(
         session.capture_access()?,
         remotes,
         DrmCapturePipelineConfig {

@@ -9,14 +9,17 @@ use async_trait::async_trait;
 use drm_capture::Access as CaptureAccess;
 use pronk_capture::allocation::Heap;
 use pronk_capture::{Actor, Config as ActorConfig, Layout};
-use pronk_capture_pipewire::Video;
+use pronk_capture_pipewire::{State as VideoState, Video};
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoSourceConfig, MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::capture_health::{CaptureEvents, CaptureMonitor};
 use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
-use crate::media_pipeline_port::{CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia};
+use crate::media_pipeline_port::{
+    CaptureEvent, CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia,
+};
 use crate::media_session::{MediaStartRequest, MediaStopReason, MediaSuspendReason};
 
 /// Immutable identity and resource policy for one display's capture pipeline.
@@ -40,6 +43,7 @@ pub struct DrmCapturePipelineConfig {
 }
 
 struct ActiveCapture {
+    monitor: CaptureMonitor,
     generation: NonZeroU64,
     video: Video<OwnedFd>,
 }
@@ -50,6 +54,7 @@ pub struct DrmCapturePipeline {
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: DrmCapturePipelineConfig,
     active: Option<ActiveCapture>,
+    events: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
 }
 
 impl std::fmt::Debug for DrmCapturePipeline {
@@ -70,13 +75,18 @@ impl DrmCapturePipeline {
         capture: CaptureAccess,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: DrmCapturePipelineConfig,
-    ) -> Self {
-        Self {
-            capture,
-            producer_remotes,
-            config,
-            active: None,
-        }
+    ) -> (Self, CaptureEvents) {
+        let (events, receive) = CaptureEvents::channel();
+        (
+            Self {
+                capture,
+                producer_remotes,
+                config,
+                active: None,
+                events,
+            },
+            receive,
+        )
     }
 
     fn active(&self, generation: NonZeroU64) -> Result<&ActiveCapture, MediaPipelineError> {
@@ -212,13 +222,19 @@ impl DrmCapturePipeline {
                 "capture stop requested generation {generation}; active generation is {actual}"
             )));
         }
-        let capture = active
-            .video
-            .shutdown()
-            .await
-            .map_err(|error| MediaPipelineError::new(format!("stop capture video: {error}")))?;
-        drop(capture);
-        Ok(())
+        let ActiveCapture { monitor, video, .. } = active;
+        monitor.cancel();
+        let (video, monitor) = tokio::join!(video.shutdown(), monitor.shutdown());
+        let video = video
+            .map(drop)
+            .map_err(|error| MediaPipelineError::new(format!("stop capture video: {error}")));
+        match (video, monitor) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(video), Err(monitor)) => Err(MediaPipelineError::new(format!(
+                "{video}; capture monitor cleanup also failed: {monitor}"
+            ))),
+        }
     }
 }
 
@@ -258,7 +274,12 @@ impl CapturePipelinePort for DrmCapturePipeline {
             ));
         }
         let target = self.media_target(&video, layout, generation);
-        self.active = Some(ActiveCapture { generation, video });
+        let monitor = monitor_capture(generation, video.subscribe(), self.events.clone());
+        self.active = Some(ActiveCapture {
+            monitor,
+            generation,
+            video,
+        });
         Ok(PreparedCaptureMedia {
             media_generation: generation,
             video_target: target,
@@ -331,4 +352,73 @@ fn require_route_layout(
         )));
     }
     Ok(())
+}
+
+fn monitor_capture(
+    media_generation: NonZeroU64,
+    state: tokio::sync::watch::Receiver<VideoState>,
+    events: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
+) -> CaptureMonitor {
+    CaptureMonitor::watch(
+        media_generation,
+        state,
+        events,
+        |state| match state {
+            VideoState::Active => None,
+            VideoState::Failed(error) => Some(error.clone()),
+            VideoState::Stopped => Some("capture video stopped unexpectedly".into()),
+        },
+        "capture video health channel closed",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media_pipeline_port::CaptureEventPort;
+    use tokio::sync::watch;
+
+    #[tokio::test]
+    async fn capture_failure_reports_the_exact_media_generation() {
+        let (state, receive) = watch::channel(VideoState::Active);
+        let (send, mut events) = CaptureEvents::channel();
+        let generation = NonZeroU64::new(21).unwrap();
+        let monitor = monitor_capture(generation, receive, send);
+        state.send_replace(VideoState::Failed("destination access failed".into()));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), events.next_event())
+                .await
+                .unwrap(),
+            Some(CaptureEvent::Failed {
+                media_generation: generation,
+                error: "destination access failed".into(),
+            })
+        );
+        monitor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_capture_is_a_failure_without_orderly_shutdown() {
+        let (_state, receive) = watch::channel(VideoState::Stopped);
+        let (send, mut events) = CaptureEvents::channel();
+        let monitor = monitor_capture(NonZeroU64::new(23).unwrap(), receive, send);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.next_event())
+                .await
+                .unwrap(),
+            Some(CaptureEvent::Failed { error, .. }) if error.contains("stopped unexpectedly")
+        ));
+        monitor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn orderly_capture_shutdown_does_not_report_failure() {
+        let (state, receive) = watch::channel(VideoState::Active);
+        let (send, mut events) = CaptureEvents::channel();
+        let monitor = monitor_capture(NonZeroU64::new(25).unwrap(), receive, send);
+        monitor.cancel();
+        state.send_replace(VideoState::Stopped);
+        monitor.shutdown().await.unwrap();
+        assert_eq!(events.next_event().await, None);
+    }
 }
