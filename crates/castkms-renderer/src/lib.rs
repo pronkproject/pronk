@@ -6,9 +6,14 @@
 //! can claim one source or complete-scene job whose consuming release records
 //! how source access ended.
 
+mod capability;
 mod scene;
 mod source;
 
+pub use capability::{
+    CapabilityFormat, CapabilityProfile, CapabilitySnapshot, PendingCapability, RendererCapability,
+    StorageProvenance,
+};
 pub use scene::{ColorEncoding, ColorOperation, ColorRange, LayerKind, SceneJob, SceneLayer};
 pub use source::{
     FormatModifier, SourceGeometry, SourceImage, SourceJob, SourcePlane, SourceReleaseError,
@@ -154,6 +159,11 @@ impl<F: AsFd> Renderer<F> {
         // synchronous ioctl.
         unsafe { drm_ioctl_castkms_renderer_query(self.fd.as_fd().as_raw_fd(), &mut query) }?;
         validate_description(query)
+    }
+
+    /// Read one coherent execution and whole-scene capability snapshot.
+    pub fn capabilities(&self) -> io::Result<CapabilitySnapshot> {
+        capability::query(self.as_fd())
     }
 
     /// Reserve startup against a previously observed execution generation.
