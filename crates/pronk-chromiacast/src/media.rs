@@ -112,6 +112,13 @@ fn minimum_playout_delay(
     Duration::from_millis(frame_milliseconds).max(audio_packet_duration)
 }
 
+fn total_dropped_frames(graph: &MediaGraphStatistics, sender: &VideoSenderStatistics) -> u64 {
+    graph
+        .raw_frames_dropped
+        .saturating_add(graph.dropped_frames)
+        .saturating_add(sender.dropped_frames)
+}
+
 #[async_trait]
 trait MediaGraphPort: Debug + Send + 'static {
     async fn configure(
@@ -806,7 +813,7 @@ impl ChromiacastMediaSession {
             // Start/Resume wait for this transport-side count, so success
             // means chromiacast accepted a validated access unit.
             encoded_frames: sender.frames,
-            dropped_frames: graph.dropped_frames.saturating_add(sender.dropped_frames),
+            dropped_frames: total_dropped_frames(&graph, &sender),
             queue_delay_micros,
         };
         statistics
@@ -1519,6 +1526,26 @@ mod tests {
             minimum_playout_delay(60_000, 1_001, false),
             Duration::from_millis(17)
         );
+    }
+
+    #[test]
+    fn reported_frame_loss_includes_each_bounded_stage() {
+        let graph = MediaGraphStatistics {
+            raw_frames_dropped: 2,
+            dropped_frames: 3,
+            ..MediaGraphStatistics::default()
+        };
+        let sender = VideoSenderStatistics {
+            dropped_frames: 5,
+            ..VideoSenderStatistics::default()
+        };
+        assert_eq!(total_dropped_frames(&graph, &sender), 10);
+
+        let saturated = MediaGraphStatistics {
+            raw_frames_dropped: u64::MAX,
+            ..MediaGraphStatistics::default()
+        };
+        assert_eq!(total_dropped_frames(&saturated, &sender), u64::MAX);
     }
 
     #[test]
