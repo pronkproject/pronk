@@ -174,6 +174,14 @@ async fn attach(
     session: KernelSession,
     cancellation: CancellationToken,
 ) -> Result<AttachedKernelSession, DisplaySetupError> {
+    attach_with_source(session, CaptureSource::Renderer, cancellation).await
+}
+
+async fn attach_with_source(
+    session: KernelSession,
+    source: CaptureSource,
+    cancellation: CancellationToken,
+) -> Result<AttachedKernelSession, DisplaySetupError> {
     let mut bytes = vec![0; 128];
     bytes[..8].copy_from_slice(&[0, 255, 255, 255, 255, 255, 255, 0]);
     bytes[127] = 0u8.wrapping_sub(bytes.iter().copied().fold(0u8, u8::wrapping_add));
@@ -182,6 +190,7 @@ async fn attach(
         ValidatedEdid::new(bytes).unwrap(),
         NonZeroU32::new(17).unwrap(),
         vec![EdidMode::new(1280, 720, 60_000).unwrap()],
+        source,
         &cancellation,
     )
     .await
@@ -281,7 +290,7 @@ async fn failed_detachment_still_releases_the_session() {
     let attached = attach(session(&state).await, CancellationToken::new())
         .await
         .unwrap();
-    attached.media_renderer.release().await.unwrap();
+    attached.media.release().await.unwrap();
     assert!(Box::new(attached.kernel).detach().await.is_err());
     assert!(!state.attached.load(Ordering::SeqCst));
     assert_eq!(
@@ -304,6 +313,45 @@ async fn missing_media_authority_retires_the_attached_monitor() {
     assert_eq!(
         state.events.lock().unwrap().as_slice(),
         &["attach", "detach", "session release"]
+    );
+}
+
+#[tokio::test]
+async fn final_image_capture_attaches_without_renderer_authority() {
+    let state = Arc::new(State {
+        omit_renderer: true,
+        ..State::default()
+    });
+    let attached = attach_with_source(
+        session(&state).await,
+        CaptureSource::FinalImage,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(attached.media, DisplayMediaAccess::FinalImage(_)));
+    assert!(state.attached.load(Ordering::SeqCst));
+    cleanup_attached_kernel_session(attached).await;
+    assert_eq!(
+        state.events.lock().unwrap().as_slice(),
+        &["attach", "detach", "session release"]
+    );
+}
+
+#[tokio::test]
+async fn final_image_capture_does_not_take_the_issued_renderer() {
+    let state = Arc::new(State::default());
+    let attached = attach_with_source(
+        session(&state).await,
+        CaptureSource::FinalImage,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    cleanup_attached_kernel_session(attached).await;
+    assert_eq!(
+        state.events.lock().unwrap().as_slice(),
+        &["attach", "detach", "renderer release", "session release"]
     );
 }
 

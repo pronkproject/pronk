@@ -159,6 +159,11 @@ impl KernelDisplay {
             .take_renderer_access()
     }
 
+    /// Retain final-image capture without transferring monitor or renderer control.
+    pub fn capture_access(&self) -> io::Result<CaptureAccess> {
+        self.capture.try_clone()
+    }
+
     fn observe(&self) -> Result<Observation, KernelDisplayError> {
         let client = match self.capture.open() {
             Ok(client) => client,

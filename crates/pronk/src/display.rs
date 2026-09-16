@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use castkms_sys::DRM_FORMAT_MOD_LINEAR;
 use nix::{libc, unistd::Uid};
 use pronk_backend_host::{BackendSessionError, BackendSessionHandle};
 use pronk_backend_protocol::{PreparationRequest, StopReason, Validate};
@@ -30,6 +29,7 @@ use crate::device_recovery::{
 };
 use crate::device_session::{BackendDeviceSession, BackendDeviceSessionEvents};
 use crate::device_session_port::DeviceSessionEventPort;
+use crate::display_media::{CaptureSource, DisplayMediaAccess, DisplayMediaConfig};
 use crate::display_state::{DisplayGrantState, DisplayRuntimeState};
 use crate::kernel_display::{
     AttachError, KernelDisplay, KernelDisplayConfig, DEFAULT_TOPOLOGY_POLL_INTERVAL,
@@ -43,11 +43,9 @@ use crate::manager::{
     ResolveDeviceError,
 };
 use crate::media_driver::ProductionMediaSessionDriver;
-use crate::media_pipeline_port::CapturePipelinePort;
 use crate::media_remote::ClassifiedDeviceMediaRemotePort;
 use crate::media_session::MediaSessionDriver;
 use crate::preparation::{PrepareCastDeviceError, PreparedCastDevice};
-use crate::renderer_capture_pipeline::{RendererCapturePipeline, RendererCapturePipelineConfig};
 use crate::replaceable_device_session::{
     replaceable_device_session, DeviceSessionReplacementHandle,
 };
@@ -55,15 +53,14 @@ use crate::slot::OutputReservationError;
 
 const INITIAL_SESSION_GENERATION: u64 = 1;
 const MAX_OPERATION_ERROR_BYTES: usize = 512;
-const RENDERER_CAPTURE_RATE_HZ: u32 = 30;
-const RENDERER_PRIVATE_CAPACITY: usize = 3;
-const RENDERER_OUTPUT_CAPACITY: usize = 4;
+const CAPTURE_RATE_HZ: u32 = 30;
 
-/// PipeWire runtime owned by the account running the media services.
+/// Capture selection and PipeWire runtime for the account running media services.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaRuntime {
     directory: PathBuf,
     server_uid: u32,
+    capture_source: CaptureSource,
 }
 
 impl MediaRuntime {
@@ -71,11 +68,17 @@ impl MediaRuntime {
         Self {
             directory,
             server_uid,
+            capture_source: CaptureSource::default(),
         }
     }
 
     pub fn for_user(uid: u32) -> Self {
         Self::new(PathBuf::from(format!("/run/user/{uid}/pronk/media")), uid)
+    }
+
+    pub fn with_capture_source(mut self, capture_source: CaptureSource) -> Self {
+        self.capture_source = capture_source;
+        self
     }
 }
 
@@ -577,7 +580,7 @@ struct DisplaySetupContext {
 
 struct AttachedKernelSession {
     kernel: KernelDisplay,
-    media_renderer: crate::renderer_session::RendererAccess,
+    media: DisplayMediaAccess,
 }
 
 fn offer_for_kernel_session(offer: &PreparationRequest) -> PreparationRequest {
@@ -592,6 +595,7 @@ async fn attach_kernel_session(
     edid: ValidatedEdid,
     crtc_id: NonZeroU32,
     modes: Vec<EdidMode>,
+    capture_source: CaptureSource,
     cancellation: &CancellationToken,
 ) -> Result<AttachedKernelSession, DisplaySetupError> {
     let mut kernel = KernelDisplay::attach(
@@ -609,22 +613,25 @@ async fn attach_kernel_session(
         AttachError::Cancelled => DisplaySetupError::Cancelled,
         error => DisplaySetupError::KernelAttach(error),
     })?;
-    let media_renderer = match kernel.take_renderer_access() {
-        Ok(renderer) => renderer,
+    let media = match capture_source {
+        CaptureSource::Renderer => kernel
+            .take_renderer_access()
+            .map(DisplayMediaAccess::Renderer),
+        CaptureSource::FinalImage => kernel.capture_access().map(DisplayMediaAccess::FinalImage),
+    };
+    let media = match media {
+        Ok(media) => media,
         Err(error) => {
             cleanup_kernel_display(kernel).await;
             return Err(DisplaySetupError::KernelAccess(error));
         }
     };
-    Ok(AttachedKernelSession {
-        kernel,
-        media_renderer,
-    })
+    Ok(AttachedKernelSession { kernel, media })
 }
 
 async fn cleanup_attached_kernel_session(session: AttachedKernelSession) {
-    if let Err(error) = session.media_renderer.release().await {
-        warn!(%error, "display setup could not release its unused renderer");
+    if let Err(error) = session.media.release().await {
+        warn!(%error, "display setup could not release its unused media authority");
     }
     cleanup_kernel_display(session.kernel).await;
 }
@@ -864,16 +871,22 @@ async fn run_display_setup_inner(
         DisplaySetupError::Monitor("reserved CastKMS output has a zero CRTC ID".into())
     })?;
     let modes = prepared.generated_edid().modes().to_vec();
-    let attached =
-        match attach_kernel_session(kernel_session, edid, crtc_id, modes, &context.cancellation)
-            .await
-        {
-            Ok(attached) => attached,
-            Err(error) => {
-                stop_partial_backend(backend_session).await;
-                return Err(error);
-            }
-        };
+    let attached = match attach_kernel_session(
+        kernel_session,
+        edid,
+        crtc_id,
+        modes,
+        context.media_runtime.capture_source,
+        &context.cancellation,
+    )
+    .await
+    {
+        Ok(attached) => attached,
+        Err(error) => {
+            stop_partial_backend(backend_session).await;
+            return Err(error);
+        }
+    };
     if context.cancellation.is_cancelled() {
         stop_partial_backend(backend_session).await;
         cleanup_attached_kernel_session(attached).await;
@@ -896,19 +909,15 @@ async fn run_display_setup_inner(
         pipewire_paths,
         Uid::from_raw(context.media_runtime.server_uid),
     );
-    let AttachedKernelSession {
-        kernel,
-        media_renderer,
-    } = attached;
+    let AttachedKernelSession { kernel, media } = attached;
     let session_id = context.display_id.to_string();
     let initial_session_generation =
         NonZeroU64::new(INITIAL_SESSION_GENERATION).expect("initial session generation is nonzero");
     let device_instance = format!("cast-display-{}", context.display_id.object_segment());
     let video_bitrate = NonZeroU64::new(8_000_000).expect("fixed bitrate is nonzero");
-    let pipeline = RendererCapturePipeline::new(
-        media_renderer,
+    let pipeline = media.create_pipeline(
         remote_provider.clone(),
-        RendererCapturePipelineConfig {
+        DisplayMediaConfig {
             connector_id: NonZeroU32::new(output.connector_id)
                 .expect("reserved CastKMS outputs have nonzero connector IDs"),
             output_index: output.id.output_index,
@@ -917,13 +926,8 @@ async fn run_display_setup_inner(
             node_description: device.display_name.clone(),
             video_profile_id: video_profile_id.clone(),
             video_bitrate,
-            capture_rate_hz: NonZeroU32::new(RENDERER_CAPTURE_RATE_HZ)
+            capture_rate_hz: NonZeroU32::new(CAPTURE_RATE_HZ)
                 .expect("fixed capture rate is nonzero"),
-            output_modifier: DRM_FORMAT_MOD_LINEAR,
-            private_capacity: std::num::NonZeroUsize::new(RENDERER_PRIVATE_CAPACITY)
-                .expect("fixed private pool capacity is nonzero"),
-            output_capacity: std::num::NonZeroUsize::new(RENDERER_OUTPUT_CAPACITY)
-                .expect("fixed output pool capacity is nonzero"),
         },
     );
     let (capture, capture_events) = match pipeline {
@@ -932,7 +936,7 @@ async fn run_display_setup_inner(
             stop_partial_backend(backend_session).await;
             cleanup_kernel_display(kernel).await;
             return Err(DisplaySetupError::Monitor(format!(
-                "open renderer: {error}"
+                "open selected capture pipeline: {error}"
             )));
         }
     };
@@ -942,7 +946,6 @@ async fn run_display_setup_inner(
     );
     let kernel = Box::new(KernelDisplayWithCapture::new(kernel, capture_events))
         as Box<dyn KernelDisplayPort>;
-    let capture = Box::new(capture) as Box<dyn CapturePipelinePort>;
     let remote_port = ClassifiedDeviceMediaRemotePort::new(
         remote_provider,
         session_id,
