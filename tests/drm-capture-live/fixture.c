@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/dma-buf.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,13 +73,91 @@ static void image_destroy(int device, struct image *image)
 	REQUIRE(drmIoctl(device, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy) == 0);
 }
 
+static int select_output(struct fixture *fixture, const drmModeRes *resources)
+{
+	for (int i = 0; i < resources->count_connectors; i++) {
+		drmModeConnector *connector = drmModeGetConnector(fixture->device, resources->connectors[i]);
+		const drmModeModeInfo *mode = NULL;
+		int crtc_index = -1;
+
+		REQUIRE(connector);
+		if (connector->connection == DRM_MODE_CONNECTED) {
+			for (int j = 0; j < connector->count_modes; j++) {
+				if (connector->modes[j].hdisplay == 640 && connector->modes[j].vdisplay == 480) {
+					mode = &connector->modes[j];
+					break;
+				}
+			}
+		}
+		for (int j = 0; mode && crtc_index < 0 && j < connector->count_encoders; j++) {
+			drmModeEncoder *encoder = drmModeGetEncoder(fixture->device, connector->encoders[j]);
+
+			REQUIRE(encoder);
+			for (int k = 0; k < resources->count_crtcs; k++) {
+				if (encoder->possible_crtcs & (1U << k)) {
+					crtc_index = k;
+					break;
+				}
+			}
+			drmModeFreeEncoder(encoder);
+		}
+		if (crtc_index >= 0) {
+			fixture->mode = *mode;
+			fixture->connector = connector->connector_id;
+			fixture->crtc = resources->crtcs[crtc_index];
+		}
+		drmModeFreeConnector(connector);
+		if (crtc_index >= 0)
+			return crtc_index;
+	}
+	return -1;
+}
+
+static bool plane_is_primary(int device, uint32_t plane)
+{
+	drmModeObjectProperties *properties = drmModeObjectGetProperties(device, plane, DRM_MODE_OBJECT_PLANE);
+	bool primary = false;
+
+	REQUIRE(properties);
+	for (uint32_t i = 0; i < properties->count_props; i++) {
+		drmModePropertyRes *property = drmModeGetProperty(device, properties->props[i]);
+
+		REQUIRE(property);
+		if (!strcmp(property->name, "type"))
+			primary = properties->prop_values[i] == DRM_PLANE_TYPE_PRIMARY;
+		drmModeFreeProperty(property);
+	}
+	drmModeFreeObjectProperties(properties);
+	return primary;
+}
+
+static uint32_t select_primary_plane(int device, int crtc_index)
+{
+	drmModePlaneRes *planes = drmModeGetPlaneResources(device);
+	uint32_t selected = 0;
+
+	REQUIRE(planes);
+	for (uint32_t i = 0; i < planes->count_planes; i++) {
+		drmModePlane *plane = drmModeGetPlane(device, planes->planes[i]);
+
+		REQUIRE(plane);
+		if ((plane->possible_crtcs & (1U << crtc_index)) && plane_is_primary(device, plane->plane_id)) {
+			REQUIRE(!selected);
+			selected = plane->plane_id;
+		}
+		drmModeFreePlane(plane);
+	}
+	drmModeFreePlaneResources(planes);
+	REQUIRE(selected);
+	return selected;
+}
+
 struct fixture *capture_fixture_open(const char *path)
 {
 	struct fixture *fixture = calloc(1, sizeof(*fixture));
 	drmVersion *version;
 	drmModeRes *resources;
-	drmModeConnector *connector;
-	drmModePlaneRes *planes;
+	int crtc_index;
 
 	REQUIRE(fixture);
 	fixture->device = open(path, O_RDWR | O_CLOEXEC);
@@ -90,23 +169,11 @@ struct fixture *capture_fixture_open(const char *path)
 	REQUIRE(drmIsMaster(fixture->device));
 	REQUIRE(drmSetClientCap(fixture->device, DRM_CLIENT_CAP_ATOMIC, 1) == 0);
 	resources = drmModeGetResources(fixture->device);
-	REQUIRE(resources && resources->count_crtcs == 1 && resources->count_connectors == 1);
-	fixture->crtc = resources->crtcs[0];
-	fixture->connector = resources->connectors[0];
+	REQUIRE(resources && resources->count_crtcs > 0 && resources->count_crtcs <= 32);
+	crtc_index = select_output(fixture, resources);
+	REQUIRE(crtc_index >= 0);
 	drmModeFreeResources(resources);
-	planes = drmModeGetPlaneResources(fixture->device);
-	REQUIRE(planes && planes->count_planes == 1);
-	fixture->plane = planes->planes[0];
-	drmModeFreePlaneResources(planes);
-	connector = drmModeGetConnector(fixture->device, fixture->connector);
-	REQUIRE(connector);
-	for (int i = 0; i < connector->count_modes; i++) {
-		if (connector->modes[i].hdisplay == 640 && connector->modes[i].vdisplay == 480) {
-			fixture->mode = connector->modes[i];
-			break;
-		}
-	}
-	drmModeFreeConnector(connector);
+	fixture->plane = select_primary_plane(fixture->device, crtc_index);
 	REQUIRE(fixture->mode.clock);
 	fixture->source = image_create(fixture->device, 0x49);
 	fixture->changed = image_create(fixture->device, 0x68);

@@ -4,7 +4,10 @@ These opt-in tests modeset a display. Use an **unused Rust CastKMS device in
 a disposable VM**, not a desktop output. The fixture requires DRM master and
 the Rust driver's version; heap tests also require `/dev/dma_heap/system`.
 The kernel must provide the matching generic capture interface and the
-built-in reference renderer. Building also requires libdrm and GTK 3 development
+built-in reference renderer. Fixture probes select the first connected output
+offering 640x480 and find its compatible primary plane; additional outputs,
+cursors and overlays may remain enabled. They do not test composition of those
+additional planes. Building also requires libdrm and GTK 3 development
 files; GTK supplies the Wayland pattern client. Build the programs before
 entering a privileged test environment:
 
