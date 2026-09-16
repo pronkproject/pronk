@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use tokio::net::UnixStream;
@@ -13,6 +14,13 @@ struct State {
     requests: Mutex<Vec<Request>>,
     releases: Mutex<Vec<(u64, String)>>,
     transitions: Mutex<Vec<(u64, u64, String)>>,
+    renderer_acquisitions: Mutex<Vec<(u64, u64, String)>>,
+    renderer_releases: Mutex<Vec<(u64, u64, String)>>,
+    renderer_peers: Mutex<BTreeMap<u64, std::os::unix::net::UnixStream>>,
+    last_renderer_id: Mutex<u64>,
+    renderer_acquire_calls: Mutex<usize>,
+    renderer_acquire_entered: Notify,
+    renderer_acquire_gate: Mutex<Option<Arc<Notify>>>,
     owner: Mutex<String>,
     entered: Notify,
     transition_entered: Notify,
@@ -48,7 +56,7 @@ impl Mutter {
         crtc: u32,
         connector: u32,
         #[zbus(header)] header: Header<'_>,
-    ) -> zbus::fdo::Result<(BusFd, BusFd, BusFd, String, u64)> {
+    ) -> zbus::fdo::Result<(BusFd, BusFd, u64, BusFd, String, u64)> {
         self.state.requests.lock().unwrap().push((
             major,
             minor,
@@ -81,10 +89,62 @@ impl Mutter {
         Ok((
             monitor.into(),
             renderer.into(),
+            1,
             capture.into(),
             "/dev/dri/renderD128".into(),
             91,
         ))
+    }
+
+    async fn acquire_renderer(
+        &self,
+        session_id: u64,
+        #[zbus(header)] header: Header<'_>,
+    ) -> zbus::fdo::Result<(BusFd, u64)> {
+        *self.state.renderer_acquire_calls.lock().unwrap() += 1;
+        let gate = self.state.renderer_acquire_gate.lock().unwrap().clone();
+        self.state.renderer_acquire_entered.notify_one();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        let (renderer, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut last_id = self.state.last_renderer_id.lock().unwrap();
+        *last_id += 1;
+        let renderer_id = *last_id;
+        self.state
+            .renderer_peers
+            .lock()
+            .unwrap()
+            .insert(renderer_id, peer);
+        self.state.renderer_acquisitions.lock().unwrap().push((
+            session_id,
+            renderer_id,
+            header.destination().unwrap().to_string(),
+        ));
+        let renderer: OwnedFd = renderer.into();
+        Ok((renderer.into(), renderer_id))
+    }
+
+    fn release_renderer(
+        &self,
+        session_id: u64,
+        renderer_id: u64,
+        #[zbus(header)] header: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.state.renderer_releases.lock().unwrap().push((
+            session_id,
+            renderer_id,
+            header.destination().unwrap().to_string(),
+        ));
+        if renderer_id == 0 || renderer_id > *self.state.last_renderer_id.lock().unwrap() {
+            return Err(zbus::fdo::Error::InvalidArgs("unknown renderer".into()));
+        }
+        self.state
+            .renderer_peers
+            .lock()
+            .unwrap()
+            .remove(&renderer_id);
+        Ok(())
     }
 
     async fn install_renderer_transition(
@@ -138,6 +198,7 @@ impl Fixture {
     async fn new(stalled: bool, release_error: bool) -> Self {
         let state = Arc::new(State {
             owner: Mutex::new(":1.88".into()),
+            last_renderer_id: Mutex::new(1),
             gate: stalled.then(Notify::new),
             release_error,
             ..State::default()
@@ -238,8 +299,8 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
     );
     *fixture.state.owner.lock().unwrap() = ":1.99".into();
     renderer_access
-        .transition
-        .install(NonZeroU64::new(73).unwrap(), CancellationToken::new())
+        .session
+        .install_transition(NonZeroU64::new(73).unwrap(), CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(
@@ -294,7 +355,7 @@ async fn cancelling_a_stalled_transition_returns_without_changing_owners() {
         .acquire(target(), CancellationToken::new())
         .await
         .unwrap();
-    let transition = session.renderer_access().unwrap().transition;
+    let transition = session.renderer_access().unwrap().session;
     let gate = Arc::new(Notify::new());
     *fixture.state.transition_gate.lock().unwrap() = Some(Arc::clone(&gate));
     let cancellation = CancellationToken::new();
@@ -302,7 +363,7 @@ async fn cancelling_a_stalled_transition_returns_without_changing_owners() {
         let cancellation = cancellation.clone();
         tokio::spawn(async move {
             transition
-                .install(NonZeroU64::new(74).unwrap(), cancellation)
+                .install_transition(NonZeroU64::new(74).unwrap(), cancellation)
                 .await
         })
     };
@@ -311,7 +372,7 @@ async fn cancelling_a_stalled_transition_returns_without_changing_owners() {
     cancellation.cancel();
     assert!(matches!(
         task.await.unwrap(),
-        Err(RendererTransitionError::Cancelled)
+        Err(RendererSessionError::Cancelled)
     ));
 
     gate.notify_one();
@@ -331,14 +392,14 @@ async fn a_stalled_transition_obeys_the_session_deadline() {
         .acquire(target(), CancellationToken::new())
         .await
         .unwrap();
-    let transition = session.renderer_access().unwrap().transition;
+    let transition = session.renderer_access().unwrap().session;
     let gate = Arc::new(Notify::new());
     *fixture.state.transition_gate.lock().unwrap() = Some(Arc::clone(&gate));
     assert!(matches!(
         transition
-            .install(NonZeroU64::new(75).unwrap(), CancellationToken::new())
+            .install_transition(NonZeroU64::new(75).unwrap(), CancellationToken::new())
             .await,
-        Err(RendererTransitionError::Timeout)
+        Err(RendererSessionError::Timeout)
     ));
     gate.notify_one();
     transition_count_reaches(&fixture.state, 1).await;
@@ -400,6 +461,98 @@ async fn renderer_access_can_move_out_of_the_broker_session_once() {
     assert!(fixture.renderer_peer.read(&mut [0]).is_err());
     drop(renderer);
     assert_eq!(fixture.renderer_peer.read(&mut [0]).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn fresh_renderer_endpoints_are_released_through_the_issuing_owner() {
+    let fixture = Fixture::new(false, false).await;
+    let session = fixture
+        .provider
+        .acquire(target(), CancellationToken::new())
+        .await
+        .unwrap();
+    let renderer_session = session.renderer_access().unwrap().session;
+    *fixture.state.owner.lock().unwrap() = ":1.99".into();
+
+    let access = renderer_session
+        .acquire_renderer(CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(access.endpoint_id, NonZeroU64::new(2).unwrap());
+    assert_eq!(
+        fixture
+            .state
+            .renderer_acquisitions
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &[(91, 2, ":1.88".into())]
+    );
+    let endpoint_id = access.endpoint_id;
+    drop(access.renderer);
+    renderer_session
+        .release_renderer(endpoint_id)
+        .await
+        .unwrap();
+    renderer_session
+        .release_renderer(endpoint_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.state.renderer_releases.lock().unwrap().as_slice(),
+        &[(91, 2, ":1.88".into()), (91, 2, ":1.88".into())]
+    );
+}
+
+#[tokio::test]
+async fn timed_out_renderer_acquisition_keeps_one_request_until_cleanup() {
+    let mut fixture = Fixture::new(false, false).await;
+    fixture.provider.timeout = Duration::from_millis(20);
+    let session = fixture
+        .provider
+        .acquire(target(), CancellationToken::new())
+        .await
+        .unwrap();
+    let renderer_session = session.renderer_access().unwrap().session;
+    let gate = Arc::new(Notify::new());
+    *fixture.state.renderer_acquire_gate.lock().unwrap() = Some(Arc::clone(&gate));
+
+    let first = {
+        let renderer_session = renderer_session.clone();
+        tokio::spawn(async move {
+            renderer_session
+                .acquire_renderer(CancellationToken::new())
+                .await
+        })
+    };
+    notified(&fixture.state.renderer_acquire_entered).await;
+    assert!(matches!(
+        first.await.unwrap(),
+        Err(RendererSessionError::Timeout)
+    ));
+    assert!(matches!(
+        renderer_session
+            .acquire_renderer(CancellationToken::new())
+            .await,
+        Err(RendererSessionError::Timeout)
+    ));
+    assert_eq!(*fixture.state.renderer_acquire_calls.lock().unwrap(), 1);
+
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !fixture.state.renderer_releases.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture.state.renderer_releases.lock().unwrap().as_slice(),
+        &[(91, 2, ":1.88".into())]
+    );
 }
 
 #[tokio::test]

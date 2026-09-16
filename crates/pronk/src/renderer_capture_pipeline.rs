@@ -5,8 +5,8 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use castkms_renderer::Renderer;
-use pronk_capture_broker::{RendererAccess, RendererTransitionAccess};
+use castkms_renderer::{CapabilityProfile, Renderer};
+use pronk_capture_broker::{RendererAccess, RendererSessionAccess};
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoPixelFormat,
@@ -58,8 +58,9 @@ struct Generation {
 /// Sole owner of renderer authority and its per-generation GPU producer.
 pub struct RendererCapturePipeline {
     renderer: Option<Renderer<OwnedFd>>,
+    renderer_endpoint_id: NonZeroU64,
     render_node: PathBuf,
-    transition: RendererTransitionAccess,
+    renderer_session: RendererSessionAccess,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
     generation: Option<Generation>,
@@ -120,13 +121,15 @@ impl RendererCapturePipeline {
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
     ) -> std::io::Result<(Self, RendererCapturePipelineEvents)> {
-        let (renderer, render_node, transition) = access.into_parts()?;
+        let (renderer, renderer_endpoint_id, render_node, renderer_session) =
+            access.into_parts()?;
         let (events, receive) = mpsc::unbounded_channel();
         Ok((
             Self {
                 renderer: Some(renderer),
+                renderer_endpoint_id,
                 render_node,
-                transition,
+                renderer_session,
                 producer_remotes,
                 config,
                 generation: None,
@@ -136,7 +139,11 @@ impl RendererCapturePipeline {
         ))
     }
 
-    async fn stop_generation(&mut self, id: NonZeroU64) -> Result<(), MediaPipelineError> {
+    async fn stop_generation(
+        &mut self,
+        id: NonZeroU64,
+        cancellation: CancellationToken,
+    ) -> Result<(), MediaPipelineError> {
         let Some(generation) = self.generation.take() else {
             return Ok(());
         };
@@ -157,7 +164,26 @@ impl RendererCapturePipeline {
                 };
                 self.restore_renderer(owner)?;
             }
-            Stream::Active { stream, monitor } => shutdown_active(stream, monitor).await?,
+            Stream::Active { stream, monitor } => {
+                if let Err(error) = hand_back_to_host(&self.renderer_session, cancellation).await {
+                    self.generation = Some(Generation {
+                        id,
+                        stream: Stream::Active { stream, monitor },
+                    });
+                    return Err(error);
+                }
+                let stopped = shutdown_active(stream, monitor).await;
+                let released = self
+                    .renderer_session
+                    .release_renderer(self.renderer_endpoint_id)
+                    .await
+                    .map_err(|error| {
+                        MediaPipelineError::new(format!(
+                            "release retired renderer endpoint: {error}"
+                        ))
+                    });
+                combine_cleanup(stopped, released)?;
+            }
         }
         Ok(())
     }
@@ -239,9 +265,35 @@ impl CapturePipelinePort for RendererCapturePipeline {
         let generation = NonZeroU64::new(request.media_generation)
             .ok_or_else(|| MediaPipelineError::new("media generation must be nonzero"))?;
         if self.renderer.is_none() {
-            return Err(MediaPipelineError::new(
-                "renderer descriptor was consumed by an earlier active generation",
-            ));
+            let access = self
+                .renderer_session
+                .acquire_renderer(cancellation.clone())
+                .await
+                .map_err(|error| {
+                    MediaPipelineError::new(format!("acquire renderer endpoint: {error}"))
+                })?;
+            let (renderer, endpoint_id, render_node, endpoint_session) =
+                access.into_parts().map_err(|error| {
+                    MediaPipelineError::new(format!("open renderer endpoint: {error}"))
+                })?;
+            if render_node != self.render_node {
+                drop(renderer);
+                let rejected = Err(MediaPipelineError::new(
+                    "replacement renderer selected a different GPU",
+                ));
+                let released = endpoint_session
+                    .release_renderer(endpoint_id)
+                    .await
+                    .map_err(|error| {
+                        MediaPipelineError::new(format!(
+                            "release mismatched renderer endpoint: {error}"
+                        ))
+                    });
+                return Err(combine_cleanup(rejected, released)
+                    .expect_err("a rejected renderer endpoint remains an error"));
+            }
+            self.renderer = Some(renderer);
+            self.renderer_endpoint_id = endpoint_id;
         }
         let render_node = self.render_node.clone();
         let mut device_task = tokio::task::spawn_blocking(move || Device::open(render_node));
@@ -365,39 +417,25 @@ impl CapturePipelinePort for RendererCapturePipeline {
         }
         match generation.stream {
             Stream::Active { stream, monitor } => {
-                match stream.state() {
-                    RendererStreamState::Active => {}
-                    RendererStreamState::Failed(error) => {
-                        return match shutdown_active(stream, monitor).await {
-                            Ok(()) => Err(MediaPipelineError::new(error)),
-                            Err(shutdown) => Err(MediaPipelineError::new(format!(
-                                "{error}; active renderer cleanup failed: {shutdown}"
-                            ))),
-                        };
-                    }
-                    state => {
-                        let error =
-                            format!("renderer generation has invalid active state {state:?}");
-                        return match shutdown_active(stream, monitor).await {
-                            Ok(()) => Err(MediaPipelineError::new(error)),
-                            Err(shutdown) => Err(MediaPipelineError::new(format!(
-                                "{error}; active renderer cleanup failed: {shutdown}"
-                            ))),
-                        };
-                    }
-                }
+                let error = match stream.state() {
+                    RendererStreamState::Active => None,
+                    RendererStreamState::Failed(error) => Some(error),
+                    state => Some(format!(
+                        "renderer generation has invalid active state {state:?}"
+                    )),
+                };
                 self.generation = Some(Generation {
                     id: generation.id,
                     stream: Stream::Active { stream, monitor },
                 });
-                Ok(())
+                error.map_or(Ok(()), |error| Err(MediaPipelineError::new(error)))
             }
             Stream::Prepared(stream) => {
                 let state = stream.subscribe();
                 let transition = stream.profile_registration().transition();
                 if let Err(error) = self
-                    .transition
-                    .install(transition, cancellation.clone())
+                    .renderer_session
+                    .install_transition(transition, cancellation.clone())
                     .await
                 {
                     let error =
@@ -411,7 +449,10 @@ impl CapturePipelinePort for RendererCapturePipeline {
                     self.restore_renderer(owner)?;
                     return Err(error);
                 }
-                let activated = stream.activate(cancellation).await;
+                // Once Mutter has installed the transition, finish the bounded
+                // kernel activation. Cancellation is handled by the ordinary
+                // stop path, which can first return execution to HOST.
+                let activated = stream.activate(CancellationToken::new()).await;
                 let stream = activated.map_err(|error| {
                     self.recover_stream_error("activate renderer stream", error)
                 })?;
@@ -429,29 +470,145 @@ impl CapturePipelinePort for RendererCapturePipeline {
         &mut self,
         media_generation: NonZeroU64,
         _reason: MediaSuspendReason,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        self.stop_generation(media_generation).await
+        self.stop_generation(media_generation, cancellation).await
     }
 
     async fn stop(
         &mut self,
         media_generation: NonZeroU64,
         _reason: MediaStopReason,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        self.stop_generation(media_generation).await
+        self.stop_generation(media_generation, cancellation).await
     }
 
     async fn shutdown(
         &mut self,
         _reason: MediaStopReason,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
         if let Some(generation) = self.generation.as_ref().map(|generation| generation.id) {
-            self.stop_generation(generation).await?;
+            self.stop_generation(generation, cancellation).await?;
         }
         Ok(())
+    }
+}
+
+async fn hand_back_to_host(
+    renderer_session: &RendererSessionAccess,
+    cancellation: CancellationToken,
+) -> Result<(), MediaPipelineError> {
+    let access = renderer_session
+        .acquire_renderer(cancellation.clone())
+        .await
+        .map_err(|error| MediaPipelineError::new(format!("acquire HOST endpoint: {error}")))?;
+    let (mut renderer, endpoint_id, _, endpoint_session) =
+        access.into_parts().map_err(|error| {
+            MediaPipelineError::new(format!("open HOST renderer endpoint: {error}"))
+        })?;
+    let result = async {
+        let description = renderer.describe().map_err(|error| {
+            MediaPipelineError::new(format!("query HOST handback endpoint: {error}"))
+        })?;
+        let candidate = renderer
+            .begin_takeover(description)
+            .map_err(|error| MediaPipelineError::new(format!("begin HOST handback: {error}")))?;
+        let registered = candidate
+            .register_profile(&CapabilityProfile::Host)
+            .map_err(|failure| {
+                let (_, error) = failure.into_parts();
+                MediaPipelineError::new(format!("register HOST handback: {error}"))
+            })?;
+        let transition = registered.registration().transition();
+        let candidate = registered.into_host().map_err(|candidate| {
+            let _ = candidate.abort();
+            MediaPipelineError::new("CastKMS rejected the registered HOST contract")
+        })?;
+        endpoint_session
+            .install_transition(transition, cancellation.clone())
+            .await
+            .map_err(|error| {
+                MediaPipelineError::new(format!("install HOST handback transition: {error}"))
+            })?;
+        activate_host(candidate, cancellation).await
+    }
+    .await;
+    drop(renderer);
+    let released = endpoint_session
+        .release_renderer(endpoint_id)
+        .await
+        .map_err(|error| {
+            MediaPipelineError::new(format!("release HOST handback endpoint: {error}"))
+        });
+    combine_cleanup(result, released)
+}
+
+async fn activate_host<'renderer>(
+    candidate: castkms_renderer::HostCandidate<'renderer, OwnedFd>,
+    cancellation: CancellationToken,
+) -> Result<(), MediaPipelineError> {
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
+    tokio::pin!(deadline);
+    let mut pending = match candidate.activate() {
+        Ok(active) => {
+            drop(active);
+            return Ok(());
+        }
+        Err(error) if error.error().raw_os_error() == Some(nix::libc::EAGAIN) => {
+            error.into_candidate()
+        }
+        Err(error) => {
+            let message = error.error().to_string();
+            let _ = error.into_candidate().abort();
+            return Err(MediaPipelineError::new(format!(
+                "activate HOST handback: {message}"
+            )));
+        }
+    };
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                let _ = pending.abort();
+                return Err(MediaPipelineError::new("HOST handback was cancelled"));
+            }
+            _ = &mut deadline => {
+                let _ = pending.abort();
+                return Err(MediaPipelineError::new("HOST handback timed out"));
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {}
+        }
+        match pending.activate() {
+            Ok(active) => {
+                drop(active);
+                return Ok(());
+            }
+            Err(error) if error.error().raw_os_error() == Some(nix::libc::EAGAIN) => {
+                pending = error.into_candidate();
+            }
+            Err(error) => {
+                let message = error.error().to_string();
+                let _ = error.into_candidate().abort();
+                return Err(MediaPipelineError::new(format!(
+                    "activate HOST handback: {message}"
+                )));
+            }
+        }
+    }
+}
+
+fn combine_cleanup(
+    primary: Result<(), MediaPipelineError>,
+    cleanup: Result<(), MediaPipelineError>,
+) -> Result<(), MediaPipelineError> {
+    match (primary, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(primary), Err(cleanup)) => Err(MediaPipelineError::new(format!(
+            "{primary}; cleanup also failed: {cleanup}"
+        ))),
     }
 }
 

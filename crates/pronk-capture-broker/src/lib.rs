@@ -46,17 +46,23 @@ pub enum Error {
     InvalidCapacity,
     #[error("Mutter returned a zero display-session identifier")]
     InvalidSession,
+    #[error("Mutter returned a zero renderer-endpoint identifier")]
+    InvalidRenderer,
     #[error("display-session broker operation failed: {0}")]
     Bus(#[from] zbus::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum RendererTransitionError {
-    #[error("renderer transition installation canceled")]
+pub enum RendererSessionError {
+    #[error("renderer-session operation canceled")]
     Cancelled,
-    #[error("renderer transition installation timed out")]
+    #[error("renderer-session operation timed out")]
     Timeout,
-    #[error("renderer transition broker operation failed: {0}")]
+    #[error("renderer-session worker stopped")]
+    WorkerStopped,
+    #[error("Mutter returned an invalid renderer endpoint")]
+    InvalidRenderer,
+    #[error("renderer-session broker operation failed: {0}")]
     Bus(#[from] zbus::Error),
 }
 
@@ -80,10 +86,9 @@ pub struct Provider {
 pub struct Session {
     id: NonZeroU64,
     monitor: Option<OwnedFd>,
-    renderer: Option<OwnedFd>,
+    renderer: Option<(OwnedFd, NonZeroU64)>,
     capture: Option<OwnedFd>,
-    render_node: PathBuf,
-    transition: RendererTransitionAccess,
+    renderer_session: RendererSessionAccess,
     release: Option<oneshot::Sender<()>>,
     done: Option<oneshot::Receiver<Result<(), Error>>>,
 }
@@ -105,27 +110,29 @@ pub struct CaptureAccess {
 #[derive(Debug)]
 pub struct RendererAccess {
     renderer: OwnedFd,
-    render_node: PathBuf,
-    transition: RendererTransitionAccess,
+    endpoint_id: NonZeroU64,
+    session: RendererSessionAccess,
 }
 
-/// Permission to ask Mutter to bind a registered profile to the current scene.
+/// Session-bound authority for renderer replacement and scene transitions.
 ///
 /// Cancellation and deadlines bound the local wait. An operation already
 /// delivered to Mutter may still complete, so callers must retire the related
 /// renderer candidate when installation does not return success.
 #[derive(Debug, Clone)]
-pub struct RendererTransitionAccess {
+pub struct RendererSessionAccess {
     connection: zbus::Connection,
     owner: OwnedUniqueName,
     session_id: NonZeroU64,
+    render_node: PathBuf,
     timeout: Duration,
+    endpoint_slots: Arc<Semaphore>,
 }
 
 impl RendererAccess {
     /// Render node for the GPU that produces the compositor's source images.
     pub fn render_node(&self) -> &Path {
-        &self.render_node
+        &self.session.render_node
     }
 
     /// Open a validated renderer client while retaining the broker session.
@@ -138,27 +145,29 @@ impl RendererAccess {
         self,
     ) -> std::io::Result<(
         castkms_renderer::Renderer,
+        NonZeroU64,
         PathBuf,
-        RendererTransitionAccess,
+        RendererSessionAccess,
     )> {
         Ok((
             castkms_renderer::Renderer::from_fd(self.renderer)?,
-            self.render_node,
-            self.transition,
+            self.endpoint_id,
+            self.session.render_node.clone(),
+            self.session,
         ))
     }
 }
 
-impl RendererTransitionAccess {
+impl RendererSessionAccess {
     /// Ask the exact session issuer to bind one registered transition.
     ///
     /// An error does not promise remote cancellation after the request has
     /// reached Mutter.
-    pub async fn install(
+    pub async fn install_transition(
         &self,
         transition: NonZeroU64,
         cancellation: CancellationToken,
-    ) -> Result<(), RendererTransitionError> {
+    ) -> Result<(), RendererSessionError> {
         let request = (self.session_id.get(), transition.get());
         let call = self.connection.call_method(
             Some(self.owner.as_str()),
@@ -169,14 +178,101 @@ impl RendererTransitionAccess {
         );
         tokio::select! {
             biased;
-            _ = cancellation.cancelled() => Err(RendererTransitionError::Cancelled),
+            _ = cancellation.cancelled() => Err(RendererSessionError::Cancelled),
             result = tokio::time::timeout(self.timeout, call) => {
-                result.map_err(|_| RendererTransitionError::Timeout)?
+                result.map_err(|_| RendererSessionError::Timeout)?
                     .and_then(|message| message.body().deserialize::<()>())
-                    .map_err(RendererTransitionError::from)
+                    .map_err(RendererSessionError::from)
             }
         }
     }
+
+    /// Obtain a fresh endpoint for renderer replacement or HOST handback.
+    pub async fn acquire_renderer(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<RendererAccess, RendererSessionError> {
+        let permit = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(RendererSessionError::Cancelled),
+            result = tokio::time::timeout(
+                self.timeout,
+                Arc::clone(&self.endpoint_slots).acquire_owned(),
+            ) => result
+                .map_err(|_| RendererSessionError::Timeout)?
+                .map_err(|_| RendererSessionError::WorkerStopped)?,
+        };
+        let (send, receive) = oneshot::channel();
+        let access = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let result = acquire_renderer(&access).await;
+            if let Err(Ok((renderer, endpoint_id))) = send.send(result) {
+                drop(renderer);
+                let _ = release_renderer(&access, endpoint_id).await;
+            }
+        });
+        let received = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(RendererSessionError::Cancelled),
+            result = tokio::time::timeout(self.timeout, receive) => {
+                result.map_err(|_| RendererSessionError::Timeout)?
+                    .map_err(|_| RendererSessionError::WorkerStopped)?
+            }
+        }?;
+        Ok(RendererAccess {
+            renderer: received.0,
+            endpoint_id: received.1,
+            session: self.clone(),
+        })
+    }
+
+    /// Revoke one endpoint after its admitted source reads have drained.
+    pub async fn release_renderer(
+        &self,
+        endpoint_id: NonZeroU64,
+    ) -> Result<(), RendererSessionError> {
+        tokio::time::timeout(self.timeout, release_renderer(self, endpoint_id))
+            .await
+            .map_err(|_| RendererSessionError::Timeout)?
+    }
+}
+
+async fn acquire_renderer(
+    access: &RendererSessionAccess,
+) -> Result<(OwnedFd, NonZeroU64), RendererSessionError> {
+    let message = access
+        .connection
+        .call_method(
+            Some(access.owner.as_str()),
+            PATH,
+            Some(SERVICE),
+            "AcquireRenderer",
+            &(access.session_id.get(),),
+        )
+        .await?;
+    let (renderer, endpoint_id) = message.body().deserialize::<(BusFd, u64)>()?;
+    let endpoint_id = NonZeroU64::new(endpoint_id).ok_or(RendererSessionError::InvalidRenderer)?;
+    Ok((renderer.into(), endpoint_id))
+}
+
+async fn release_renderer(
+    access: &RendererSessionAccess,
+    endpoint_id: NonZeroU64,
+) -> Result<(), RendererSessionError> {
+    access
+        .connection
+        .call_method(
+            Some(access.owner.as_str()),
+            PATH,
+            Some(SERVICE),
+            "ReleaseRenderer",
+            &(access.session_id.get(), endpoint_id.get()),
+        )
+        .await?
+        .body()
+        .deserialize::<()>()?;
+    Ok(())
 }
 
 impl CaptureAccess {
@@ -193,10 +289,10 @@ impl Session {
             .as_fd()
     }
 
-    fn renderer(&self) -> std::io::Result<BorrowedFd<'_>> {
+    fn renderer(&self) -> std::io::Result<(BorrowedFd<'_>, NonZeroU64)> {
         self.renderer
             .as_ref()
-            .map(AsFd::as_fd)
+            .map(|(renderer, id)| (renderer.as_fd(), *id))
             .ok_or_else(|| std::io::Error::other("renderer access was already transferred"))
     }
     /// Borrow the monitor-control capability without exposing capture through it.
@@ -218,10 +314,11 @@ impl Session {
     }
 
     pub fn renderer_access(&self) -> std::io::Result<RendererAccess> {
+        let (renderer, endpoint_id) = self.renderer()?;
         Ok(RendererAccess {
-            renderer: self.renderer()?.try_clone_to_owned()?,
-            render_node: self.render_node.clone(),
-            transition: self.transition_access(),
+            renderer: renderer.try_clone_to_owned()?,
+            endpoint_id,
+            session: self.renderer_session.clone(),
         })
     }
 
@@ -229,16 +326,12 @@ impl Session {
     pub fn take_renderer_access(&mut self) -> std::io::Result<RendererAccess> {
         self.renderer
             .take()
-            .map(|renderer| RendererAccess {
+            .map(|(renderer, endpoint_id)| RendererAccess {
                 renderer,
-                render_node: self.render_node.clone(),
-                transition: self.transition_access(),
+                endpoint_id,
+                session: self.renderer_session.clone(),
             })
             .ok_or_else(|| std::io::Error::other("renderer access was already transferred"))
-    }
-
-    fn transition_access(&self) -> RendererTransitionAccess {
-        self.transition.clone()
     }
 
     pub fn monitor_capabilities(&self) -> std::io::Result<monitor::Capabilities> {
@@ -382,15 +475,26 @@ async fn run_session(
     let received = result.and_then(|message| {
         message
             .body()
-            .deserialize::<(BusFd, BusFd, BusFd, String, u64)>()
+            .deserialize::<(BusFd, BusFd, u64, BusFd, String, u64)>()
     });
-    let (monitor, renderer, capture, render_node, id) = match received {
-        Ok((monitor, renderer, capture, render_node, id)) => {
+    let (monitor, renderer, renderer_id, capture, render_node, id) = match received {
+        Ok((monitor, renderer, renderer_id, capture, render_node, id)) => {
             let Some(id) = NonZeroU64::new(id) else {
                 let _ = send.send(Err(Error::InvalidSession));
                 return;
             };
-            (monitor, renderer, capture, PathBuf::from(render_node), id)
+            let Some(renderer_id) = NonZeroU64::new(renderer_id) else {
+                let _ = send.send(Err(Error::InvalidRenderer));
+                return;
+            };
+            (
+                monitor,
+                renderer,
+                renderer_id,
+                capture,
+                PathBuf::from(render_node),
+                id,
+            )
         }
         Err(error) => {
             let _ = send.send(Err(error.into()));
@@ -406,14 +510,15 @@ async fn run_session(
     let _ = send.send(Ok(Session {
         id,
         monitor: Some(monitor),
-        renderer: Some(renderer),
+        renderer: Some((renderer, renderer_id)),
         capture: Some(capture),
-        render_node,
-        transition: RendererTransitionAccess {
+        renderer_session: RendererSessionAccess {
             connection: connection.clone(),
             owner: owner.clone(),
             session_id: id,
+            render_node,
             timeout,
+            endpoint_slots: Arc::new(Semaphore::new(1)),
         },
         release: Some(release),
         done: Some(wait_done),
