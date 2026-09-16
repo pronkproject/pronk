@@ -266,7 +266,7 @@ impl MockMediaEngine {
             media_generation: media_generation.get(),
             video_bitrate,
             encoded_frames: statistics.frames,
-            dropped_frames: statistics.dropped_frames,
+            dropped_frames: statistics.dropped_video_frames(),
             queue_delay_micros: 0,
         })
     }

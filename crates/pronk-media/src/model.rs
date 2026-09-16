@@ -395,6 +395,13 @@ pub struct MediaGraphStatistics {
     pub encoded_audio_caps: Option<String>,
 }
 
+impl MediaGraphStatistics {
+    /// Raw images and encoded access units discarded within the media graph.
+    pub fn dropped_video_frames(&self) -> u64 {
+        self.raw_frames_dropped.saturating_add(self.dropped_frames)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaGraphSnapshot {
     pub revision: u64,
@@ -499,6 +506,23 @@ mod tests {
         assert_eq!(cadence.frames_in(2), 60);
         assert_eq!(cadence.maximum_integer_rate().unwrap(), 30);
         assert_eq!(cadence.caps_fraction(), "30000/1001");
+    }
+
+    #[test]
+    fn video_loss_combines_both_bounded_graph_stages() {
+        let statistics = MediaGraphStatistics {
+            raw_frames_dropped: 2,
+            dropped_frames: 3,
+            ..MediaGraphStatistics::default()
+        };
+        assert_eq!(statistics.dropped_video_frames(), 5);
+
+        let saturated = MediaGraphStatistics {
+            raw_frames_dropped: u64::MAX,
+            dropped_frames: 1,
+            ..MediaGraphStatistics::default()
+        };
+        assert_eq!(saturated.dropped_video_frames(), u64::MAX);
     }
 
     #[test]

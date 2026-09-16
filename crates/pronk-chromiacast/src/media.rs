@@ -114,8 +114,7 @@ fn minimum_playout_delay(
 
 fn total_dropped_frames(graph: &MediaGraphStatistics, sender: &VideoSenderStatistics) -> u64 {
     graph
-        .raw_frames_dropped
-        .saturating_add(graph.dropped_frames)
+        .dropped_video_frames()
         .saturating_add(sender.dropped_frames)
 }
 
