@@ -288,6 +288,14 @@ pub struct TakeoverCandidate<'renderer, F: AsFd> {
 pub struct RegisteredCandidate<'renderer, F: AsFd> {
     candidate: TakeoverCandidate<'renderer, F>,
     registration: ProfileRegistration,
+    host_capability: bool,
+}
+
+/// Registered HOST candidate that needs no native probe submission.
+#[must_use = "activate the HOST candidate or abort it deliberately"]
+#[derive(Debug)]
+pub struct HostCandidate<'renderer, F: AsFd> {
+    candidate: RegisteredCandidate<'renderer, F>,
 }
 
 impl<'renderer, F: AsFd> RegisteredCandidate<'renderer, F> {
@@ -371,6 +379,29 @@ impl<'renderer, F: AsFd> RegisteredCandidate<'renderer, F> {
     pub fn abort(self) -> io::Result<()> {
         self.candidate.abort()
     }
+
+    /// Refine a registered candidate to the HOST-only activation path.
+    pub fn into_host(self) -> Result<HostCandidate<'renderer, F>, Self> {
+        if self.host_capability {
+            Ok(HostCandidate { candidate: self })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl<'renderer, F: AsFd> HostCandidate<'renderer, F> {
+    /// Activate HOST execution without manufacturing a GPU probe.
+    pub fn activate(self) -> Result<ActiveRenderer<'renderer, F>, ActivationError<'renderer, F>> {
+        SubmittedCandidate {
+            candidate: self.candidate,
+        }
+        .activate()
+    }
+
+    pub fn abort(self) -> io::Result<()> {
+        self.candidate.abort()
+    }
 }
 
 /// Failed profile registration retaining the candidate for explicit cleanup.
@@ -419,6 +450,7 @@ impl<'renderer, F: AsFd> TakeoverCandidate<'renderer, F> {
             Ok(registration) => Ok(RegisteredCandidate {
                 candidate: self,
                 registration,
+                host_capability: matches!(profile, CapabilityProfile::Host),
             }),
             Err(error) => Err(ProfileRegistrationError {
                 candidate: self,
@@ -731,6 +763,7 @@ fn unsupported(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drm_display_executor::scene::geometry::Extent;
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -804,8 +837,18 @@ mod tests {
                     )
                     .unwrap(),
                 },
+                host_capability: true,
             },
         }
+    }
+
+    fn registered_candidate(
+        renderer: &mut Renderer<std::fs::File>,
+        capability: CapabilityProfile,
+    ) -> RegisteredCandidate<'_, std::fs::File> {
+        let mut submitted = submitted_candidate(renderer, 7);
+        submitted.candidate.host_capability = capability == CapabilityProfile::Host;
+        submitted.candidate
     }
 
     #[test]
@@ -1030,5 +1073,23 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
         assert_eq!(error.into_candidate().configuration(), configuration());
+    }
+
+    #[test]
+    fn only_the_host_contract_enters_probeless_activation() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let mut renderer = Renderer { fd: file };
+        let capability = CapabilityProfile::Renderer(RendererCapability::linear_xrgb8888_primary(
+            Extent::new(1920, 1080).unwrap(),
+        ));
+        assert!(registered_candidate(&mut renderer, capability)
+            .into_host()
+            .is_err());
+        let error = registered_candidate(&mut renderer, CapabilityProfile::Host)
+            .into_host()
+            .unwrap()
+            .activate()
+            .unwrap_err();
+        assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
     }
 }
