@@ -7,7 +7,10 @@ use std::os::unix::fs::MetadataExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
-use castkms_renderer::{CapabilityProfile, Profile, RendererCapability};
+use castkms_renderer::{
+    CapabilityFormat, CapabilityProfile, FormatModifier, Profile, RendererCapability,
+    StorageProvenance,
+};
 use drm_display_executor::scene::geometry::Extent;
 use pronk_capture_broker::{Provider, RendererAccess, Target};
 use tokio_util::sync::CancellationToken;
@@ -56,9 +59,29 @@ async fn run(target: Target) -> anyhow::Result<()> {
     ensure!(before.profile() == Profile::HostV1);
     let candidate = renderer.begin_takeover(before)?;
     let output = candidate.configuration();
-    let profile = CapabilityProfile::Renderer(RendererCapability::linear_xrgb8888_primary(
+    let format = |fourcc, modifier| {
+        CapabilityFormat::new(
+            fourcc,
+            modifier,
+            NonZeroU32::new(1).unwrap(),
+            StorageProvenance::new(true, true),
+            NonZeroU32::new(1).unwrap(),
+            NonZeroU32::new(1).unwrap(),
+            NonZeroU32::new(u32::MAX).unwrap(),
+        )
+    };
+    let capability = RendererCapability::single_primary_formats(
         Extent::new(output.width().get(), output.height().get())?,
-    ));
+        vec![
+            format(u32::from_le_bytes(*b"XR24"), FormatModifier::Unspecified)?,
+            format(u32::from_le_bytes(*b"XR24"), FormatModifier::Explicit(0))?,
+            format(u32::from_le_bytes(*b"XB24"), FormatModifier::Unspecified)?,
+            format(u32::from_le_bytes(*b"XB24"), FormatModifier::Explicit(0))?,
+        ]
+        .into_boxed_slice(),
+    )?
+    .with_output_color(256, true)?;
+    let profile = CapabilityProfile::Renderer(capability);
     let registered = candidate
         .register_profile(&profile)
         .map_err(|failure| failure.into_parts().1)?;
