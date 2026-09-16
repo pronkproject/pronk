@@ -510,15 +510,20 @@ async fn hand_back_to_host(
             })?;
         let transition = registered.registration().transition();
         let candidate = registered.into_host().map_err(|candidate| {
-            let _ = candidate.abort();
-            MediaPipelineError::new("CastKMS rejected the registered HOST contract")
+            include_abort_failure(
+                MediaPipelineError::new("CastKMS rejected the registered HOST contract"),
+                candidate.abort(),
+            )
         })?;
-        endpoint_session
+        if let Err(error) = endpoint_session
             .install_transition(transition, cancellation.clone())
             .await
-            .map_err(|error| {
-                MediaPipelineError::new(format!("install HOST handback transition: {error}"))
-            })?;
+        {
+            return Err(include_abort_failure(
+                MediaPipelineError::new(format!("install HOST handback transition: {error}")),
+                candidate.abort(),
+            ));
+        }
         activate_host(candidate, cancellation).await
     }
     .await;
@@ -545,22 +550,26 @@ async fn activate_host<'renderer>(
         }
         Err(error) => {
             let message = error.error().to_string();
-            let _ = error.into_candidate().abort();
-            return Err(MediaPipelineError::new(format!(
-                "activate HOST handback: {message}"
-            )));
+            return Err(include_abort_failure(
+                MediaPipelineError::new(format!("activate HOST handback: {message}")),
+                error.into_candidate().abort(),
+            ));
         }
     };
     loop {
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
-                let _ = pending.abort();
-                return Err(MediaPipelineError::new("HOST handback was cancelled"));
+                return Err(include_abort_failure(
+                    MediaPipelineError::new("HOST handback was cancelled"),
+                    pending.abort(),
+                ));
             }
             _ = &mut deadline => {
-                let _ = pending.abort();
-                return Err(MediaPipelineError::new("HOST handback timed out"));
+                return Err(include_abort_failure(
+                    MediaPipelineError::new("HOST handback timed out"),
+                    pending.abort(),
+                ));
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {}
         }
@@ -574,12 +583,24 @@ async fn activate_host<'renderer>(
             }
             Err(error) => {
                 let message = error.error().to_string();
-                let _ = error.into_candidate().abort();
-                return Err(MediaPipelineError::new(format!(
-                    "activate HOST handback: {message}"
-                )));
+                return Err(include_abort_failure(
+                    MediaPipelineError::new(format!("activate HOST handback: {message}")),
+                    error.into_candidate().abort(),
+                ));
             }
         }
+    }
+}
+
+fn include_abort_failure(
+    primary: MediaPipelineError,
+    abort: std::io::Result<()>,
+) -> MediaPipelineError {
+    match abort {
+        Ok(()) => primary,
+        Err(error) => MediaPipelineError::new(format!(
+            "{primary}; abort renderer transition also failed: {error}"
+        )),
     }
 }
 
@@ -733,5 +754,18 @@ mod tests {
         state.send_replace(RendererStreamState::Stopped);
         monitor.shutdown().await.unwrap();
         assert_eq!(event_rx.recv().await, None);
+    }
+
+    #[test]
+    fn host_abort_failure_preserves_the_primary_error() {
+        let primary = MediaPipelineError::new("HOST activation failed");
+        let combined = include_abort_failure(
+            primary,
+            Err(std::io::Error::from_raw_os_error(nix::libc::EIO)),
+        );
+        assert_eq!(
+            combined.to_string(),
+            "HOST activation failed; abort renderer transition also failed: Input/output error (os error 5)"
+        );
     }
 }
