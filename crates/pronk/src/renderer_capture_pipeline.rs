@@ -46,8 +46,9 @@ pub struct RendererCapturePipelineConfig {
 enum Stream {
     Prepared(RendererStream<OwnedFd>),
     Active {
-        stream: ActiveRendererStream<OwnedFd>,
+        // Stop health observation before dropping the stream requests shutdown.
         monitor: CaptureMonitor,
+        stream: ActiveRendererStream<OwnedFd>,
     },
 }
 
@@ -59,12 +60,13 @@ struct Generation {
 /// Sole owner of renderer authority and its per-generation GPU producer.
 pub struct RendererCapturePipeline {
     renderer: Option<Renderer<OwnedFd>>,
-    renderer_lease: Option<CapabilityLease>,
     render_node: PathBuf,
     renderer_session: RendererSession,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
     generation: Option<Generation>,
+    // Drop requests stream shutdown before returning authority to its issuer.
+    renderer_lease: Option<CapabilityLease>,
     events: mpsc::UnboundedSender<CaptureEvent>,
 }
 
