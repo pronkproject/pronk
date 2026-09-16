@@ -107,9 +107,17 @@ async fn run(
     let runtime = socket.parent().context("private socket has no directory")?;
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
-    let renderer = session.take_renderer_access()?.into_renderer()?;
+    let (renderer, broker_render_node, transition) =
+        session.take_renderer_access()?.into_parts()?;
+    ensure!(
+        broker_render_node == render_node,
+        "Mutter selected render node {}, but the test requested {}",
+        broker_render_node.display(),
+        render_node.display()
+    );
     let (mut capture, mut renderer_events) = RendererCapturePipeline::new(
         renderer,
+        transition,
         remotes,
         RendererCapturePipelineConfig {
             connector_id: target.connector_id,

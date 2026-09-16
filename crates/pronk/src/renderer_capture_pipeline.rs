@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use castkms_renderer::Renderer;
+use pronk_capture_broker::RendererTransitionAccess;
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoPixelFormat,
@@ -58,6 +59,7 @@ struct Generation {
 /// Sole owner of renderer authority and its per-generation GPU producer.
 pub struct RendererCapturePipeline {
     renderer: Option<Renderer<OwnedFd>>,
+    transition: RendererTransitionAccess,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
     generation: Option<Generation>,
@@ -115,6 +117,7 @@ impl Drop for ActiveMonitor {
 impl RendererCapturePipeline {
     pub fn new(
         renderer: Renderer<OwnedFd>,
+        transition: RendererTransitionAccess,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
     ) -> (Self, RendererCapturePipelineEvents) {
@@ -122,6 +125,7 @@ impl RendererCapturePipeline {
         (
             Self {
                 renderer: Some(renderer),
+                transition,
                 producer_remotes,
                 config,
                 generation: None,
@@ -389,6 +393,23 @@ impl CapturePipelinePort for RendererCapturePipeline {
             }
             Stream::Prepared(stream) => {
                 let state = stream.subscribe();
+                let transition = stream.profile_registration().transition();
+                if let Err(error) = self
+                    .transition
+                    .install(transition, cancellation.clone())
+                    .await
+                {
+                    let error =
+                        MediaPipelineError::new(format!("install renderer transition: {error}"));
+                    let owner = stream.shutdown().await.map_err(|shutdown| {
+                        self.recover_stream_error(
+                            &format!("{error}; stop uninstalled renderer"),
+                            shutdown,
+                        )
+                    })?;
+                    self.restore_renderer(owner)?;
+                    return Err(error);
+                }
                 let activated = stream.activate(cancellation).await;
                 let stream = activated.map_err(|error| {
                     self.recover_stream_error("activate renderer stream", error)
