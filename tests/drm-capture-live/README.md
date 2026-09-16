@@ -17,7 +17,8 @@ The binaries cover distinct boundaries:
 - `pronk-drm-capture-live-test /dev/dri/cardN`: client ioctls, changing pixels,
   backpressure, cancellation, revocation, and restart.
 - `pronk-capture-actor-live-test /dev/dri/cardN`: fresh heap destinations,
-  held frames, ordinary display replacement, and retained old-session storage.
+  held frames, ordinary display replacement, repeated media generations under
+  one grant, and retained storage across a new authorization.
 - `pronk-capture-handoff-live-test /dev/dri/cardN`: real capture frames with
   **synthetic** PipeWire events, including stale releases and retirement.
 - `pronk-capture-broker-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID`:

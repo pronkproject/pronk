@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{ensure, Context};
 use castkms_renderer::{CapabilityProfile, RendererCapability};
 use drm_display_executor::scene::geometry::Extent;
-use pronk_capture::{allocation::Heap, Actor, Config, Layout};
+use pronk_capture::{allocation::Heap, Config, Layout, Session};
 use pronk_capture_broker::{Provider, Target};
 use tokio_util::sync::CancellationToken;
 
@@ -71,8 +71,7 @@ async fn run(target: Target) -> anyhow::Result<()> {
             nz(3),
             NonZeroU64::new(64 * 1024 * 1024).unwrap(),
         )?;
-        let actor = Actor::spawn(
-            client,
+        let actor = Session::new(client).spawn(
             buffers,
             Config {
                 capacity: nz(3),

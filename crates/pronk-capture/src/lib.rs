@@ -5,11 +5,14 @@
 //! domain. Never recycle exported storage into a differently authorized session.
 
 pub mod allocation;
+mod names;
 mod native;
 mod pool;
+mod session;
 mod worker;
 
 pub use pool::BufferHandle;
+pub use session::Session;
 
 use std::io;
 use std::num::NonZeroU32;
@@ -17,7 +20,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::time::Duration;
 
-use drm_capture::{Client, RequestId};
+use drm_capture::RequestId;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -167,20 +170,6 @@ pub struct Actor<F> {
 }
 
 impl<F: AsFd + Send + 'static> Actor<F> {
-    /// Open a stream on a fresh client for the currently active output.
-    ///
-    /// Configuration changes require shutdown and a new session with fresh
-    /// storage. No grant, primary DRM file or broker identity reaches consumers.
-    pub fn spawn(client: Client<F>, buffers: Vec<Buffer>, config: Config) -> io::Result<Self> {
-        config.validate(buffers.len())?;
-        // Require a runtime context before opening kernel state. Its timers
-        // must also be enabled for completion polling and shutdown deadlines.
-        tokio::runtime::Handle::try_current()
-            .map_err(|_| invalid("capture actor requires a Tokio runtime"))?;
-        let (backend, layout) = native::Native::open(client, &buffers, config)?;
-        Ok(worker::spawn(backend, buffers, layout, config))
-    }
-
     pub fn layout(&self) -> Layout {
         self.layout
     }

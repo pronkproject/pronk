@@ -1,14 +1,14 @@
 //! Generic DRM capture and PipeWire adapter for production media sessions.
 
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use drm_capture::Access as CaptureAccess;
 use pronk_capture::allocation::Heap;
-use pronk_capture::{Actor, Config as ActorConfig, Layout};
+use pronk_capture::{Actor, Config as ActorConfig, Layout, Session as CaptureSession};
 use pronk_capture_pipewire::{State as VideoState, Video};
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoSourceConfig, MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
@@ -42,15 +42,18 @@ pub struct DrmCapturePipelineConfig {
     pub shutdown_timeout: Duration,
 }
 
+type CaptureOwner = Arc<drm_capture::Client>;
+
 struct ActiveCapture {
     monitor: CaptureMonitor,
     generation: NonZeroU64,
-    video: Video<OwnedFd>,
+    video: Video<CaptureOwner>,
 }
 
 /// Sole owner of capture access and its per-generation PipeWire producer.
 pub struct DrmCapturePipeline {
     capture: CaptureAccess,
+    session: Option<CaptureSession>,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: DrmCapturePipelineConfig,
     active: Option<ActiveCapture>,
@@ -80,6 +83,7 @@ impl DrmCapturePipeline {
         (
             Self {
                 capture,
+                session: None,
                 producer_remotes,
                 config,
                 active: None,
@@ -115,18 +119,24 @@ impl DrmCapturePipeline {
     }
 
     async fn create_actor(
-        &self,
+        &mut self,
         request: MediaStartRequest,
         cancellation: CancellationToken,
-    ) -> Result<(Actor<OwnedFd>, Layout), MediaPipelineError> {
+    ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
         if cancellation.is_cancelled() {
             return Err(MediaPipelineError::new("capture start was cancelled"));
         }
-        let client = self
-            .capture
-            .open()
-            .map_err(|error| MediaPipelineError::new(format!("open capture session: {error}")))?;
-        let offer = client.describe().map_err(|error| {
+        if self.session.is_none() {
+            let client = self.capture.open().map_err(|error| {
+                MediaPipelineError::new(format!("open capture session: {error}"))
+            })?;
+            self.session = Some(CaptureSession::new(client));
+        }
+        let session = self
+            .session
+            .as_mut()
+            .expect("capture file retains its namespace");
+        let offer = session.describe().map_err(|error| {
             MediaPipelineError::new(format!("describe capture output: {error}"))
         })?;
         let layout = Layout {
@@ -139,16 +149,16 @@ impl DrmCapturePipeline {
                 heap.allocate(layout, self.config.pool_size, self.config.pool_byte_limit)
             })
             .map_err(|error| MediaPipelineError::new(format!("allocate capture pool: {error}")))?;
-        let actor = Actor::spawn(
-            client,
-            buffers,
-            ActorConfig {
-                capacity: self.config.request_capacity,
-                poll_interval: self.config.poll_interval,
-                shutdown_timeout: self.config.shutdown_timeout,
-            },
-        )
-        .map_err(|error| MediaPipelineError::new(format!("start capture actor: {error}")))?;
+        let actor = session
+            .spawn(
+                buffers,
+                ActorConfig {
+                    capacity: self.config.request_capacity,
+                    poll_interval: self.config.poll_interval,
+                    shutdown_timeout: self.config.shutdown_timeout,
+                },
+            )
+            .map_err(|error| MediaPipelineError::new(format!("start capture actor: {error}")))?;
         let layout = actor.layout();
         require_route_layout(layout, request).map_err(|_| {
             MediaPipelineError::new("capture layout changed while the generation was starting")
@@ -158,10 +168,10 @@ impl DrmCapturePipeline {
 
     async fn prepare_video(
         &self,
-        actor: Actor<OwnedFd>,
+        actor: Actor<CaptureOwner>,
         generation: NonZeroU64,
         cancellation: CancellationToken,
-    ) -> Result<Video<OwnedFd>, MediaPipelineError> {
+    ) -> Result<Video<CaptureOwner>, MediaPipelineError> {
         let remote = tokio::select! {
             biased;
             _ = cancellation.cancelled() => {
@@ -191,7 +201,7 @@ impl DrmCapturePipeline {
 
     fn media_target(
         &self,
-        video: &Video<OwnedFd>,
+        video: &Video<CaptureOwner>,
         layout: Layout,
         generation: NonZeroU64,
     ) -> DeviceMediaTarget {

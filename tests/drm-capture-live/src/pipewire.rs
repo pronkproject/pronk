@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
-use pronk_capture::{allocation::Heap, Actor, CaptureError, Config, Layout};
+use pronk_capture::{allocation::Heap, CaptureError, Config, Layout, Session};
 use pronk_capture_pipewire::Registration;
 use pronk_pipewire::{
     PipeWireRemote, VideoSourceActor, VideoSourceActorEvent, VideoSourceConfig,
@@ -45,8 +45,7 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
         nz(fixture.crtc()),
         nz(fixture.connector()),
     )?;
-    let capture = Actor::spawn(
-        client,
+    let capture = Session::new(client).spawn(
         heap.allocate(
             Layout {
                 width: nz(640),

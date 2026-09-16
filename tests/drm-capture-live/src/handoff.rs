@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
-use pronk_capture::{allocation::Heap, Actor, CaptureError, Config, Frame, Layout};
+use pronk_capture::{allocation::Heap, Actor, CaptureError, Config, Frame, Layout, Session};
 use pronk_capture_pipewire::Registration;
 use pronk_pipewire::{PipeWireBufferTransport, VideoNodeIdentity, VideoSourceActorEvent};
 
@@ -19,7 +19,7 @@ fn generation(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).unwrap()
 }
 
-async fn capture(actor: &Actor<std::os::fd::OwnedFd>) -> anyhow::Result<Frame> {
+async fn capture<F: std::os::fd::AsFd + Send + 'static>(actor: &Actor<F>) -> anyhow::Result<Frame> {
     Ok(tokio::time::timeout(Duration::from_secs(5), actor.capture()).await??)
 }
 
@@ -38,8 +38,7 @@ async fn main() -> anyhow::Result<()> {
         nz(fixture.crtc()),
         nz(fixture.connector()),
     )?;
-    let actor = Actor::spawn(
-        client,
+    let actor = Session::new(client).spawn(
         heap.allocate(
             Layout {
                 width: nz(640),

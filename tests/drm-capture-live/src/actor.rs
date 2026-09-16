@@ -4,13 +4,13 @@
 mod fixture;
 
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use drm_capture::create_grant;
-use pronk_capture::{allocation::Heap, Actor, CaptureError, Config, Frame, Layout};
+use pronk_capture::{allocation::Heap, Actor, CaptureError, Config, Frame, Layout, Session};
 
 extern "C" {
     fn capture_buffer_check_pixels(dma: i32, width: u32, height: u32, stride: u32, expected: u8);
@@ -35,7 +35,7 @@ fn nz(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
 }
 
-async fn frame(actor: &Actor<OwnedFd>) -> anyhow::Result<Frame> {
+async fn frame<F: AsFd + Send + 'static>(actor: &Actor<F>) -> anyhow::Result<Frame> {
     tokio::time::timeout(Duration::from_secs(5), actor.capture())
         .await
         .context("capture actor timeout")?
@@ -70,7 +70,8 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
-            let actor = Actor::spawn(client, heap.allocate(layout, nz(3), budget)?, config)?;
+            let mut session = Session::new(client);
+            let actor = session.spawn(heap.allocate(layout, nz(3), budget)?, config)?;
             let first = frame(&actor).await?;
             let second = frame(&actor).await?;
             let third = frame(&actor).await?;
@@ -91,6 +92,17 @@ fn main() -> anyhow::Result<()> {
             check(&changed, 0x68);
             drop(changed);
             drop(actor.shutdown().await?);
+
+            // Each media generation keeps the grant but owns fresh pool storage.
+            for _ in 0..3 {
+                let actor = session.spawn(heap.allocate(layout, nz(3), budget)?, config)?;
+                let current = frame(&actor).await?;
+                check(&current, 0x68);
+                check(&first, 0x49);
+                drop(current);
+                drop(actor.shutdown().await?);
+            }
+            drop(session);
             drop(control);
 
             // A fresh authorization uses new backing storage, not the retained image.
@@ -99,7 +111,8 @@ fn main() -> anyhow::Result<()> {
                 nz(fixture.crtc()),
                 nz(fixture.connector()),
             )?;
-            let actor = Actor::spawn(client, heap.allocate(layout, nz(3), budget)?, config)?;
+            let actor =
+                Session::new(client).spawn(heap.allocate(layout, nz(3), budget)?, config)?;
             let restarted = frame(&actor).await?;
             check(&restarted, 0x68);
             check(&first, 0x49);

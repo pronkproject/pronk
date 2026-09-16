@@ -1,16 +1,16 @@
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-use drm_capture::{Client, Destination, DestinationId, Plane, RequestId, StreamId};
+use drm_capture::{Client, Destination, Plane, RequestId};
 use pronk_dmabuf::{export_dependencies, Access};
 
+use crate::names::Registration;
 use crate::worker::{Backend, Completed};
 use crate::{invalid, Buffer, Config, Layout};
 
 pub(crate) struct Native<F> {
     client: Client<F>,
-    stream: StreamId,
-    destinations: usize,
+    registration: Registration,
     stream_closed: bool,
     next_cleanup: usize,
 }
@@ -20,6 +20,7 @@ impl<F: AsFd> Native<F> {
         client: Client<F>,
         buffers: &[Buffer],
         config: Config,
+        registration: Registration,
     ) -> io::Result<(Self, Layout)> {
         let offer = client.describe()?;
         if offer.format != u32::from_le_bytes(*b"XR24") || offer.modifier != 0 {
@@ -31,8 +32,7 @@ impl<F: AsFd> Native<F> {
         if config.capacity > offer.max_requests {
             return Err(invalid("capture capacity exceeds the current offer"));
         }
-        let stream = StreamId::new(1).unwrap();
-        client.open_stream(stream, offer.offer, config.capacity)?;
+        client.open_stream(registration.stream, offer.offer, config.capacity)?;
         for (slot, buffer) in buffers.iter().enumerate() {
             let planes = [Plane {
                 buffer: buffer.as_fd(),
@@ -40,7 +40,7 @@ impl<F: AsFd> Native<F> {
                 offset: 0,
             }];
             client.register_destination(
-                destination(slot),
+                registration.destination(slot),
                 &Destination {
                     width: offer.width,
                     height: offer.height,
@@ -53,8 +53,7 @@ impl<F: AsFd> Native<F> {
         Ok((
             Self {
                 client,
-                stream,
-                destinations: buffers.len(),
+                registration,
                 stream_closed: false,
                 next_cleanup: 0,
             },
@@ -66,21 +65,21 @@ impl<F: AsFd> Native<F> {
     }
 }
 
-fn destination(slot: usize) -> DestinationId {
-    DestinationId::new(slot as u64 + 1).expect("bounded pool index")
-}
-
 impl<F: AsFd + Send + 'static> Backend for Native<F> {
     type Owner = F;
 
     fn queue(&mut self, request: RequestId, slot: usize, buffer: &Buffer) -> io::Result<()> {
         let reuse = export_dependencies(buffer.as_fd(), Access::Write)?;
-        self.client
-            .queue_output(self.stream, request, destination(slot), Some(reuse.as_fd()))
+        self.client.queue_output(
+            self.registration.stream,
+            request,
+            self.registration.destination(slot),
+            Some(reuse.as_fd()),
+        )
     }
 
     fn dequeue(&mut self) -> io::Result<Option<Completed>> {
-        match self.client.try_dequeue(self.stream)? {
+        match self.client.try_dequeue(self.registration.stream)? {
             Some(result) => Ok(Some(Completed {
                 request: result.request(),
                 outcome: result.outcome(),
@@ -94,12 +93,12 @@ impl<F: AsFd + Send + 'static> Backend for Native<F> {
 
     fn close(&mut self) -> io::Result<()> {
         if !self.stream_closed {
-            self.client.close_stream(self.stream)?;
+            self.client.close_stream(self.registration.stream)?;
             self.stream_closed = true;
         }
-        while self.next_cleanup < self.destinations {
+        while self.next_cleanup < self.registration.destinations {
             self.client
-                .unregister_destination(destination(self.next_cleanup))?;
+                .unregister_destination(self.registration.destination(self.next_cleanup))?;
             self.next_cleanup += 1;
         }
         Ok(())
