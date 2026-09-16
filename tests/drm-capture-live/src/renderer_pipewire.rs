@@ -115,19 +115,59 @@ async fn run(
             output_capacity: NonZeroUsize::new(4).unwrap(),
         },
     )?;
+    let mode = RoutedMode {
+        width,
+        height,
+        refresh_millihz,
+        flags: 0,
+    };
+    run_generation(
+        &mut capture,
+        &mut renderer_events,
+        target,
+        mode,
+        generation,
+        socket,
+    )
+    .await?;
+    let next_generation = nz64(
+        generation
+            .get()
+            .checked_add(1)
+            .context("generation overflow")?,
+    );
+    run_generation(
+        &mut capture,
+        &mut renderer_events,
+        target,
+        mode,
+        next_generation,
+        socket,
+    )
+    .await?;
+    capture
+        .shutdown(MediaStopReason::BackendShutdown, CancellationToken::new())
+        .await?;
+    session.release().await?;
+    Ok(())
+}
+
+async fn run_generation(
+    capture: &mut RendererCapturePipeline,
+    renderer_events: &mut impl CaptureEventPort,
+    target: Target,
+    mode: RoutedMode,
+    generation: NonZeroU64,
+    socket: &Path,
+) -> anyhow::Result<()> {
     let prepared = capture
         .start(
             MediaStartRequest {
                 media_generation: generation.get(),
                 route: MediaRoute {
-                    route_generation: 1,
+                    route_generation: generation.get(),
                     target: RouteTarget::new(target.crtc_id),
-                    mode: RoutedMode {
-                        width,
-                        height,
-                        refresh_millihz,
-                        flags: 0,
-                    },
+                    mode,
                 },
             },
             CancellationToken::new(),
@@ -181,10 +221,6 @@ async fn run(
             CancellationToken::new(),
         )
         .await?;
-    capture
-        .shutdown(MediaStopReason::BackendShutdown, CancellationToken::new())
-        .await?;
-    session.release().await?;
     ensure!(link.wait().await?.success(), "private port link failed");
     Ok(())
 }
