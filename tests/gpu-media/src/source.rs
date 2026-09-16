@@ -88,8 +88,17 @@ impl MediaConsumer {
             Self::Production(consumer) => {
                 let (statistics, remaining) = consumer.finish(render_node).await?;
                 ensure!(
+                    statistics.dropped_frames == 0,
+                    "production graph dropped {} encoded access units",
+                    statistics.dropped_frames
+                );
+                ensure!(
                     statistics.frames == (received + remaining.len()) as u64,
                     "production output omitted an encoded access unit"
+                );
+                eprintln!(
+                    "production raw queue discarded {} input frames",
+                    statistics.raw_frames_dropped
                 );
                 Ok(remaining)
             }

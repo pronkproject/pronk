@@ -186,8 +186,10 @@ H.264 dependency parser or Chromecast receiver qualification.
 The production oracle uses 20 Mbit/s so sharp synthetic color boundaries remain
 useful pixel evidence after lossy encoding. This is test configuration, not the
 Chromecast bitrate policy. The production graph may discard work in its bounded,
-leaky queue; the test requires at least twelve useful access units, preserves
-their source sequence numbers and rejects missing output after the encoder.
+leaky raw queue; the test requires at least twelve useful access units and
+reports how many inputs that queue discarded. The encoded sink applies
+backpressure instead of dropping access units. The test preserves source
+sequence numbers and rejects any reported or observed loss after the encoder.
 
 After source shutdown and native retirement, a separate test oracle decodes
 the surviving access units on the selected GPU. It maps only decoded oracle
