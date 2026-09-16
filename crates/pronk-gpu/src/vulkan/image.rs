@@ -326,13 +326,13 @@ impl Device {
         }
         result.map_err(native)?;
         let limits = properties.image_format_properties;
-        Ok(!(width > limits.max_extent.width
-            || height > limits.max_extent.height
-            || !limits.sample_counts.contains(vk::SampleCountFlags::TYPE_1)
-            || !memory
+        Ok(width <= limits.max_extent.width
+            && height <= limits.max_extent.height
+            && limits.sample_counts.contains(vk::SampleCountFlags::TYPE_1)
+            && memory
                 .external_memory_properties
                 .external_memory_features
-                .contains(usage.sharing())))
+                .contains(usage.sharing()))
     }
 }
 
