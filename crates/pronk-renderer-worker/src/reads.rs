@@ -8,9 +8,9 @@ use pronk_gpu::vulkan::{PendingPrivateRead, PrivateImage};
 /// Accepted native reads that belong to one renderer source claim.
 ///
 /// Each pending read retains its imported source and private destination until
-/// native completion. The borrowed completion represents every submitted read;
-/// it can be transferred to the source provider before pixel waits begin.
-#[must_use = "transfer the completion before waiting for private pixels"]
+/// native completion. The borrowed completion represents every submitted read
+/// and can contribute to the source provider's eventual completion record.
+#[must_use = "wait for the submitted reads or retain their native completion"]
 pub struct SubmittedReads {
     reads: Vec<PendingPrivateRead>,
     merged: Option<SyncFile>,

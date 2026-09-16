@@ -9,9 +9,9 @@ use pronk_gpu::output_pool::{
     AccessReady, FinishedAccess, OutputPool as AccessPool, PendingAccess, Publication,
     PublishPermit, WritePermit, MAX_OUTPUT_BUFFERS,
 };
-use pronk_gpu::vulkan::{Device, Image, ImageLayout, PrivateCopy};
+use pronk_gpu::vulkan::{Device, Image, ImageLayout};
 
-use crate::{PrivateBuffer, PrivateFrame};
+use crate::RenderedFrame;
 
 /// Maximum visible and native storage retained by one exported output pool.
 pub const MAX_OUTPUT_POOL_BYTES: u64 = 512 * 1024 * 1024;
@@ -137,7 +137,7 @@ impl OutputPool {
     pub fn submit(&mut self, output: CompletedOutput) -> io::Result<PendingOutput> {
         let CompletedOutput {
             pool,
-            private,
+            frame,
             destination,
             permit,
             completion,
@@ -149,7 +149,7 @@ impl OutputPool {
         let pending = self.access.submitted(permit, completion)?;
         Ok(PendingOutput {
             pool,
-            private,
+            frame,
             destination,
             slot,
             pending,
@@ -160,7 +160,7 @@ impl OutputPool {
     pub fn finish(&mut self, output: FinishedOutput) -> io::Result<ReadyOutput> {
         let FinishedOutput {
             pool,
-            private,
+            frame,
             destination,
             slot,
             finished,
@@ -178,7 +178,7 @@ impl OutputPool {
         match self.access.complete(finished)? {
             AccessReady::Publish(permit) if permit.slot() == slot => Ok(ReadyOutput {
                 pool,
-                private,
+                frame,
                 destination,
                 permit,
             }),
@@ -187,24 +187,20 @@ impl OutputPool {
     }
 
     /// Transfer one ready output to the registered transport.
-    pub fn publish(&mut self, output: ReadyOutput) -> io::Result<(PrivateBuffer, PublishedOutput)> {
+    pub fn publish(&mut self, output: ReadyOutput) -> io::Result<(RenderedFrame, PublishedOutput)> {
         let ReadyOutput {
             pool,
-            private,
+            frame,
             destination,
             permit,
         } = output;
         if !Arc::ptr_eq(&self.identity, &pool) {
             return Err(invalid("ready output belongs to another pool"));
         }
-        let PrivateFrame {
-            buffer,
-            content_serial,
-            alpha: _,
-        } = private;
+        let content_serial = frame.private.content_serial;
         self.access.publish(permit).map(|publication| {
             (
-                buffer,
+                frame,
                 PublishedOutput {
                     pool,
                     image: destination,
@@ -299,36 +295,23 @@ pub struct OutputDestination {
 
 impl OutputDestination {
     /// Copy retired private pixels without retaining a compositor source.
-    pub fn copy_from(self, source: PrivateFrame) -> io::Result<CompletedOutput> {
+    pub fn copy_from(self, source: RenderedFrame) -> io::Result<CompletedOutput> {
         let Self {
             pool,
             slot,
             permit,
             image,
         } = self;
-        let PrivateFrame {
-            buffer:
-                PrivateBuffer {
-                    identity: private_identity,
-                    image: source,
-                },
-            content_serial,
-            alpha,
-        } = source;
-        let PrivateCopy {
-            source,
+        let crate::scene_image::CopiedSceneImage {
+            scene,
             destination,
             completion,
-        } = source.copy_into_and_wait(image)?;
+        } = source.scene.copy_into(image)?;
         Ok(CompletedOutput {
             pool,
-            private: PrivateFrame {
-                buffer: PrivateBuffer {
-                    identity: private_identity,
-                    image: source,
-                },
-                content_serial,
-                alpha,
+            frame: RenderedFrame {
+                private: source.private,
+                scene,
             },
             destination,
             permit,
@@ -342,7 +325,7 @@ impl OutputDestination {
 #[must_use = "enroll the completed write in its output pool"]
 pub struct CompletedOutput {
     pool: Arc<()>,
-    private: PrivateFrame,
+    frame: RenderedFrame,
     destination: Image,
     permit: WritePermit,
     completion: pronk_dmabuf::SyncFile,
@@ -360,7 +343,7 @@ pub struct CompletedOutput {
 #[must_use = "finish the producer wait before publishing the output"]
 pub struct PendingOutput {
     pool: Arc<()>,
-    private: PrivateFrame,
+    frame: RenderedFrame,
     destination: Image,
     slot: usize,
     pending: PendingAccess,
@@ -371,7 +354,7 @@ impl PendingOutput {
     pub async fn wait(self) -> FinishedOutput {
         FinishedOutput {
             pool: self.pool,
-            private: self.private,
+            frame: self.frame,
             destination: self.destination,
             slot: self.slot,
             finished: self.pending.wait().await,
@@ -383,7 +366,7 @@ impl PendingOutput {
 #[must_use = "apply the completed producer wait to its output pool"]
 pub struct FinishedOutput {
     pool: Arc<()>,
-    private: PrivateFrame,
+    frame: RenderedFrame,
     destination: Image,
     slot: usize,
     finished: FinishedAccess,
@@ -393,7 +376,7 @@ pub struct FinishedOutput {
 #[must_use = "publish the output and recover its private buffer"]
 pub struct ReadyOutput {
     pool: Arc<()>,
-    private: PrivateFrame,
+    frame: RenderedFrame,
     destination: Image,
     permit: PublishPermit,
 }

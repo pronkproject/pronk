@@ -16,7 +16,9 @@ use castkms_sys::{
 use drm_display_executor::scene::geometry::{DestinationRect, Extent, SourceRect};
 
 use crate::source::{has_close_on_exec, release_source};
-use crate::{ActiveRenderer, FormatModifier, SourceImage, SourcePlane, SourceReleaseError};
+use crate::{
+    ActiveRenderer, FormatModifier, RegisteredImage, SourceImage, SourcePlane, SourceReleaseError,
+};
 
 /// KMS plane role retained by one scene layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,25 +169,36 @@ impl<'renderer, F: AsFd> ActiveRenderer<'renderer, F> {
     /// borrow prevents another source or scene job on this renderer endpoint.
     ///
     /// ```compile_fail
-    /// use castkms_renderer::ActiveRenderer;
+    /// use castkms_renderer::{ActiveRenderer, RegisteredImage};
     /// use std::fmt::Debug;
     /// use std::os::fd::AsFd;
     ///
-    /// fn claim_twice<F: AsFd + Debug>(renderer: &mut ActiveRenderer<'_, F>) {
-    ///     let first = renderer.try_dequeue_scene().unwrap().unwrap();
-    ///     let second = renderer.try_dequeue_scene().unwrap();
+    /// fn claim_twice<F: AsFd + Debug>(
+    ///     renderer: &mut ActiveRenderer<'_, F>,
+    ///     image: &RegisteredImage,
+    /// ) {
+    ///     let first = renderer.try_dequeue_scene(image).unwrap().unwrap();
+    ///     let second = renderer.try_dequeue_scene(image).unwrap();
     ///     drop((first, second));
     /// }
     /// ```
     pub fn try_dequeue_scene<'job>(
         &'job mut self,
+        image: &RegisteredImage,
     ) -> io::Result<Option<SceneJob<'job, 'renderer, F>>> {
+        if !image.belongs_to(&self.image_scope) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private image belongs to another renderer",
+            ));
+        }
         let words = RENDERER_SCENE_MAX_BYTES / size_of::<u64>();
         let mut storage = Vec::new();
         storage.try_reserve_exact(words).map_err(io::Error::other)?;
         storage.resize(words, u64::MAX);
         let request = DrmCastkmsRendererDequeueScene {
             result: storage.as_mut_ptr() as u64,
+            image_id: image.id().get(),
             capacity: RENDERER_SCENE_MAX_BYTES as u32,
             ..Default::default()
         };

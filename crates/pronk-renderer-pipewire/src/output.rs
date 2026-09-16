@@ -9,7 +9,7 @@ use pronk_pipewire::{
 };
 use pronk_renderer_worker::{
     CompletedOutput, CompletedReturn, FinishedOutput, OutputDestination, OutputPool, OutputReturn,
-    OutputScope, PendingOutput, PrivateBuffer, PublishedOutput, ReadyOutput,
+    OutputScope, PendingOutput, PublishedOutput, ReadyOutput, RenderedFrame,
 };
 
 use crate::invalid;
@@ -71,10 +71,10 @@ impl OutputSession {
         output: ReadyOutput,
         pts_ns: i64,
         discontinuity: bool,
-    ) -> Result<(PrivateBuffer, OutputFrame), Box<PublishError>> {
-        let (private, published) = self.pool.publish(output).map_err(|error| {
+    ) -> Result<(RenderedFrame, OutputFrame), Box<PublishError>> {
+        let (rendered, published) = self.pool.publish(output).map_err(|error| {
             Box::new(PublishError {
-                private: None,
+                frame: None,
                 retirement: None,
                 error,
             })
@@ -85,7 +85,7 @@ impl OutputSession {
             .begin_publish(published, pts_ns, discontinuity)
         {
             Ok(frame) => Ok((
-                private,
+                rendered,
                 OutputFrame {
                     frame,
                     content_serial,
@@ -95,7 +95,7 @@ impl OutputSession {
                 let (published, error) = error.into_parts();
                 let retirement = self.pool.begin_return(published).ok();
                 Err(Box::new(PublishError {
-                    private: Some(private),
+                    frame: Some(rendered),
                     retirement,
                     error,
                 }))
@@ -353,7 +353,7 @@ pub enum OutputEvent {
 
 /// Failed publication setup and any ownership available for recovery.
 pub struct PublishError {
-    private: Option<PrivateBuffer>,
+    frame: Option<RenderedFrame>,
     retirement: Option<OutputReturn>,
     error: io::Error,
 }
@@ -367,8 +367,8 @@ impl PublishError {
     ///
     /// Missing storage was quarantined by the layer that rejected it. A
     /// returned retirement must finish before its output slot can be reused.
-    pub fn into_parts(self) -> (Option<PrivateBuffer>, Option<OutputReturn>, io::Error) {
-        (self.private, self.retirement, self.error)
+    pub fn into_parts(self) -> (Option<RenderedFrame>, Option<OutputReturn>, io::Error) {
+        (self.frame, self.retirement, self.error)
     }
 }
 

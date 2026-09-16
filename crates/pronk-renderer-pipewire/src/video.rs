@@ -9,7 +9,7 @@ use pronk_pipewire::{
 };
 use pronk_renderer_worker::{
     CompletedOutput, CompletedReturn, FinishedOutput, OutputDestination, OutputReturn,
-    PendingOutput, PrivateBuffer, ReadyOutput,
+    PendingOutput, ReadyOutput, RenderedFrame,
 };
 
 use crate::{invalid, OutputEvent, OutputSession, PublishError, Registration};
@@ -81,8 +81,8 @@ impl Video {
         output: ReadyOutput,
         pts_ns: i64,
         discontinuity: bool,
-    ) -> Result<(PrivateBuffer, Option<NonZeroU64>), FramePublishError> {
-        let (private, frame) = self
+    ) -> Result<(RenderedFrame, Option<NonZeroU64>), FramePublishError> {
+        let (rendered, frame) = self
             .output
             .publish(output, pts_ns, discontinuity)
             .map_err(FramePublishError::Prepare)?;
@@ -94,12 +94,12 @@ impl Video {
             .await
         {
             return Err(FramePublishError::Handoff {
-                private,
+                frame: rendered,
                 content_serial,
                 cause: error(cause),
             });
         }
-        Ok((private, content_serial))
+        Ok((rendered, content_serial))
     }
 
     /// Receive one source event and translate it into native output ownership.
@@ -183,7 +183,7 @@ pub enum VideoEvent {
 pub enum FramePublishError {
     Prepare(Box<PublishError>),
     Handoff {
-        private: PrivateBuffer,
+        frame: RenderedFrame,
         content_serial: Option<NonZeroU64>,
         cause: io::Error,
     },

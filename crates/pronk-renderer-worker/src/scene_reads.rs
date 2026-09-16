@@ -5,6 +5,7 @@ use std::num::NonZeroU64;
 use std::os::fd::BorrowedFd;
 use std::sync::Arc;
 
+#[cfg(test)]
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::SourceImage;
 
@@ -58,7 +59,6 @@ struct PreparedRead {
 /// A complete set of checked layer reads that has not accessed source pixels.
 #[must_use = "submit the scene reads or recover every unused owner"]
 pub(crate) struct PreparedSceneReads {
-    profile: Arc<()>,
     reads: Vec<PreparedRead>,
 }
 
@@ -102,10 +102,7 @@ impl PreparedSceneReads {
                     destination,
                 }),
         );
-        Ok(Self {
-            profile: Arc::clone(composer.profile()),
-            reads,
-        })
+        Ok(Self { reads })
     }
 
     /// Submit every whole-image read and prepare one aggregate completion.
@@ -141,18 +138,7 @@ impl PreparedSceneReads {
         }
         let reads = SubmittedReads::new(pending)
             .map_err(|error| SubmitSceneReadsError(error.into_parts().1))?;
-        Ok(SubmittedSceneReads {
-            profile: self.profile,
-            identities,
-            reads,
-        })
-    }
-
-    pub fn into_parts(self) -> (Vec<SceneSource>, Vec<PrivateBuffer>) {
-        self.reads
-            .into_iter()
-            .map(|read| (read.source, read.destination))
-            .unzip()
+        Ok(SubmittedSceneReads { identities, reads })
     }
 }
 
@@ -198,14 +184,14 @@ impl PrepareSceneReadsError {
 }
 
 /// Accepted reads represented by one native completion record.
-#[must_use = "release the aggregate completion before waiting for scene pixels"]
+#[must_use = "wait for every accepted source read before composing the scene"]
 pub(crate) struct SubmittedSceneReads {
-    profile: Arc<()>,
     identities: Vec<(std::sync::Arc<BufferIdentity>, SourceAlpha)>,
     reads: SubmittedReads,
 }
 
 impl SubmittedSceneReads {
+    #[cfg(test)]
     pub fn completion(&self) -> Option<&SyncFile> {
         self.reads.completion()
     }
@@ -218,10 +204,6 @@ impl SubmittedSceneReads {
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.reads.is_empty()
-    }
-
-    pub(crate) fn belongs_to(&self, composer: &SceneComposer) -> bool {
-        Arc::ptr_eq(&self.profile, composer.profile())
     }
 
     /// Wait for every read and attach the kernel scene's content identity.
@@ -398,8 +380,6 @@ mod tests {
             .unwrap_or_else(|_| panic!("matching scene reads were rejected"))
             .submit()
             .unwrap();
-        assert!(submitted.belongs_to(&composer));
-        assert!(!submitted.belongs_to(&other_composer));
         assert_eq!(submitted.len(), 2);
         assert!(!submitted.is_empty());
         if let Some(completion) = submitted.completion() {

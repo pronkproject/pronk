@@ -38,8 +38,9 @@ Turning an eventual userspace response into a fence would mix future admission
 with native execution and could create dependency cycles in memory management.
 
 A preparation ticket becomes ready only after admission is closed and every
-accepted source read has completed. Mutter then retries the atomic update that
-would retire those sources.
+accepted source read has kernel-retained native completion coverage. The GPU
+work may still be pending. Mutter then retries the atomic update that would
+retire those sources in the required order.
 
 ## Why can an atomic commit return `EAGAIN`?
 
@@ -52,10 +53,11 @@ request, and submits it again. Callers must use an ioctl path that preserves
 ## Why does the GPU path stage through a private image?
 
 The compositor source must not remain retained while a downstream destination
-is busy in PipeWire or an encoder. The first GPU operation copies or composes
-the source into executor-owned storage. CastKMS can release the source when that
-operation completes; a later operation may wait for and fill an exported media
-buffer independently.
+is busy in PipeWire or an encoder. The source-reading transaction stages and
+composes the complete scene into registered executor-owned storage. CastKMS
+releases the source only after native completion covers that transaction's
+source reads and final private write. A later operation may wait for and fill
+an exported media buffer independently.
 
 ## Why not render directly into the encoder's buffer?
 

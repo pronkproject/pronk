@@ -3,11 +3,8 @@
 use std::io;
 use std::os::fd::AsFd;
 
-use crate::scene_reads::{SceneSource, SubmittedSceneReads};
-use crate::{
-    ComposedFrame, SceneComposer, SceneCompositionError, SceneFrames, SceneInputs,
-    SceneStorageProfile,
-};
+use crate::scene_reads::SceneSource;
+use crate::{SceneComposer, SceneStorageProfile};
 use castkms_renderer::{SceneJob, SourceReleaseError};
 
 /// A complete-scene job and the only composer qualified from its metadata.
@@ -32,6 +29,10 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
         &self.composer
     }
 
+    pub(crate) fn into_parts(self) -> (SceneJob<'job, 'renderer, F>, SceneComposer) {
+        (self.job, self.composer)
+    }
+
     /// Import every layer under this job's nominal scene identity.
     pub(crate) fn import_sources(&self) -> io::Result<Vec<SceneSource>> {
         let mut sources = Vec::new();
@@ -53,38 +54,6 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
         self,
     ) -> Result<(), SourceReleaseError<SceneJob<'job, 'renderer, F>>> {
         self.job.release_without_access()
-    }
-
-    /// Transfer the bound aggregate completion and close source admission.
-    pub(crate) fn release_submitted(
-        self,
-        reads: SubmittedSceneReads,
-    ) -> Result<ReleasedSceneReads, Box<ReleaseSceneJobError<'job, 'renderer, F>>> {
-        if !reads.belongs_to(&self.composer) {
-            return Err(Box::new(ReleaseSceneJobError {
-                scene: self,
-                reads,
-                cause: invalid("submitted reads belong to another qualified scene"),
-            }));
-        }
-        let content_serial = self.job.content_serial();
-        let completion = reads.completion().map(AsFd::as_fd);
-        let Self { job, composer } = self;
-        match job.release_submitted(completion) {
-            Ok(()) => Ok(ReleasedSceneReads {
-                reads,
-                content_serial,
-                composer,
-            }),
-            Err(error) => {
-                let (job, cause) = error.into_parts();
-                Err(Box::new(ReleaseSceneJobError {
-                    scene: Self { job, composer },
-                    reads,
-                    cause,
-                }))
-            }
-        }
     }
 }
 
@@ -123,88 +92,4 @@ impl<J> std::error::Error for QualifySceneJobError<J> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.cause)
     }
-}
-
-/// Failed aggregate release retaining both the kernel job and native reads.
-pub(crate) struct ReleaseSceneJobError<'job, 'renderer, F: AsFd> {
-    scene: QualifiedSceneJob<'job, 'renderer, F>,
-    reads: SubmittedSceneReads,
-    cause: io::Error,
-}
-
-impl<'job, 'renderer, F: AsFd> ReleaseSceneJobError<'job, 'renderer, F> {
-    pub fn into_parts(
-        self,
-    ) -> (
-        QualifiedSceneJob<'job, 'renderer, F>,
-        SubmittedSceneReads,
-        io::Error,
-    ) {
-        (self.scene, self.reads, self.cause)
-    }
-}
-
-impl<F: AsFd> std::fmt::Debug for ReleaseSceneJobError<'_, '_, F> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ReleaseSceneJobError")
-            .field("cause", &self.cause)
-            .finish()
-    }
-}
-
-impl<F: AsFd> std::fmt::Display for ReleaseSceneJobError<'_, '_, F> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "release complete scene job: {}", self.cause)
-    }
-}
-
-impl<F: AsFd> std::error::Error for ReleaseSceneJobError<'_, '_, F> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.cause)
-    }
-}
-
-/// Native reads accepted by CastKMS with no remaining source claim.
-#[must_use = "wait for valid private pixels before composing the scene"]
-pub(crate) struct ReleasedSceneReads {
-    reads: SubmittedSceneReads,
-    content_serial: std::num::NonZeroU64,
-    composer: SceneComposer,
-}
-
-impl ReleasedSceneReads {
-    pub fn wait(self) -> io::Result<ReadyScene> {
-        let frames = self.reads.wait(self.content_serial)?;
-        Ok(ReadyScene {
-            composer: self.composer,
-            frames,
-        })
-    }
-}
-
-/// Private source pixels paired with the native program for their kernel job.
-#[must_use = "compose the released scene or retire its private buffers"]
-pub(crate) struct ReadyScene {
-    composer: SceneComposer,
-    frames: SceneFrames,
-}
-
-impl ReadyScene {
-    pub(crate) fn into_parts(self) -> (SceneComposer, SceneFrames) {
-        (self.composer, self.frames)
-    }
-
-    /// Compose the released source stages into an independently ready output.
-    pub fn compose_and_wait(
-        self,
-        destination: crate::PrivateBuffer,
-    ) -> Result<ComposedFrame, SceneCompositionError> {
-        self.composer
-            .compose_and_wait(SceneInputs::new(destination, self.frames, [0; 3]))
-    }
-}
-
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message)
 }

@@ -170,6 +170,14 @@ impl ScenePool {
         self.destination.put(destination)
     }
 
+    pub(crate) fn accepts_destination(&self, destination: &PrivateBuffer) -> bool {
+        self.destination.accepts(destination)
+    }
+
+    pub(crate) fn restore_destination_validated(&mut self, destination: PrivateBuffer) {
+        self.destination.put_validated(destination);
+    }
+
     fn accepts_sources(&self, sources: &[PrivateBuffer]) -> bool {
         sources.len() == self.sources.len()
             && self

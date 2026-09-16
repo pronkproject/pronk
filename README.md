@@ -117,8 +117,9 @@ but it never receives renderer source descriptors.
   readiness is neither GPU completion nor presentation completion.
 - GPU completion fences describe work already submitted to the native driver;
   userspace responses are not represented as future fences.
-- Destination reuse must complete before a source-reading job acquires its
-  scene. Encoder backpressure therefore cannot retain a compositor source.
+- A reusable renderer-private destination must be reserved before a
+  source-reading job acquires its scene. Downstream destination reuse is not
+  part of that job, so encoder backpressure cannot retain a compositor source.
 - Exported DMA-BUF storage remains within one authorization scope for its
   lifetime. A new protocol identity does not revoke an old descriptor.
 - Closing a session capability stops new work and begins bounded cleanup. A

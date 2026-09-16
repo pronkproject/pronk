@@ -693,26 +693,29 @@ Submission copies each complete image into its source-sized stage and exposes
 one merged concrete sync file. Structurally identical jobs cannot exchange
 sources or submitted reads.
 
-Only `QualifiedSceneJob::release_submitted` can transfer that merged completion
-to the matching kernel job. A successful release returns `ReleasedSceneReads`,
-whose blocking wait pairs the valid private frames with that job's native
-program as a `ReadyScene`. Its composition operation consumes both together.
-The type boundary therefore prevents native pixels from being consumed before
-the kernel accepts their source-read completion and prevents the frames from
-being composed with another job's operations or a background other than the
-protocol's opaque black. Submission failure is terminal for that scene
-transaction; cleanup retires any accepted native work without pretending that
-a normal aggregate release remains possible.
+An active renderer additionally owns a bounded pool of packed, exportable
+images that never cross into PipeWire or the encoder. Each Vulkan image is
+inseparably paired with its increasing endpoint-local CastKMS registration.
+`DEQUEUE_SCENE` receives that registration, so the kernel job and the native
+destination cannot be accidentally exchanged. The floating-point images used
+for layer color and blending remain non-exportable implementation storage.
+Allocation and native-layout validation finish while takeover remains
+abortable; activation only adds the endpoint-local kernel registrations.
 
-The production-facing transaction starts from a complete `ScenePool`
-reservation. `QualifiedSceneJob::prepare` imports sources only while that
-independently available slot is present. Before submission, cancellation
-returns every private buffer. After submission, the types carry the reserved
-final image through kernel release and source completion; only the resulting
-`CompositableScene` exposes composition. A terminal native submission failure
-keeps the source job opaque and returns only the final image, which no source
-read or composition has touched. The renderer endpoint must be abandoned after
-that result.
+The production-facing transaction reserves both the complete floating-point
+`ScenePool` slot and one registered packed image before dequeue. It imports and
+stages every source, waits for valid private source pixels, performs complete
+scene composition, then converts the result into the registered packed image.
+Only the completion from that final write is supplied to `RELEASE_SOURCE`.
+Because the operations execute in order on the same native queue and earlier
+stages have completed, that record closes every source read and the registered
+private-image write. No source job is released after staging alone.
+
+Predictable metadata and profile failures occur before native access and use
+`NO_ACCESS`. A native submission, completion, composition, private-write or
+release failure is terminal for the active renderer incarnation. Teardown then
+provides best-effort cleanup without declaring uncertain pixels valid or
+recycling affected storage.
 
 Source imports, aggregate read preparation and the intermediate release owner
 are implementation details of that transaction. Public callers cannot import
@@ -721,32 +724,28 @@ lower-level path. They may qualify a job, release it without access, or consume
 it exactly once into `PreparedSceneJob`. Qualification also closes public
 access to the raw job descriptors and the per-job composer.
 
-`SceneReader` owns the active renderer endpoint together with one qualified
-storage profile and its pool. Every attempt reserves a complete slot before it
-dequeues a source-bearing job. Idle dequeue and metadata rejection release the
-job without access and restore the whole slot; successful submission returns
-only work whose aggregate completion has already been accepted by CastKMS.
-Native submission or release uncertainty is terminal for that renderer
-incarnation rather than a reason to reuse possibly affected stages.
-The released result provides one blocking `compose_and_wait` operation for a
-graphics worker while retaining distinct source-completion and composition
-errors for supervision.
-After that operation, `SceneReader::finish_composition` atomically returns all
-source stages to their profile pool and yields only the final private frame for
-output delivery. A profile mismatch returns every source and the final frame
-without changing any pool.
+`SceneReader` owns the active renderer endpoint, qualified storage profile,
+floating-point pool, and registered packed-image pool. Every attempt reserves
+both kinds of storage before it dequeues a source-bearing job. Idle dequeue and
+metadata rejection release without access and restore the whole reservation.
+If a registered image is still retained by a kernel output read, the reader
+tries another pool entry; exhausting the pool defers admission without holding
+a source claim.
 
-The renderer-to-PipeWire scheduler consumes complete scenes through one private
-frame-source contract. Cadence, output availability, publication, return and
-cancellation handling remain independent of the blocking composition operation
-and the atomic return of source stages before their final frame enters output
-copying.
-Blocking work may finish concurrently, but an explicit admission sequence
-holds later results until every earlier admitted frame completes. PipeWire
-therefore observes source order rather than host thread wake-up order. Final
-output copying through publication is serialized after that ordered boundary;
-source staging and scene composition remain concurrent and independently
-bounded.
+Successful rendering returns all source stages immediately and yields a
+`RenderedFrame` that owns both the reusable floating-point destination and the
+matching registered packed image. Returning the frame validates both pool
+identities before changing either pool, preventing cross-generation storage
+substitution.
+
+The renderer-to-PipeWire scheduler executes the blocking source-to-private
+transaction on its isolated renderer thread, then copies the completed
+registered image into an independently available recipient image. That second
+copy may wait for recipient reuse without retaining any compositor source.
+Cadence, recipient availability, publication, return and cancellation remain
+separate from kernel source retirement. CastKMS admits one scene job per
+endpoint, so source-to-private work is ordered without a second userspace
+reordering queue.
 
 The scene records can be decoded, qualified and executed by the complete-scene
 reader above. `castkms-renderer` owns and validates the complete packet under

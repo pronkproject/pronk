@@ -337,6 +337,11 @@ impl Device {
 }
 
 impl Image {
+    /// Whether this image belongs to the supplied logical device instance.
+    pub fn is_owned_by(&self, device: &Device) -> bool {
+        Arc::ptr_eq(&self.device, &device.inner)
+    }
+
     pub(super) fn color_range(&self) -> vk::ImageSubresourceRange {
         vk::ImageSubresourceRange::default()
             .aspect_mask(vk::ImageAspectFlags::COLOR)

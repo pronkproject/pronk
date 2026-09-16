@@ -10,7 +10,8 @@ use drm_display_executor::scene::geometry::Extent;
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
 use pronk_renderer_worker::{
-    OutputPool, PrimarySceneProfile, PrivateProbe, SceneReader, SceneStorageProfile,
+    OutputPool, PreparedSceneImages, PrimarySceneProfile, PrivateProbe, SceneReader,
+    SceneStorageProfile,
 };
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -104,6 +105,7 @@ async fn run_prepared<F: AsFd>(
         storage,
         scene_pool,
         source_interval,
+        scene_images,
     } = generation;
     let mut available = VecDeque::new();
     loop {
@@ -133,6 +135,7 @@ async fn run_prepared<F: AsFd>(
                         storage,
                         scene_pool,
                         source_interval,
+                        scene_images,
                     },
                     available,
                     ActiveControl {
@@ -187,6 +190,7 @@ async fn activate_generation<F: AsFd>(
         storage,
         scene_pool,
         source_interval,
+        scene_images,
     } = generation;
     let submitted = match probe.submit() {
         Ok(submitted) => submitted,
@@ -202,7 +206,7 @@ async fn activate_generation<F: AsFd>(
             return GenerationOutcome::candidate(result);
         }
     };
-    let reader = match SceneReader::new(active_renderer, storage, scene_pool) {
+    let reader = match SceneReader::new(active_renderer, storage, scene_pool, scene_images) {
         Ok(reader) => reader,
         Err(failure) => {
             let (_, _, _, error) = failure.into_parts();
@@ -239,6 +243,7 @@ struct PreparedGeneration<'renderer, F: AsFd> {
     storage: SceneStorageProfile,
     scene_pool: pronk_renderer_worker::ScenePool,
     source_interval: Duration,
+    scene_images: PreparedSceneImages,
 }
 
 async fn prepare_generation<'renderer, F: AsFd>(
@@ -273,6 +278,20 @@ async fn prepare_generation<'renderer, F: AsFd>(
         Ok(scene_pool) => scene_pool,
         Err(error) => {
             let _ = started.send(Started::Failed);
+            return Err(abort_candidate(candidate, error));
+        }
+    };
+    let scene_images = match PreparedSceneImages::new(
+        device,
+        configuration.width(),
+        configuration.height(),
+        config.output_modifier,
+        config.private_capacity,
+    ) {
+        Ok(images) => images,
+        Err(error) => {
+            let _ = started.send(Started::Failed);
+            drop(scene_pool);
             return Err(abort_candidate(candidate, error));
         }
     };
@@ -349,6 +368,7 @@ async fn prepare_generation<'renderer, F: AsFd>(
         storage,
         scene_pool,
         source_interval: Duration::from_nanos(interval_ns),
+        scene_images,
     })
 }
 

@@ -1,6 +1,6 @@
 //! Scheduling for one active userspace-rendered output generation.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::io;
 use std::os::fd::AsFd;
 use std::time::Duration;
@@ -8,8 +8,7 @@ use std::time::Duration;
 use nix::sys::time::TimeValLike;
 use nix::time::{clock_gettime, ClockId};
 use pronk_renderer_worker::{
-    CompletedOutput, CompletedReturn, ComposedFrame, FinishedOutput, PrivateBuffer, PrivateFrame,
-    SceneAttempt, SceneReader,
+    CompletedOutput, CompletedReturn, FinishedOutput, RenderedFrame, SceneAttempt, SceneReader,
 };
 use tokio::task::JoinSet;
 use tokio::time::{self, MissedTickBehavior};
@@ -57,19 +56,6 @@ async fn run_until_stopped<F: AsFd>(
                     return Err(error);
                 }
             }
-            completed = pipeline.frame_tasks.join_next(), if !pipeline.frame_tasks.is_empty() => {
-                let (sequence, completed) = completed
-                    .ok_or_else(|| io::Error::other("frame completion set ended unexpectedly"))?
-                    .map_err(join_error)?;
-                for completed in pipeline.completion_order.complete(sequence, completed?)? {
-                    let frame = reader.finish_composition(completed).map_err(|_| {
-                        io::Error::other(
-                            "scene reader rejected its completed private source stages",
-                        )
-                    })?;
-                    pipeline.frames.push_back(frame);
-                }
-            }
             completed = pipeline.output_copies.join_next(), if !pipeline.output_copies.is_empty() => {
                 let output = completed
                     .ok_or_else(|| io::Error::other("output copy set ended unexpectedly"))?
@@ -84,8 +70,8 @@ async fn run_until_stopped<F: AsFd>(
                 let ready = video.finish(output)?;
                 let first = !pipeline.published;
                 match video.publish(ready, monotonic_now_ns()?, first).await {
-                    Ok((private, _)) => {
-                        return_destination(reader, private)?;
+                    Ok((frame, _)) => {
+                        return_frame(reader, frame)?;
                         pipeline.published = true;
                     }
                     Err(error) => {
@@ -101,15 +87,10 @@ async fn run_until_stopped<F: AsFd>(
                 pipeline.available.push_back(slot);
             }
             _ = source_tick.tick(), if reader.available_slots() != 0 => {
-                match SceneReader::try_submit(reader).map_err(io::Error::other)? {
+                match SceneReader::try_render(reader).map_err(io::Error::other)? {
                     SceneAttempt::NoSlot | SceneAttempt::NoScene => {}
                     SceneAttempt::Rejected { cause } => return Err(cause),
-                    SceneAttempt::Submitted(scene) => {
-                        let sequence = pipeline.completion_order.admit()?;
-                        pipeline.frame_tasks.spawn_blocking(move || {
-                            (sequence, scene.compose_and_wait().map_err(io::Error::other))
-                        });
-                    }
+                    SceneAttempt::Rendered(frame) => pipeline.frames.push_back(frame),
                 }
             }
         }
@@ -118,9 +99,7 @@ async fn run_until_stopped<F: AsFd>(
 
 struct Pipeline {
     available: VecDeque<usize>,
-    frames: VecDeque<PrivateFrame>,
-    frame_tasks: JoinSet<(u64, io::Result<ComposedFrame>)>,
-    completion_order: CompletionOrder<ComposedFrame>,
+    frames: VecDeque<RenderedFrame>,
     output_copies: JoinSet<io::Result<CompletedOutput>>,
     producer_waits: JoinSet<FinishedOutput>,
     reader_waits: JoinSet<CompletedReturn>,
@@ -132,8 +111,6 @@ impl Pipeline {
         Self {
             available,
             frames: VecDeque::new(),
-            frame_tasks: JoinSet::new(),
-            completion_order: CompletionOrder::new(),
             output_copies: JoinSet::new(),
             producer_waits: JoinSet::new(),
             reader_waits: JoinSet::new(),
@@ -185,81 +162,31 @@ impl Pipeline {
         let cause = io::Error::new(error.error().kind(), error.error().to_string());
         match error {
             FramePublishError::Prepare(error) => {
-                let (private, retirement, _) = error.into_parts();
-                if let Some(private) = private {
-                    return_destination(reader, private)?;
+                let (frame, retirement, _) = error.into_parts();
+                if let Some(frame) = frame {
+                    return_frame(reader, frame)?;
                 }
                 if let Some(output) = retirement {
                     self.reader_waits.spawn(async move { output.wait().await });
                 }
             }
-            FramePublishError::Handoff { private, .. } => {
-                return_destination(reader, private)?;
+            FramePublishError::Handoff { frame, .. } => {
+                return_frame(reader, frame)?;
             }
         }
         Ok(cause)
     }
 
     async fn shutdown(&mut self) {
-        stop_tasks(&mut self.frame_tasks).await;
         stop_tasks(&mut self.output_copies).await;
         stop_tasks(&mut self.producer_waits).await;
         stop_tasks(&mut self.reader_waits).await;
     }
 }
 
-struct CompletionOrder<C> {
-    next_admission: u64,
-    next_delivery: u64,
-    completed: BTreeMap<u64, C>,
-}
-
-impl<C> CompletionOrder<C> {
-    fn new() -> Self {
-        Self {
-            next_admission: 0,
-            next_delivery: 0,
-            completed: BTreeMap::new(),
-        }
-    }
-
-    fn admit(&mut self) -> io::Result<u64> {
-        let sequence = self.next_admission;
-        self.next_admission = sequence
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("frame admission sequence overflowed"))?;
-        Ok(sequence)
-    }
-
-    fn complete(&mut self, sequence: u64, completed: C) -> io::Result<Vec<C>> {
-        if sequence < self.next_delivery
-            || sequence >= self.next_admission
-            || self.completed.contains_key(&sequence)
-        {
-            return Err(io::Error::other("invalid frame completion sequence"));
-        }
-        self.completed.insert(sequence, completed);
-        let mut ready = Vec::new();
-        ready
-            .try_reserve_exact(self.completed.len())
-            .map_err(io::Error::other)?;
-        while let Some(completed) = self.completed.remove(&self.next_delivery) {
-            ready.push(completed);
-            self.next_delivery = self
-                .next_delivery
-                .checked_add(1)
-                .ok_or_else(|| io::Error::other("frame delivery sequence overflowed"))?;
-        }
-        Ok(ready)
-    }
-}
-
-fn return_destination<F: AsFd>(
-    reader: &mut SceneReader<'_, F>,
-    destination: PrivateBuffer,
-) -> io::Result<()> {
-    SceneReader::return_destination(reader, destination)
-        .map_err(|_| io::Error::other("scene reader rejected its returned final image"))
+fn return_frame<F: AsFd>(reader: &mut SceneReader<'_, F>, frame: RenderedFrame) -> io::Result<()> {
+    SceneReader::return_frame(reader, frame)
+        .map_err(|_| io::Error::other("scene reader rejected its returned private images"))
 }
 
 async fn stop_tasks<T: 'static>(tasks: &mut JoinSet<T>) {
@@ -290,8 +217,8 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{stop_tasks, take_pair, CompletionOrder};
-    use pronk_renderer_worker::{CompletedOutput, ComposedFrame, ReleasedSceneJob};
+    use super::{stop_tasks, take_pair};
+    use pronk_renderer_worker::{CompletedOutput, RenderedFrame};
     use std::collections::VecDeque;
     use tokio::sync::oneshot;
     use tokio::task::JoinSet;
@@ -301,8 +228,7 @@ mod tests {
     #[test]
     fn completed_output_can_return_from_a_blocking_worker() {
         assert_send::<CompletedOutput>();
-        assert_send::<ReleasedSceneJob>();
-        assert_send::<ComposedFrame>();
+        assert_send::<RenderedFrame>();
     }
 
     #[test]
@@ -316,25 +242,6 @@ mod tests {
         let mut right = VecDeque::from([2]);
         assert_eq!(take_pair(&mut left, &mut right), None);
         assert_eq!(right, [2]);
-    }
-
-    #[test]
-    fn completed_frames_return_in_admission_order() {
-        let mut order = CompletionOrder::new();
-        let first = order.admit().unwrap();
-        let second = order.admit().unwrap();
-        let third = order.admit().unwrap();
-
-        assert!(order.complete(third, 30).unwrap().is_empty());
-        assert_eq!(order.complete(first, 10).unwrap(), [10]);
-        assert_eq!(order.complete(second, 20).unwrap(), [20, 30]);
-        assert!(order.complete(second, 99).is_err());
-
-        let fourth = order.admit().unwrap();
-        let fifth = order.admit().unwrap();
-        assert!(order.complete(fifth, 50).unwrap().is_empty());
-        assert!(order.complete(fifth, 55).is_err());
-        assert_eq!(order.complete(fourth, 40).unwrap(), [40, 50]);
     }
 
     #[tokio::test]

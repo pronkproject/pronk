@@ -25,6 +25,10 @@ pub struct RegisteredImage {
 }
 
 impl RegisteredImage {
+    pub(crate) fn id(&self) -> NonZeroU64 {
+        self.id
+    }
+
     pub(crate) fn belongs_to(&self, scope: &Arc<()>) -> bool {
         Arc::ptr_eq(&self.scope, scope)
     }

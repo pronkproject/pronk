@@ -5,6 +5,7 @@ mod output;
 mod pool;
 mod reads;
 mod scene;
+mod scene_image;
 mod scene_job;
 mod scene_pool;
 mod scene_profile;
@@ -24,6 +25,7 @@ pub use scene::{
     ComposedFrame, RejectedScene, RejectedSceneFrames, SceneComposer, SceneCompositionError,
     SceneFrames, SceneInputs, SceneStorageProfile,
 };
+pub use scene_image::{PreparedSceneImages, RenderedFrame};
 pub use scene_job::{QualifiedSceneJob, QualifySceneJobError};
 pub use scene_pool::{
     RejectedComposedFrame, RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool,
@@ -31,9 +33,5 @@ pub use scene_pool::{
 };
 pub use scene_profile::PrimarySceneProfile;
 pub use scene_reader::{SceneAttempt, SceneAttemptError, SceneReader, SceneReaderStartError};
-pub use scene_transaction::{
-    CancelSceneJobError, CompositableScene, PrepareSceneJobError, PreparedSceneJob,
-    ReleaseSubmittedSceneError, ReleasedSceneJob, SceneCompletionError, SceneWaitError,
-    SubmitSceneJobError, SubmittedSceneJob,
-};
+pub use scene_transaction::SceneCompletionError;
 pub use source::SourceAlpha;

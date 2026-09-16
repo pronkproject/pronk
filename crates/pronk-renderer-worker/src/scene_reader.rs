@@ -5,16 +5,15 @@ use std::os::fd::AsFd;
 
 use castkms_renderer::ActiveRenderer;
 
-use crate::{
-    ComposedFrame, PrivateBuffer, PrivateFrame, QualifiedSceneJob, RejectedBuffer,
-    RejectedComposedFrame, RejectedSceneSources, ReleasedSceneJob, ScenePool, SceneStorageProfile,
-};
+use crate::scene_image::{PreparedSceneImages, SceneImagePool};
+use crate::{QualifiedSceneJob, RenderedFrame, ScenePool, SceneStorageProfile};
 
 /// Active scene endpoint and the reusable private pool for its storage profile.
 pub struct SceneReader<'renderer, F: AsFd> {
     renderer: ActiveRenderer<'renderer, F>,
     storage: SceneStorageProfile,
     private: ScenePool,
+    images: SceneImagePool,
 }
 
 impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
@@ -23,12 +22,18 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
         renderer: ActiveRenderer<'renderer, F>,
         storage: SceneStorageProfile,
         private: ScenePool,
+        images: PreparedSceneImages,
     ) -> Result<Self, Box<SceneReaderStartError<'renderer, F>>> {
         let configuration = renderer.configuration();
         let output = storage.output();
         if !private.belongs_to(storage.profile())
             || output.width() != configuration.width().get()
             || output.height() != configuration.height().get()
+            || !images.matches(
+                storage.device(),
+                configuration.width(),
+                configuration.height(),
+            )
         {
             return Err(Box::new(SceneReaderStartError {
                 renderer,
@@ -37,35 +42,93 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
                 cause: invalid("scene pool does not match the active renderer profile"),
             }));
         }
+        let mut renderer = renderer;
+        let images = match images.register(&mut renderer) {
+            Ok(images) => images,
+            Err(cause) => {
+                return Err(Box::new(SceneReaderStartError {
+                    renderer,
+                    storage,
+                    private: Box::new(private),
+                    cause,
+                }));
+            }
+        };
         Ok(Self {
             renderer,
             storage,
             private,
+            images,
         })
     }
 
     pub fn available_slots(&self) -> usize {
-        self.private.available()
+        self.private.available().min(self.images.available())
     }
 
-    /// Reserve a complete slot and submit at most one changed complete scene.
+    /// Render at most one changed complete scene into registered private storage.
     ///
     /// Import, producer waits and failed native cleanup may block. Run on a
     /// blocking graphics worker rather than an asynchronous executor thread.
     /// An error is terminal for this active renderer incarnation.
-    pub fn try_submit(&mut self) -> Result<SceneAttempt, SceneAttemptError> {
+    pub fn try_render(&mut self) -> Result<SceneAttempt, SceneAttemptError> {
         let Some(buffers) = self.private.take().map_err(SceneAttemptError::Reserve)? else {
             return Ok(SceneAttempt::NoSlot);
         };
-        let job = match self.renderer.try_dequeue_scene() {
-            Ok(Some(job)) => job,
-            Ok(None) => {
+        let available = self.images.available();
+        let mut deferred = Vec::new();
+        if deferred.try_reserve_exact(available).is_err() {
+            self.restore(buffers)?;
+            return Err(SceneAttemptError::Reserve(io::Error::other(
+                "reserve private-image selection storage",
+            )));
+        }
+        let (job, target) = loop {
+            let Some(target) = self.images.take() else {
                 self.restore(buffers)?;
-                return Ok(SceneAttempt::NoScene);
-            }
-            Err(cause) => {
-                self.restore(buffers)?;
-                return Err(SceneAttemptError::Dequeue(cause));
+                return Ok(SceneAttempt::NoSlot);
+            };
+            match self.renderer.try_dequeue_scene(target.registration()) {
+                Ok(Some(job)) => {
+                    for image in deferred {
+                        self.images
+                            .restore(image)
+                            .map_err(|_| SceneAttemptError::ReturnSlot)?;
+                    }
+                    break (job, target);
+                }
+                Ok(None) => {
+                    deferred.push(target);
+                    for image in deferred {
+                        self.images
+                            .restore(image)
+                            .map_err(|_| SceneAttemptError::ReturnSlot)?;
+                    }
+                    self.restore(buffers)?;
+                    return Ok(SceneAttempt::NoScene);
+                }
+                Err(cause) if cause.raw_os_error() == Some(nix::libc::EBUSY) => {
+                    deferred.push(target);
+                    if deferred.len() == available {
+                        for image in deferred {
+                            self.images
+                                .restore(image)
+                                .map_err(|_| SceneAttemptError::ReturnSlot)?;
+                        }
+                        self.restore(buffers)?;
+                        return Ok(SceneAttempt::NoSlot);
+                    }
+                }
+                Err(cause) => {
+                    deferred.push(target);
+                    for image in deferred {
+                        self.images
+                            .restore(image)
+                            .map_err(|_| SceneAttemptError::ReturnSlot)?;
+                    }
+                    self.restore(buffers)?;
+                    return Err(SceneAttemptError::Dequeue(cause));
+                }
             }
         };
         let scene = match QualifiedSceneJob::new(&self.storage, job) {
@@ -73,7 +136,12 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
             Err(error) => {
                 let (job, cause) = error.into_parts();
                 match job.release_without_access() {
-                    Ok(()) => self.restore(buffers)?,
+                    Ok(()) => {
+                        self.restore(buffers)?;
+                        self.images
+                            .restore(target)
+                            .map_err(|_| SceneAttemptError::ReturnSlot)?;
+                    }
                     Err(error) => {
                         let (_, cause) = error.into_parts();
                         return Err(SceneAttemptError::ReleaseUnused(cause));
@@ -82,12 +150,17 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
                 return Ok(SceneAttempt::Rejected { cause });
             }
         };
-        let prepared = match scene.prepare(buffers) {
+        let prepared = match scene.prepare(buffers, target) {
             Ok(prepared) => prepared,
             Err(error) => {
-                let (scene, buffers, cause) = error.into_parts();
+                let (scene, buffers, target, cause) = error.into_parts();
                 match scene.release_without_access() {
-                    Ok(()) => self.restore(buffers)?,
+                    Ok(()) => {
+                        self.restore(buffers)?;
+                        self.images
+                            .restore(target)
+                            .map_err(|_| SceneAttemptError::ReturnSlot)?;
+                    }
                     Err(error) => {
                         let (_, cause) = error.into_parts();
                         return Err(SceneAttemptError::ReleaseUnused(cause));
@@ -97,39 +170,31 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
             }
         };
         let submitted = prepared.submit().map_err(|error| {
-            let (destination, cause) = error.into_parts();
+            let (destination, target, cause) = error.into_parts();
             drop(destination);
+            drop(target);
             SceneAttemptError::Submit(cause)
         })?;
-        submitted
-            .release()
-            .map(|released| SceneAttempt::Submitted(Box::new(released)))
-            .map_err(|error| {
-                let (_, cause) = error.into_parts();
-                SceneAttemptError::ReleaseSubmitted(cause)
-            })
+        let rendered = submitted
+            .render_and_release()
+            .map_err(SceneAttemptError::Complete)?;
+        let (sources, frame) = rendered.into_parts();
+        self.private
+            .restore_sources(sources)
+            .map_err(|_| SceneAttemptError::ReturnSlot)?;
+        Ok(SceneAttempt::Rendered(frame))
     }
 
-    pub fn return_sources(
-        &mut self,
-        sources: Vec<PrivateBuffer>,
-    ) -> Result<(), RejectedSceneSources> {
-        self.private.restore_sources(sources)
-    }
-
-    pub fn finish_composition(
-        &mut self,
-        composed: ComposedFrame,
-    ) -> Result<PrivateFrame, RejectedComposedFrame> {
-        self.private.finish_composition(composed)
-    }
-
-    pub fn return_destination(&mut self, destination: PrivateBuffer) -> Result<(), RejectedBuffer> {
-        self.private.restore_destination(destination)
-    }
-
-    pub fn into_parts(self) -> (ActiveRenderer<'renderer, F>, SceneStorageProfile, ScenePool) {
-        (self.renderer, self.storage, self.private)
+    pub fn return_frame(&mut self, frame: RenderedFrame) -> Result<(), Box<RenderedFrame>> {
+        if !self.private.accepts_destination(&frame.private.buffer)
+            || !self.images.accepts(&frame.scene)
+        {
+            return Err(Box::new(frame));
+        }
+        self.private
+            .restore_destination_validated(frame.private.buffer);
+        self.images.restore_validated(frame.scene);
+        Ok(())
     }
 
     fn restore(&mut self, buffers: crate::SceneBuffers) -> Result<(), SceneAttemptError> {
@@ -139,13 +204,13 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
     }
 }
 
-/// Outcome of one nonblocking complete-scene submission attempt.
-#[must_use = "handle idle, rejected or submitted complete-scene work"]
+/// Outcome of one complete-scene rendering attempt.
+#[must_use = "handle idle, rejected or completed scene work"]
 pub enum SceneAttempt {
     NoSlot,
     NoScene,
     Rejected { cause: io::Error },
-    Submitted(Box<ReleasedSceneJob>),
+    Rendered(RenderedFrame),
 }
 
 /// Terminal failure while resolving a complete-scene submission attempt.
@@ -161,8 +226,8 @@ pub enum SceneAttemptError {
     ReturnSlot,
     #[error("submit complete native scene reads: {0}")]
     Submit(#[source] io::Error),
-    #[error("release submitted complete scene reads: {0}")]
-    ReleaseSubmitted(#[source] io::Error),
+    #[error("complete and release the rendered scene: {0}")]
+    Complete(#[source] crate::SceneCompletionError),
 }
 
 /// Failed reader setup retaining the active endpoint and private storage.
