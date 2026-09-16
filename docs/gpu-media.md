@@ -310,11 +310,13 @@ alpha is copied without blending or color-space conversion.
 
 The CastKMS worker uses this operation for the source protocol's integral crop,
 top-left destination and complete output dimensions. Its private pool matches
-the output, with opaque black outside the primary plane. The supported import
-profile is one XRGB8888, XBGR8888, XRGB2101010, XBGR2101010 or RGB565 memory
-plane with an explicit compatible modifier. The worker does not infer support for scene
-properties absent from the source protocol. Admission still reserves private
-storage before claiming any source.
+the output, with opaque black outside the primary plane. At generation startup,
+the worker discovers the explicit modifiers which the selected GPU can import
+for XRGB8888, ARGB8888, XBGR8888, ABGR8888, XRGB2101010, ARGB2101010,
+XBGR2101010, ABGR2101010 and RGB565. It registers those exact one-plane tuples
+as alternatives in the primary-scene contract; it does not infer support for
+other scene properties. Admission still reserves private storage before
+claiming any source.
 
 Each `RendererStream` generation runs on a dedicated thread. Source submission
 can wait for producer fences, and error cleanup can wait for accepted native
@@ -646,8 +648,9 @@ edges, one-pixel footprints and quarter-turn rejection. See the
 
 ## Qualified complete scenes
 
-`SceneStorageProfile` gives one output extent and ordered set of source storage
-requirements a reusable nominal identity. Its private pool can serve successive
+`SceneStorageProfile` gives one output extent and an ordered set of source
+storage roles a reusable nominal identity. Each role contains one or more exact
+format, modifier and extent alternatives. Its private pool can serve successive
 jobs whose scene operations vary while their output and layer storage remain
 compatible. Creating a structurally identical storage profile does not confer
 that identity; reuse must be explicit. Construction checks every external
@@ -658,10 +661,10 @@ until a source-bearing job has been claimed.
 `SceneComposer` prepares one ordered visual program before source acquisition.
 It retains every layer's exact crop, destination, transform, blend and color
 program and validates their packed format, modifier and source extent against
-its `SceneStorageProfile`. The output color program belongs to the same qualified
-scene. An adapter can query each source requirement while validating a newly
-dequeued scene without exposing the composer's native programs or private
-buffer identity.
+one alternative in the corresponding `SceneStorageProfile` role. The output
+color program belongs to the same qualified scene. An adapter can inspect the
+accepted alternatives while validating a newly dequeued scene without exposing
+the composer's native programs or private buffer identity.
 
 The associated `ScenePool` gives every layer a distinct source-sized private
 storage role. Final-image and source-stage capacities are independent, but a
