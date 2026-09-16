@@ -23,16 +23,16 @@ pub(crate) fn encoder_output_caps() -> Result<gst::Caps, MediaGraphError> {
 }
 
 pub(crate) fn bitrate_kbits(bits_per_second: u64) -> Result<u32, MediaGraphError> {
-    const MAX_X264_BITRATE_KBITS: u64 = 2_048_000;
+    const MAX_H264_BITRATE_KBITS: u64 = 2_048_000;
 
     let kbits = bits_per_second.div_ceil(1_000);
-    if !(1..=MAX_X264_BITRATE_KBITS).contains(&kbits) {
+    if !(1..=MAX_H264_BITRATE_KBITS).contains(&kbits) {
         return Err(MediaGraphError::new(format!(
-            "requested video bitrate {bits_per_second} bit/s is outside x264enc's supported range"
+            "requested video bitrate {bits_per_second} bit/s is outside the H.264 encoder range"
         )));
     }
     u32::try_from(kbits)
-        .map_err(|_| MediaGraphError::new("x264enc bitrate does not fit its property type"))
+        .map_err(|_| MediaGraphError::new("H.264 encoder bitrate does not fit its property type"))
 }
 
 pub(crate) fn key_frame_interval(cadence: VideoCadence) -> u32 {

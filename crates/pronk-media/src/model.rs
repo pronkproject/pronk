@@ -1,5 +1,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::OwnedFd;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gstreamer as gst;
@@ -46,10 +47,11 @@ pub enum VideoCodec {
     H264,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VideoEncoder {
     Software(VideoCodec),
+    VaH264 { render_node: PathBuf },
 }
 
 impl VideoEncoder {
@@ -57,9 +59,23 @@ impl VideoEncoder {
         Self::Software(codec)
     }
 
-    pub const fn codec(self) -> VideoCodec {
+    pub fn va_h264(render_node: impl Into<PathBuf>) -> Self {
+        Self::VaH264 {
+            render_node: render_node.into(),
+        }
+    }
+
+    pub const fn codec(&self) -> VideoCodec {
         match self {
-            Self::Software(codec) => codec,
+            Self::Software(codec) => *codec,
+            Self::VaH264 { .. } => VideoCodec::H264,
+        }
+    }
+
+    pub fn render_node(&self) -> Option<&Path> {
+        match self {
+            Self::Software(_) => None,
+            Self::VaH264 { render_node } => Some(render_node),
         }
     }
 }
@@ -363,6 +379,9 @@ pub struct MediaGraphStatistics {
     pub first_pts_nanos: Option<u64>,
     pub last_pts_nanos: Option<u64>,
     pub encoder_name: Option<String>,
+    pub encoder_input_caps: Option<String>,
+    pub video_memory_path: Option<String>,
+    pub render_device: Option<String>,
     pub encoded_caps: Option<String>,
     pub audio_packets: u64,
     pub dropped_audio_packets: u64,

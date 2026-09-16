@@ -192,10 +192,7 @@ impl GStreamerGraph {
             .map_err(|error| {
                 MediaGraphError::new(format!("construct bounded video queue: {error}"))
             })?;
-        let convert = gst::ElementFactory::make("videoconvert")
-            .name("pronk-video-convert")
-            .build()
-            .map_err(|error| MediaGraphError::new(format!("construct video converter: {error}")))?;
+        let convert = video_encoder.build_converter()?;
         let rate = gst::ElementFactory::make("videorate")
             .name("pronk-video-rate")
             .property("drop-only", true)
@@ -325,6 +322,12 @@ impl GStreamerGraph {
         let has_audio = audio.is_some();
 
         let effective_bitrate = video_encoder.effective_bitrate(configuration.video_bitrate)?;
+        let encoder_name = video_encoder.name().into();
+        let encoder_input_caps = converted_caps.to_string();
+        let video_memory_path = video_encoder.memory_path().into();
+        let render_device = video_encoder
+            .render_node()
+            .map(|path| path.display().to_string());
         let graph = Self {
             generation: configuration.media_generation,
             video_codec,
@@ -341,7 +344,10 @@ impl GStreamerGraph {
                 video_bitrate: effective_bitrate,
                 video_cadence_numerator: video_cadence.numerator.get(),
                 video_cadence_denominator: video_cadence.denominator.get(),
-                encoder_name: Some(video_encoder.name().into()),
+                encoder_name: Some(encoder_name),
+                encoder_input_caps: Some(encoder_input_caps),
+                video_memory_path: Some(video_memory_path),
+                render_device,
                 encoded_caps: Some(encoded_caps.to_string()),
                 audio_encoder_name: has_audio.then(|| "opusenc".into()),
                 encoded_audio_caps: has_audio.then(|| {
