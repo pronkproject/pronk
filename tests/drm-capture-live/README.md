@@ -65,9 +65,10 @@ The binaries cover distinct boundaries:
   generations, and orderly stop without a false health event. It then revokes
   a separate grant during active delivery, checks its exact failure generation
   and retained pixels, and resumes delivery through fresh authority and fresh
-  output storage. It uses the versioned WirePlumber policy and classified
-  core/backend sockets. The test does not qualify broker issuance, hardware
-  encoding, or a receiver.
+  output storage. The wrapper also restarts its isolated PipeWire server and
+  WirePlumber policy during active delivery; the same grant must report the
+  transport failure and start another generation after service recovery. The
+  test does not qualify broker issuance, hardware encoding, or a receiver.
 - Live Mutter media:
   `pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
   WIDTH HEIGHT /path/to/pipewire-0-pronk-backend` runs a fullscreen Wayland

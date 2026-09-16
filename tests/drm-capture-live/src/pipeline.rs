@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     );
     ensure!(args.next().is_none(), "expected device and socket only");
     tokio::time::timeout(Duration::from_secs(40), run(&device, &socket)).await??;
-    println!("PASS: application capture, revocation and authority recovery");
+    println!("PASS: application capture, media-service restart, revocation and authority recovery");
     Ok(())
 }
 
@@ -137,6 +137,96 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
     .await
     .context("capture generations timed out")
     .and_then(|result| result);
+
+    let service_restart = if generations.is_ok() {
+        async {
+            let generation = nz64(4);
+            let prepared = capture
+                .start(
+                    capture_request(&fixture, generation.get()),
+                    CancellationToken::new(),
+                )
+                .await?;
+            let mut consumer =
+                pipewire_consumer::Consumer::start(socket, &prepared.video_target.node_name, true)?;
+            capture
+                .activate(generation, CancellationToken::new())
+                .await?;
+            let disconnected_sample = consumer.next().await?;
+            pipewire_consumer::check_pixels(&disconnected_sample, 0x68)?;
+            std::fs::write(runtime.join("restart-request"), b"")?;
+            let failure = tokio::time::timeout(Duration::from_secs(5), events.next_event())
+                .await
+                .context("media-service failure was not reported")?
+                .context("capture event channel closed after media-service failure")?;
+            ensure!(
+                matches!(
+                    failure,
+                    CaptureEvent::Failed {
+                        media_generation,
+                        ref error,
+                    } if media_generation == generation && !error.is_empty()
+                ),
+                "incorrect media-service failure event: {failure:?}"
+            );
+            ensure!(
+                capture
+                    .stop(
+                        generation,
+                        MediaStopReason::TransportFailure,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .is_err(),
+                "disconnected capture reported successful shutdown"
+            );
+            drop(consumer);
+            pipewire_consumer::check_pixels(&disconnected_sample, 0x68)?;
+            std::fs::write(runtime.join("restart-observed"), b"")?;
+            wait_for_marker(&runtime.join("restart-ready")).await?;
+
+            fixture.restore();
+            let generation = nz64(5);
+            let prepared = capture
+                .start(
+                    capture_request(&fixture, generation.get()),
+                    CancellationToken::new(),
+                )
+                .await?;
+            let mut consumer =
+                pipewire_consumer::Consumer::start(socket, &prepared.video_target.node_name, true)?;
+            capture
+                .activate(generation, CancellationToken::new())
+                .await?;
+            for sequence in 1..=6 {
+                let sample = tokio::select! {
+                    sample = consumer.next() => sample?,
+                    failure = events.next_event() => {
+                        bail!("capture health event after media-service restart: {failure:?}")
+                    }
+                };
+                ensure!(
+                    pipewire_consumer::check_pixels(&sample, 0x49)? == sequence,
+                    "missing or reordered frame after media-service restart"
+                );
+                pipewire_consumer::check_pixels(&disconnected_sample, 0x68)?;
+            }
+            drop(consumer);
+            capture
+                .stop(
+                    generation,
+                    MediaStopReason::DisplayRemoved,
+                    CancellationToken::new(),
+                )
+                .await?;
+            drop(disconnected_sample);
+            Ok::<_, anyhow::Error>(())
+        }
+        .await
+    } else {
+        Ok(())
+    };
+
     let stopped = tokio::time::timeout(
         Duration::from_secs(8),
         capture.shutdown(MediaStopReason::DisplayRemoved, CancellationToken::new()),
@@ -149,6 +239,7 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
         eprintln!("Capture cleanup failed: {error:#}");
     }
     let retained = generations?;
+    service_restart?;
     stopped?;
     ensure!(events.next_event().await.is_none(), "late capture failure");
 
@@ -289,4 +380,14 @@ fn capture_request(fixture: &fixture::Fixture, media_generation: u64) -> MediaSt
             },
         },
     }
+}
+
+async fn wait_for_marker(path: &Path) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("timed out waiting for {}", path.display()))
 }
