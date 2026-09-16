@@ -1,7 +1,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const EDID_BLOCK_SIZE: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +101,7 @@ mod tests {
 
     #[test]
     fn requests_match_the_kernel_layout() {
+        assert_eq!(VERSION, 2);
         assert_eq!(size_of::<Query>(), 16);
         assert_eq!(size_of::<Attach>(), 16);
         assert_eq!(offset_of!(Attach, edid_ptr), 8);
