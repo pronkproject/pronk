@@ -1,5 +1,6 @@
 pub mod brokered_kernel_display;
 pub mod caller;
+pub mod capability_lease;
 pub mod cast_display_slot;
 pub mod dbus;
 pub mod device_control_port;
