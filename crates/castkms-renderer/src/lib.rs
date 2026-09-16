@@ -7,6 +7,7 @@
 //! source access ended.
 
 mod capability;
+mod image;
 mod scene;
 mod source;
 
@@ -14,12 +15,14 @@ pub use capability::{
     CapabilityFormat, CapabilityProfile, CapabilitySnapshot, PendingCapability, RendererCapability,
     StorageProvenance,
 };
+pub use image::{RegisteredImage, UnregisterImageError};
 pub use scene::{ColorEncoding, ColorOperation, ColorRange, LayerKind, SceneJob, SceneLayer};
 pub use source::{FormatModifier, SourceImage, SourcePlane, SourceReleaseError};
 
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::sync::Arc;
 
 use castkms_sys::{
     drm_ioctl_castkms_renderer_abort_takeover, drm_ioctl_castkms_renderer_begin_takeover,
@@ -557,6 +560,8 @@ impl<'renderer, F: AsFd> SubmittedCandidate<'renderer, F> {
         Ok(ActiveRenderer {
             submitted: self,
             description,
+            image_scope: Arc::new(()),
+            next_image_id: NonZeroU64::new(1),
         })
     }
 
@@ -614,6 +619,8 @@ impl<'renderer, F: AsFd> ActivationError<'renderer, F> {
 pub struct ActiveRenderer<'renderer, F: AsFd> {
     submitted: SubmittedCandidate<'renderer, F>,
     description: Description,
+    image_scope: Arc<()>,
+    next_image_id: Option<NonZeroU64>,
 }
 
 impl<F: AsFd> ActiveRenderer<'_, F> {
