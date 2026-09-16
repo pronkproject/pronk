@@ -48,8 +48,9 @@ impl MediaPipelineError {
 
 /// Sole-owner capture and producer-node boundary.
 ///
-/// Its production adapter is the future per-display CastKMS actor. Neither the
-/// media-session use case nor the Device backend can access a grant or DRM fd.
+/// Implementations own the per-display CastKMS capability and its producer
+/// resources. Neither the media-session use case nor the Device backend can
+/// access that capability or a DRM fd.
 #[async_trait]
 pub trait CapturePipelinePort: fmt::Debug + Send + 'static {
     async fn start(

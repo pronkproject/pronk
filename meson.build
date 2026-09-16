@@ -31,10 +31,6 @@ cargo_profile = get_option('cargo-profile')
 cargo_profile_dir = cargo_profile == 'dev' ? 'debug' : 'release'
 cargo_profile_args = cargo_profile == 'dev' ? [] : ['--release']
 cargo_environment = environment()
-cargo_environment.set(
-  'PRONK_GRANT_HELPER_PATH',
-  join_paths(pronk_libexec_dir, 'pronk-grant-helper'),
-)
 
 cargo_workspace = custom_target(
   'cargo-workspace',
@@ -114,8 +110,6 @@ pronk_chromiacast = custom_target(
   install_dir: pronk_backend_install_dir,
 )
 
-subdir('src/pronk-grant-helper')
-
 run_target(
   'cargo-test',
   command: [
@@ -129,6 +123,5 @@ run_target(
   ],
 )
 
-subdir('tests/castkms-live')
 subdir('tests/backend-activation')
 subdir('data')

@@ -3,17 +3,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use pronk::caller::PublicBus;
 use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
-use pronk::kernel_session_provider::LegacyKernelSessionProvider;
 use pronk::manager::{BackendConfig, ManagerActor};
 use pronk_backend_host::{BackendEndpoint, BackendReconnectPolicy, ExactRegistrationValidator};
 use pronk_dbus::BUS_NAME;
 use tokio::time::{sleep, timeout};
 
-mod test_grant_provider;
+mod test_kernel_session_provider;
 
-use test_grant_provider::UnreachableGrantProvider;
+use test_kernel_session_provider::UnreachableKernelSessionProvider;
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -26,14 +24,12 @@ async fn main() -> anyhow::Result<()> {
         BackendReconnectPolicy::new(0, Duration::ZERO, Duration::ZERO, Duration::from_secs(1))?;
     let mut manager = ManagerActor::spawn(
         vec![BackendConfig::new(endpoint, 501, validator, policy)],
-        Arc::new(LegacyKernelSessionProvider::new(Arc::new(
-            UnreachableGrantProvider,
-        ))),
+        Arc::new(UnreachableKernelSessionProvider),
     )?;
     let connection = zbus::Connection::session()
         .await
         .context("connect to isolated session bus")?;
-    register_manager(&connection, manager.handle(), PublicBus::Session).await?;
+    register_manager(&connection, manager.handle()).await?;
     let inventory_events = manager
         .take_events()
         .context("manager event stream was already taken")?;
@@ -48,13 +44,7 @@ async fn main() -> anyhow::Result<()> {
     let lifecycle_connection = connection.clone();
     let lifecycle_manager = manager.handle();
     let lifecycle_task = tokio::spawn(async move {
-        serve_lifecycle_events(
-            &lifecycle_connection,
-            lifecycle_manager,
-            lifecycle_events,
-            PublicBus::Session,
-        )
-        .await
+        serve_lifecycle_events(&lifecycle_connection, lifecycle_manager, lifecycle_events).await
     });
 
     timeout(START_TIMEOUT, async {

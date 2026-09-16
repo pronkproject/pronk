@@ -1,10 +1,8 @@
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::process::Command;
 
 use anyhow::Context;
 use futures_util::StreamExt;
-use nix::unistd::{Uid, User};
 use pronk_dbus::{
     cast_display_object_path, CastDisplay1Proxy, DeviceSelection, DisplaySetupOptions,
     Manager1Proxy, MediaSession1Proxy, MediaSessionState, Operation1Proxy, OperationStage,
@@ -14,18 +12,10 @@ use pronk_dbus::{
 };
 
 const USAGE: &str = "usage:
-  pronkctl [--session|--system] list-devices
-  pronkctl [--session|--system] list-displays
-  pronkctl [--session|--system] add-display --device <backend-id>:<device-id> [--no-audio]
-  pronkctl [--session|--system] remove-display <display-id>";
-const PKEXEC_PATH: &str = "/usr/bin/pkexec";
-const SYSTEM_SERVICE_USER: &str = "pronk";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Bus {
-    Session,
-    System,
-}
+  pronkctl list-devices
+  pronkctl list-displays
+  pronkctl add-display --device <backend-id>:<device-id> [--no-audio]
+  pronkctl remove-display <display-id>";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
@@ -40,18 +30,8 @@ enum Action {
     RemoveDisplay(OsString),
 }
 
-impl Action {
-    fn uses_service(&self) -> bool {
-        !matches!(self, Self::Version | Self::Help)
-    }
-}
-
 fn main() -> anyhow::Result<()> {
-    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    let (bus, action) = parse_arguments(arguments.clone())?;
-    if bus == Bus::System && action.uses_service() {
-        reexecute_as_system_service_user(&arguments)?;
-    }
+    let action = parse_arguments(std::env::args_os().skip(1).collect())?;
 
     match &action {
         Action::Version => {
@@ -69,21 +49,10 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("create Tokio runtime")?;
-    runtime.block_on(run_action(bus, action))
+    runtime.block_on(run_action(action))
 }
 
-fn parse_arguments(mut arguments: Vec<OsString>) -> anyhow::Result<(Bus, Action)> {
-    let bus = match arguments.first().and_then(|argument| argument.to_str()) {
-        Some("--system") => {
-            arguments.remove(0);
-            Bus::System
-        }
-        Some("--session") => {
-            arguments.remove(0);
-            Bus::Session
-        }
-        _ => Bus::Session,
-    };
+fn parse_arguments(arguments: Vec<OsString>) -> anyhow::Result<Action> {
     let action = match arguments.as_slice() {
         [command] if command == "--version" => Action::Version,
         [command] if command == "--help" || command == "-h" => Action::Help,
@@ -108,50 +77,24 @@ fn parse_arguments(mut arguments: Vec<OsString>) -> anyhow::Result<(Bus, Action)
         }
         _ => anyhow::bail!(USAGE),
     };
-    Ok((bus, action))
+    Ok(action)
 }
 
-fn reexecute_as_system_service_user(arguments: &[OsString]) -> anyhow::Result<()> {
-    let service_user = User::from_name(SYSTEM_SERVICE_USER)
-        .context("resolve the pronk system account")?
-        .context("the pronk system account is not installed")?;
-    anyhow::ensure!(
-        !service_user.uid.is_root(),
-        "the pronk system account must not be root"
-    );
-    if Uid::effective() == service_user.uid {
-        return Ok(());
-    }
-
-    let executable = std::env::current_exe().context("resolve the current pronkctl executable")?;
-    let status = Command::new(PKEXEC_PATH)
-        .arg("--user")
-        .arg(SYSTEM_SERVICE_USER)
-        .arg(executable)
-        .args(arguments)
-        .status()
-        .context("authorize system-service control with polkit")?;
-    if let Some(code) = status.code() {
-        std::process::exit(code);
-    }
-    anyhow::bail!("pkexec was terminated before pronkctl completed")
-}
-
-async fn run_action(bus: Bus, action: Action) -> anyhow::Result<()> {
+async fn run_action(action: Action) -> anyhow::Result<()> {
     match action {
-        Action::ListDevices => list_devices(bus).await,
-        Action::ListDisplays => list_displays(bus).await,
+        Action::ListDevices => list_devices().await,
+        Action::ListDisplays => list_displays().await,
         Action::AddDisplay {
             device,
             audio_enabled,
-        } => add_display(bus, &device, audio_enabled).await,
-        Action::RemoveDisplay(display_id) => remove_display(bus, &display_id).await,
+        } => add_display(&device, audio_enabled).await,
+        Action::RemoveDisplay(display_id) => remove_display(&display_id).await,
         Action::Version | Action::Help => unreachable!("local actions return before runtime setup"),
     }
 }
 
-async fn list_displays(bus: Bus) -> anyhow::Result<()> {
-    let client = Client::connect(bus).await?;
+async fn list_displays() -> anyhow::Result<()> {
+    let client = Client::connect().await?;
     let proxy = client
         .manager_with_feature(
             API_FEATURE_CAST_DISPLAY_LIFECYCLE
@@ -251,8 +194,8 @@ fn format_media_status(state: &MediaSessionState) -> String {
     }
 }
 
-async fn list_devices(bus: Bus) -> anyhow::Result<()> {
-    let client = Client::connect(bus).await?;
+async fn list_devices() -> anyhow::Result<()> {
+    let client = Client::connect().await?;
     let proxy = client
         .manager_with_feature(API_FEATURE_DEVICE_INVENTORY, "Device inventory")
         .await?;
@@ -274,12 +217,12 @@ async fn list_devices(bus: Bus) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn add_display(bus: Bus, device_argument: &OsStr, audio_enabled: bool) -> anyhow::Result<()> {
+async fn add_display(device_argument: &OsStr, audio_enabled: bool) -> anyhow::Result<()> {
     let device_argument = device_argument
         .to_str()
         .context("Device selector is not valid UTF-8")?;
     let (backend_id, device_id) = parse_device_target(device_argument)?;
-    let client = Client::connect(bus).await?;
+    let client = Client::connect().await?;
     let proxy = client
         .manager_with_feature(
             API_FEATURE_DEVICE_INVENTORY | API_FEATURE_CAST_DISPLAY_LIFECYCLE,
@@ -369,11 +312,11 @@ async fn wait_for_operation(operation: &Operation1Proxy<'_>) -> anyhow::Result<O
     Ok(state)
 }
 
-async fn remove_display(bus: Bus, display_id: &OsStr) -> anyhow::Result<()> {
+async fn remove_display(display_id: &OsStr) -> anyhow::Result<()> {
     let display_id = display_id
         .to_str()
         .context("cast-display ID is not valid UTF-8")?;
-    let client = Client::connect(bus).await?;
+    let client = Client::connect().await?;
     let proxy = client
         .manager_with_feature(API_FEATURE_CAST_DISPLAY_LIFECYCLE, "cast-display lifecycle")
         .await?;
@@ -422,15 +365,10 @@ struct Client {
 }
 
 impl Client {
-    async fn connect(bus: Bus) -> anyhow::Result<Self> {
-        let connection = match bus {
-            Bus::Session => zbus::Connection::session()
-                .await
-                .context("connect to the session bus")?,
-            Bus::System => zbus::Connection::system()
-                .await
-                .context("connect to the system bus")?,
-        };
+    async fn connect() -> anyhow::Result<Self> {
+        let connection = zbus::Connection::session()
+            .await
+            .context("connect to the session bus")?;
         Ok(Self { connection })
     }
 
@@ -495,32 +433,5 @@ mod tests {
         state.phase = pronk_dbus::MediaSessionPhase::Recovering;
         state.media_generation = 4;
         assert_eq!(format_media_status(&state), "Recovering (generation 4)");
-    }
-
-    #[test]
-    fn system_mode_parses_before_requesting_polkit_authorization() {
-        let (bus, action) = parse_arguments(vec![
-            "--system".into(),
-            "add-display".into(),
-            "--device".into(),
-            "mock:living-room".into(),
-            "--no-audio".into(),
-        ])
-        .unwrap();
-        assert_eq!(bus, Bus::System);
-        assert_eq!(
-            action,
-            Action::AddDisplay {
-                device: "mock:living-room".into(),
-                audio_enabled: false,
-            }
-        );
-        assert!(action.uses_service());
-
-        let (bus, action) = parse_arguments(vec!["--system".into(), "--help".into()]).unwrap();
-        assert_eq!(bus, Bus::System);
-        assert_eq!(action, Action::Help);
-        assert!(!action.uses_service());
-        assert!(parse_arguments(vec!["--system".into(), "unknown".into()]).is_err());
     }
 }

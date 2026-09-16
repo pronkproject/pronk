@@ -1,40 +1,18 @@
 //! Application boundary for acquiring one authorized kernel display lifetime.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use pronk_capture_broker::{Provider as BrokerProvider, Session as BrokerSession};
-use pronk_core::grant::{
-    GrantAcquisitionError, GrantLease, GrantProfile, GrantProvider, GrantTarget,
-};
 use pronk_core::output::{CastKmsOutput, OutputConnection};
 use tokio_util::sync::CancellationToken;
 
-pub enum KernelSession {
-    Brokered(BrokerSession),
-    Legacy(GrantLease),
-}
-
-impl std::fmt::Debug for KernelSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Brokered(session) => formatter
-                .debug_tuple("Brokered")
-                .field(&session.id())
-                .finish(),
-            Self::Legacy(_) => formatter.debug_tuple("Legacy").finish(),
-        }
-    }
-}
+pub type KernelSession = BrokerSession;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KernelSessionError {
     #[error("kernel display authorization was cancelled")]
     Cancelled,
-    #[error("acquire brokered kernel display session: {0}")]
+    #[error("acquire kernel display session: {0}")]
     Broker(#[source] pronk_capture_broker::Error),
-    #[error("acquire legacy CastKMS grant: {0}")]
-    Legacy(#[source] GrantAcquisitionError),
     #[error("CastKMS output has an invalid zero {0}")]
     InvalidOutput(&'static str),
     #[error("brokered kernel display sessions do not yet provide audio")]
@@ -87,7 +65,6 @@ impl KernelSessionProvider for BrokerProvider {
             cancellation,
         )
         .await
-        .map(KernelSession::Brokered)
         .map_err(|error| match error {
             pronk_capture_broker::Error::Cancelled => KernelSessionError::Cancelled,
             error => KernelSessionError::Broker(error),
@@ -110,74 +87,13 @@ fn validate_brokered_features(audio_enabled: bool) -> Result<(), KernelSessionEr
     }
 }
 
-#[derive(Debug)]
-pub struct LegacyKernelSessionProvider {
-    grants: Arc<dyn GrantProvider>,
-}
-
-impl LegacyKernelSessionProvider {
-    pub fn new(grants: Arc<dyn GrantProvider>) -> Self {
-        Self { grants }
-    }
-}
-
-#[async_trait]
-impl KernelSessionProvider for LegacyKernelSessionProvider {
-    async fn acquire(
-        &self,
-        output: &CastKmsOutput,
-        audio_enabled: bool,
-        cancellation: CancellationToken,
-    ) -> Result<KernelSession, KernelSessionError> {
-        let profile = if audio_enabled {
-            GrantProfile::DisplayCecAudioV1
-        } else {
-            GrantProfile::DisplayCecV1
-        };
-        self.grants
-            .acquire(
-                GrantTarget {
-                    device_major: output.device_major,
-                    device_minor: output.device_minor,
-                    connector_id: output.connector_id,
-                    profile,
-                },
-                cancellation,
-            )
-            .await
-            .map(KernelSession::Legacy)
-            .map_err(|error| match error {
-                GrantAcquisitionError::Cancelled => KernelSessionError::Cancelled,
-                error => KernelSessionError::Legacy(error),
-            })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     use pronk_core::output::{CastKmsOutputId, OutputConnection};
 
     use super::*;
-
-    #[derive(Debug, Default)]
-    struct RecordingGrantProvider {
-        target: Mutex<Option<GrantTarget>>,
-    }
-
-    #[async_trait]
-    impl GrantProvider for RecordingGrantProvider {
-        async fn acquire(
-            &self,
-            target: GrantTarget,
-            _cancellation: CancellationToken,
-        ) -> Result<GrantLease, GrantAcquisitionError> {
-            *self.target.lock().unwrap() = Some(target);
-            Err(GrantAcquisitionError::Cancelled)
-        }
-    }
 
     fn output() -> CastKmsOutput {
         CastKmsOutput {
@@ -195,23 +111,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn legacy_adapter_selects_the_complete_audio_profile() {
-        let grants = Arc::new(RecordingGrantProvider::default());
-        let provider = LegacyKernelSessionProvider::new(grants.clone());
-        assert!(matches!(
-            provider
-                .acquire(&output(), true, CancellationToken::new())
-                .await,
-            Err(KernelSessionError::Cancelled)
-        ));
-        let target = grants.target.lock().unwrap().clone().unwrap();
-        assert_eq!(target.device_major, 226);
-        assert_eq!(target.device_minor, 9);
-        assert_eq!(target.connector_id, 29);
-        assert_eq!(target.profile, GrantProfile::DisplayCecAudioV1);
-    }
-
     #[test]
     fn brokered_sessions_reject_audio_requests() {
         assert!(matches!(
@@ -226,9 +125,6 @@ mod tests {
         let mut candidate = output();
         candidate.connection = OutputConnection::Connected;
         assert!(broker_may_acquire(&candidate));
-
-        let legacy = LegacyKernelSessionProvider::new(Arc::new(RecordingGrantProvider::default()));
-        assert!(!legacy.may_acquire(&candidate));
 
         candidate.connection = OutputConnection::Unknown;
         assert!(!broker_may_acquire(&candidate));

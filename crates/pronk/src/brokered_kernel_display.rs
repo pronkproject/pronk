@@ -18,6 +18,8 @@ use crate::kernel_display_port::{
     KernelDisplayPort,
 };
 
+pub const DEFAULT_TOPOLOGY_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
 #[derive(Debug)]
 pub struct BrokeredKernelDisplay {
     session: Option<Session>,

@@ -13,8 +13,7 @@ use std::time::Duration;
 use nix::{libc, unistd::Uid};
 use pronk_backend_host::{BackendSessionError, BackendSessionHandle};
 use pronk_backend_protocol::{PreparationRequest, StopReason, Validate};
-use pronk_core::castkms::{CastKmsClient, CastKmsError, ValidatedEdid};
-use pronk_core::edid::EdidMode;
+use pronk_core::edid::{EdidMode, ValidatedEdid};
 use pronk_core::identity::PnpIdResolver;
 use pronk_core::output::CastKmsOutputId;
 use pronk_core::session::PinnedCallerProcess;
@@ -26,8 +25,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::brokered_kernel_display::BrokeredKernelDisplay;
-use crate::castkms_actor::{CastKmsActorConfig, CastKmsKernelActor};
+use crate::brokered_kernel_display::{BrokeredKernelDisplay, DEFAULT_TOPOLOGY_POLL_INTERVAL};
 use crate::device_recovery::{
     DeviceSessionFactoryError, DeviceSessionFactoryPort, PreparedDeviceSession,
 };
@@ -577,135 +575,87 @@ struct DisplaySetupContext {
     status: watch::Sender<DisplaySetupSnapshot>,
 }
 
-enum AcquiredKernelSession {
-    Brokered(pronk_capture_broker::Session),
-    Legacy(Box<CastKmsClient>),
+struct AttachedKernelSession {
+    kernel: BrokeredKernelDisplay,
+    media_capture: pronk_capture_broker::CaptureAccess,
 }
 
-enum AttachedKernelSession {
-    Brokered {
-        kernel: BrokeredKernelDisplay,
-        media_capture: pronk_capture_broker::CaptureAccess,
-    },
-    Legacy(Box<CastKmsClient>),
-}
-
-fn offer_for_kernel_session(
-    offer: &PreparationRequest,
-    session: &AcquiredKernelSession,
-) -> PreparationRequest {
+fn offer_for_kernel_session(offer: &PreparationRequest) -> PreparationRequest {
     let mut offer = offer.clone();
-    if matches!(session, AcquiredKernelSession::Brokered(_)) {
-        offer.audio_profiles.clear();
-        offer.requested_features = 0;
-    }
+    offer.audio_profiles.clear();
+    offer.requested_features = 0;
     offer
 }
 
 async fn attach_kernel_session(
-    session: AcquiredKernelSession,
+    session: KernelSession,
     edid: ValidatedEdid,
-    assigned_display_name: String,
     crtc_id: NonZeroU32,
     modes: Vec<EdidMode>,
     cancellation: &CancellationToken,
 ) -> Result<AttachedKernelSession, DisplaySetupError> {
-    match session {
-        AcquiredKernelSession::Legacy(client) => {
-            let mut task = tokio::task::spawn_blocking(move || {
-                let result = client.attach_monitor(&edid, &assigned_display_name);
-                (client, result)
-            });
-            let (client, result) = tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => {
-                    let joined = (&mut task).await;
-                    if let Ok((client, Ok(()))) = joined {
-                        if let Err(error) = detach_client(*client).await {
-                            warn!(%error, "cancelled setup could not explicitly detach its monitor");
+    let display_capture = session
+        .capture_access()
+        .map_err(DisplaySetupError::CaptureAccess)?;
+    let media_capture = session
+        .capture_access()
+        .map_err(DisplaySetupError::CaptureAccess)?;
+    let mut task = tokio::task::spawn_blocking(move || {
+        let result = session.attach_monitor(Some(edid.as_bytes()));
+        (session, result)
+    });
+    let (session, result) = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            let joined = (&mut task).await;
+            if let Ok((session, Ok(()))) = joined {
+                match BrokeredKernelDisplay::new(
+                    session,
+                    display_capture,
+                    crtc_id,
+                    modes,
+                    DEFAULT_TOPOLOGY_POLL_INTERVAL,
+                ) {
+                    Ok(kernel) => {
+                        if let Err(error) = Box::new(kernel).detach().await {
+                            warn!(%error, "cancelled setup could not release its brokered monitor");
                         }
                     }
-                    return Err(DisplaySetupError::Cancelled);
-                }
-                joined = &mut task => joined.map_err(DisplaySetupError::AttachTask)?,
-            };
-            result.map_err(DisplaySetupError::Attach)?;
-            if cancellation.is_cancelled() {
-                if let Err(error) = detach_client(*client).await {
-                    warn!(%error, "cancelled setup could not explicitly detach its monitor");
-                }
-                return Err(DisplaySetupError::Cancelled);
-            }
-            Ok(AttachedKernelSession::Legacy(client))
-        }
-        AcquiredKernelSession::Brokered(session) => {
-            let display_capture = session
-                .capture_access()
-                .map_err(DisplaySetupError::CaptureAccess)?;
-            let media_capture = session
-                .capture_access()
-                .map_err(DisplaySetupError::CaptureAccess)?;
-            let mut task = tokio::task::spawn_blocking(move || {
-                let result = session.attach_monitor(Some(edid.as_bytes()));
-                (session, result)
-            });
-            let (session, result) = tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => {
-                    let joined = (&mut task).await;
-                    if let Ok((session, Ok(()))) = joined {
-                        match BrokeredKernelDisplay::new(
-                            session,
-                            display_capture,
-                            crtc_id,
-                            modes,
-                            crate::kernel_display::DEFAULT_TOPOLOGY_POLL_INTERVAL,
-                        ) {
-                            Ok(kernel) => {
-                                if let Err(error) = Box::new(kernel).detach().await {
-                                    warn!(%error, "cancelled setup could not release its brokered monitor");
-                                }
-                            }
-                            Err(error) => {
-                                warn!(%error, "cancelled setup could not construct brokered cleanup");
-                            }
-                        }
+                    Err(error) => {
+                        warn!(%error, "cancelled setup could not construct brokered cleanup");
                     }
-                    return Err(DisplaySetupError::Cancelled);
                 }
-                joined = &mut task => joined.map_err(DisplaySetupError::AttachTask)?,
-            };
-            result.map_err(DisplaySetupError::BrokerAttach)?;
-            let kernel = BrokeredKernelDisplay::new(
-                session,
-                display_capture,
-                crtc_id,
-                modes,
-                crate::kernel_display::DEFAULT_TOPOLOGY_POLL_INTERVAL,
-            )
-            .map_err(DisplaySetupError::BrokerDisplay)?;
-            if cancellation.is_cancelled() {
-                if let Err(error) = Box::new(kernel).detach().await {
-                    warn!(%error, "cancelled setup could not release its brokered monitor");
-                }
-                return Err(DisplaySetupError::Cancelled);
             }
-            Ok(AttachedKernelSession::Brokered {
-                kernel,
-                media_capture,
-            })
+            return Err(DisplaySetupError::Cancelled);
         }
+        joined = &mut task => joined.map_err(DisplaySetupError::AttachTask)?,
+    };
+    result.map_err(DisplaySetupError::BrokerAttach)?;
+    let kernel = BrokeredKernelDisplay::new(
+        session,
+        display_capture,
+        crtc_id,
+        modes,
+        DEFAULT_TOPOLOGY_POLL_INTERVAL,
+    )
+    .map_err(DisplaySetupError::BrokerDisplay)?;
+    if cancellation.is_cancelled() {
+        if let Err(error) = Box::new(kernel).detach().await {
+            warn!(%error, "cancelled setup could not release its brokered monitor");
+        }
+        return Err(DisplaySetupError::Cancelled);
     }
+    Ok(AttachedKernelSession {
+        kernel,
+        media_capture,
+    })
 }
 
 async fn cleanup_attached_kernel_session(session: AttachedKernelSession) {
-    let result: Result<(), String> = match session {
-        AttachedKernelSession::Legacy(client) => detach_client(*client).await,
-        AttachedKernelSession::Brokered { kernel, .. } => Box::new(kernel)
-            .detach()
-            .await
-            .map_err(|error| error.to_string()),
-    };
+    let result = Box::new(session.kernel)
+        .detach()
+        .await
+        .map_err(|error| error.to_string());
     if let Err(error) = result {
         warn!(%error, "display setup could not release its attached kernel session");
     }
@@ -809,14 +759,7 @@ async fn run_display_setup_inner(
             KernelSessionError::Cancelled => DisplaySetupError::Cancelled,
             error => DisplaySetupError::KernelSession(error),
         })?;
-    let kernel_session = match kernel_session {
-        KernelSession::Brokered(session) => AcquiredKernelSession::Brokered(session),
-        KernelSession::Legacy(lease) => AcquiredKernelSession::Legacy(Box::new(
-            CastKmsClient::new(lease).map_err(DisplaySetupError::GrantClient)?,
-        )),
-    };
-    let brokered = matches!(&kernel_session, AcquiredKernelSession::Brokered(_));
-    let offer = offer_for_kernel_session(&context.offer, &kernel_session);
+    let offer = offer_for_kernel_session(&context.offer);
     if context.cancellation.is_cancelled() {
         return Err(DisplaySetupError::Cancelled);
     }
@@ -873,7 +816,7 @@ async fn run_display_setup_inner(
     };
     drop(prepare);
 
-    let kernel_audio_enabled = context.audio_enabled && !brokered;
+    let kernel_audio_enabled = false;
     let prepared = match PreparedCastDevice::from_capabilities(
         device.clone(),
         capabilities,
@@ -939,27 +882,20 @@ async fn run_display_setup_inner(
         None,
     );
     let edid = prepared.generated_edid().edid().clone();
-    let assigned_display_name = device.display_name.clone();
     let crtc_id = NonZeroU32::new(output.crtc_id).ok_or_else(|| {
         DisplaySetupError::Monitor("reserved CastKMS output has a zero CRTC ID".into())
     })?;
     let modes = prepared.generated_edid().modes().to_vec();
-    let attached = match attach_kernel_session(
-        kernel_session,
-        edid,
-        assigned_display_name,
-        crtc_id,
-        modes,
-        &context.cancellation,
-    )
-    .await
-    {
-        Ok(attached) => attached,
-        Err(error) => {
-            stop_partial_backend(backend_session).await;
-            return Err(error);
-        }
-    };
+    let attached =
+        match attach_kernel_session(kernel_session, edid, crtc_id, modes, &context.cancellation)
+            .await
+        {
+            Ok(attached) => attached,
+            Err(error) => {
+                stop_partial_backend(backend_session).await;
+                return Err(error);
+            }
+        };
     if context.cancellation.is_cancelled() {
         stop_partial_backend(backend_session).await;
         cleanup_attached_kernel_session(attached).await;
@@ -978,9 +914,6 @@ async fn run_display_setup_inner(
             }
         };
     let video_profile_id = prepared.capabilities().video_profiles[0].profile_id.clone();
-    let audio_profile_id = (kernel_audio_enabled
-        && !prepared.capabilities().audio_profiles.is_empty())
-    .then(|| prepared.capabilities().audio_profiles[0].profile_id.clone());
     let remote_provider = ClassifiedSocketRemoteProvider::new_for_server_uid(
         pipewire_paths,
         Uid::from_raw(context.media_runtime.server_uid),
@@ -988,66 +921,40 @@ async fn run_display_setup_inner(
     let session_id = context.display_id.to_string();
     let initial_session_generation =
         NonZeroU64::new(INITIAL_SESSION_GENERATION).expect("initial session generation is nonzero");
-    let (device_session, device_control, session_replacement) = replaceable_device_session(
+    let (device_session, _device_control, session_replacement) = replaceable_device_session(
         initial_session_generation,
         Box::new(BackendDeviceSession::new(backend_session)),
     );
     let device_instance = format!("cast-display-{}", context.display_id.object_segment());
     let video_bitrate = NonZeroU64::new(8_000_000).expect("fixed bitrate is nonzero");
-    let runtime = match attached {
-        AttachedKernelSession::Legacy(client) => {
-            let actor_config = CastKmsActorConfig {
-                producer_remotes: remote_provider.clone(),
+    let runtime = Ok((
+        Box::new(attached.kernel) as Box<dyn KernelDisplayPort>,
+        Box::new(DrmCapturePipeline::new(
+            attached.media_capture,
+            remote_provider.clone(),
+            DrmCapturePipelineConfig {
+                connector_id: NonZeroU32::new(output.connector_id)
+                    .expect("reserved CastKMS outputs have nonzero connector IDs"),
+                output_index: output.id.output_index,
                 session_id: session_id.clone(),
                 device_instance: device_instance.clone(),
                 node_description: device.display_name.clone(),
-                output_index: output.id.output_index,
                 video_profile_id: video_profile_id.clone(),
-                audio_profile_id,
                 video_bitrate,
-                device_control: prepared
-                    .control_enabled()
-                    .then(|| Arc::clone(&device_control)),
-            };
-            CastKmsKernelActor::spawn(*client, actor_config).map(|(kernel, capture)| {
-                (
-                    Box::new(kernel) as Box<dyn KernelDisplayPort>,
-                    Box::new(capture) as Box<dyn CapturePipelinePort>,
-                )
-            })
-        }
-        AttachedKernelSession::Brokered {
-            kernel,
-            media_capture,
-        } => Ok((
-            Box::new(kernel) as Box<dyn KernelDisplayPort>,
-            Box::new(DrmCapturePipeline::new(
-                media_capture,
-                remote_provider.clone(),
-                DrmCapturePipelineConfig {
-                    connector_id: NonZeroU32::new(output.connector_id)
-                        .expect("reserved CastKMS outputs have nonzero connector IDs"),
-                    output_index: output.id.output_index,
-                    session_id: session_id.clone(),
-                    device_instance: device_instance.clone(),
-                    node_description: device.display_name.clone(),
-                    video_profile_id: video_profile_id.clone(),
-                    video_bitrate,
-                    capture_rate_hz: NonZeroU32::new(GENERIC_CAPTURE_RATE_HZ)
-                        .expect("fixed capture rate is nonzero"),
-                    pool_size: NonZeroU32::new(GENERIC_CAPTURE_POOL_SIZE)
-                        .expect("fixed capture pool is nonzero"),
-                    request_capacity: NonZeroU32::new(GENERIC_CAPTURE_REQUEST_CAPACITY)
-                        .expect("fixed request capacity is nonzero"),
-                    pool_byte_limit: NonZeroU64::new(GENERIC_CAPTURE_POOL_BYTE_LIMIT)
-                        .expect("fixed capture pool byte limit is nonzero"),
-                    heap_path: PathBuf::from(GENERIC_CAPTURE_HEAP),
-                    poll_interval: GENERIC_CAPTURE_POLL_INTERVAL,
-                    shutdown_timeout: GENERIC_CAPTURE_SHUTDOWN_TIMEOUT,
-                },
-            )) as Box<dyn CapturePipelinePort>,
-        )),
-    };
+                capture_rate_hz: NonZeroU32::new(GENERIC_CAPTURE_RATE_HZ)
+                    .expect("fixed capture rate is nonzero"),
+                pool_size: NonZeroU32::new(GENERIC_CAPTURE_POOL_SIZE)
+                    .expect("fixed capture pool is nonzero"),
+                request_capacity: NonZeroU32::new(GENERIC_CAPTURE_REQUEST_CAPACITY)
+                    .expect("fixed request capacity is nonzero"),
+                pool_byte_limit: NonZeroU64::new(GENERIC_CAPTURE_POOL_BYTE_LIMIT)
+                    .expect("fixed capture pool byte limit is nonzero"),
+                heap_path: PathBuf::from(GENERIC_CAPTURE_HEAP),
+                poll_interval: GENERIC_CAPTURE_POLL_INTERVAL,
+                shutdown_timeout: GENERIC_CAPTURE_SHUTDOWN_TIMEOUT,
+            },
+        )) as Box<dyn CapturePipelinePort>,
+    )) as Result<_, io::Error>;
     let (kernel, capture) = match runtime {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -1205,12 +1112,6 @@ async fn stop_partial_backend(session: BackendSessionHandle) {
     }
 }
 
-async fn detach_client(client: CastKmsClient) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || client.detach_monitor().map_err(|error| error.to_string()))
-        .await
-        .map_err(|error| format!("detach task failed: {error}"))?
-}
-
 fn set_status(
     status: &watch::Sender<DisplaySetupSnapshot>,
     stage: DisplaySetupStage,
@@ -1263,14 +1164,10 @@ pub enum DisplaySetupError {
     Device(#[source] ResolveDeviceError),
     #[error("acquire kernel display session: {0}")]
     KernelSession(#[source] KernelSessionError),
-    #[error("open verified CastKMS grant client: {0}")]
-    GrantClient(#[source] CastKmsError),
     #[error("backend display session failed: {0}")]
     Backend(#[source] BackendSessionError),
     #[error("prepare selected Device identity and EDID: {0}")]
     Prepare(#[source] PrepareCastDeviceError),
-    #[error("attach selected Device EDID: {0}")]
-    Attach(#[source] CastKmsError),
     #[error("duplicate brokered capture access: {0}")]
     CaptureAccess(#[source] io::Error),
     #[error("attach selected Device through brokered monitor control: {0}")]
@@ -1300,12 +1197,10 @@ impl DisplaySetupError {
             Self::KernelSession(KernelSessionError::UnsupportedAudio) => {
                 OperationErrorCode::InvalidRequest
             }
-            Self::KernelSession(_) | Self::GrantClient(_) => {
-                OperationErrorCode::AuthorizationFailed
-            }
+            Self::KernelSession(_) => OperationErrorCode::AuthorizationFailed,
             Self::Backend(error) => backend_session_error_code(error),
             Self::Prepare(error) => prepare_device_error_code(error),
-            Self::Attach(_) | Self::BrokerAttach(_) => OperationErrorCode::AttachmentFailed,
+            Self::BrokerAttach(_) => OperationErrorCode::AttachmentFailed,
             Self::CallerMonitor(_)
             | Self::CallerTask(_)
             | Self::ReservationConsumed
@@ -1395,20 +1290,18 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use pronk_core::grant::{GrantAcquisitionError, GrantLease, GrantProvider, GrantTarget};
     use pronk_core::identity::DEFAULT_SYNTHESIZER_PNP_ID;
     use pronk_core::output::{CastKmsOutput, CastKmsOutputId, OutputConnection};
     use pronk_dbus::DeviceAvailability;
 
     use super::*;
-    use crate::kernel_session_provider::LegacyKernelSessionProvider;
     use crate::manager::{
         test_reserved_display_slot, ManagerActor, OutputInventoryProvider,
         OutputInventoryProviderError,
     };
 
     #[derive(Debug)]
-    struct CancellationGrantProvider {
+    struct CancellationKernelSessionProvider {
         entered: Arc<tokio::sync::Notify>,
         observed_cancellation: Arc<AtomicBool>,
     }
@@ -1423,30 +1316,32 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct UnreachableGrantProvider;
+    struct UnreachableKernelSessionProvider;
 
     #[async_trait::async_trait]
-    impl GrantProvider for UnreachableGrantProvider {
+    impl KernelSessionProvider for UnreachableKernelSessionProvider {
         async fn acquire(
             &self,
-            _target: GrantTarget,
+            _output: &pronk_core::output::CastKmsOutput,
+            _audio_enabled: bool,
             _cancellation: CancellationToken,
-        ) -> Result<GrantLease, GrantAcquisitionError> {
+        ) -> Result<KernelSession, KernelSessionError> {
             panic!("invalid Device selection reached grant acquisition")
         }
     }
 
     #[async_trait::async_trait]
-    impl GrantProvider for CancellationGrantProvider {
+    impl KernelSessionProvider for CancellationKernelSessionProvider {
         async fn acquire(
             &self,
-            _target: GrantTarget,
+            _output: &pronk_core::output::CastKmsOutput,
+            _audio_enabled: bool,
             cancellation: CancellationToken,
-        ) -> Result<GrantLease, GrantAcquisitionError> {
+        ) -> Result<KernelSession, KernelSessionError> {
             self.entered.notify_one();
             cancellation.cancelled().await;
             self.observed_cancellation.store(true, Ordering::SeqCst);
-            Err(GrantAcquisitionError::Cancelled)
+            Err(KernelSessionError::Cancelled)
         }
     }
 
@@ -1456,9 +1351,7 @@ mod tests {
             PnpIdResolver::from_database("GGL\tGoogle Inc.\n", &[], DEFAULT_SYNTHESIZER_PNP_ID)
                 .unwrap(),
         );
-        let provider: Arc<dyn KernelSessionProvider> = Arc::new(LegacyKernelSessionProvider::new(
-            Arc::new(UnreachableGrantProvider),
-        ));
+        let provider: Arc<dyn KernelSessionProvider> = Arc::new(UnreachableKernelSessionProvider);
         let manager = ManagerActor::spawn_with_providers(
             Vec::new(),
             Arc::new(UnreachableOutputProvider),
@@ -1540,12 +1433,11 @@ mod tests {
         let (slot, mut releases) = test_reserved_display_slot(device, output);
         let entered = Arc::new(tokio::sync::Notify::new());
         let observed_cancellation = Arc::new(AtomicBool::new(false));
-        let grants = Arc::new(CancellationGrantProvider {
-            entered: Arc::clone(&entered),
-            observed_cancellation: Arc::clone(&observed_cancellation),
-        });
         let provider: Arc<dyn KernelSessionProvider> =
-            Arc::new(LegacyKernelSessionProvider::new(grants));
+            Arc::new(CancellationKernelSessionProvider {
+                entered: Arc::clone(&entered),
+                observed_cancellation: Arc::clone(&observed_cancellation),
+            });
         let resolver = Arc::new(
             PnpIdResolver::from_database("GGL\tGoogle Inc.\n", &[], DEFAULT_SYNTHESIZER_PNP_ID)
                 .unwrap(),

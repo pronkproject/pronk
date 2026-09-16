@@ -14,10 +14,7 @@ use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::Connection;
 use zvariant::OwnedObjectPath;
 
-use crate::caller::{
-    pin_authorized_system_bus_caller, pin_bus_caller_for, query_bus_caller_credentials,
-    BusCallerCredentials, PublicBus,
-};
+use crate::caller::pin_bus_caller;
 use crate::display::{CastDisplayId, DisplaySetupHandle, DisplaySetupSnapshot, DisplaySetupStage};
 use crate::manager::{InventoryEvent, LifecycleEvent, ManagerHandle};
 
@@ -26,15 +23,11 @@ const TERMINAL_OPERATION_RETENTION: std::time::Duration = std::time::Duration::f
 #[derive(Debug, Clone)]
 pub struct ManagerInterface {
     manager: ManagerHandle,
-    public_bus: PublicBus,
 }
 
 impl ManagerInterface {
-    pub fn new(manager: ManagerHandle, public_bus: PublicBus) -> Self {
-        Self {
-            manager,
-            public_bus,
-        }
+    pub fn new(manager: ManagerHandle) -> Self {
+        Self { manager }
     }
 }
 
@@ -81,7 +74,7 @@ impl ManagerInterface {
         device
             .validate()
             .map_err(|error| zbus::fdo::Error::InvalidArgs(error.to_string()))?;
-        let caller = authorize_and_pin_caller(self.public_bus, &header, connection).await?;
+        let caller = pin_caller(&header, connection).await?;
         let operation = self
             .manager
             .start_display_setup(device, None, caller, options.audio_enabled)
@@ -91,7 +84,7 @@ impl ManagerInterface {
         let was_added = match object_server
             .at(
                 path.clone(),
-                OperationInterface::new(self.manager.clone(), operation.clone(), self.public_bus),
+                OperationInterface::new(self.manager.clone(), operation.clone()),
             )
             .await
         {
@@ -127,13 +120,7 @@ impl ManagerInterface {
     }
 
     #[zbus(name = "RemoveDisplay")]
-    async fn remove_display(
-        &self,
-        display_id: String,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-    ) -> zbus::fdo::Result<()> {
-        authorize_system_control(self.public_bus, &header, connection).await?;
+    async fn remove_display(&self, display_id: String) -> zbus::fdo::Result<()> {
         let display_id = display_id
             .parse::<CastDisplayId>()
             .map_err(|error| zbus::fdo::Error::InvalidArgs(error.to_string()))?;
@@ -194,16 +181,11 @@ async fn retire_unpublished_operation(manager: ManagerHandle, operation: Display
 struct OperationInterface {
     manager: ManagerHandle,
     operation: DisplaySetupHandle,
-    public_bus: PublicBus,
 }
 
 impl OperationInterface {
-    fn new(manager: ManagerHandle, operation: DisplaySetupHandle, public_bus: PublicBus) -> Self {
-        Self {
-            manager,
-            operation,
-            public_bus,
-        }
+    fn new(manager: ManagerHandle, operation: DisplaySetupHandle) -> Self {
+        Self { manager, operation }
     }
 }
 
@@ -213,7 +195,6 @@ struct CastDisplayInterface {
     display_id: CastDisplayId,
     info: CastDisplayInfo,
     state: CastDisplayState,
-    public_bus: PublicBus,
 }
 
 impl CastDisplayInterface {
@@ -222,14 +203,12 @@ impl CastDisplayInterface {
         display_id: CastDisplayId,
         info: CastDisplayInfo,
         state: CastDisplayState,
-        public_bus: PublicBus,
     ) -> Self {
         Self {
             manager,
             display_id,
             info,
             state,
-            public_bus,
         }
     }
 }
@@ -258,12 +237,7 @@ impl CastDisplayInterface {
     }
 
     #[zbus(name = "Remove")]
-    async fn remove(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-    ) -> zbus::fdo::Result<()> {
-        authorize_system_control(self.public_bus, &header, connection).await?;
+    async fn remove(&self) -> zbus::fdo::Result<()> {
         self.manager
             .remove_display(self.display_id)
             .await
@@ -302,12 +276,7 @@ impl OperationInterface {
     }
 
     #[zbus(name = "Cancel")]
-    async fn cancel(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-    ) -> zbus::fdo::Result<bool> {
-        authorize_system_control(self.public_bus, &header, connection).await?;
+    async fn cancel(&self) -> zbus::fdo::Result<bool> {
         self.manager
             .cancel_display_setup(self.operation.display_id())
             .await
@@ -324,51 +293,14 @@ fn method_sender<'a>(header: &'a Header<'a>) -> zbus::fdo::Result<&'a zbus::name
         .ok_or_else(|| zbus::fdo::Error::AccessDenied("D-Bus caller has no sender".into()))
 }
 
-async fn authorize_system_control(
-    public_bus: PublicBus,
-    header: &Header<'_>,
-    connection: &Connection,
-) -> zbus::fdo::Result<()> {
-    if public_bus == PublicBus::Session {
-        return Ok(());
-    }
-    let sender = method_sender(header)?;
-    let credentials = query_bus_caller_credentials(connection, sender)
-        .await
-        .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))?;
-    authorize_system_credentials(connection, sender, credentials).await
-}
-
-async fn authorize_and_pin_caller(
-    public_bus: PublicBus,
+async fn pin_caller(
     header: &Header<'_>,
     connection: &Connection,
 ) -> zbus::fdo::Result<pronk_core::session::PinnedCallerProcess> {
     let sender = method_sender(header)?;
-    if public_bus == PublicBus::Session {
-        return pin_bus_caller_for(connection, sender, PublicBus::Session)
-            .await
-            .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()));
-    }
-    let credentials = query_bus_caller_credentials(connection, sender)
+    pin_bus_caller(connection, sender)
         .await
-        .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))?;
-    authorize_system_credentials(connection, sender, credentials).await?;
-    pin_authorized_system_bus_caller(credentials)
-        .await
-        .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))
-}
-
-async fn authorize_system_credentials(
-    connection: &Connection,
-    sender: &zbus::names::UniqueName<'_>,
-    credentials: BusCallerCredentials,
-) -> zbus::fdo::Result<()> {
-    if credentials.uid == nix::unistd::Uid::effective().as_raw() {
-        return Ok(());
-    }
-    crate::system_authorization::authorize_control(connection, sender)
-        .await
+        .map(pronk_core::session::PinnedCallerSession::into_process)
         .map_err(|error| zbus::fdo::Error::AccessDenied(error.to_string()))
 }
 
@@ -593,11 +525,10 @@ async fn emit_operation_states(
 pub async fn register_manager(
     connection: &Connection,
     manager: ManagerHandle,
-    public_bus: PublicBus,
 ) -> Result<(), zbus::Error> {
     connection
         .object_server()
-        .at(MANAGER_PATH, ManagerInterface::new(manager, public_bus))
+        .at(MANAGER_PATH, ManagerInterface::new(manager))
         .await
         .map(|_| ())
 }
@@ -644,7 +575,6 @@ pub async fn serve_lifecycle_events(
     connection: &Connection,
     manager: ManagerHandle,
     mut events: mpsc::UnboundedReceiver<LifecycleEvent>,
-    public_bus: PublicBus,
 ) -> Result<(), LifecycleSignalError> {
     let manager_emitter = SignalEmitter::new(connection, MANAGER_PATH)
         .map_err(LifecycleSignalError::Emitter)?
@@ -661,13 +591,7 @@ pub async fn serve_lifecycle_events(
                     .object_server()
                     .at(
                         path.clone(),
-                        CastDisplayInterface::new(
-                            manager.clone(),
-                            display_id,
-                            info.clone(),
-                            state,
-                            public_bus,
-                        ),
+                        CastDisplayInterface::new(manager.clone(), display_id, info.clone(), state),
                     )
                     .await
                     .map_err(LifecycleSignalError::RegisterDisplay)?;
@@ -992,10 +916,7 @@ mod tests {
             .unwrap()
             .p2p()
             .auth_mechanism(AuthMechanism::External)
-            .serve_at(
-                MANAGER_PATH,
-                ManagerInterface::new(actor.handle(), PublicBus::Session),
-            )
+            .serve_at(MANAGER_PATH, ManagerInterface::new(actor.handle()))
             .unwrap();
         let client = Builder::unix_stream(client_stream)
             .p2p()
@@ -1081,13 +1002,7 @@ mod tests {
             .auth_mechanism(AuthMechanism::External)
             .serve_at(
                 path.clone(),
-                CastDisplayInterface::new(
-                    actor.handle(),
-                    display_id,
-                    info.clone(),
-                    state.clone(),
-                    PublicBus::Session,
-                ),
+                CastDisplayInterface::new(actor.handle(), display_id, info.clone(), state.clone()),
             )
             .unwrap();
         let client = Builder::unix_stream(client_stream)
@@ -1118,10 +1033,7 @@ mod tests {
             .unwrap()
             .p2p()
             .auth_mechanism(AuthMechanism::External)
-            .serve_at(
-                MANAGER_PATH,
-                ManagerInterface::new(actor.handle(), PublicBus::Session),
-            )
+            .serve_at(MANAGER_PATH, ManagerInterface::new(actor.handle()))
             .unwrap();
         let client = Builder::unix_stream(client_stream)
             .p2p()
@@ -1134,13 +1046,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let lifecycle_manager = actor.handle();
         let lifecycle_task = tokio::spawn(async move {
-            serve_lifecycle_events(
-                &server_connection,
-                lifecycle_manager,
-                event_rx,
-                PublicBus::Session,
-            )
-            .await
+            serve_lifecycle_events(&server_connection, lifecycle_manager, event_rx).await
         });
         let display_id = CastDisplayId::generate().unwrap();
         let snapshot = added_display_snapshot(display_id);

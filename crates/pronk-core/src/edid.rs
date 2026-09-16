@@ -6,9 +6,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::castkms::{EdidError, ValidatedEdid, EDID_BLOCK_SIZE};
 use crate::identity::{normalize_manufacturer_name, PnpId};
 
+pub const EDID_BLOCK_SIZE: usize = 128;
+pub const EDID_MAX_BLOCKS: usize = 4;
 pub const EDID_PRODUCT_NAME_MAX_BYTES: usize = 106;
 pub const MAX_EDID_MODES: usize = 16;
 
@@ -24,6 +25,92 @@ const DISPLAYID_TYPE_I_TIMING_TAG: u8 = 0x03;
 
 const PRODUCT_CODE_DOMAIN: &[u8] = b"io.github.pronkproject.Pronk.edid-product-code.v1\0";
 const SERIAL_DOMAIN: &[u8] = b"io.github.pronkproject.Pronk.edid-serial.v1\0";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedEdid {
+    bytes: Box<[u8]>,
+}
+
+impl ValidatedEdid {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, EdidError> {
+        validate_edid(&bytes)?;
+        Ok(Self {
+            bytes: bytes.into_boxed_slice(),
+        })
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+impl TryFrom<Vec<u8>> for ValidatedEdid {
+    type Error = EdidError;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::new(bytes)
+    }
+}
+
+impl TryFrom<&[u8]> for ValidatedEdid {
+    type Error = EdidError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Self::new(bytes.to_vec())
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum EdidError {
+    #[error("EDID size {0} is not a 128-byte multiple in 128..=512")]
+    InvalidSize(usize),
+    #[error("EDID base-block header is invalid")]
+    InvalidHeader,
+    #[error("EDID declares {declared} extension blocks but contains {actual}")]
+    ExtensionCount { declared: usize, actual: usize },
+    #[error("EDID block {block} has an invalid checksum")]
+    InvalidChecksum { block: usize },
+}
+
+fn validate_edid(bytes: &[u8]) -> Result<(), EdidError> {
+    if bytes.is_empty()
+        || bytes.len() > EDID_BLOCK_SIZE * EDID_MAX_BLOCKS
+        || bytes.len() % EDID_BLOCK_SIZE != 0
+    {
+        return Err(EdidError::InvalidSize(bytes.len()));
+    }
+
+    const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+    if bytes[..HEADER.len()] != HEADER {
+        return Err(EdidError::InvalidHeader);
+    }
+
+    let actual_extensions = bytes.len() / EDID_BLOCK_SIZE - 1;
+    let declared_extensions = usize::from(bytes[126]);
+    if declared_extensions != actual_extensions {
+        return Err(EdidError::ExtensionCount {
+            declared: declared_extensions,
+            actual: actual_extensions,
+        });
+    }
+
+    for (block, bytes) in bytes.chunks_exact(EDID_BLOCK_SIZE).enumerate() {
+        let checksum = bytes.iter().copied().fold(0_u8, u8::wrapping_add);
+        if checksum != 0 {
+            return Err(EdidError::InvalidChecksum { block });
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EdidMode {

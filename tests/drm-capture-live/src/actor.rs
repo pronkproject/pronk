@@ -19,7 +19,7 @@ extern "C" {
 fn check(frame: &Frame, expected: u8) {
     let layout = frame.layout();
     // SAFETY: The completed frame retains its DMA-BUF throughout the read-only
-    // check. The C helper maps the described extent and brackets CPU access.
+    // check. The test helper maps the described extent and brackets CPU access.
     unsafe {
         capture_buffer_check_pixels(
             frame.as_fd().as_raw_fd(),

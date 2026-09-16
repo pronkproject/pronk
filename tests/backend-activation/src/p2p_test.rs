@@ -19,7 +19,6 @@ use pronk::device_session_port::{
 };
 use pronk::display::{DisplaySetupStage, MediaRuntime};
 use pronk::display_state::{MediaState, RoutedMode};
-use pronk::kernel_session_provider::LegacyKernelSessionProvider;
 use pronk::manager::{
     BackendConfig, InventoryEvent, ManagerActor, OutputInventoryProvider,
     OutputInventoryProviderError, SystemOutputInventoryProvider,
@@ -49,12 +48,12 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 mod gstreamer_fixture;
-mod test_grant_provider;
+mod test_kernel_session_provider;
 
 use gstreamer_fixture::{
     pass_gstreamer_diagnostic_environment, wait_for_backend_pipewire_clients, GStreamerTestProducer,
 };
-use test_grant_provider::UnreachableGrantProvider;
+use test_kernel_session_provider::UnreachableKernelSessionProvider;
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const METHOD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -792,9 +791,7 @@ async fn run_inventory_manager(path: &Path) -> anyhow::Result<()> {
         Arc::new(StaticOutputInventoryProvider {
             outputs: mock_outputs(),
         }),
-        Arc::new(LegacyKernelSessionProvider::new(Arc::new(
-            UnreachableGrantProvider,
-        ))),
+        Arc::new(UnreachableKernelSessionProvider),
     )?;
     let mut events = manager
         .take_events()

@@ -1,7 +1,7 @@
 //! Trusted D-Bus caller identity for public service operations.
 
 use nix::unistd::Uid;
-use pronk_core::session::{CallerSessionError, PinnedCallerProcess, PinnedCallerSession};
+use pronk_core::session::{CallerSessionError, PinnedCallerSession};
 use thiserror::Error;
 use zbus::names::UniqueName;
 use zbus::Connection;
@@ -10,12 +10,6 @@ use zbus::Connection;
 pub struct BusCallerCredentials {
     pub pid: u32,
     pub uid: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PublicBus {
-    Session,
-    System,
 }
 
 /// Resolve one immutable D-Bus unique name through the bus broker.
@@ -53,46 +47,6 @@ pub async fn pin_bus_caller(
 ) -> Result<PinnedCallerSession, BusCallerError> {
     let credentials = query_bus_caller_credentials(connection, sender).await?;
     PinnedCallerSession::pin_async(credentials.pid, credentials.uid, Uid::effective().as_raw())
-        .await
-        .map_err(BusCallerError::PinSession)
-}
-
-pub async fn pin_bus_caller_for(
-    connection: &Connection,
-    sender: &UniqueName<'_>,
-    bus: PublicBus,
-) -> Result<PinnedCallerProcess, BusCallerError> {
-    let credentials = query_bus_caller_credentials(connection, sender).await?;
-    match bus {
-        PublicBus::Session => PinnedCallerSession::pin_async(
-            credentials.pid,
-            credentials.uid,
-            Uid::effective().as_raw(),
-        )
-        .await
-        .map(PinnedCallerSession::into_process),
-        PublicBus::System => {
-            PinnedCallerProcess::pin_async(
-                credentials.pid,
-                credentials.uid,
-                Uid::effective().as_raw(),
-            )
-            .await
-        }
-    }
-    .map_err(BusCallerError::PinSession)
-}
-
-/// Pin a system-bus caller against the credentials assigned by the bus.
-///
-/// This is used only after a separate authorization decision has accepted an
-/// ordinary desktop user. Re-reading `/proc` through the pidfd-backed helper
-/// prevents a recycled process ID or changed process identity from inheriting
-/// that decision.
-pub async fn pin_authorized_system_bus_caller(
-    credentials: BusCallerCredentials,
-) -> Result<PinnedCallerProcess, BusCallerError> {
-    PinnedCallerProcess::pin_async(credentials.pid, credentials.uid, credentials.uid)
         .await
         .map_err(BusCallerError::PinSession)
 }

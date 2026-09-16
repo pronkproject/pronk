@@ -4,28 +4,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use futures_util::StreamExt;
-use nix::libc;
-use nix::unistd::{getresgid, getresuid, Uid, User};
-use pronk::caller::PublicBus;
+use nix::unistd::Uid;
 use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
 use pronk::display::MediaRuntime;
-use pronk::kernel_session_provider::{KernelSessionProvider, LegacyKernelSessionProvider};
+use pronk::kernel_session_provider::KernelSessionProvider;
 use pronk::manager::{BackendConfig, ManagerActor};
 use pronk_backend_host::{
     BackendReconnectPolicy, BackendRegistrationValidator, BackendRegistry,
-    SystemdRegistrationValidator, SYSTEM_BACKEND_RUNTIME_DIR,
+    SystemdRegistrationValidator,
 };
-use pronk_core::grant_helper::provider::PkexecAdminGrantProvider;
 use pronk_dbus::BUS_NAME;
 use tokio::runtime::Builder;
 use tracing::{info, warn};
 use tracing_subscriber::{filter::LevelFilter, EnvFilter};
-use zbus::fdo::DBusProxy;
-use zbus::names::BusName;
 
-const SYSTEM_SERVICE_USER: &str = "pronk";
-const SYSTEM_MEDIA_RUNTIME_DIRECTORY: &str = "/run/pronk";
 const MAX_KERNEL_DISPLAY_SESSIONS: usize = 8;
 const KERNEL_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -35,7 +27,7 @@ fn main() -> anyhow::Result<()> {
         println!("pronk {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let mode = ServiceMode::parse(&arguments)?;
+    anyhow::ensure!(arguments.is_empty(), "usage: pronkd");
 
     tracing_subscriber::fmt()
         .with_ansi(false)
@@ -51,109 +43,18 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("create Tokio runtime")?;
-    runtime.block_on(run(mode))
+    runtime.block_on(run())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServiceMode {
-    Session,
-    System,
-}
-
-impl ServiceMode {
-    fn parse(arguments: &[std::ffi::OsString]) -> anyhow::Result<Self> {
-        match arguments {
-            [] => Ok(Self::Session),
-            [argument] if argument == "--session" => Ok(Self::Session),
-            [argument] if argument == "--system" => Ok(Self::System),
-            _ => anyhow::bail!("usage: pronkd [--session|--system]"),
-        }
-    }
-
-    fn public_bus(self) -> PublicBus {
-        match self {
-            Self::Session => PublicBus::Session,
-            Self::System => PublicBus::System,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Session => "session",
-            Self::System => "system",
-        }
-    }
-}
-
-async fn run(mode: ServiceMode) -> anyhow::Result<()> {
-    let system_connection = match mode {
-        ServiceMode::Session => Some(
-            zbus::Connection::system()
-                .await
-                .context("connect to the system bus for service arbitration")?,
-        ),
-        ServiceMode::System => None,
-    };
-    let system_bus = match &system_connection {
-        Some(connection) => Some(
-            DBusProxy::new(connection)
-                .await
-                .context("create the system bus proxy for service arbitration")?,
-        ),
-        None => None,
-    };
-    let mut system_service_appearances = match &system_bus {
-        Some(bus) => Some(
-            bus.receive_name_owner_changed_with_args(&[(0, BUS_NAME), (1, "")])
-                .await
-                .context("watch for the Pronk system service")?,
-        ),
-        None => None,
-    };
-    if let Some(bus) = &system_bus {
-        let name = BusName::try_from(BUS_NAME).context("validate the Pronk bus name")?;
-        if bus
-            .name_has_owner(name)
-            .await
-            .context("query the Pronk system service")?
-        {
-            info!("Pronk system service is already running; session service will not start");
-            return Ok(());
-        }
-    }
-
+async fn run() -> anyhow::Result<()> {
     let effective_uid = Uid::effective();
-    let (runtime_directory, media_runtime) = match mode {
-        ServiceMode::Session => {
-            let directory = PathBuf::from(format!("/run/user/{}", effective_uid.as_raw()));
-            (directory, MediaRuntime::for_user(effective_uid.as_raw()))
-        }
-        ServiceMode::System => {
-            let service_user = User::from_name(SYSTEM_SERVICE_USER)
-                .context("resolve the pronk system account")?
-                .context("the pronk system account is not installed")?;
-            if service_user.uid.is_root() {
-                anyhow::bail!("the pronk system account must not be root");
-            }
-            require_system_service_identity(&service_user)?;
-            drop_inheritable_process_capabilities()?;
-            let media_directory = PathBuf::from(SYSTEM_MEDIA_RUNTIME_DIRECTORY);
-            (
-                PathBuf::from(SYSTEM_BACKEND_RUNTIME_DIR),
-                MediaRuntime::new(media_directory, service_user.uid.as_raw()),
-            )
-        }
-    };
+    let runtime_directory = PathBuf::from(format!("/run/user/{}", effective_uid.as_raw()));
+    let media_runtime = MediaRuntime::for_user(effective_uid.as_raw());
     let registry = BackendRegistry::load_installed(&runtime_directory)
         .context("load the installed backend registry")?;
-    let connection = match mode {
-        ServiceMode::Session => zbus::Connection::session()
-            .await
-            .context("connect to the session bus")?,
-        ServiceMode::System => zbus::Connection::system()
-            .await
-            .context("connect to the system bus")?,
-    };
+    let connection = zbus::Connection::session()
+        .await
+        .context("connect to the session bus")?;
     let validator: Arc<dyn BackendRegistrationValidator> =
         Arc::new(SystemdRegistrationValidator::new(connection.clone()));
     let configs = registry
@@ -167,22 +68,16 @@ async fn run(mode: ServiceMode) -> anyhow::Result<()> {
             )
         })
         .collect();
-    let kernel_session_provider: Arc<dyn KernelSessionProvider> = match mode {
-        // Mutter authorizes the sender that owns Pronk's public session-bus
-        // name, so display-session calls must use this same connection.
-        ServiceMode::Session => Arc::new(pronk_capture_broker::Provider::new(
+    let kernel_session_provider: Arc<dyn KernelSessionProvider> =
+        Arc::new(pronk_capture_broker::Provider::new(
             connection.clone(),
             NonZeroUsize::new(MAX_KERNEL_DISPLAY_SESSIONS).unwrap(),
             KERNEL_SESSION_TIMEOUT,
-        )?),
-        ServiceMode::System => Arc::new(LegacyKernelSessionProvider::new(Arc::new(
-            PkexecAdminGrantProvider,
-        ))),
-    };
+        )?);
     let mut manager =
         ManagerActor::spawn_with_media_runtime(configs, kernel_session_provider, media_runtime)
             .context("start the Pronk manager")?;
-    register_manager(&connection, manager.handle(), mode.public_bus())
+    register_manager(&connection, manager.handle())
         .await
         .context("register the public manager object")?;
     let inventory_events = manager
@@ -198,15 +93,8 @@ async fn run(mode: ServiceMode) -> anyhow::Result<()> {
         );
     let lifecycle_connection = connection.clone();
     let lifecycle_manager = manager.handle();
-    let public_bus = mode.public_bus();
     let mut lifecycle_task = tokio::spawn(async move {
-        serve_lifecycle_events(
-            &lifecycle_connection,
-            lifecycle_manager,
-            lifecycle_events,
-            public_bus,
-        )
-        .await
+        serve_lifecycle_events(&lifecycle_connection, lifecycle_manager, lifecycle_events).await
     });
 
     connection
@@ -215,7 +103,7 @@ async fn run(mode: ServiceMode) -> anyhow::Result<()> {
         .context("acquire the Pronk bus name")?;
     info!(
         backends = registry.len(),
-        bus = mode.label(),
+        bus = "session",
         "Pronk device inventory is available"
     );
 
@@ -232,19 +120,6 @@ async fn run(mode: ServiceMode) -> anyhow::Result<()> {
             result.context("join lifecycle signal task")??;
             Some("lifecycle signal")
         }
-        _ = async {
-            match &mut system_service_appearances {
-                Some(appearances) => {
-                    if appearances.next().await.is_none() {
-                        std::future::pending::<()>().await;
-                    }
-                }
-                None => std::future::pending().await,
-            }
-        } => {
-            info!("Pronk system service appeared; stopping the session service");
-            None
-        }
     };
 
     let report = manager.shutdown().await.context("stop the Pronk manager")?;
@@ -260,108 +135,12 @@ async fn run(mode: ServiceMode) -> anyhow::Result<()> {
             .context("join lifecycle signal task")??;
     }
     if let Err(error) = connection.release_name(BUS_NAME).await {
-        warn!(bus = mode.label(), %error, "failed to release the Pronk bus name");
+        warn!(bus = "session", %error, "failed to release the Pronk bus name");
     }
     if let Some(task) = ended_task {
         anyhow::bail!("{task} task stopped unexpectedly");
     }
     info!("Pronk stopped");
-    Ok(())
-}
-
-fn require_system_service_identity(service_user: &User) -> anyhow::Result<()> {
-    let user_ids = getresuid().context("read system-service user IDs")?;
-    if user_ids.real != service_user.uid
-        || user_ids.effective != service_user.uid
-        || user_ids.saved != service_user.uid
-    {
-        anyhow::bail!(
-            "system mode requires real/effective/saved uid {} ({}), found {}/{}/{}",
-            service_user.uid.as_raw(),
-            SYSTEM_SERVICE_USER,
-            user_ids.real.as_raw(),
-            user_ids.effective.as_raw(),
-            user_ids.saved.as_raw(),
-        );
-    }
-    let group_ids = getresgid().context("read system-service group IDs")?;
-    if group_ids.real != service_user.gid
-        || group_ids.effective != service_user.gid
-        || group_ids.saved != service_user.gid
-    {
-        anyhow::bail!(
-            "system mode requires real/effective/saved gid {}, found {}/{}/{}",
-            service_user.gid.as_raw(),
-            group_ids.real.as_raw(),
-            group_ids.effective.as_raw(),
-            group_ids.saved.as_raw(),
-        );
-    }
-    Ok(())
-}
-
-#[repr(C)]
-struct LinuxCapabilityHeader {
-    version: u32,
-    pid: libc::c_int,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct LinuxCapabilityData {
-    effective: u32,
-    permitted: u32,
-    inheritable: u32,
-}
-
-fn read_process_capabilities() -> anyhow::Result<[LinuxCapabilityData; 2]> {
-    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-
-    let mut header = LinuxCapabilityHeader {
-        version: LINUX_CAPABILITY_VERSION_3,
-        pid: 0,
-    };
-    let mut data = [LinuxCapabilityData::default(); 2];
-    // SAFETY: `header` and the two-entry version-3 capability array are
-    // writable for the duration of this synchronous syscall.
-    let result = unsafe { libc::syscall(libc::SYS_capget, &mut header, data.as_mut_ptr()) };
-    if result < 0 {
-        return Err(std::io::Error::last_os_error()).context("read system-service capabilities");
-    }
-    Ok(data)
-}
-
-fn drop_inheritable_process_capabilities() -> anyhow::Result<()> {
-    let capabilities = read_process_capabilities()?;
-    if capabilities
-        .iter()
-        .any(|word| word.effective != 0 || word.permitted != 0)
-    {
-        anyhow::bail!("system mode must start without effective or permitted capabilities");
-    }
-
-    if capabilities.iter().any(|word| word.inheritable != 0) {
-        const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-        let mut header = LinuxCapabilityHeader {
-            version: LINUX_CAPABILITY_VERSION_3,
-            pid: 0,
-        };
-        let data = [LinuxCapabilityData::default(); 2];
-        // SAFETY: `header` and the two-entry version-3 capability array remain
-        // readable for the duration of this synchronous syscall.
-        let result = unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_ptr()) };
-        if result < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("drop inherited system-service capabilities");
-        }
-    }
-
-    if read_process_capabilities()?
-        .iter()
-        .any(|word| word.effective != 0 || word.permitted != 0 || word.inheritable != 0)
-    {
-        anyhow::bail!("system mode could not drop all process capabilities");
-    }
     Ok(())
 }
 

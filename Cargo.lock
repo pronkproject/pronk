@@ -1448,22 +1448,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pronk-castkms-live-test"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "castkms-sys",
- "nix 0.29.0",
- "pronk",
- "pronk-core",
- "pronk-dbus",
- "pronk-pipewire",
- "tokio",
- "tokio-util",
- "zbus",
-]
-
-[[package]]
 name = "pronk-chromiacast"
 version = "0.1.0"
 dependencies = [
@@ -1487,15 +1471,12 @@ dependencies = [
 name = "pronk-core"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "castkms-sys",
  "nix 0.29.0",
- "pronk-dmabuf",
  "pronk-userns",
  "sha2",
  "thiserror 2.0.20",
  "tokio",
- "tokio-util",
  "unicode-normalization",
 ]
 
