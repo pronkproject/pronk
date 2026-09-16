@@ -364,3 +364,33 @@ async fn a_panicking_attachment_worker_still_releases_its_session() {
     notified(&state.release_done).await;
     assert!(!state.attached.load(Ordering::SeqCst));
 }
+
+#[test]
+fn cancellation_while_attachment_is_queued_skips_monitor_io() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (resume, wait) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+        });
+        ready.await.unwrap();
+        let state = Arc::new(State::default());
+        let cancellation = CancellationToken::new();
+        let mut task = Box::pin(attach(session(&state).await, cancellation.clone()));
+        assert!(futures_util::poll!(&mut task).is_pending());
+        cancellation.cancel();
+        resume.send(()).unwrap();
+        blocker.await.unwrap();
+        assert!(matches!(task.await, Err(DisplaySetupError::Cancelled)));
+        assert_eq!(
+            state.events.lock().unwrap().as_slice(),
+            &["renderer release", "session release"]
+        );
+    });
+}

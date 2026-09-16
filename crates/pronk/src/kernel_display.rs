@@ -86,7 +86,8 @@ impl KernelDisplay {
 
     /// Attach a monitor while retaining responsibility for a late completion.
     ///
-    /// Observation is configured before the monitor changes. Once a blocking
+    /// Observation is configured before the monitor changes. Queued work checks
+    /// cancellation again before issuing the monitor operation. Once a blocking
     /// attach has started, cancellation joins it and retires any attached
     /// monitor before returning. Dropping the whole future instead relies on
     /// the session owner's release behavior when the worker finishes.
@@ -103,10 +104,13 @@ impl KernelDisplay {
             return Err(AttachError::Cancelled);
         }
         let display = Self::prepare(session, config).map_err(AttachError::Configuration)?;
+        let before_attach = cancellation.clone();
         let mut task = tokio::task::spawn_blocking(move || {
-            let result = display
-                .session()
-                .attach_monitor(edid.as_ref().map(ValidatedEdid::as_bytes));
+            let result = (!before_attach.is_cancelled()).then(|| {
+                display
+                    .session()
+                    .attach_monitor(edid.as_ref().map(ValidatedEdid::as_bytes))
+            });
             (display, result)
         });
         let joined = tokio::select! {
@@ -116,14 +120,14 @@ impl KernelDisplay {
         };
         let (mut display, result) = joined.map_err(AttachError::Worker)?;
         match result {
-            Ok(()) if !cancellation.is_cancelled() => Ok(display),
-            Ok(()) => {
+            Some(Ok(())) if !cancellation.is_cancelled() => Ok(display),
+            Some(Ok(())) => {
                 if let Err(error) = Box::new(display).detach().await {
                     tracing::warn!(%error, "cancelled attachment could not retire its monitor");
                 }
                 Err(AttachError::Cancelled)
             }
-            Err(error) => {
+            result => {
                 let session = display
                     .session
                     .take()
@@ -131,10 +135,11 @@ impl KernelDisplay {
                 if let Err(error) = session.release().await {
                     tracing::warn!(%error, "unsuccessful attachment could not release its session");
                 }
-                if cancellation.is_cancelled() {
-                    Err(AttachError::Cancelled)
-                } else {
-                    Err(AttachError::Rejected(error))
+                match result {
+                    Some(Err(error)) if !cancellation.is_cancelled() => {
+                        Err(AttachError::Rejected(error))
+                    }
+                    _ => Err(AttachError::Cancelled),
                 }
             }
         }
