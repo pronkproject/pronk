@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/castkms-monitor",
     "crates/castkms-renderer",
     "crates/castkms-sys",
     "crates/drm-capture",

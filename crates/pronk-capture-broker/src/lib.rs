@@ -16,10 +16,6 @@ use tokio_util::sync::CancellationToken;
 use zbus::names::OwnedUniqueName;
 use zbus::zvariant::OwnedFd as BusFd;
 
-mod monitor;
-
-pub use monitor::Capabilities as MonitorCapabilities;
-
 const SERVICE: &str = "org.gnome.Mutter.CastKms";
 const PATH: &str = "/org/gnome/Mutter/CastKms";
 
@@ -346,16 +342,16 @@ impl Session {
             .ok_or_else(|| std::io::Error::other("renderer access was already transferred"))
     }
 
-    pub fn monitor_capabilities(&self) -> std::io::Result<monitor::Capabilities> {
-        monitor::query_capabilities(self.monitor())
+    pub fn monitor_capabilities(&self) -> std::io::Result<castkms_monitor::Capabilities> {
+        castkms_monitor::query_capabilities(self.monitor())
     }
 
     pub fn attach_monitor(&self, edid: Option<&[u8]>) -> std::io::Result<()> {
-        monitor::attach_monitor(self.monitor(), edid)
+        castkms_monitor::attach_monitor(self.monitor(), edid)
     }
 
     pub fn detach_monitor(&self) -> std::io::Result<()> {
-        monitor::detach_monitor(self.monitor())
+        castkms_monitor::detach_monitor(self.monitor())
     }
 
     /// Open a capture client while retaining the display session itself.

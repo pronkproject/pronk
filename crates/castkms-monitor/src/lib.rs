@@ -1,3 +1,8 @@
+//! Virtual-monitor control through an issued CastKMS capability.
+//!
+//! These operations borrow only the monitor-control descriptor. They confer no
+//! capture, renderer, revocation, primary-node or compositor-session authority.
+
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 

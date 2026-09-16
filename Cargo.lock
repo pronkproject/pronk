@@ -215,6 +215,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "castkms-monitor"
+version = "0.1.0"
+dependencies = [
+ "nix 0.29.0",
+]
+
+[[package]]
 name = "castkms-renderer"
 version = "0.1.0"
 dependencies = [
@@ -1418,6 +1425,7 @@ dependencies = [
 name = "pronk-capture-broker"
 version = "0.1.0"
 dependencies = [
+ "castkms-monitor",
  "castkms-renderer",
  "drm-capture",
  "nix 0.29.0",
