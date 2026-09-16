@@ -109,12 +109,11 @@ once to the nearest 16-bit value. Endpoints select the first and last entries
 exactly. Descending and nonmonotonic tables are supported; no identity-ramp
 shortcut silently removes a supplied table.
 
-The stage ordering follows the C CastKMS composition path and the
+The stage ordering follows the
 [DRM gamma property](https://docs.kernel.org/gpu/drm-kms.html#color-management-properties).
-The interpolation arithmetic is an explicit reference choice, not a claim of
-bit-for-bit equivalence to the C helper's fixed-point approximations or to a
-particular hardware LUT. C differential comparison and native color precision
-qualification remain separate work. The Vulkan copy/blit profile still accepts
+The interpolation arithmetic defines the software executor's output and does
+not claim equivalence to a particular hardware LUT. Native color precision
+requires separate qualification. The Vulkan copy/blit profile still accepts
 only identity color and must not silently ignore a requested gamma stage.
 
 Tests evaluate every 16-bit input against independent normalized equations at

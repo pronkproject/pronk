@@ -1,519 +1,141 @@
 # Pronk
 
-<p align="center">
-  <img src="docs/images/pronk.png" alt="A luminous pronghorn leaping from a laptop screen into a television" width="654">
-</p>
+Pronk turns a CastKMS virtual display into a media stream for a receiver such
+as a Chromecast. It runs inside the graphical login, obtains narrowly scoped
+display capabilities from Mutter, and keeps display control, rendering, media
+transport, encoding, and network delivery in separate components.
 
-Pronk is experimental Linux software that lets your desktop use a nearby
-Google Cast Device, such as a Chromecast or Cast-enabled TV, as an
-additional monitor. Pronk sends video to the Device and can send audio with
-the video.
+The current path is:
 
-Pronk depends on **CastKMS**, an experimental Linux kernel driver that creates
-a virtual monitor. Your desktop's compositor—the component that arranges
-windows and produces the final screen image—sees this virtual monitor in the
-same way that it sees a physical one. Pronk captures the completed image and
-passes it to a separate program that communicates with the Cast Device.
+```text
+Mutter session broker
+  → CastKMS monitor, capture, and renderer files
+  → GPU renderer
+  → private PipeWire connection
+  → media backend and encoder
+  → receiver
+```
 
-That separate program is called a **backend** in this project. The included
-`pronk-chromiacast` backend discovers Devices, encodes the captured audio and
-video, and sends it over the network. The main service runs as the `pronkd`
-daemon and never connects to the network itself. You control it with the
-`pronkctl` command-line tool.
-
-> [!IMPORTANT]
-> Pronk is not yet a ready-to-install desktop application. It currently
-> requires a separately built kernel driver and a source build. Session mode
-> additionally requires a compositor with the experimental CastKMS display
-> broker; optional system mode can operate without compositor integration.
-
-## Contents
-
-- [Requirements](#requirements)
-- [Build and install](#build-and-install)
-- [Optional system service](#optional-system-service)
-- [Silverblue development extension](#silverblue-development-extension)
-- [Add and remove a display](#add-and-remove-a-display)
-- [How Pronk works](#how-pronk-works)
-- [Technical FAQ](#technical-faq)
-- [Display control with HDMI-CEC](#display-control-with-hdmi-cec)
-- [Capture authorization](#capture-authorization)
-- [Backends](#backends)
-- [Private audio and video](#private-audio-and-video)
-- [D-Bus API](#d-bus-api)
-- [Tests](#tests)
-- [License](#license)
+Pronk does not open-endedly delegate the DRM primary node. Anonymous kernel
+files carry the authority needed for one display session. The renderer can read
+complete scene descriptions, while the capture side receives only completed
+images. The network backend receives neither compositor source buffers nor DRM
+authority.
 
 ## Requirements
 
-To run Pronk in its default session mode, you need:
+- the Rust CastKMS driver and its generic DRM capture support;
+- Mutter with the `org.gnome.Mutter.CastKms` session broker;
+- PipeWire and WirePlumber;
+- GStreamer with the plugins required by the selected backend;
+- Rust, Meson, Ninja, and the development packages used by the workspace.
 
-- a Linux desktop with an active graphical login session;
-- the Rust CastKMS driver with generic capture and monitor-control support,
-  installed and loaded with at least one available virtual monitor slot;
-- GNOME Mutter with the `org.gnome.Mutter.CastKms` display-session broker;
-- a Google Cast Device on the same network as the computer;
-- systemd user services, PipeWire, and WirePlumber 0.5.15 or newer; and
-- these GStreamer components:
-  - for video: `x264enc`, `h264parse`, and `pipewiresrc`;
-  - for optional audio on the legacy system path: `opusenc`, `audioconvert`,
-    and `audioresample`.
+The Chromecast backend currently needs H.264 or VP8 encoding, Opus for audio
+when audio is enabled, and the corresponding GStreamer parser and transport
+elements. GPU encoding also requires access to the selected render node from
+the backend service sandbox.
 
-Pronk uses systemd to start its processes, PipeWire to move captured media
-between them, and WirePlumber to restrict what each process can access.
-
-System mode replaces the active graphical-session and Mutter requirements
-with polkit, a dedicated `pronk` system account, and system services for
-PipeWire and WirePlumber. The compositor still needs ordinary DRM/KMS support
-for the CastKMS connector, but it does not need a Pronk-specific D-Bus API.
-When the system service is running, it is authoritative: a session daemon
-declines startup or shuts down when the system service appears.
-
-On Fedora, `x264enc` is provided by RPM Fusion's
-`gstreamer1-plugins-ugly` package. Package names differ on other Linux
-distributions.
-
-Building Pronk also requires:
-
-- Rust 1.83 or newer;
-- Meson 1.4 or newer;
-- development files for `libdrm`, `libsystemd`, and `libpipewire-0.3`; and
-- Cargo access to crates.io for the published
-  [`chromiacast`](https://crates.io/crates/chromiacast) dependency.
-
-[CastKMS](https://github.com/pronkproject/castkms) is also a separate project; it
-is not included in this repository. Install and load that driver before trying
-to add a display.
-
-## Build and install
-
-Configure Meson for the standard `/usr` installation layout:
+## Build and test
 
 ```sh
-meson setup build -Dprefix=/usr -Dlibexecdir=libexec
-meson compile -C build
+meson setup build
+ninja -C build
 meson test -C build --print-errorlogs
 ```
 
-Meson currently builds the Rust workspace in debug mode and copies the debug
-binaries into the installation layout.
-
-Install the build and update the affected user services:
-
-```sh
-sudo meson install -C build
-systemctl --user daemon-reload
-systemctl --user enable --now pronk-chromiacast.socket
-systemctl --user restart wireplumber.service
-```
-
-The Chromiacast socket waits for Pronk to request a backend connection. When
-that request arrives, systemd starts the backend. Restarting the desktop
-WirePlumber loads CastKMS output routing; Pronk starts its own private
-PipeWire/WirePlumber pair automatically when `pronkctl` activates the main
-service.
-
-To run only the Rust tests, without using Meson, use:
+The Meson build compiles the Rust workspace and validates the installed D-Bus,
+systemd user-unit, backend, PipeWire, and WirePlumber contracts. Rust tests can
+also be run directly:
 
 ```sh
 cargo test --workspace --locked
 ```
 
-## Optional system service
+## Run
 
-The system service is useful with the legacy C driver when the compositor does
-not implement the CastKMS display broker. After installing, create the packaged
-service account and private directories, then start the service:
+The installed D-Bus service activates `pronkd` on the session bus. Backend
+sockets are systemd user units, so normal control does not require root or a
+separate daemon.
 
-```sh
-sudo systemd-sysusers /usr/lib/sysusers.d/pronk.conf
-sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/pronk.conf
-sudo systemctl daemon-reload
-sudo systemctl enable --now pronk.service
-```
-
-Use `--system` for every control operation:
-
-```sh
-pronkctl --system list-devices
-pronkctl --system add-display --device chromiacast:<device-id> --no-audio
-pronkctl --system list-displays
-```
-
-An unprivileged invocation asks polkit to authenticate an administrator and
-then runs only the installed `pronkctl` as the `pronk` account. The public
-system-bus API also exposes read-only inventory and state to desktop clients.
-Its control methods only accept a caller that already holds the polkit
-authorization; the daemon never asks polkit to display an authentication
-dialog. Graphical clients acquire that authorization through an explicit
-Unlock action. The daemon, backends, PipeWire, and WirePlumber remain under
-`pronk`; root exists only in a short-lived grant helper described under
-[Capture authorization](#capture-authorization).
-
-System mode has its own PipeWire graph below `/run/pronk`. This prevents a
-root process from exchanging pixels with a user-controlled media server and
-keeps backend media private. Desktop audio still follows the normal output
-path into the CastKMS ALSA playback card; a grant-scoped kernel tap carries the
-consumed samples into Pronk's private graph, so no cross-graph audio route is
-needed.
-
-## Silverblue development extension
-
-The whole-stack Fedora Silverblue development extension is maintained by the
-[Pronk packaging repository](https://github.com/pronkproject/packaging#development-system-extension).
-That workflow builds the packaging checkout's `sources/*` submodules so every
-component comes from one explicit source bundle.
-
-## Add and remove a display
-
-Keep your graphical session active throughout these steps.
-
-First, list the Cast Devices that Pronk can find:
+List discovered receivers and create a display:
 
 ```sh
 pronkctl list-devices
-```
-
-Each result contains an `ID` such as `chromiacast:<device-id>`. Copy the full
-value after `ID` and use it to add the Device as a display. Starting without
-audio makes the first test simpler:
-
-```sh
-pronkctl add-display --device chromiacast:<device-id> --no-audio
-```
-
-Session mode currently requires `--no-audio`. Legacy system mode can omit that
-option to send audio as well as video. Pronk prints each setup stage and waits
-for the operation to finish. You can press Ctrl-C while setup is in progress
-to request cancellation.
-
-After setup succeeds, the new monitor appears in your desktop's normal display
-settings. You can arrange it and choose a supported resolution and refresh
-rate there just as you would for a physical monitor.
-
-To inspect configured displays, run:
-
-```sh
+pronkctl add-display --device chromiacast:DEVICE-ID --no-audio
 pronkctl list-displays
 ```
 
-This command shows the Device, the virtual monitor in use, its resolution and
-refresh rate, whether audio is enabled, and the current media state. The
-possible media states are `Inactive`, `Starting`, `Running`, `Suspended`,
-`Recovering`, `Stopping`, and `Failed`.
+The current session bundle is video-only, so display creation must include
+`--no-audio` until the broker publishes a separate audio capability.
 
-To remove a display, use its display `ID` from `list-displays`—not the Device
-ID from `list-devices`:
+Remove the display by the identifier printed by `add-display` or
+`list-displays`:
 
 ```sh
-pronkctl remove-display <display-id>
+pronkctl remove-display DISPLAY-ID
 ```
 
-If no Devices appear, confirm that the Device is on the same network and
-that `pronk-chromiacast.socket` is active. If media does not reach `Running`,
-check that WirePlumber is new enough, that the required GStreamer elements are
-installed, and that PipeWire and WirePlumber were restarted after
-installation. Use `pronkctl list-displays` to check the media state.
-If session setup fails while authorizing the display, verify that Mutter owns
-`org.gnome.Mutter.CastKms` on the session bus and that the loaded CastKMS
-driver exposes the generic capture and monitor-control capabilities. Session
-mode currently accepts video-only requests; use the legacy system path when
-testing audio or CEC.
+Display setup is asynchronous. `pronkctl` reports validation, authorization,
+device preparation, attachment, and final activation as the operation moves
+through those stages. Interrupting setup requests cancellation and waits for
+owned resources to retire.
 
-Pronk can tell when a Device accepts a stream, but the Device does not
-confirm that the television decoded and displayed it. A successful send means
-"delivered to the Device," not "confirmed visible on screen."
+## Component boundaries
 
-## How Pronk works
+`pronkd` owns device inventory and display-session state. It discovers CastKMS
+outputs but receives their authority only through Mutter's session broker. A
+display session contains independent monitor-control, capture, and renderer
+files, so one role cannot silently acquire another role's access.
 
-The media paths are:
+The renderer worker consumes bounded, versioned complete-scene descriptions.
+It stages compositor sources into private GPU images before an exported output
+can wait on downstream reuse. That boundary lets CastKMS retire compositor
+sources without depending on PipeWire or encoder progress.
 
-```text
-desktop compositor
-  → CastKMS virtual monitor
-  → capability-scoped final-image capture
-  → Pronk private PipeWire
-  → Chromiacast backend
-  → Cast Device
+The capture pipeline registers destination DMA-BUFs with the generic DRM
+capture interface. It transports final images over a private PipeWire remote;
+the public desktop PipeWire instance is not the authority boundary for raw
+display pixels.
 
-desktop PipeWire
-  → CastKMS playback-only ALSA card
-  → grant-scoped kernel audio tap
-  → private PipeWire connection
-  → Chromiacast backend
-  → Cast Device
-```
+Backends run as socket-activated user services. Their peer identity and
+protocol version are checked before device inventory is accepted. The
+Chromecast backend owns receiver discovery, encoding, and network transport,
+but it never receives renderer source descriptors.
 
-A display is set up as follows:
+## Synchronization and lifetime rules
 
-1. Rust CastKMS exposes a built-in virtual monitor so it remains useful without
-   Pronk. During session setup, Mutter acquires exclusive monitor control and
-   gives Pronk a restricted descriptor used to publish the selected Device's
-   description. Legacy system mode instead starts with detached slots.
-2. The Chromiacast backend discovers Devices on the local network.
-3. When you select a Device, session mode confirms that the request came from
-   the active local graphical session and asks Mutter for separate monitor and
-   final-image capture capabilities for one CastKMS slot. System mode accepts
-   only the `pronk` account and obtains the legacy combined rights through its
-   one-shot helper.
-4. The backend authenticates the Device. It then finds video and audio
-   formats supported by both the Device and Pronk. The backend gives Pronk
-   the information needed to describe the virtual monitor. Device
-   credentials and network details remain inside the backend.
-5. Pronk attaches the virtual monitor and supplies its **EDID**, the standard
-   data a monitor uses to report its name, supported resolutions, and audio
-   capabilities.
-6. The compositor notices the new monitor, configures it, and begins drawing
-   frames for it.
-7. Pronk captures each completed frame. It stores the frame as an `XRGB8888`
-   image in a **DMA-BUF**, a graphics buffer that local processes can share
-   using an operating-system handle called a file descriptor. Pronk publishes
-   the buffer through a private PipeWire connection. On the legacy system path,
-   Pronk also captures audio sent to that virtual monitor when audio is enabled.
-8. The backend encodes the captured media and sends it to the Device. If the
-   backend or PipeWire restarts, the virtual monitor remains attached and
-   streaming starts again with a new media session.
+- Preparation readiness means that source-read admission has closed and all
+  admitted reads have completed. It is not presentation completion.
+- GPU completion fences describe work already submitted to the native driver;
+  userspace responses are not represented as future fences.
+- Destination reuse must complete before a source-reading job acquires its
+  scene. Encoder backpressure therefore cannot retain a compositor source.
+- Exported DMA-BUF storage remains within one authorization scope for its
+  lifetime. A new protocol identity does not revoke an old descriptor.
+- Closing a session capability stops new work and begins bounded cleanup. A
+  renderer crash is handled like a failed execution device: Pronk attempts an
+  orderly handback and reports failure without claiming perfect recovery.
 
-Pronk deliberately separates responsibilities:
+More detail is available in:
 
-- The main service can capture only the CastKMS monitor for which it received
-  permission. A client cannot point it at another graphics device or virtual
-  monitor slot.
-- The main service does not implement Google Cast and does not open network
-  connections.
-- A backend never receives a CastKMS or other graphics-device file descriptor.
+- [`docs/drm-capture.md`](docs/drm-capture.md)
+- [`docs/display-executor.md`](docs/display-executor.md)
+- [`docs/gpu-media.md`](docs/gpu-media.md)
+- [`docs/faq.md`](docs/faq.md)
+- [`tests/vm/README.md`](tests/vm/README.md)
 
-## Technical FAQ
+## Source layout
 
-The [technical FAQ](docs/faq.md) explains the rationale behind the major design
-choices, including DRM writeback and leases, CastKMS capability lifetimes,
-retained framebuffer safety, PipeWire policy, process separation, DMA-BUF
-copies, latency, audio, and modes.
-
-## Display control with HDMI-CEC
-
-When a Device and its backend support display control, Pronk exposes the
-CastKMS connector as a normal Linux HDMI-CEC adapter. Existing CEC clients can
-then use `/dev/cecX`; they do not need to know that the display is reached over
-a network protocol.
-
-The control path is:
-
-```text
-Linux CEC client
-  → CastKMS /dev/cecX adapter
-  → Pronk CEC translator
-  → normalized Device control
-  → selected backend
-  → Device protocol
-```
-
-Pronk translates activation, deactivation, power, standby, key, volume, and
-mute operations. The backend reports completion through the same chain, so a
-CEC transmit is not reported as successful merely because Pronk accepted it.
-
-CEC belongs to the attached cast display rather than to one video or audio
-session. It remains available while the monitor route is disabled, across
-ordinary modesets, and while media is replaced. Removing the display, losing
-its legacy grant, or stopping Pronk invalidates the CEC physical address and
-ends the transport. A temporary grant-authority suspension aborts in-flight
-work; once authority returns, a fresh state generation admits new or
-kernel-retried transmits.
-
-CEC is currently available only through the legacy system path. Its CastKMS
-actor is the sole owner of the grant and CEC file descriptor. The translator
-contains no Cast, D-Bus, or network code, and a backend receives only a bounded
-normalized control operation—never the DRM or CEC descriptor.
-
-## Capture authorization
-
-Being able to open a graphics device such as `/dev/dri/cardN` does not give a
-process permission to control or capture CastKMS pixels. The Rust driver uses
-separate anonymous file capabilities for one virtual monitor and its completed
-images. The legacy C driver uses one connector-scoped grant with a rights mask.
-
-### Session-mode authorization
-
-Pronk asks Mutter, GNOME's compositor and DRM master, to create a display
-session for the selected DRM device, CRTC, and connector. Mutter authorizes the
-unique session-bus owner of `io.github.pronkproject.Pronk1`, then returns one
-monitor-control descriptor and one final-image capture descriptor. Pronk keeps
-monitor control in its display observer and gives only capture access to the
-media pipeline. Neither descriptor confers DRM modesetting authority.
-
-Mutter retains the revocation endpoints and the broker session identity. If
-Pronk leaves the bus or exits unexpectedly, Mutter revokes both capabilities.
-An orderly removal asks Mutter to release the session after Pronk detaches the
-monitor and stops capture. The kernel arbitrates monitor ownership, so a stale
-connection-state observation cannot authorize two controllers.
-
-Session-mode acquisition has no privileged fallback. A missing broker,
-rejected request, invalid response, or cancelled operation fails display setup
-and drops any received descriptor. The user service therefore runs with
-`NoNewPrivileges=yes` and cannot start setuid programs.
-
-### System-mode authorization
-
-System mode runs `pronkd` permanently as the non-root `pronk` account. For one
-grant request it launches `/usr/libexec/pronk-grant-helper` through
-`pkexec --keep-cwd` from the unit's fixed `/` working directory. This avoids
-exposing `/root` through the daemon's `ProtectHome` sandbox merely to satisfy
-`pkexec`'s default target-home-directory change.
-Polkit permits that helper only when the requesting process already runs as
-`pronk`; the helper then independently requires its Unix seqpacket peer and
-parent to be a live process in `pronk.service`, executing the installed
-root-owned `pronkd` inode. Those checks are repeated immediately before and
-after grant creation.
-
-The helper accepts only a device major/minor, virtual connector, and one fixed
-rights profile. It creates an explicit administrative CastKMS grant, drops any
-accidental DRM-master state, and transfers exactly two descriptors: the
-restricted holder and the close-to-revoke control endpoint. Administrative
-grants are creator-independent, so the helper closes its privileged DRM file
-before exiting; only the anonymous control descriptor can revoke the grant.
-
-The fixed audio-enabled profile also includes the right to open the
-attachment's anonymous kernel audio tap. The long-lived daemon has no
-effective, permitted, or inheritable
-capabilities and verifies that fact at startup. Its systemd capability
-bounding set exists only so `pkexec` can enter the helper with
-`CAP_SYS_ADMIN` for grant creation and `CAP_SYS_PTRACE` for repeated
-`/proc/PID/exe` identity checks. The helper clears supplementary groups,
-drops every other capability, and sets `NoNewPrivileges`. No root daemon
-connects to the `pronk` PipeWire server.
-
-## Backends
-
-A backend discovers compatible devices and communicates with the selected
-device. Each installed backend has a configuration file in TOML format under
-`/usr/lib/pronk/backends.d`. The installed files are owned by the root user.
-
-For safety, a configuration file may specify only a local socket path and the
-name of a preinstalled systemd service template. The template tells systemd
-how to start one backend process. A configuration file cannot specify an
-executable, command-line arguments, or environment variables. Installing a
-backend configuration therefore cannot make Pronk run an arbitrary command.
-
-This repository includes two backends:
-
-- **`pronk-chromiacast`** is the backend for normal use. It starts on demand
-  through a private systemd user or system socket. It discovers and
-  authenticates Cast Devices, encodes H.264 video and optional Opus audio, and
-  handles the Cast network protocol.
-- **`pronk-backend-mock`** behaves predictably for automated tests. It lets
-  developers test Pronk without a physical Device, but it does not replace
-  testing with real Cast hardware.
-
-The main service and backend verify each other's identities through the
-selected systemd manager. The backend must have been started from its installed
-socket, and the main process must be `pronk.service`. On the accepted backend
-socket, Pronk also requires kernel-supplied process credentials with every D-Bus read.
-It rejects a writer change and verifies that the authenticated writer is the
-backend unit's current main process before admitting the connection.
-
-## Private audio and video
-
-Most desktop applications connect to PipeWire through one shared server.
-Pronk does not publish captured media there. Both service modes start a second,
-hardware-free PipeWire/WirePlumber pair: session mode below `%t/pronk/media`
-and system mode below `/run/pronk`. That private server creates two classified
-connections:
-
-- `pipewire-0-pronk-core` for the main service; and
-- `pipewire-0-pronk-backend` for backends.
-
-For each media generation, Pronk opens fresh PipeWire connections and passes
-the backend connections as file descriptors; the backend does not need to open
-a PipeWire socket by path. A Unix socket is an endpoint for communication
-between processes on the same computer. WirePlumber 0.5.15 or newer applies the
-following access rules before either process can use the private graph:
-
-- The main service may publish versioned Pronk video. Legacy system mode may
-  also publish one audio source made directly from its grant-scoped CastKMS
-  tap. The private media services do not enumerate ALSA hardware and cannot
-  open `/dev/snd`.
-- The backend may see only compatible Pronk-private video and kernel-tap audio
-  sources. Each source carries the exact connector, session, and media
-  generation identity supplied in the backend protocol.
-- Cameras, microphones, unrelated monitors, and video carrying an unrecognized
-  access-rule version remain hidden. Other desktop applications retain their
-  usual playback access on the ordinary desktop graph.
-
-Pronk refuses to start a real media stream if these access rules are not
-loaded. It does not silently use the less restricted default PipeWire
-connection. In system mode all four PipeWire sockets and WirePlumber are owned
-by the non-root `pronk` account. On WirePlumber versions older than 0.5.15, the
-corresponding test is skipped because those versions cannot provide the same
-protection.
-
-The current named sockets are mode `0600` and classify a connection by the
-socket endpoint. Pronk treats one Unix user ID as one trust principal and does
-not claim confidentiality from another unsandboxed process owned by that user.
-Claiming a per-process boundary without requiring a separately enforced process
-identity would promise more than the standard Unix credential model provides.
-The packaged backend sandbox still hides the default and Pronk-specific
-PipeWire socket paths, so the backend can use only the connected descriptors
-Pronk transfers. WirePlumber then restricts what that admitted backend role can
-see without pretending to isolate arbitrary same-user processes.
-
-The first supported video encoder is GStreamer's `x264enc`. Audio uses
-`opusenc`.
-
-## D-Bus API
-
-Everything available through `pronkctl` is also available through D-Bus, the
-desktop's standard system for communication between applications and
-services. Pronk uses `io.github.pronkproject.Pronk1` on the session bus or the
-system bus. A graphical client should prefer an already-running system-bus
-service and otherwise use the session bus. System-bus inventory and state are
-public; control methods require a previously acquired polkit authorization.
-Graphical clients should expose that as a deliberate Unlock action and remain
-read-only until it succeeds. Command-line callers can use `pronkctl --system`,
-whose equivalent polkit workflow runs the installed client as the `pronk`
-service account.
-
-An `AddDisplay` call returns immediately with an object that reports the
-operation's progress. If setup fails or is cancelled, Pronk gives up the
-capture permission, detaches the virtual monitor, and closes the backend
-connection. After setup succeeds, the display remains under Pronk's control
-until `RemoveDisplay` is called or the service stops.
-
-See the
-[`D-Bus interface definition`](data/dbus-1/interfaces/io.github.pronkproject.Pronk1.xml)
-for the methods, properties, signals, and data types.
-
-Developers changing display authorization or backend startup should also read:
-
-- [`tests/castkms-live/README.md`](tests/castkms-live/README.md)
-- [`tests/backend-activation/README.md`](tests/backend-activation/README.md)
-
-## Tests
-
-The normal test suite runs without a loaded CastKMS device:
-
-```sh
-meson test -C build --print-errorlogs
-```
-
-It covers:
-
-- Mutter display sessions and one-shot helper grants with strict target
-  validation;
-- systemd service and socket definitions;
-- PipeWire connection access and WirePlumber privacy rules;
-- mock and Chromiacast streaming behavior;
-- HDMI-CEC event translation, generation-safe transport state, and normalized
-  backend control completion; and
-- the public command interface, tested against an isolated copy of the main
-  service.
-
-Tests that exercise real capabilities, Mutter display changes, PipeWire
-capture, and a complete connection to a Device require a graphical virtual
-machine. See
-[`tests/vm/README.md`](tests/vm/README.md) for setup and usage.
+- `crates/pronk`: session daemon and display lifecycle;
+- `crates/pronk-capture-broker`: Mutter broker client;
+- `crates/castkms-renderer`: checked renderer protocol;
+- `crates/pronk-renderer-worker`: scene execution worker;
+- `crates/drm-capture`: generic final-image capture client;
+- `crates/pronk-pipewire`: private media transport;
+- `crates/pronk-chromiacast`: Chromecast backend;
+- `crates/pronk-dbus`: public control API;
+- `crates/pronkctl`: command-line client.
 
 ## License
 
-Pronk is available under the [MIT License](LICENSE). Files that carry a
-different SPDX license identifier remain available under the license named in
-that file.
+Pronk is distributed under the MIT license. See [`LICENSE`](LICENSE).

@@ -1,16 +1,15 @@
 # Anonymous DRM capture transport
 
-`drm-capture` implements the experimental final-image capture interface used by
-the Rust CastKMS driver. It does not use the C driver's 0.12 capture protocol.
-The client has no modesetting, attachment, EDID, audio, CEC, allocation or raw
-plane operations. Grant issuance separately borrows the current DRM master and
+`drm-capture` implements the final-image capture interface used by CastKMS. The
+client has no modesetting, attachment, EDID, audio, allocation or raw-plane
+operations. Grant issuance separately borrows the current DRM master and
 returns distinct capture and revocation owners.
 
 The client is a transport boundary, not a pool manager or another renderer.
 It depends only on `nix`. The kernel remains authoritative for permission,
 configuration names, increasing request IDs and outstanding request capacity.
-No mirrored queue accounting is inferred from descriptor lifetime. The actor's
-future pool manager will separately track downstream ownership and native reuse.
+No mirrored queue accounting is inferred from descriptor lifetime. The pool
+manager separately tracks downstream ownership and native reuse.
 
 ## Operation and ownership
 
@@ -83,31 +82,24 @@ requires DRM master, checks the driver name and development version, and changes
 the output's mode and framebuffer. It does not choose a device automatically.
 Ordinary `cargo test` does not start the live probe.
 
-The September 14 qualification used kernel commit
-`0cce0927a0de3e202f900f546f588fbf80ff27a6`, a two-CPU/2 GiB guest and linear
-640x480 XRGB8888 output. It verified exact changing pixels, source-alias rejection,
-backpressure, failed admission without consuming a name, duplicate descriptors,
-an exported native reuse fence closed immediately after admission, cancellation,
-destination removal during an accepted request, revoked dequeue, a fresh grant
-in the same authorization domain, and creator-file revocation while control is
-retained. Three consecutive runs passed alongside all 438 driver cases, followed
-by successful module unload. No test qualifies unrestricted exporter latency or
-revocation of previously exported backing allocations.
+The qualification gate uses a two-CPU/2 GiB guest and linear 640x480 XRGB8888
+output. It verifies exact changing pixels, source-alias rejection, backpressure,
+failed admission without consuming a name, duplicate descriptors, an exported
+native reuse fence closed immediately after admission, cancellation, destination
+removal during an accepted request, revoked dequeue, a fresh grant in the same
+authorization domain, and creator-file revocation while control is retained.
+No test claims to revoke previously exported backing allocations.
 
 ## Application integration
 
-Session mode obtains separate monitor-control and final-image capture
+Pronk obtains separate monitor-control, final-image capture, and renderer
 capabilities from Mutter's display-session broker. The production display
 observer retains the broker session and monitor capability, while the media
-pipeline receives only capture access. Legacy system mode keeps the combined
-CastKMS grant because its audio and CEC facilities do not yet have corresponding
-generic capabilities.
+pipeline receives only capture access.
 
-The production session path uses the built-in reference renderer, which produces
-private host images and copies them to registered destinations. Userspace
-renderer activation, GPU-compatible media transport and hardware encoding remain
-separate integration work. The capture queue does not encode Chromecast's
-display cadence or transport window.
+The renderer and capture paths remain separate even when the renderer uses the
+GPU. The capture queue does not encode Chromecast's display cadence or transport
+window.
 
 If upstream chooses V4L2 for buffer transport, it would replace these transport
 operations rather than introduce a second production path. Keeping the client
