@@ -4,7 +4,7 @@ use std::io;
 use std::os::fd::AsFd;
 
 use castkms_renderer::{ProfileRegistration, Renderer};
-use pronk_gpu::vulkan::Device;
+use pronk_gpu::vulkan::{Device, RenderNodeIdentity};
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
@@ -30,6 +30,7 @@ pub struct ActiveRendererStream<F> {
 struct StreamHandle<F> {
     identity: VideoNodeIdentity,
     layout: VideoBufferLayout,
+    render_node: RenderNodeIdentity,
     registration: ProfileRegistration,
     state: watch::Receiver<RendererStreamState>,
     stop: CancellationToken,
@@ -54,6 +55,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
                 ),
             });
         }
+        let render_node = device.render_node_identity();
         let stop = CancellationToken::new();
         let (state, receive) = watch::channel(RendererStreamState::Prepared);
         let (started, response) = oneshot::channel();
@@ -103,6 +105,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
                 handle: Some(StreamHandle {
                     identity,
                     layout,
+                    render_node,
                     registration,
                     state: receive,
                     stop,
@@ -129,6 +132,10 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
 
     pub fn layout(&self) -> VideoBufferLayout {
         self.handle().layout
+    }
+
+    pub fn render_node_identity(&self) -> RenderNodeIdentity {
+        self.handle().render_node
     }
 
     /// Return the transition that the KMS client must install before activation.
@@ -536,6 +543,10 @@ mod tests {
                 size: NonZeroU64::new(4).unwrap(),
                 storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
             },
+            render_node: RenderNodeIdentity {
+                major: 226,
+                minor: 128,
+            },
             registration: profile_registration(),
             state,
             stop: stop.clone(),
@@ -560,6 +571,10 @@ mod tests {
                     pitch: NonZeroU32::new(4).unwrap(),
                     size: NonZeroU64::new(4).unwrap(),
                     storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
+                },
+                render_node: RenderNodeIdentity {
+                    major: 226,
+                    minor: 128,
                 },
                 registration: profile_registration(),
                 state,
