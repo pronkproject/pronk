@@ -13,7 +13,6 @@ pub const OPUS_SAMPLE_RATE: u32 = 48_000;
 pub const OPUS_CHANNELS: u32 = 2;
 pub const OPUS_BITRATE: u32 = 128_000;
 pub const OPUS_FRAME_DURATION: Duration = Duration::from_millis(20);
-pub const VIDEO_FRAME_RATE: u32 = 30;
 
 #[derive(Debug)]
 pub struct PipeWireVideoInput {
@@ -37,6 +36,7 @@ pub struct MediaGraphConfiguration {
     pub video: PipeWireVideoInput,
     pub audio: Option<PipeWireAudioInput>,
     pub video_codec: VideoCodec,
+    pub video_cadence: VideoCadence,
     pub video_bitrate: NonZeroU64,
 }
 
@@ -44,6 +44,45 @@ pub struct MediaGraphConfiguration {
 pub enum VideoCodec {
     Vp8,
     H264,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoCadence {
+    pub numerator: NonZeroU32,
+    pub denominator: NonZeroU32,
+}
+
+impl VideoCadence {
+    pub const fn new(numerator: NonZeroU32, denominator: NonZeroU32) -> Self {
+        Self {
+            numerator,
+            denominator,
+        }
+    }
+
+    pub(crate) fn frame_interval_nanoseconds(self) -> u64 {
+        let numerator = u128::from(self.numerator.get());
+        let interval = u128::from(self.denominator.get())
+            .saturating_mul(1_000_000_000)
+            .div_ceil(numerator);
+        u64::try_from(interval).unwrap_or(u64::MAX)
+    }
+
+    pub(crate) fn frames_in(self, seconds: u64) -> u64 {
+        u64::from(self.numerator.get())
+            .saturating_mul(seconds)
+            .div_ceil(u64::from(self.denominator.get()))
+    }
+
+    pub(crate) fn maximum_integer_rate(self) -> Result<i32, MediaGraphError> {
+        let rate = u64::from(self.numerator.get()).div_ceil(u64::from(self.denominator.get()));
+        i32::try_from(rate)
+            .map_err(|_| MediaGraphError::new("video cadence exceeds GStreamer's rate limit"))
+    }
+
+    pub(crate) fn caps_fraction(self) -> String {
+        format!("{}/{}", self.numerator, self.denominator)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +137,13 @@ impl ValidatedVideoCaps {
             .parse::<gst::Caps>()
             .map_err(|error| MediaGraphError::new(format!("parse video caps: {error}")))?;
         validate_caps(&caps)
+    }
+
+    pub fn supports_cadence(self, cadence: VideoCadence) -> bool {
+        u64::from(self.framerate_numerator.get())
+            .saturating_mul(u64::from(cadence.denominator.get()))
+            >= u64::from(cadence.numerator.get())
+                .saturating_mul(u64::from(self.framerate_denominator.get()))
     }
 }
 
@@ -245,6 +291,8 @@ pub struct MediaGraphStatistics {
     pub key_frames: u64,
     pub encoded_bytes: u64,
     pub video_bitrate: u64,
+    pub video_cadence_numerator: u32,
+    pub video_cadence_denominator: u32,
     pub key_frame_requests: u64,
     pub bitrate_changes: u64,
     pub bytes_hashed: u64,
@@ -315,6 +363,14 @@ mod tests {
         assert_eq!(parsed.height.get(), 1080);
         assert_eq!(parsed.framerate_numerator.get(), 60);
         assert_eq!(parsed.framerate_denominator.get(), 1);
+        assert!(parsed.supports_cadence(VideoCadence::new(
+            NonZeroU32::new(30_000).unwrap(),
+            NonZeroU32::new(1_001).unwrap(),
+        )));
+        assert!(!parsed.supports_cadence(VideoCadence::new(
+            NonZeroU32::new(60_001).unwrap(),
+            NonZeroU32::new(1_000).unwrap(),
+        )));
 
         for invalid in [
             "video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1",
@@ -323,6 +379,19 @@ mod tests {
         ] {
             assert!(ValidatedVideoCaps::parse(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn rational_video_cadence_keeps_fractional_timing() {
+        let cadence = VideoCadence::new(
+            NonZeroU32::new(30_000).unwrap(),
+            NonZeroU32::new(1_001).unwrap(),
+        );
+
+        assert_eq!(cadence.frame_interval_nanoseconds(), 33_366_667);
+        assert_eq!(cadence.frames_in(2), 60);
+        assert_eq!(cadence.maximum_integer_rate().unwrap(), 30);
+        assert_eq!(cadence.caps_fraction(), "30000/1001");
     }
 
     #[test]

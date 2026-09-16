@@ -1,16 +1,19 @@
 use gstreamer as gst;
 
 use crate::model::{
-    MediaGraphError, VideoFrameDependency, MAX_ENCODED_ACCESS_UNIT_BYTES, VIDEO_FRAME_RATE,
+    MediaGraphError, VideoCadence, VideoFrameDependency, MAX_ENCODED_ACCESS_UNIT_BYTES,
 };
 
 pub(crate) const ENCODER_NAME: &str = "vp8enc";
 const KEY_FRAME_INTERVAL_SECONDS: u64 = 2;
 
-pub(crate) fn encoder_input_caps() -> Result<gst::Caps, MediaGraphError> {
-    format!("video/x-raw,format=(string)I420,framerate=(fraction){VIDEO_FRAME_RATE}/1")
-        .parse::<gst::Caps>()
-        .map_err(|error| MediaGraphError::new(format!("construct encoder input caps: {error}")))
+pub(crate) fn encoder_input_caps(cadence: VideoCadence) -> Result<gst::Caps, MediaGraphError> {
+    format!(
+        "video/x-raw,format=(string)I420,framerate=(fraction){}",
+        cadence.caps_fraction()
+    )
+    .parse::<gst::Caps>()
+    .map_err(|error| MediaGraphError::new(format!("construct encoder input caps: {error}")))
 }
 
 pub(crate) fn encoder_output_caps() -> Result<gst::Caps, MediaGraphError> {
@@ -27,8 +30,8 @@ pub(crate) fn bitrate(bits_per_second: u64) -> Result<i32, MediaGraphError> {
     })
 }
 
-pub(crate) fn key_frame_interval() -> i32 {
-    let frames = u64::from(VIDEO_FRAME_RATE).saturating_mul(KEY_FRAME_INTERVAL_SECONDS);
+pub(crate) fn key_frame_interval(cadence: VideoCadence) -> i32 {
+    let frames = cadence.frames_in(KEY_FRAME_INTERVAL_SECONDS);
     i32::try_from(frames.clamp(1, i32::MAX as u64)).unwrap_or(i32::MAX)
 }
 

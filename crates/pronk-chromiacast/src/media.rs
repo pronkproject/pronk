@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::OwnedFd as StdOwnedFd;
 use std::time::{Duration, Instant};
 
@@ -11,8 +11,8 @@ use pronk_backend_protocol::{
 use pronk_media::{
     EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit, MediaGraphActor,
     MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics, PipeWireAudioInput,
-    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCodec, OPUS_BITRATE,
-    OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE, VIDEO_FRAME_RATE,
+    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence, VideoCodec,
+    OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -32,6 +32,13 @@ use crate::transport::{
 const ENCODED_OUTPUT_CAPACITY: usize = 8;
 const ENCODED_AUDIO_OUTPUT_CAPACITY: usize = 32;
 const START_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn chromecast_video_cadence() -> VideoCadence {
+    VideoCadence::new(
+        NonZeroU32::new(30).expect("Chromecast video cadence is nonzero"),
+        NonZeroU32::new(1).expect("Chromecast video cadence denominator is nonzero"),
+    )
+}
 
 fn minimum_playout_delay(
     framerate_numerator: u32,
@@ -157,6 +164,7 @@ struct PendingMediaGraphConfiguration {
     media_generation: NonZeroU64,
     video: PipeWireVideoInput,
     audio: Option<PipeWireAudioInput>,
+    video_cadence: VideoCadence,
     video_bitrate: NonZeroU64,
 }
 
@@ -167,6 +175,7 @@ impl PendingMediaGraphConfiguration {
             video: self.video,
             audio: self.audio,
             video_codec,
+            video_cadence: self.video_cadence,
             video_bitrate: self.video_bitrate,
         }
     }
@@ -902,12 +911,26 @@ impl ChromiacastMediaSession {
         let bitrate = u32::try_from(configuration.video_bitrate).map_err(|_| {
             MediaSessionError::InvalidRequest("video bitrate exceeds Cast's u32 range".into())
         })?;
-        let minimum_playout_delay = minimum_playout_delay(VIDEO_FRAME_RATE, 1, audio.is_some());
+        let video_cadence = chromecast_video_cadence();
+        if !caps.supports_cadence(video_cadence) {
+            return Err(MediaSessionError::InvalidRequest(format!(
+                "video caps cadence {}/{} is below the required {}/{}",
+                caps.framerate_numerator,
+                caps.framerate_denominator,
+                video_cadence.numerator,
+                video_cadence.denominator
+            )));
+        }
+        let minimum_playout_delay = minimum_playout_delay(
+            video_cadence.numerator.get(),
+            video_cadence.denominator.get(),
+            audio.is_some(),
+        );
         let transport = VideoTransportConfiguration {
             width: caps.width.get(),
             height: caps.height.get(),
-            framerate_numerator: VIDEO_FRAME_RATE,
-            framerate_denominator: 1,
+            framerate_numerator: video_cadence.numerator.get(),
+            framerate_denominator: video_cadence.denominator.get(),
             bitrate,
             target_playout_delay: INITIAL_PLAYOUT_DELAY.max(minimum_playout_delay),
             audio: audio.as_ref().map(|(_, transport)| *transport),
@@ -922,6 +945,7 @@ impl ChromiacastMediaSession {
                 caps: video_target.caps,
             },
             audio: audio.map(|(input, _)| input),
+            video_cadence,
             video_bitrate: NonZeroU64::new(configuration.video_bitrate)
                 .expect("wire validation rejected zero bitrate"),
         };
@@ -1114,6 +1138,9 @@ mod tests {
         ) -> Result<(), MediaGraphError> {
             self.generation = Some(configuration.media_generation);
             self.statistics.video_bitrate = configuration.video_bitrate.get();
+            self.statistics.video_cadence_numerator = configuration.video_cadence.numerator.get();
+            self.statistics.video_cadence_denominator =
+                configuration.video_cadence.denominator.get();
             self.statistics.encoder_name = Some(
                 match configuration.video_codec {
                     VideoCodec::Vp8 => "vp8enc",
@@ -1434,7 +1461,7 @@ mod tests {
             Some(VideoTransportConfiguration {
                 width: 640,
                 height: 480,
-                framerate_numerator: VIDEO_FRAME_RATE,
+                framerate_numerator: chromecast_video_cadence().numerator.get(),
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
                 target_playout_delay: INITIAL_PLAYOUT_DELAY,
@@ -1501,9 +1528,36 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .framerate_numerator,
-            VIDEO_FRAME_RATE
+            chromecast_video_cadence().numerator.get()
         );
         media.stop_media(1, &mut transport).await.unwrap();
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_source_must_supply_the_selected_cadence() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        let mut transport = FakeTransport::default();
+        media.complete_preparation(capabilities()).unwrap();
+        let mut capture_target = target(session_id, 1);
+        capture_target.caps = "video/x-raw,format=BGRx,width=640,height=480,framerate=24/1".into();
+
+        assert!(matches!(
+            media
+                .configure(
+                    remote(),
+                    vec![capture_target],
+                    configuration(),
+                    1,
+                    &mut transport,
+                )
+                .await,
+            Err(MediaSessionError::InvalidRequest(_))
+        ));
         media.shutdown().await.unwrap();
     }
 
@@ -1531,16 +1585,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            media
-                .graph
-                .statistics(NonZeroU64::new(1).unwrap())
-                .await
-                .unwrap()
-                .encoder_name
-                .as_deref(),
-            Some("x264enc")
-        );
+        let statistics = media
+            .graph
+            .statistics(NonZeroU64::new(1).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(statistics.encoder_name.as_deref(), Some("x264enc"));
+        assert_eq!(statistics.video_cadence_numerator, 30);
+        assert_eq!(statistics.video_cadence_denominator, 1);
         media.stop_media(1, &mut transport).await.unwrap();
         media.shutdown().await.unwrap();
     }
@@ -1591,7 +1643,7 @@ mod tests {
             Some(VideoTransportConfiguration {
                 width: 640,
                 height: 480,
-                framerate_numerator: VIDEO_FRAME_RATE,
+                framerate_numerator: chromecast_video_cadence().numerator.get(),
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
                 target_playout_delay: INITIAL_PLAYOUT_DELAY,

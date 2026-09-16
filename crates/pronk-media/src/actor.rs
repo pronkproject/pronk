@@ -595,7 +595,8 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     use crate::{
-        MediaGraphConfiguration, MediaGraphState, PipeWireVideoInput, MAX_ENCODED_OUTPUT_CAPACITY,
+        MediaGraphConfiguration, MediaGraphState, PipeWireVideoInput, VideoCadence,
+        MAX_ENCODED_OUTPUT_CAPACITY,
     };
 
     use super::MediaGraphActor;
@@ -654,6 +655,10 @@ mod tests {
             },
             audio: None,
             video_codec: crate::VideoCodec::Vp8,
+            video_cadence: VideoCadence::new(
+                std::num::NonZeroU32::new(30).unwrap(),
+                std::num::NonZeroU32::new(1).unwrap(),
+            ),
             video_bitrate: NonZeroU64::new(1_000_000).unwrap(),
         }
     }

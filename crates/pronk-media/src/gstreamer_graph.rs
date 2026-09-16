@@ -20,8 +20,8 @@ use crate::h264;
 use crate::media_timeline::{GenerationMediaTimeline, MediaStreamKind};
 use crate::model::{
     parse_caps, EncodedAudioPacket, EncodedVideoAccessUnit, MediaGraphConfiguration,
-    MediaGraphError, MediaGraphStatistics, VideoCodec, VideoFrameDependency, OPUS_BITRATE,
-    OPUS_CHANNELS, OPUS_SAMPLE_RATE, VIDEO_FRAME_RATE,
+    MediaGraphError, MediaGraphStatistics, VideoCadence, VideoCodec, VideoFrameDependency,
+    OPUS_BITRATE, OPUS_CHANNELS, OPUS_SAMPLE_RATE,
 };
 use crate::vp8;
 
@@ -32,7 +32,6 @@ const PIPELINE_STATE_TIMEOUT: Duration = Duration::from_secs(3);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_QUANTUM: Duration = Duration::from_millis(20);
 const RAW_QUEUE_BUFFERS: u32 = 2;
-const VIDEO_FRAME_INTERVAL_NANOSECONDS: u64 = 1_000_000_000 / VIDEO_FRAME_RATE as u64;
 const VIDEO_FRAME_INTERVAL_TOLERANCE_NANOSECONDS: u64 = 2_000_000;
 
 impl VideoCodec {
@@ -50,10 +49,10 @@ impl VideoCodec {
         }
     }
 
-    fn encoder_input_caps(self) -> Result<gst::Caps, MediaGraphError> {
+    fn encoder_input_caps(self, cadence: VideoCadence) -> Result<gst::Caps, MediaGraphError> {
         match self {
-            Self::Vp8 => vp8::encoder_input_caps(),
-            Self::H264 => h264::encoder_input_caps(),
+            Self::Vp8 => vp8::encoder_input_caps(cadence),
+            Self::H264 => h264::encoder_input_caps(cadence),
         }
     }
 
@@ -64,7 +63,11 @@ impl VideoCodec {
         }
     }
 
-    fn build_encoder(self, bitrate: NonZeroU64) -> Result<gst::Element, MediaGraphError> {
+    fn build_encoder(
+        self,
+        bitrate: NonZeroU64,
+        cadence: VideoCadence,
+    ) -> Result<gst::Element, MediaGraphError> {
         match self {
             Self::Vp8 => gst::ElementFactory::make(vp8::ENCODER_NAME)
                 .name("pronk-vp8-encoder")
@@ -78,7 +81,7 @@ impl VideoCodec {
                 .property("buffer-size", 1_000_i32)
                 .property("target-bitrate", vp8::bitrate(bitrate.get())?)
                 .property_from_str("keyframe-mode", "disabled")
-                .property("keyframe-max-dist", vp8::key_frame_interval())
+                .property("keyframe-max-dist", vp8::key_frame_interval(cadence))
                 .property("lag-in-frames", 0_i32)
                 .property("threads", 8_i32)
                 .property("static-threshold", 100_i32)
@@ -91,7 +94,7 @@ impl VideoCodec {
                 .property_from_str("tune", "zerolatency")
                 .property_from_str("speed-preset", "ultrafast")
                 .property("bitrate", h264::bitrate_kbits(bitrate.get())?)
-                .property("key-int-max", h264::key_frame_interval())
+                .property("key-int-max", h264::key_frame_interval(cadence))
                 .property("bframes", 0_u32)
                 .property("byte-stream", true)
                 .property("aud", true)
@@ -181,7 +184,10 @@ fn is_segment_anchor(buffer: &gst::BufferRef) -> bool {
     buffer.pts().is_some() && !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT)
 }
 
-fn install_video_frame_rate_gate(rate: &gst::Element) -> Result<(), MediaGraphError> {
+fn install_video_frame_rate_gate(
+    rate: &gst::Element,
+    cadence: VideoCadence,
+) -> Result<(), MediaGraphError> {
     let source_pad = rate
         .static_pad("src")
         .ok_or_else(|| MediaGraphError::new("videorate has no static source pad"))?;
@@ -198,7 +204,8 @@ fn install_video_frame_rate_gate(rate: &gst::Element) -> Result<(), MediaGraphEr
             let mut last = last_forwarded_timestamp
                 .lock()
                 .expect("video frame-rate gate mutex poisoned");
-            let minimum_interval = VIDEO_FRAME_INTERVAL_NANOSECONDS
+            let minimum_interval = cadence
+                .frame_interval_nanoseconds()
                 .saturating_sub(VIDEO_FRAME_INTERVAL_TOLERANCE_NANOSECONDS);
             if last.is_some_and(|previous| {
                 timestamp >= previous && timestamp - previous < minimum_interval
@@ -257,9 +264,19 @@ impl GStreamerGraph {
         if configuration.video.node_name.is_empty() {
             return Err(MediaGraphError::new("PipeWire video node name is empty"));
         }
-        let (raw_caps, _) = parse_caps(&configuration.video.caps)?;
+        let (raw_caps, source_caps) = parse_caps(&configuration.video.caps)?;
         let video_codec = configuration.video_codec;
-        let converted_caps = video_codec.encoder_input_caps()?;
+        let video_cadence = configuration.video_cadence;
+        if !source_caps.supports_cadence(video_cadence) {
+            return Err(MediaGraphError::new(format!(
+                "source video cadence {}/{} is below the requested {}/{}",
+                source_caps.framerate_numerator,
+                source_caps.framerate_denominator,
+                video_cadence.numerator,
+                video_cadence.denominator
+            )));
+        }
+        let converted_caps = video_codec.encoder_input_caps(video_cadence)?;
         let encoded_caps = video_codec.encoder_output_caps()?;
         let stream_properties = video_stream_properties();
         let source = gst::ElementFactory::make("pipewiresrc")
@@ -314,12 +331,12 @@ impl GStreamerGraph {
         let rate = gst::ElementFactory::make("videorate")
             .name("pronk-video-rate")
             .property("drop-only", true)
-            .property("max-rate", VIDEO_FRAME_RATE as i32)
+            .property("max-rate", video_cadence.maximum_integer_rate()?)
             .build()
             .map_err(|error| {
                 MediaGraphError::new(format!("construct video rate limiter: {error}"))
             })?;
-        install_video_frame_rate_gate(&rate)?;
+        install_video_frame_rate_gate(&rate, video_cadence)?;
         let converted_caps_filter = gst::ElementFactory::make("capsfilter")
             .name("pronk-encoder-input-caps")
             .property("caps", &converted_caps)
@@ -327,7 +344,7 @@ impl GStreamerGraph {
             .map_err(|error| {
                 MediaGraphError::new(format!("construct encoder input caps filter: {error}"))
             })?;
-        let encoder = video_codec.build_encoder(configuration.video_bitrate)?;
+        let encoder = video_codec.build_encoder(configuration.video_bitrate, video_cadence)?;
         let parser = video_codec.build_parser()?;
         let encoded_caps_filter = gst::ElementFactory::make("capsfilter")
             .name("pronk-encoded-video-caps")
@@ -453,6 +470,8 @@ impl GStreamerGraph {
             audio,
             statistics: MediaGraphStatistics {
                 video_bitrate: effective_bitrate,
+                video_cadence_numerator: video_cadence.numerator.get(),
+                video_cadence_denominator: video_cadence.denominator.get(),
                 encoder_name: Some(video_codec.encoder_name().into()),
                 encoded_caps: Some(encoded_caps.to_string()),
                 audio_encoder_name: has_audio.then(|| "opusenc".into()),

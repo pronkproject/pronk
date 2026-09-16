@@ -1,16 +1,19 @@
 use gstreamer as gst;
 
 use crate::model::{
-    MediaGraphError, VideoFrameDependency, MAX_ENCODED_ACCESS_UNIT_BYTES, VIDEO_FRAME_RATE,
+    MediaGraphError, VideoCadence, VideoFrameDependency, MAX_ENCODED_ACCESS_UNIT_BYTES,
 };
 
 pub(crate) const ENCODER_NAME: &str = "x264enc";
 const KEY_FRAME_INTERVAL_SECONDS: u64 = 2;
 
-pub(crate) fn encoder_input_caps() -> Result<gst::Caps, MediaGraphError> {
-    format!("video/x-raw,format=(string)I420,framerate=(fraction){VIDEO_FRAME_RATE}/1")
-        .parse::<gst::Caps>()
-        .map_err(|error| MediaGraphError::new(format!("construct encoder input caps: {error}")))
+pub(crate) fn encoder_input_caps(cadence: VideoCadence) -> Result<gst::Caps, MediaGraphError> {
+    format!(
+        "video/x-raw,format=(string)I420,framerate=(fraction){}",
+        cadence.caps_fraction()
+    )
+    .parse::<gst::Caps>()
+    .map_err(|error| MediaGraphError::new(format!("construct encoder input caps: {error}")))
 }
 
 pub(crate) fn encoder_output_caps() -> Result<gst::Caps, MediaGraphError> {
@@ -32,8 +35,8 @@ pub(crate) fn bitrate_kbits(bits_per_second: u64) -> Result<u32, MediaGraphError
         .map_err(|_| MediaGraphError::new("x264enc bitrate does not fit its property type"))
 }
 
-pub(crate) fn key_frame_interval() -> u32 {
-    let frames = u64::from(VIDEO_FRAME_RATE).saturating_mul(KEY_FRAME_INTERVAL_SECONDS);
+pub(crate) fn key_frame_interval(cadence: VideoCadence) -> u32 {
+    let frames = cadence.frames_in(KEY_FRAME_INTERVAL_SECONDS);
     u32::try_from(frames.clamp(1, u64::from(u32::MAX))).unwrap_or(u32::MAX)
 }
 

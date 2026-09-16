@@ -18,7 +18,8 @@ pub use actor::{EncodedMediaReceivers, MediaGraphActor};
 pub use model::{
     EncodedAudioPacket, EncodedVideoAccessUnit, MediaGraphConfiguration, MediaGraphError,
     MediaGraphSnapshot, MediaGraphState, MediaGraphStatistics, PipeWireAudioInput,
-    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCodec, VideoFrameDependency,
-    MAX_ENCODED_ACCESS_UNIT_BYTES, MAX_ENCODED_AUDIO_PACKET_BYTES, MAX_ENCODED_OUTPUT_CAPACITY,
-    OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE, VIDEO_FRAME_RATE,
+    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence, VideoCodec,
+    VideoFrameDependency, MAX_ENCODED_ACCESS_UNIT_BYTES, MAX_ENCODED_AUDIO_PACKET_BYTES,
+    MAX_ENCODED_OUTPUT_CAPACITY, OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION,
+    OPUS_SAMPLE_RATE,
 };

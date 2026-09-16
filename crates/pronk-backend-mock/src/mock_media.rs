@@ -1,4 +1,4 @@
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::OwnedFd as StdOwnedFd;
 
 use pronk_backend_protocol::{MediaConfiguration, MediaKind, PipeWireTarget, SessionStatistics};
@@ -130,6 +130,10 @@ impl MockMediaEngine {
                         },
                         audio: None,
                         video_codec: pronk_media::VideoCodec::H264,
+                        video_cadence: pronk_media::VideoCadence::new(
+                            NonZeroU32::new(30).unwrap(),
+                            NonZeroU32::new(1).unwrap(),
+                        ),
                         video_bitrate: NonZeroU64::new(configuration.video_bitrate)
                             .expect("wire validation rejected zero bitrate"),
                     })

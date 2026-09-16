@@ -18,7 +18,8 @@ use pronk::media_pipeline_port::CapturePipelinePort;
 use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk_capture_broker::{Provider, Target};
 use pronk_media::{
-    MediaGraphActor, MediaGraphConfiguration, PipeWireVideoInput, VideoCodec, VideoFrameDependency,
+    MediaGraphActor, MediaGraphConfiguration, PipeWireVideoInput, VideoCadence, VideoCodec,
+    VideoFrameDependency,
 };
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use tokio_util::sync::CancellationToken;
@@ -169,6 +170,7 @@ async fn run(
         },
         audio: None,
         video_codec: VideoCodec::H264,
+        video_cadence: VideoCadence::new(nz(30), nz(1)),
         video_bitrate: nz64(4_000_000),
     };
     let mut decoder = decoder::Decoder::new()?;
