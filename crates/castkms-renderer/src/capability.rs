@@ -26,6 +26,7 @@ const FEATURE_FLAGS: u32 = CAPABILITY_CROP
     | CAPABILITY_PLANE_MATRIX
     | CAPABILITY_OUTPUT_MATRIX;
 const SNAPSHOT_BYTES: usize = 72;
+const FIXED_SCALE: u32 = 1 << 16;
 
 /// Storage provenance accepted for one exact format tuple.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +139,27 @@ pub struct RendererCapability {
 }
 
 impl RendererCapability {
+    /// Limit a transition to one unscaled full-output primary plane.
+    ///
+    /// The narrow shape lets a renderer reserve complete private storage before
+    /// it claims the first source-bearing job.
+    pub fn single_primary(output: Extent, format: CapabilityFormat) -> Self {
+        Self {
+            flags: 0,
+            max_output: output,
+            max_source: output,
+            min_scale: NonZeroU32::new(FIXED_SCALE).expect("fixed scale is nonzero"),
+            max_scale: NonZeroU32::new(FIXED_SCALE).expect("fixed scale is nonzero"),
+            max_layers: NonZeroU32::new(1).expect("one layer is nonzero"),
+            max_roles: [1, 0, 0],
+            max_color_operations: 0,
+            max_lut_entries: 0,
+            yuv_encodings: 0,
+            yuv_ranges: 0,
+            formats: vec![format].into_boxed_slice(),
+        }
+    }
+
     pub fn max_output(&self) -> Extent {
         self.max_output
     }
@@ -148,6 +170,37 @@ impl RendererCapability {
 
     pub fn formats(&self) -> &[CapabilityFormat] {
         &self.formats
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(PROFILE_BYTES + self.formats.len() * FORMAT_BYTES);
+        for value in [
+            CAPABILITY_VERSION,
+            CAPABILITY_RENDERER,
+            self.flags,
+            self.formats.len() as u32,
+            self.max_output.width(),
+            self.max_output.height(),
+            self.max_source.width(),
+            self.max_source.height(),
+            self.min_scale.get(),
+            self.max_scale.get(),
+            self.max_layers.get(),
+            self.max_roles[0],
+            self.max_roles[1],
+            self.max_roles[2],
+            self.max_color_operations,
+            self.max_lut_entries,
+            self.yuv_encodings,
+            self.yuv_ranges,
+        ] {
+            put_u32(&mut bytes, value);
+        }
+        bytes.resize(PROFILE_BYTES, 0);
+        for format in &self.formats {
+            put_format(&mut bytes, *format);
+        }
+        bytes
     }
 }
 
@@ -300,6 +353,18 @@ fn decode_snapshot(bytes: &[u8]) -> io::Result<CapabilitySnapshot> {
 }
 
 impl CapabilityProfile {
+    pub(super) fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Host => {
+                let mut bytes = vec![0; PROFILE_BYTES];
+                bytes[0..4].copy_from_slice(&CAPABILITY_VERSION.to_ne_bytes());
+                bytes[4..8].copy_from_slice(&CAPABILITY_HOST.to_ne_bytes());
+                bytes
+            }
+            Self::Renderer(profile) => profile.encode(),
+        }
+    }
+
     pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
         if !(PROFILE_BYTES..=CAPABILITY_MAX_BYTES).contains(&bytes.len()) {
             return Err(invalid("CastKMS returned an invalid capability size"));
@@ -374,6 +439,23 @@ impl CapabilityProfile {
     }
 }
 
+fn put_format(bytes: &mut Vec<u8>, format: CapabilityFormat) {
+    put_u32(bytes, format.fourcc);
+    put_u32(bytes, format.plane_count.get());
+    let (modifier, explicit) = match format.modifier {
+        FormatModifier::Unspecified => (0, false),
+        FormatModifier::Explicit(modifier) => (modifier, true),
+    };
+    put_u64(bytes, modifier);
+    let flags = (u32::from(format.provenance.native) * CAPABILITY_NATIVE)
+        | (u32::from(format.provenance.imported) * CAPABILITY_IMPORTED)
+        | (u32::from(explicit) * CAPABILITY_EXPLICIT_MODIFIER);
+    put_u32(bytes, flags);
+    put_u32(bytes, format.pitch_alignment.get());
+    put_u32(bytes, format.offset_alignment.get());
+    put_u32(bytes, format.max_pitch.get());
+}
+
 fn decode_format(bytes: &[u8], offset: usize) -> io::Result<CapabilityFormat> {
     let flags = get_u32(bytes, offset + 16)?;
     if flags & !(CAPABILITY_NATIVE | CAPABILITY_IMPORTED | CAPABILITY_EXPLICIT_MODIFIER) != 0 {
@@ -423,12 +505,10 @@ fn get_u64(bytes: &[u8], offset: usize) -> io::Result<u64> {
     ))
 }
 
-#[cfg(test)]
 fn put_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_ne_bytes());
 }
 
-#[cfg(test)]
 fn put_u64(bytes: &mut Vec<u8>, value: u64) {
     bytes.extend_from_slice(&value.to_ne_bytes());
 }
@@ -510,6 +590,17 @@ mod tests {
         put_u32(&mut bytes, 4);
         put_u32(&mut bytes, 65_536);
         bytes
+    }
+
+    #[test]
+    fn narrow_primary_profile_round_trips() {
+        let profile = CapabilityProfile::Renderer(RendererCapability::single_primary(
+            Extent::new(1920, 1080).unwrap(),
+            format(),
+        ));
+        let bytes = profile.encode();
+        assert_eq!(bytes.len(), PROFILE_BYTES + FORMAT_BYTES);
+        assert_eq!(CapabilityProfile::decode(&bytes).unwrap(), profile);
     }
 
     #[test]

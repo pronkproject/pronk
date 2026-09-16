@@ -26,12 +26,13 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use castkms_sys::{
     drm_ioctl_castkms_renderer_abort_takeover, drm_ioctl_castkms_renderer_begin_takeover,
     drm_ioctl_castkms_renderer_commit_takeover, drm_ioctl_castkms_renderer_get_snapshot,
-    drm_ioctl_castkms_renderer_query, drm_ioctl_castkms_renderer_submit_probe,
-    DrmCastkmsRendererAbortTakeover, DrmCastkmsRendererBeginTakeover,
-    DrmCastkmsRendererCommitTakeover, DrmCastkmsRendererGetSnapshot, DrmCastkmsRendererQuery,
-    DrmCastkmsRendererSnapshot, DrmCastkmsRendererSubmitProbe, DrmCastkmsRendererTakeover,
-    DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888, EXECUTION_GPU_V1, EXECUTION_HOST_V1,
-    RENDERER_PROBE_PRIVATE, RENDERER_PROBE_STARTUP_IMAGE, RENDERER_VERSION,
+    drm_ioctl_castkms_renderer_query, drm_ioctl_castkms_renderer_register_profile,
+    drm_ioctl_castkms_renderer_submit_probe, DrmCastkmsRendererAbortTakeover,
+    DrmCastkmsRendererBeginTakeover, DrmCastkmsRendererCommitTakeover,
+    DrmCastkmsRendererGetSnapshot, DrmCastkmsRendererProfileResult, DrmCastkmsRendererQuery,
+    DrmCastkmsRendererRegisterProfile, DrmCastkmsRendererSnapshot, DrmCastkmsRendererSubmitProbe,
+    DrmCastkmsRendererTakeover, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888, EXECUTION_GPU_V1,
+    EXECUTION_HOST_V1, RENDERER_PROBE_PRIVATE, RENDERER_PROBE_STARTUP_IMAGE, RENDERER_VERSION,
 };
 use nix::fcntl::{fcntl, FcntlArg};
 
@@ -233,6 +234,28 @@ struct CandidateDescription {
     configuration: OutputConfiguration,
 }
 
+/// Immutable identities assigned to one registered transition profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProfileRegistration {
+    transition: NonZeroU64,
+    capability_generation: NonZeroU64,
+    execution_generation: NonZeroU64,
+}
+
+impl ProfileRegistration {
+    pub fn transition(self) -> NonZeroU64 {
+        self.transition
+    }
+
+    pub fn capability_generation(self) -> NonZeroU64 {
+        self.capability_generation
+    }
+
+    pub fn execution_generation(self) -> NonZeroU64 {
+        self.execution_generation
+    }
+}
+
 /// One reserved takeover candidate tied to its originating renderer endpoint.
 #[must_use = "retain the candidate for startup or abort it deliberately"]
 #[derive(Debug)]
@@ -245,6 +268,65 @@ pub struct TakeoverCandidate<'renderer, F: AsFd> {
     active: bool,
 }
 
+/// Candidate whose immutable whole-scene contract is pending installation.
+#[must_use = "retain the registered candidate for startup or abort it deliberately"]
+#[derive(Debug)]
+pub struct RegisteredCandidate<'renderer, F: AsFd> {
+    candidate: TakeoverCandidate<'renderer, F>,
+    registration: ProfileRegistration,
+}
+
+impl<'renderer, F: AsFd> RegisteredCandidate<'renderer, F> {
+    pub fn registration(&self) -> ProfileRegistration {
+        self.registration
+    }
+
+    pub fn profile(&self) -> Profile {
+        self.candidate.profile()
+    }
+
+    pub fn configuration(&self) -> OutputConfiguration {
+        self.candidate.configuration()
+    }
+
+    pub fn submit_private_probe(
+        self,
+        completion: Option<BorrowedFd<'_>>,
+    ) -> io::Result<SubmittedCandidate<'renderer, F>> {
+        self.candidate
+            .submit_probe(RENDERER_PROBE_PRIVATE, completion)
+    }
+
+    pub fn abort(self) -> io::Result<()> {
+        self.candidate.abort()
+    }
+}
+
+/// Failed profile registration retaining the candidate for explicit cleanup.
+#[derive(Debug)]
+pub struct ProfileRegistrationError<'renderer, F: AsFd> {
+    candidate: TakeoverCandidate<'renderer, F>,
+    error: io::Error,
+}
+
+impl<'renderer, F: AsFd> ProfileRegistrationError<'renderer, F> {
+    pub fn error(&self) -> &io::Error {
+        &self.error
+    }
+
+    pub fn into_parts(self) -> (TakeoverCandidate<'renderer, F>, io::Error) {
+        (self.candidate, self.error)
+    }
+}
+
+impl<F: AsFd> std::fmt::Display for ProfileRegistrationError<'_, F> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl<F: AsFd + std::fmt::Debug> std::error::Error for ProfileRegistrationError<'_, F> {}
+
 impl<'renderer, F: AsFd> TakeoverCandidate<'renderer, F> {
     pub fn profile(&self) -> Profile {
         self.profile
@@ -252,6 +334,26 @@ impl<'renderer, F: AsFd> TakeoverCandidate<'renderer, F> {
 
     pub fn configuration(&self) -> OutputConfiguration {
         self.configuration
+    }
+
+    /// Register one immutable whole-scene contract for this candidate.
+    ///
+    /// Registration does not change KMS acceptance. Success consumes the
+    /// unregistered candidate so safe Rust cannot propose a second contract.
+    pub fn register_profile(
+        self,
+        profile: &CapabilityProfile,
+    ) -> Result<RegisteredCandidate<'renderer, F>, ProfileRegistrationError<'renderer, F>> {
+        match register_profile(&self, profile) {
+            Ok(registration) => Ok(RegisteredCandidate {
+                candidate: self,
+                registration,
+            }),
+            Err(error) => Err(ProfileRegistrationError {
+                candidate: self,
+                error,
+            }),
+        }
     }
 
     /// Copy the newest eligible HOST result into independent storage.
@@ -533,6 +635,59 @@ fn validate_candidate(
     })
 }
 
+fn register_profile<F: AsFd>(
+    candidate: &TakeoverCandidate<'_, F>,
+    profile: &CapabilityProfile,
+) -> io::Result<ProfileRegistration> {
+    let bytes = profile.encode();
+    let mut result = DrmCastkmsRendererProfileResult::default();
+    let request = DrmCastkmsRendererRegisterProfile {
+        candidate_id: candidate.id.get(),
+        profile: bytes.as_ptr() as u64,
+        result: (&mut result as *mut DrmCastkmsRendererProfileResult) as u64,
+        profile_size: bytes
+            .len()
+            .try_into()
+            .map_err(|_| invalid_data("renderer profile exceeds the ioctl size field"))?,
+        ..Default::default()
+    };
+    // SAFETY: Both fixed-width records and the immutable encoded profile remain
+    // live and stable throughout the synchronous ioctl.
+    unsafe {
+        drm_ioctl_castkms_renderer_register_profile(
+            candidate.renderer.fd.as_fd().as_raw_fd(),
+            &request,
+        )
+    }?;
+    validate_registration(result, candidate.execution)
+}
+
+fn validate_registration(
+    result: DrmCastkmsRendererProfileResult,
+    execution: Description,
+) -> io::Result<ProfileRegistration> {
+    let expected_execution = execution
+        .generation
+        .get()
+        .checked_add(1)
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| invalid_data("CastKMS execution generation overflowed"))?;
+    let registration = ProfileRegistration {
+        transition: NonZeroU64::new(result.transition)
+            .ok_or_else(|| invalid_data("CastKMS returned a zero transition"))?,
+        capability_generation: NonZeroU64::new(result.capability_generation)
+            .ok_or_else(|| invalid_data("CastKMS returned a zero capability generation"))?,
+        execution_generation: NonZeroU64::new(result.execution_generation)
+            .ok_or_else(|| invalid_data("CastKMS returned a zero target execution generation"))?,
+    };
+    if result.reserved != 0 || registration.execution_generation != expected_execution {
+        return Err(invalid_data(
+            "CastKMS returned an inconsistent profile registration",
+        ));
+    }
+    Ok(registration)
+}
+
 fn validate_startup_image(
     result: DrmCastkmsRendererSnapshot,
     dma_buf: OwnedFd,
@@ -755,6 +910,40 @@ mod tests {
             },
         ] {
             assert!(validate_candidate(invalid, expected()).is_err());
+        }
+    }
+
+    #[test]
+    fn profile_registration_names_the_next_execution() {
+        let valid = DrmCastkmsRendererProfileResult {
+            transition: 13,
+            capability_generation: 17,
+            execution_generation: 8,
+            reserved: 0,
+        };
+        let registration = validate_registration(valid, expected()).unwrap();
+        assert_eq!(registration.transition().get(), 13);
+        assert_eq!(registration.capability_generation().get(), 17);
+        assert_eq!(registration.execution_generation().get(), 8);
+        for invalid in [
+            DrmCastkmsRendererProfileResult {
+                transition: 0,
+                ..valid
+            },
+            DrmCastkmsRendererProfileResult {
+                capability_generation: 0,
+                ..valid
+            },
+            DrmCastkmsRendererProfileResult {
+                execution_generation: 7,
+                ..valid
+            },
+            DrmCastkmsRendererProfileResult {
+                reserved: 1,
+                ..valid
+            },
+        ] {
+            assert!(validate_registration(invalid, expected()).is_err());
         }
     }
 
