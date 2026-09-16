@@ -165,11 +165,7 @@ impl KernelDisplay {
     }
 
     fn observe(&self) -> Result<Observation, KernelDisplayError> {
-        let client = match self.capture.open() {
-            Ok(client) => client,
-            Err(error) => return classify_capture_error(error, self.current),
-        };
-        let description = match client.describe() {
+        let description = match self.capture.describe() {
             Ok(description) => description,
             Err(error) => return classify_capture_error(error, self.current),
         };

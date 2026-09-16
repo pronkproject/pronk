@@ -19,6 +19,9 @@ validation: `Access::open` duplicates the descriptor with close-on-exec and
 queries the active output. Failure leaves the retained access available for a
 later attempt. Clones share the same kernel file and authorization, not a fresh
 namespace or an independent permission lifetime.
+`Access::describe` performs the same checked query directly on retained access,
+without duplicating the descriptor. Display observation uses that operation;
+it does not open streams or allocate names.
 
 `Client::from_fd` adopts an inherited descriptor after a successful description
 query. It rejects inactive or revoked grants rather than pretending to validate
