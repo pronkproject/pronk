@@ -251,3 +251,5 @@ process, uses the development socket policy, and has no capture/executor
 capabilities. It does not qualify the eventual process split, system-service
 identity, arbitrary compositor scenes, device-reset recovery or receiver traffic.
 No installed service unit is edited or restarted.
+See the installed hardware-encoder section in `docs/gpu-media.md` for the
+per-instance device authorization that a qualified deployment must provide.

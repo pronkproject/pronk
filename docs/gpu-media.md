@@ -765,6 +765,37 @@ fields; its adapter therefore uses identity transforms, premultiplied pixel
 alpha and full plane alpha. The registered capability states the operations
 accepted by the worker rather than extending those defaults implicitly.
 
+## Installed hardware encoder
+
+The installed Chromecast backend deliberately starts with software encoding
+and no DRM device in its private device namespace. A deployment that has
+qualified one VA H.264 render node can select it for every socket-activated
+backend process with a `pronk-chromiacast@.service.d` systemd drop-in such as:
+
+```ini
+[Service]
+Environment=PRONK_CHROMIACAST_VIDEO_ENCODER=va-h264
+Environment=PRONK_CHROMIACAST_RENDER_NODE=/dev/dri/renderD128
+BindReadOnlyPaths=/dev/dri/renderD128
+DeviceAllow=/dev/dri/renderD128 rw
+```
+
+The template's instance identifier names an accepted control connection, not a
+Chromecast receiver, so a receiver-specific instance override is not a stable
+configuration mechanism. Keep `PrivateDevices=yes` and `DevicePolicy=closed`
+in the base unit: the bind places only the selected node in the service
+namespace, and the allow rule permits access only to that character device. Do
+not expose a primary DRM node or the complete `/dev/dri` directory. A machine
+that needs explicit VA driver selection may add its qualified
+`LIBVA_DRIVER_NAME` and `LIBVA_DRIVERS_PATH` to the same drop-in.
+
+The backend opens the configured path during startup, requires a DRM render
+node and records its device numbers. It later rejects a userspace-rendered
+video target produced by another render device before media negotiation. Those
+checks prevent an accidental cross-device route; they do not replace format,
+modifier, encoder or sandbox qualification. Restarting an activated backend
+after a drop-in change interrupts its active Cast session.
+
 ## Current scope
 
 The generated-image media harness uses the non-exportable shader path. Three
@@ -782,11 +813,11 @@ derive that choice from the encoder's import abilities. The generated-image
 harness joins a separate producer's source import, private staging, exported
 output reuse and hardware encoding for one explicit tiled tuple. It overwrites
 source and staging before checking the decoded output. Selecting a compatible
-nonlinear output through KMS constraints and authorizing the installed backend
-service to open its chosen render node remain integration work. The default
-software encoder and base service sandbox remain available without DRM access.
-A transport-level modifier test is not qualification of the complete private
-PipeWire, encoder or receiver path.
+nonlinear output through KMS constraints remains integration work. Hardware
+encoding also requires the deployment to install the per-instance device
+authorization above; the default software encoder and base service sandbox
+remain available without DRM access. A transport-level modifier test is not
+qualification of the complete private PipeWire, encoder or receiver path.
 
 Userspace-rendered video targets carry the major and minor number of the exact
 render node used to select their Vulkan device. The Chromecast backend records
