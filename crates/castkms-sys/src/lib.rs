@@ -131,7 +131,9 @@ pub const DMA_BUF_SYNC_WRITE: u64 = 2;
 pub const DMA_BUF_SYNC_START: u64 = 0;
 pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 
-pub const RENDERER_VERSION: u32 = 7;
+pub const RENDERER_VERSION: u32 = 8;
+pub const TRANSITION_PROPERTY: &str = "CASTKMS_TRANSITION";
+pub const EXECUTION_PROPERTY: &str = "CASTKMS_EXECUTION";
 pub const RENDERER_PROBE_PRIVATE: u32 = 1;
 pub const RENDERER_PROBE_STARTUP_IMAGE: u32 = 2;
 pub const RENDERER_RELEASE_NO_ACCESS: u32 = 1;
@@ -152,24 +154,34 @@ pub const RENDERER_COLOR_MATRIX: u32 = 3;
 pub const RENDERER_COLOR_LUT: u32 = 4;
 pub const EXECUTION_HOST_V1: u32 = 1;
 pub const EXECUTION_GPU_V1: u32 = 2;
-pub const CAPABILITY_VERSION: u32 = 1;
-pub const CAPABILITY_HOST: u32 = 1;
-pub const CAPABILITY_RENDERER: u32 = 2;
+pub const CAPABILITY_VERSION: u32 = 2;
+pub const CAPABILITY_KIND_HOST: u32 = 1;
+pub const CAPABILITY_KIND_RENDERER: u32 = 2;
 pub const CAPABILITY_MAX_FORMATS: usize = 256;
 pub const CAPABILITY_MAX_BYTES: usize = 128 + 32 * CAPABILITY_MAX_FORMATS;
 pub const CAPABILITY_QUERY_MAX_BYTES: usize = 72 + 2 * CAPABILITY_MAX_BYTES;
-pub const CAPABILITY_CROP: u32 = 1 << 0;
-pub const CAPABILITY_FRACTIONAL: u32 = 1 << 1;
-pub const CAPABILITY_POSITION: u32 = 1 << 2;
-pub const CAPABILITY_SCALE: u32 = 1 << 3;
-pub const CAPABILITY_SRGB: u32 = 1 << 4;
-pub const CAPABILITY_PLANE_MATRIX: u32 = 1 << 5;
-pub const CAPABILITY_OUTPUT_MATRIX: u32 = 1 << 6;
-pub const CAPABILITY_NATIVE: u32 = 1 << 0;
-pub const CAPABILITY_IMPORTED: u32 = 1 << 1;
-pub const CAPABILITY_EXPLICIT_MODIFIER: u32 = 1 << 2;
-pub const CAPABILITY_PENDING: u32 = 1 << 0;
-pub const CAPABILITY_GATED: u32 = 1 << 1;
+pub const CAPABILITY_PROFILE_CROP: u32 = 1 << 0;
+pub const CAPABILITY_PROFILE_FRACTIONAL: u32 = 1 << 1;
+pub const CAPABILITY_PROFILE_POSITION: u32 = 1 << 2;
+pub const CAPABILITY_PROFILE_SCALE: u32 = 1 << 3;
+pub const CAPABILITY_PROFILE_SRGB: u32 = 1 << 4;
+pub const CAPABILITY_PROFILE_PLANE_MATRIX: u32 = 1 << 5;
+pub const CAPABILITY_PROFILE_OUTPUT_MATRIX: u32 = 1 << 6;
+pub const CAPABILITY_FORMAT_NATIVE: u32 = 1 << 0;
+pub const CAPABILITY_FORMAT_IMPORTED: u32 = 1 << 1;
+pub const CAPABILITY_FORMAT_EXPLICIT_MODIFIER: u32 = 1 << 2;
+pub const CAPABILITY_STATE_PENDING: u32 = 1 << 0;
+pub const CAPABILITY_STATE_GATED: u32 = 1 << 1;
+pub const YUV_ENCODING_BT601: u32 = 0;
+pub const YUV_ENCODING_BT709: u32 = 1;
+pub const YUV_ENCODING_BT2020: u32 = 2;
+pub const YUV_RANGE_LIMITED: u32 = 0;
+pub const YUV_RANGE_FULL: u32 = 1;
+pub const CAPABILITY_YUV_ENCODING_BT601: u32 = 1 << YUV_ENCODING_BT601;
+pub const CAPABILITY_YUV_ENCODING_BT709: u32 = 1 << YUV_ENCODING_BT709;
+pub const CAPABILITY_YUV_ENCODING_BT2020: u32 = 1 << YUV_ENCODING_BT2020;
+pub const CAPABILITY_YUV_RANGE_LIMITED: u32 = 1 << YUV_RANGE_LIMITED;
+pub const CAPABILITY_YUV_RANGE_FULL: u32 = 1 << YUV_RANGE_FULL;
 
 /// Native-pointer layout used by the standard DRM `VERSION` ioctl.
 ///
@@ -482,7 +494,9 @@ pub struct DrmCastkmsCapabilityProfile {
     pub max_lut_entries: u32,
     pub yuv_encodings: u32,
     pub yuv_ranges: u32,
-    pub reserved: [u32; 14],
+    pub min_output: [u32; 2],
+    pub min_source: [u32; 2],
+    pub reserved: [u32; 10],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -505,6 +519,7 @@ pub struct DrmCastkmsRendererRegisterProfile {
     pub result: u64,
     pub profile_size: u32,
     pub flags: u32,
+    pub reserved: [u64; 2],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -550,32 +565,6 @@ pub struct DrmCastkmsRendererSourcePlane {
     pub pitch: u32,
     pub offset: u32,
     pub reserved: u32,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[repr(C)]
-pub struct DrmCastkmsRendererSource {
-    pub job_id: u64,
-    pub content_serial: u64,
-    pub modifier: u64,
-    pub format: u32,
-    pub width: u32,
-    pub height: u32,
-    pub plane_count: u32,
-    pub producer_fd: i32,
-    pub reserved: u32,
-    pub source: [u32; 4],
-    pub destination: [u32; 2],
-    pub output: [u32; 2],
-    pub planes: [DrmCastkmsRendererSourcePlane; RENDERER_MAX_PLANES],
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[repr(C)]
-pub struct DrmCastkmsRendererDequeueSource {
-    pub result: u64,
-    pub flags: u32,
-    pub reserved: [u32; 3],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1036,12 +1025,6 @@ nix::ioctl_write_ptr!(
     DrmCastkmsRendererCommitTakeover
 );
 nix::ioctl_write_ptr!(
-    drm_ioctl_castkms_renderer_dequeue_source,
-    b'd',
-    0x4a,
-    DrmCastkmsRendererDequeueSource
-);
-nix::ioctl_write_ptr!(
     drm_ioctl_castkms_renderer_release_source,
     b'd',
     0x4b,
@@ -1238,7 +1221,7 @@ mod tests {
 
     #[test]
     fn renderer_operations_match_the_uapi_layouts() {
-        assert_eq!(RENDERER_VERSION, 7);
+        assert_eq!(RENDERER_VERSION, 8);
         assert_eq!(RENDERER_PROBE_PRIVATE, 1);
         assert_eq!(RENDERER_PROBE_STARTUP_IMAGE, 2);
         assert_eq!(EXECUTION_HOST_V1, 1);
@@ -1276,7 +1259,7 @@ mod tests {
         assert_eq!(std::mem::align_of::<DrmCastkmsCapabilityProfile>(), 4);
         assert_eq!(std::mem::size_of::<DrmCastkmsCapabilityFormat>(), 32);
         assert_eq!(std::mem::align_of::<DrmCastkmsCapabilityFormat>(), 8);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererRegisterProfile>(), 32);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererRegisterProfile>(), 48);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererProfileResult>(), 32);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererCapabilities>(), 72);
         assert_eq!(
@@ -1284,14 +1267,6 @@ mod tests {
             24
         );
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererSourcePlane>(), 16);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererSource>(), 144);
-        assert_eq!(std::mem::align_of::<DrmCastkmsRendererSource>(), 8);
-        assert_eq!(
-            std::mem::offset_of!(DrmCastkmsRendererSource, producer_fd),
-            40
-        );
-        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererSource, planes), 80);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererDequeueSource>(), 24);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererReleaseSource>(), 32);
         assert_eq!(RENDERER_SCENE_VERSION, 1);
         assert_eq!(RENDERER_SCENE_MAX_BYTES, 65_536);

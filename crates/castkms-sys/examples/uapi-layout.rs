@@ -48,11 +48,6 @@ fn main() {
         DrmCastkmsRendererSourcePlane,
         "drm_castkms_renderer_source_plane"
     );
-    layout!(DrmCastkmsRendererSource, "drm_castkms_renderer_source");
-    layout!(
-        DrmCastkmsRendererDequeueSource,
-        "drm_castkms_renderer_dequeue_source"
-    );
     layout!(
         DrmCastkmsRendererReleaseSource,
         "drm_castkms_renderer_release_source"
