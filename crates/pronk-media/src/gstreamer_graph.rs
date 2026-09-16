@@ -229,11 +229,7 @@ impl GStreamerGraph {
             })?
             .downcast::<gst_app::AppSink>()
             .map_err(|_| MediaGraphError::new("appsink factory returned another element type"))?;
-        app_sink.set_caps(Some(&encoded_caps));
-        app_sink.set_max_buffers(RAW_QUEUE_BUFFERS);
-        app_sink.set_drop(true);
-        app_sink.set_wait_on_eos(false);
-        app_sink.set_sync(false);
+        configure_encoded_video_sink(&app_sink, &encoded_caps);
 
         let worker = std::thread::current();
         wake_worker_on_output(&app_sink, worker.clone());
@@ -823,6 +819,17 @@ fn wake_worker_on_output(app_sink: &gst_app::AppSink, worker: std::thread::Threa
     );
 }
 
+fn configure_encoded_video_sink(app_sink: &gst_app::AppSink, caps: &gst::Caps) {
+    app_sink.set_caps(Some(caps));
+    app_sink.set_max_buffers(RAW_QUEUE_BUFFERS);
+    // Preserve the encoder's reference chain. Backpressure here reaches the
+    // leaky raw-frame queue, where shedding work cannot omit an encoded frame
+    // that a later access unit depends on.
+    app_sink.set_drop(false);
+    app_sink.set_wait_on_eos(false);
+    app_sink.set_sync(false);
+}
+
 impl Drop for GStreamerGraph {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
@@ -879,7 +886,12 @@ mod tests {
     use std::os::fd::AsFd;
     use std::os::unix::net::{UnixDatagram, UnixStream};
 
-    use super::{is_segment_anchor, validate_remote_socket, video_stream_properties};
+    use gstreamer::prelude::*;
+
+    use super::{
+        configure_encoded_video_sink, is_segment_anchor, validate_remote_socket,
+        video_stream_properties, RAW_QUEUE_BUFFERS,
+    };
 
     #[test]
     fn video_stream_is_non_live_while_using_the_pipeline_system_clock() {
@@ -909,6 +921,22 @@ mod tests {
             .unwrap()
             .set_pts(gstreamer::ClockTime::ZERO);
         assert!(is_segment_anchor(&key_frame));
+    }
+
+    #[test]
+    fn encoded_video_sink_preserves_reference_dependencies() {
+        gstreamer::init().unwrap();
+        let sink = gstreamer::ElementFactory::make("appsink")
+            .build()
+            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
+            .unwrap();
+        let caps = gstreamer::Caps::builder("video/x-h264").build();
+
+        configure_encoded_video_sink(&sink, &caps);
+
+        assert_eq!(sink.max_buffers(), RAW_QUEUE_BUFFERS);
+        assert!(!sink.is_drop());
     }
 
     #[test]
