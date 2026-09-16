@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
-use drm_capture::create_grant;
-use pronk_capture::{allocation::Heap, Actor, CaptureError, Config, Frame, Layout, Session};
+use drm_capture::{create_grant, Client, DestinationId, StreamId};
+use pronk_capture::{
+    allocation::Heap, Actor, Buffer, CaptureError, Config, Frame, Layout, Session,
+};
 
 extern "C" {
     fn capture_buffer_check_pixels(dma: i32, width: u32, height: u32, stride: u32, expected: u8);
@@ -70,7 +72,31 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
+            let observer = Client::from_fd(client.as_fd().try_clone_to_owned()?)?;
             let mut session = Session::new(client);
+            let mut incomplete = heap.allocate(layout, nz(3), budget)?;
+            incomplete[1] = Buffer::new(std::fs::File::open("/dev/null")?.into(), nz(640 * 4));
+            ensure!(
+                session.spawn(incomplete, config).is_err(),
+                "an ordinary file was accepted as a DMA-BUF destination"
+            );
+            ensure!(
+                observer
+                    .close_stream(StreamId::new(1).unwrap())
+                    .unwrap_err()
+                    .raw_os_error()
+                    == Some(nix::libc::ENOENT),
+                "failed setup retained its stream"
+            );
+            ensure!(
+                observer
+                    .unregister_destination(DestinationId::new(1).unwrap())
+                    .unwrap_err()
+                    .raw_os_error()
+                    == Some(nix::libc::ENOENT),
+                "failed setup retained its first destination"
+            );
+            drop(observer);
             let actor = session.spawn(heap.allocate(layout, nz(3), budget)?, config)?;
             let first = frame(&actor).await?;
             let second = frame(&actor).await?;
@@ -122,6 +148,6 @@ fn main() -> anyhow::Result<()> {
             drop(control);
             Ok::<(), anyhow::Error>(())
         })?;
-    println!("PASS: capture actor, fresh heap storage, held frames, changing pixels and restart");
+    println!("PASS: capture actor, setup rollback, held frames, changing pixels and restart");
     Ok(())
 }
