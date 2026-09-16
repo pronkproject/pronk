@@ -63,6 +63,29 @@ impl VideoEncoderPolicy {
             )),
         }
     }
+
+    fn validate_video_target(
+        &self,
+        render_device: Option<RenderDeviceIdentity>,
+    ) -> Result<(), String> {
+        let Self::VaH264 {
+            render_device: selected,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let Some(actual) = render_device else {
+            return Err("the selected VA encoder requires a render-device identity".into());
+        };
+        if actual != *selected {
+            return Err(format!(
+                "video target uses render device {}:{}; the selected VA encoder uses {}:{}",
+                actual.major, actual.minor, selected.major, selected.minor
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn chromecast_video_cadence() -> VideoCadence {
@@ -906,6 +929,9 @@ impl ChromiacastMediaSession {
                 "PipeWire target belongs to another session".into(),
             ));
         }
+        self.encoder_policy
+            .validate_video_target(video_target.render_device)
+            .map_err(MediaSessionError::InvalidRequest)?;
         let caps = ValidatedVideoCaps::parse(&video_target.caps)?;
         if caps.width.get() != configuration.mode.width
             || caps.height.get() != configuration.mode.height
@@ -1511,6 +1537,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn va_policy_requires_its_selected_render_device() {
+        let policy = VideoEncoderPolicy::VaH264 {
+            render_node: PathBuf::from("/dev/dri/renderD128"),
+            render_device: test_render_device(),
+        };
+        policy
+            .validate_video_target(Some(test_render_device()))
+            .unwrap();
+        assert!(policy.validate_video_target(None).is_err());
+        assert!(policy
+            .validate_video_target(Some(RenderDeviceIdentity {
+                major: 226,
+                minor: 129,
+            }))
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn mismatched_render_device_is_rejected_before_transport() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (video_output, video_receiver) = mpsc::channel(4);
+        let (_audio_output, audio_receiver) = mpsc::channel(1);
+        let graph = FakeGraph::video(video_output);
+        let mut media = ChromiacastMediaSession::with_graph_outputs(
+            session_id.into(),
+            7,
+            VideoEncoderPolicy::VaH264 {
+                render_node: PathBuf::from("/dev/dri/renderD128"),
+                render_device: test_render_device(),
+            },
+            Box::new(graph),
+            video_receiver,
+            audio_receiver,
+        );
+        media.complete_preparation(capabilities()).unwrap();
+        let mut target = target_on_render_device(session_id, 1);
+        target.render_device.as_mut().unwrap().minor += 1;
+        let mut transport = FakeTransport::default();
+
+        assert!(matches!(
+            media
+                .configure(remote(), vec![target], configuration(), 1, &mut transport,)
+                .await,
+            Err(MediaSessionError::InvalidRequest(_))
+        ));
+        assert!(transport.configuration.is_none());
+        assert_eq!(media.state, SessionState::Prepared);
+        media.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn rejected_encoder_selection_closes_the_negotiated_sender() {
         let session_id = "12345678-1234-1234-1234-123456789abc";
@@ -1540,7 +1617,7 @@ mod tests {
             media
                 .configure(
                     remote(),
-                    vec![target(session_id, 1)],
+                    vec![target_on_render_device(session_id, 1)],
                     configuration(),
                     1,
                     &mut transport,
@@ -2123,6 +2200,13 @@ mod tests {
             media_generation,
             render_device: None,
             caps: "video/x-raw,format=BGRx,width=640,height=480,framerate=60/1".into(),
+        }
+    }
+
+    fn target_on_render_device(session_id: &str, media_generation: u64) -> PipeWireTarget {
+        PipeWireTarget {
+            render_device: Some(test_render_device()),
+            ..target(session_id, media_generation)
         }
     }
 

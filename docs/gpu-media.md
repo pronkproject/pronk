@@ -785,6 +785,15 @@ work. The default software media graph and installed service
 sandboxes are unchanged. A transport-level modifier test is not qualification
 of the complete private PipeWire, encoder or receiver path.
 
+Userspace-rendered video targets carry the major and minor number of the exact
+render node used to select their Vulkan device. The Chromecast backend records
+the same identity when it validates its selected VA encoder node at startup and
+rejects an absent or different identity before Cast transport negotiation.
+That check prevents an accidental cross-device media route; it does not qualify
+a format, modifier, external handle or device replacement by itself. CPU-backed
+capture targets leave the identity absent and remain available only to encoder
+policies that do not require a particular graphics device.
+
 Run `cargo test -p pronk-pipewire --lib` for layout-boundary, modifier-negotiation,
 native metadata and existing ownership tests. The metadata tests use ordinary
 descriptors without GPU access; they do not qualify a particular GPU modifier.
