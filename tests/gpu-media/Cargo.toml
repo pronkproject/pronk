@@ -25,6 +25,7 @@ libc = "=0.2.189"
 pronk = { path = "../../crates/pronk" }
 pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
 pronk-gpu = { path = "../../crates/pronk-gpu" }
+pronk-media = { path = "../../crates/pronk-media" }
 pronk-pipewire = { path = "../../crates/pronk-pipewire" }
 tokio.workspace = true
 

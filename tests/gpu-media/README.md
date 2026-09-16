@@ -133,7 +133,7 @@ composed-image overwrites have a separate total. Those intervals are not GPU
 timestamps, a full source-retention interval, or end-to-end presentation timing.
 The twenty-frame sample includes startup effects. Device, modifier, validation
 layers and media profile must be recorded before comparing runs.
-The default `raw` profile does not inspect pixel contents. Neither profile
+The default `raw` profile does not inspect pixel contents. None of the profiles
 qualifies receiver behavior, an unsignaled native-reader stall, device loss,
 installed service permissions or production private-node policy. Frame metadata
 and memory-type checks do not establish that every library or driver avoids
@@ -147,13 +147,20 @@ plugins, `h264parse`, `vah264dec` and a VA driver supporting the requested
 modifier. The selected render node must match the conversion, encoding and
 decoding elements; another GPU is not silently accepted.
 
+The `production-va-h264` profile replaces that fixture-owned consumer graph
+with `pronk-media`'s `MediaGraphActor` and `VideoEncoder::VaH264` path. It
+checks the actor's generation-scoped access units and reported encoder,
+VA-memory path and render device before sending the same bytes through the
+hardware-decoding pixel oracle. This is the preferred qualification profile;
+`va-h264` remains a smaller transport and plugin diagnostic.
+
 For the tested Fedora/Lunar Lake installation, the codec-capable VA driver
 is selected explicitly:
 
 ```sh
 LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
     sh tests/gpu-media/run-private.sh /dev/dri/renderD128 \
-    0100000000000009 va-h264
+    0100000000000009 production-va-h264
 ```
 
 These driver paths are machine-specific. The wrapper uses a fresh GStreamer
@@ -164,9 +171,11 @@ software-encoder fallback.
 This profile describes the Vulkan image as ARGB with producer-written opaque
 alpha. On this device VA conversion accepts tiled ARGB but not tiled XRGB;
 the raw profile retains XRGB. Conversion must produce independent VA-memory
-NV12 images before encoding. A held input remains retained through six encoded
-outputs, so a successful run exercises subsequent publications while that
-input is unavailable for rewriting.
+NV12 images before encoding. In the fixture-owned `va-h264` graph, a held input
+remains retained through six encoded outputs, so a successful diagnostic run
+exercises subsequent publications while that input is unavailable for
+rewriting. The production profile instead exercises the production queue and
+buffer-return policy.
 
 The encoder disables B-frames, requests constrained-baseline byte-stream access
 units, and supplies parameter sets with keyframes. Validation checks the caps,
@@ -174,15 +183,22 @@ decode timestamps no later than presentation, exact fixture presentation
 intervals and IDR/SPS/PPS presence on keyframes. These checks are not a full
 H.264 dependency parser or Chromecast receiver qualification.
 
+The production oracle uses 20 Mbit/s so sharp synthetic color boundaries remain
+useful pixel evidence after lossy encoding. This is test configuration, not the
+Chromecast bitrate policy. The production graph may discard work in its bounded,
+leaky queue; the test requires at least twelve useful access units, preserves
+their source sequence numbers and rejects missing output after the encoder.
+
 After source shutdown and native retirement, a separate test oracle decodes
-the twenty access units on the selected GPU. It maps only decoded oracle
-images and verifies every RGB pixel, in order, with a six-level channel
-tolerance for conversion and codec rounding, including rectangle edges. Its
+the surviving access units on the selected GPU. It maps only decoded oracle
+images and verifies every RGB pixel against its original scene, with a
+six-level channel tolerance for conversion and codec rounding. A narrow band
+around layer edges permits sixteen levels for chroma-subsampling bleed. Its
 test-only NV12-to-RGB conversion explicitly uses nearest-neighbor interpolation
 to preserve the sharp-edged fixture's chroma boundaries. The encoder conversion
 retains its default interpolation; the oracle does not qualify other decoder
-resampling filters. It also requires exactly twenty
-images and decoder end-of-stream. Every publication has a distinct RGB color;
+resampling filters. It also requires decoder end-of-stream. Every publication
+has a distinct RGB color;
 tests require disjoint tolerance ranges between all twenty colors and the
 black/white overwrite values. A stale image must fail even if its sequence
 metadata is current. At each coordinate, the topmost visible layer supplies the
@@ -200,7 +216,7 @@ service. Cargo and the private PipeWire server remain outside the sandbox:
 ```sh
 LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
     sh tests/gpu-media/run-private.sh /dev/dri/renderD128 \
-    0100000000000009 va-h264 sandbox
+    0100000000000009 production-va-h264 sandbox
 ```
 
 The service retains memory-execution restrictions, the system-service syscall

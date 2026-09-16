@@ -4,7 +4,7 @@ set -eu
 render_node=${1:?render node required}
 modifier=${2:?hexadecimal DRM modifier required}
 profile=${3:-raw}
-case "$profile" in raw|va-h264) ;; *) echo "profile must be raw or va-h264" >&2; exit 2 ;; esac
+case "$profile" in raw|va-h264|production-va-h264) ;; *) echo "profile must be raw, va-h264 or production-va-h264" >&2; exit 2 ;; esac
 execution=${4:-host}
 case "$execution" in host|sandbox|sandbox-denied) ;; *) echo "execution must be host, sandbox or sandbox-denied" >&2; exit 2 ;; esac
 test_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

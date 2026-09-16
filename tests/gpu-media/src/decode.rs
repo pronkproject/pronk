@@ -7,7 +7,7 @@ use anyhow::{ensure, Context, Result};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_video::{self as video, prelude::*};
 
-use crate::pattern::{self, FRAMES, HEIGHT, TOLERANCE, WIDTH};
+use crate::pattern::{self, EDGE_TOLERANCE, FRAMES, HEIGHT, TOLERANCE, WIDTH};
 
 struct Pipeline(gst::Pipeline);
 
@@ -17,9 +17,9 @@ impl Drop for Pipeline {
     }
 }
 
-pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
+pub fn verify(frames: Vec<crate::encoded::Frame>, render_node: &Path) -> Result<()> {
     ensure!(
-        frames.len() == FRAMES as usize,
+        !frames.is_empty() && frames.len() <= FRAMES as usize,
         "unexpected fixture frame count"
     );
     let pipeline = Pipeline(gst::parse::launch(
@@ -57,17 +57,21 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("decode appsink"))?;
     pipeline.0.set_state(gst::State::Playing)?;
     let count = frames.len();
-    for (index, bytes) in frames.into_iter().enumerate() {
-        let mut buffer = gst::Buffer::from_mut_slice(bytes);
+    let sequences = frames
+        .iter()
+        .map(|frame| frame.sequence)
+        .collect::<Vec<_>>();
+    for frame in frames {
+        let mut buffer = gst::Buffer::from_mut_slice(frame.data);
         let buffer_ref = buffer.get_mut().context("unique encoded buffer")?;
         buffer_ref.set_pts(gst::ClockTime::from_nseconds(
-            index as u64 * 1_000_000_000 / 30,
+            u64::from(frame.sequence) * 1_000_000_000 / 30,
         ));
         buffer_ref.set_duration(gst::ClockTime::from_nseconds(1_000_000_000 / 30));
         source.push_buffer(buffer)?;
     }
     source.end_of_stream()?;
-    for index in 0..count {
+    for (index, sequence) in sequences.into_iter().enumerate() {
         let sample = sink
             .try_pull_sample(gst::ClockTime::from_seconds(5))
             .context("missing decoded image")?;
@@ -84,7 +88,7 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
         )?;
         let stride = usize::try_from(frame.plane_stride()[0])?;
         let pixels = frame.plane_data(0)?;
-        let regions = pattern::scene(index as u32).map(|plane| {
+        let regions = pattern::scene(sequence).map(|plane| {
             let region = plane.visible();
             let [left, top] = region.destination();
             (
@@ -108,16 +112,23 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
                     })
                     .unwrap_or(background);
                 let actual = [pixel[2], pixel[1], pixel[0]];
+                let tolerance = if regions.iter().any(|(horizontal, vertical, _)| {
+                    near_edge(horizontal, vertical, x as u32, y as u32)
+                }) {
+                    EDGE_TOLERANCE
+                } else {
+                    TOLERANCE
+                };
                 ensure!(
                     actual
                         .into_iter()
                         .zip(expected)
-                        .all(|(a, b)| a.abs_diff(b) <= TOLERANCE),
-                    "decoded frame {index} pixel {x},{y}: actual {actual:?}, expected {expected:?}"
+                        .all(|(a, b)| a.abs_diff(b) <= tolerance),
+                    "decoded output {index} for frame {sequence} pixel {x},{y}: actual {actual:?}, expected {expected:?}"
                 );
             }
         }
-        eprintln!("decoded frame={index} pixels=match");
+        eprintln!("decoded output={index} frame={sequence} pixels=match");
     }
     ensure!(
         sink.try_pull_sample(gst::ClockTime::from_seconds(5))
@@ -133,4 +144,22 @@ pub fn verify(frames: Vec<Vec<u8>>, render_node: &Path) -> Result<()> {
     }
     eprintln!("PASS: {count} decoded images match the ordered color sequence");
     Ok(())
+}
+
+fn near_edge(
+    horizontal: &std::ops::Range<u32>,
+    vertical: &std::ops::Range<u32>,
+    x: u32,
+    y: u32,
+) -> bool {
+    const WIDTH: u32 = 2;
+    let near_horizontal_extent =
+        x >= horizontal.start.saturating_sub(WIDTH) && x < horizontal.end.saturating_add(WIDTH);
+    let near_vertical_extent =
+        y >= vertical.start.saturating_sub(WIDTH) && y < vertical.end.saturating_add(WIDTH);
+    let near_vertical_edge =
+        x.abs_diff(horizontal.start) <= WIDTH || x.abs_diff(horizontal.end) <= WIDTH;
+    let near_horizontal_edge =
+        y.abs_diff(vertical.start) <= WIDTH || y.abs_diff(vertical.end) <= WIDTH;
+    (near_vertical_edge && near_vertical_extent) || (near_horizontal_edge && near_horizontal_extent)
 }

@@ -16,12 +16,86 @@ use pronk_pipewire::{
     VideoSourceActor, VideoSourceConfig, VideoSourceGeneration,
 };
 
-use crate::consumer::{self, Consumer, Event, Mode};
+use crate::consumer::{self, Consumer, Event, Mode as FixtureMode};
 use crate::encoded::Encoded;
 use crate::pattern::{self, FRAMES, HEIGHT, WIDTH};
+use crate::production;
 use crate::render;
 
 const SLOTS: usize = 4;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Raw,
+    VaH264,
+    ProductionVaH264,
+}
+
+impl Mode {
+    const fn is_production(self) -> bool {
+        matches!(self, Self::ProductionVaH264)
+    }
+
+    const fn is_encoded(self) -> bool {
+        matches!(self, Self::VaH264 | Self::ProductionVaH264)
+    }
+
+    const fn fixture(self) -> Option<FixtureMode> {
+        match self {
+            Self::Raw => Some(FixtureMode::Raw),
+            Self::VaH264 => Some(FixtureMode::VaH264),
+            Self::ProductionVaH264 => None,
+        }
+    }
+}
+
+enum MediaConsumer {
+    Fixture(Consumer),
+    Production(production::Consumer),
+}
+
+enum MediaEvent {
+    Fixture(Event),
+    Production(production::Event),
+}
+
+impl MediaConsumer {
+    async fn next(&mut self) -> Result<MediaEvent> {
+        match self {
+            Self::Fixture(consumer) => consumer.next().await.map(MediaEvent::Fixture),
+            Self::Production(consumer) => consumer.next().await.map(MediaEvent::Production),
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        match self {
+            Self::Fixture(consumer) => consumer.check(),
+            Self::Production(_) => Ok(()),
+        }
+    }
+
+    async fn finish(
+        self,
+        render_node: &Path,
+        received: usize,
+    ) -> Result<Vec<pronk_media::EncodedVideoAccessUnit>> {
+        match self {
+            Self::Fixture(consumer) => {
+                consumer.check()?;
+                drop(consumer);
+                Ok(Vec::new())
+            }
+            Self::Production(consumer) => {
+                let (statistics, remaining) = consumer.finish(render_node).await?;
+                ensure!(
+                    statistics.frames == (received + remaining.len()) as u64,
+                    "production output omitted an encoded access unit"
+                );
+                Ok(remaining)
+            }
+        }
+    }
+}
 
 pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Result<()> {
     ensure!(
@@ -84,7 +158,9 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             layout: VideoBufferLayout {
                 format: match mode {
                     Mode::Raw => pronk_pipewire::VideoPixelFormat::Xrgb8888,
-                    Mode::VaH264 => pronk_pipewire::VideoPixelFormat::Argb8888,
+                    Mode::VaH264 | Mode::ProductionVaH264 => {
+                        pronk_pipewire::VideoPixelFormat::Argb8888
+                    }
                 },
                 width: layout.width,
                 height: layout.height,
@@ -117,31 +193,52 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
         })
         .await?;
     let mut output = GpuOutput::new(identity.clone(), pool, ids)?;
+    let consumer_target = if mode.is_production() {
+        "pronk-backend-media-1:input_1"
+    } else {
+        "pronk.gpu-test-consumer:input_1"
+    };
     let link = tokio::process::Command::new("pw-link")
         .arg("--wait")
         .arg("--remote")
         .arg(socket)
         .arg(format!("{}:capture_1", identity.node_name))
-        .arg("pronk.gpu-test-consumer:input_1")
+        .arg(consumer_target)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("link private video ports")?;
-    let consumer_socket = socket.to_owned();
-    let consumer_name = identity.node_name.clone();
-    let consumer_render_node = render_node.clone();
-    let mut consumer = tokio::task::spawn_blocking(move || {
-        Consumer::start(
-            &consumer_socket,
-            &consumer_name,
-            modifier,
-            FRAMES,
-            &consumer_render_node,
-            mode,
+    let mut consumer = if mode.is_production() {
+        MediaConsumer::Production(production::Consumer::start(
+            socket,
+            identity.node_name.clone(),
+            identity.object_serial,
+            input_caps(modifier, mode),
+            &render_node,
+            generation,
+        )?)
+    } else {
+        let consumer_socket = socket.to_owned();
+        let consumer_name = identity.node_name.clone();
+        let consumer_render_node = render_node.clone();
+        let fixture_mode = mode
+            .fixture()
+            .context("production mode reached fixture consumer")?;
+        MediaConsumer::Fixture(
+            tokio::task::spawn_blocking(move || {
+                Consumer::start(
+                    &consumer_socket,
+                    &consumer_name,
+                    modifier,
+                    FRAMES,
+                    &consumer_render_node,
+                    fixture_mode,
+                )
+            })
+            .await??,
         )
-    })
-    .await??;
+    };
     let link = link.wait_with_output().await?;
     ensure!(
         link.status.success(),
@@ -156,10 +253,19 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
     let mut encoded = Encoded::default();
     let mut uses = [0u32; SLOTS];
     let mut timing = render::Report::default();
+    let mut publication_tick = tokio::time::interval(Duration::from_millis(34));
+    publication_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    while received.len() < FRAMES as usize
-        || (mode == Mode::VaH264 && encoded.len() < FRAMES as usize)
-    {
+    let mut last_production_frame = tokio::time::Instant::now();
+    while match mode {
+        Mode::Raw => received.len() < FRAMES as usize,
+        Mode::VaH264 => received.len() < FRAMES as usize || encoded.len() < FRAMES as usize,
+        Mode::ProductionVaH264 => {
+            published < FRAMES
+                || encoded.len() < production::MINIMUM_ENCODED_FRAMES
+                || last_production_frame.elapsed() < Duration::from_millis(500)
+        }
+    } {
         if published < FRAMES {
             if let Some(id) = writable.pop_front() {
                 let slot = id.get() as usize - 1;
@@ -236,6 +342,9 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                         acquire_point: None,
                     },
                 )?;
+                if mode.is_production() {
+                    publication_tick.tick().await;
+                }
                 actor.publish(generation, frame).await?;
                 published += 1;
                 uses[slot] += 1;
@@ -244,10 +353,12 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
         tokio::select! {
             event = actor.next_event() => {
                 let event = event.context("source event stream closed")?;
-                if let pronk_pipewire::VideoSourceActorEvent::BufferReleased { sequence, .. } = &event {
-                    ensure!(received.contains(sequence), "release before consumer disposed its sample");
-                    if let Some(sample) = &held {
-                        ensure!(consumer::sequence(sample)? != *sequence, "release while sample is retained");
+                if !mode.is_production() {
+                    if let pronk_pipewire::VideoSourceActorEvent::BufferReleased { sequence, .. } = &event {
+                        ensure!(received.contains(sequence), "release before consumer disposed its sample");
+                        if let Some(sample) = &held {
+                            ensure!(consumer::sequence(sample)? != *sequence, "release while sample is retained");
+                        }
                     }
                 }
                 match output.handle_event(&event)? {
@@ -264,26 +375,32 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             }
             event = consumer.next() => {
                 match event? {
-                    Event::Input(buffer) => {
+                    MediaEvent::Fixture(Event::Input(buffer)) => {
                         let seq = consumer::sequence(&buffer)?;
                         ensure!(seq == received.len() as u64, "out-of-order source sequence {seq}");
                         ensure!(seq < u64::from(FRAMES) && received.insert(seq), "duplicate or invalid source sequence {seq}");
                         if held.is_none() && received.len() == 1 { held = Some(buffer); }
                         if mode == Mode::Raw && received.len() == 6 { held = None; }
                     }
-                    Event::Encoded(sample) => {
+                    MediaEvent::Fixture(Event::Encoded(sample)) => {
                         encoded.push(&sample)?;
                         if encoded.len() == 6 { held = None; }
                     }
-                    Event::Error(error) => anyhow::bail!(error),
+                    MediaEvent::Fixture(Event::Error(error)) => anyhow::bail!(error),
+                    MediaEvent::Production(production::Event::Activated) => {},
+                    MediaEvent::Production(production::Event::Encoded(unit)) => {
+                        encoded.push_access_unit(unit, generation)?;
+                        last_production_frame = tokio::time::Instant::now();
+                    }
                 }
             }
             _ = tick.tick() => consumer.check()?,
         }
     }
-    consumer.check()?;
     drop(held);
-    drop(consumer);
+    for unit in consumer.finish(&render_node, encoded.len()).await? {
+        encoded.push_access_unit(unit, generation)?;
+    }
     let report = actor.stop(generation).await?;
     let retirement = output.stopped(&report)?;
     ensure!(
@@ -301,9 +418,12 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
         uses.iter().all(|count| *count > 1),
         "not every image was rewritten: {uses:?}"
     );
-    eprintln!("PASS: {published} generated frames, {} encoded, per-slot uses {uses:?}, first input retained through six outputs", encoded.len());
+    eprintln!(
+        "PASS: {published} generated frames, {} encoded, per-slot uses {uses:?}",
+        encoded.len()
+    );
     timing.print();
-    if mode == Mode::VaH264 {
+    if mode.is_encoded() {
         tokio::task::spawn_blocking(move || {
             crate::decode::verify(encoded.into_frames(), &render_node)
         })
@@ -314,4 +434,19 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
 
 fn nz(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
+}
+
+fn input_caps(modifier: u64, mode: Mode) -> String {
+    let fourcc = match mode {
+        Mode::Raw => "XR24",
+        Mode::VaH264 | Mode::ProductionVaH264 => "AR24",
+    };
+    let drm_format = if modifier == 0 {
+        fourcc.into()
+    } else {
+        format!("{fourcc}:0x{modifier:016x}")
+    };
+    format!(
+        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={WIDTH},height={HEIGHT},framerate=30/1"
+    )
 }

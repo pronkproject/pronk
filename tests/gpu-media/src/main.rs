@@ -4,6 +4,7 @@ mod consumer;
 mod decode;
 mod encoded;
 mod pattern;
+mod production;
 mod render;
 mod sandbox;
 mod source;
@@ -26,10 +27,11 @@ fn main() -> Result<()> {
         .into_string()
         .map_err(|_| anyhow::anyhow!("modifier is not UTF-8"))?;
     let mode = match args.next().as_deref() {
-        None => consumer::Mode::Raw,
-        Some(mode) if mode == "raw" => consumer::Mode::Raw,
-        Some(mode) if mode == "va-h264" => consumer::Mode::VaH264,
-        _ => anyhow::bail!("profile must be raw or va-h264"),
+        None => source::Mode::Raw,
+        Some(mode) if mode == "raw" => source::Mode::Raw,
+        Some(mode) if mode == "va-h264" => source::Mode::VaH264,
+        Some(mode) if mode == "production-va-h264" => source::Mode::ProductionVaH264,
+        _ => anyhow::bail!("profile must be raw, va-h264 or production-va-h264"),
     };
     anyhow::ensure!(args.next().is_none(), "unexpected argument");
     let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16)?;

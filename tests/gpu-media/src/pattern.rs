@@ -5,6 +5,7 @@ use drm_display_executor::scene::geometry::{CopyRegion, Extent, SourceRect};
 use pronk_gpu::vulkan::PackedFormat;
 
 pub const FRAMES: u32 = 20;
+pub const EDGE_TOLERANCE: u8 = 16;
 pub const TOLERANCE: u8 = 6;
 pub const WIDTH: u32 = 1920;
 pub const HEIGHT: u32 = 1080;
