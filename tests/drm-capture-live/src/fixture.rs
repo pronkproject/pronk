@@ -23,6 +23,8 @@ extern "C" {
     fn capture_fixture_open(path: *const c_char) -> *mut c_void;
     fn capture_fixture_info(fixture: *const c_void) -> Info;
     fn capture_fixture_flip(fixture: *const c_void);
+    #[allow(dead_code)]
+    fn capture_fixture_restore(fixture: *const c_void);
     fn capture_fixture_check_pixels(fixture: *const c_void, expected: u8);
     fn capture_fixture_close(fixture: *mut c_void);
 }
@@ -75,6 +77,12 @@ impl Fixture {
     pub fn flip(&mut self) {
         // SAFETY: Exclusive access retains the fixture through its blocking modeset.
         unsafe { capture_fixture_flip(self.raw.as_ptr()) };
+    }
+
+    #[allow(dead_code)]
+    pub fn restore(&mut self) {
+        // SAFETY: Exclusive access retains the fixture through its blocking modeset.
+        unsafe { capture_fixture_restore(self.raw.as_ptr()) };
     }
 
     pub fn check_pixels(&self, expected: u8) {

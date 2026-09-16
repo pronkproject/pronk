@@ -193,7 +193,7 @@ struct fixture_info capture_fixture_info(const struct fixture *fixture)
 	};
 }
 
-void capture_fixture_flip(const struct fixture *fixture)
+static void select_framebuffer(const struct fixture *fixture, uint32_t framebuffer)
 {
 	drmModeObjectProperties *properties;
 	drmModeAtomicReq *update = drmModeAtomicAlloc();
@@ -213,9 +213,19 @@ void capture_fixture_flip(const struct fixture *fixture)
 	drmModeFreeObjectProperties(properties);
 	REQUIRE(framebuffer_property);
 	REQUIRE(drmModeAtomicAddProperty(update, fixture->plane, framebuffer_property,
-				       fixture->changed.framebuffer) >= 0);
+				       framebuffer) >= 0);
 	REQUIRE(drmModeAtomicCommit(fixture->device, update, 0, NULL) == 0);
 	drmModeAtomicFree(update);
+}
+
+void capture_fixture_flip(const struct fixture *fixture)
+{
+	select_framebuffer(fixture, fixture->changed.framebuffer);
+}
+
+void capture_fixture_restore(const struct fixture *fixture)
+{
+	select_framebuffer(fixture, fixture->source.framebuffer);
 }
 
 void capture_buffer_check_pixels(int dma, uint32_t width, uint32_t height,
