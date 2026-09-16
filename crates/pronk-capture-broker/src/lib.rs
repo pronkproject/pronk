@@ -206,13 +206,22 @@ impl RendererSessionAccess {
         let access = self.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let result = acquire_renderer(&access).await;
-            if let Err(Ok((renderer, endpoint_id))) = send.send(result) {
-                drop(renderer);
+            let (renderer, endpoint_id) = match acquire_renderer(&access).await {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    let _ = send.send(Err(error));
+                    return;
+                }
+            };
+            let (claim, claimed) = oneshot::channel();
+            let _ = send.send(Ok((renderer, endpoint_id, claim)));
+            // A queued reply still belongs to the acquisition worker until the
+            // caller takes it. Hold the permit through that handoff or cleanup.
+            if claimed.await.is_err() {
                 let _ = release_renderer(&access, endpoint_id).await;
             }
         });
-        let received = tokio::select! {
+        let (renderer, endpoint_id, claim) = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(RendererSessionError::Cancelled),
             result = tokio::time::timeout(self.timeout, receive) => {
@@ -220,9 +229,12 @@ impl RendererSessionAccess {
                     .map_err(|_| RendererSessionError::WorkerStopped)?
             }
         }?;
+        claim
+            .send(())
+            .map_err(|_| RendererSessionError::WorkerStopped)?;
         Ok(RendererAccess {
-            renderer: received.0,
-            endpoint_id: received.1,
+            renderer,
+            endpoint_id,
             session: self.clone(),
         })
     }

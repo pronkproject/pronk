@@ -598,6 +598,71 @@ async fn timed_out_renderer_acquisition_keeps_one_request_until_cleanup() {
     );
 }
 
+struct AcquisitionWake(Notify);
+
+impl std::task::Wake for AcquisitionWake {
+    fn wake(self: Arc<Self>) {
+        self.0.notify_one();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.notify_one();
+    }
+}
+
+async fn abandon_ready_renderer_reply(cancel: bool) {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let fixture = Fixture::new(false, false).await;
+    let session = fixture
+        .provider
+        .acquire(target(), CancellationToken::new())
+        .await
+        .unwrap();
+    let renderer_session = session.renderer_access().unwrap().session;
+    let cancellation = CancellationToken::new();
+    let mut acquisition = Box::pin(renderer_session.acquire_renderer(cancellation.clone()));
+    let wake = Arc::new(AcquisitionWake(Notify::new()));
+    let waker = Waker::from(Arc::clone(&wake));
+    assert!(acquisition
+        .as_mut()
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+
+    // Keep the caller unpolled until its reply has reached the local channel.
+    tokio::time::timeout(Duration::from_secs(1), wake.0.notified())
+        .await
+        .unwrap();
+    assert_eq!(fixture.state.renderer_acquisitions.lock().unwrap().len(), 1);
+    *fixture.state.owner.lock().unwrap() = ":1.99".into();
+    if cancel {
+        cancellation.cancel();
+        assert!(matches!(
+            acquisition.await,
+            Err(RendererSessionError::Cancelled)
+        ));
+    } else {
+        drop(acquisition);
+    }
+    notified(&fixture.state.renderer_release_entered).await;
+    assert_eq!(
+        fixture.state.renderer_releases.lock().unwrap().as_slice(),
+        &[(91, 2, ":1.88".into())]
+    );
+    session.release().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_releases_an_unclaimed_ready_renderer_reply() {
+    abandon_ready_renderer_reply(true).await;
+}
+
+#[tokio::test]
+async fn abandoning_an_unclaimed_ready_renderer_reply_requests_release() {
+    abandon_ready_renderer_reply(false).await;
+}
+
 #[tokio::test]
 async fn timed_out_renderer_release_blocks_replacement_until_cleanup() {
     let mut fixture = Fixture::new(false, false).await;
