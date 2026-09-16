@@ -204,6 +204,20 @@ impl RendererCapability {
         })
     }
 
+    /// Accept the standard output color pipeline after scene composition.
+    pub fn with_output_color(mut self, max_lut_entries: u32, matrix: bool) -> io::Result<Self> {
+        if max_lut_entries > 256 {
+            return Err(invalid("invalid output color capability"));
+        }
+        if matrix {
+            self.flags |= CAPABILITY_PROFILE_OUTPUT_MATRIX;
+        } else {
+            self.flags &= !CAPABILITY_PROFILE_OUTPUT_MATRIX;
+        }
+        self.max_lut_entries = max_lut_entries;
+        Ok(self)
+    }
+
     pub fn max_output(&self) -> Extent {
         self.max_output
     }
@@ -682,6 +696,24 @@ mod tests {
         };
         assert_eq!(decoded.min_output(), Extent::new(1920, 1080).unwrap());
         assert_eq!(decoded.min_source(), Extent::new(1920, 1080).unwrap());
+    }
+
+    #[test]
+    fn output_color_capability_round_trips() {
+        let capability =
+            RendererCapability::single_primary(Extent::new(1920, 1080).unwrap(), format())
+                .with_output_color(256, true)
+                .unwrap();
+        let profile = CapabilityProfile::Renderer(capability);
+        assert_eq!(
+            CapabilityProfile::decode(&profile.encode()).unwrap(),
+            profile
+        );
+        assert!(
+            RendererCapability::single_primary(Extent::new(1920, 1080).unwrap(), format(),)
+                .with_output_color(257, false)
+                .is_err()
+        );
     }
 
     #[test]
