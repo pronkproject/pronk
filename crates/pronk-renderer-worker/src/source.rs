@@ -6,8 +6,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use castkms_renderer::FormatModifier;
 use castkms_sys::{
     DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
-    DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010,
-    DRM_FORMAT_XRGB8888,
+    DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888,
+    DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888,
 };
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{Device, ImageLayout, PackedFormat, SourceImage};
@@ -27,14 +27,7 @@ pub(crate) fn import_image(
     producer: Option<BorrowedFd<'_>>,
 ) -> io::Result<(SourceImage, SourceAlpha)> {
     let format = source_format(source.format())?;
-    let modifier = match source.modifier() {
-        FormatModifier::Explicit(modifier) => modifier,
-        FormatModifier::Unspecified => {
-            return Err(unsupported(
-                "renderer source has no explicit format modifier",
-            ));
-        }
-    };
+    let modifier = resolved_modifier(source.modifier());
     let mut planes = source.planes();
     let plane = planes
         .next()
@@ -110,6 +103,14 @@ fn source_format(fourcc: u32) -> io::Result<SourceFormat> {
 
 pub(crate) fn packed_format(fourcc: u32) -> io::Result<PackedFormat> {
     source_format(fourcc).map(|format| format.packed)
+}
+
+/// Resolve the DRM KMS convention for framebuffers created without modifier flags.
+pub(crate) fn resolved_modifier(modifier: FormatModifier) -> u64 {
+    match modifier {
+        FormatModifier::Explicit(modifier) => modifier,
+        FormatModifier::Unspecified => DRM_FORMAT_MOD_LINEAR,
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +218,11 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn omitted_kms_modifiers_resolve_to_linear_storage() {
+        assert_eq!(resolved_modifier(FormatModifier::Unspecified), 0);
+        assert_eq!(resolved_modifier(FormatModifier::Explicit(9)), 9);
     }
 }
