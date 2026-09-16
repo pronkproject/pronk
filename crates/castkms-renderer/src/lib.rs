@@ -237,6 +237,7 @@ struct CandidateDescription {
 pub struct ProfileRegistration {
     transition: NonZeroU64,
     capability_generation: NonZeroU64,
+    /// Execution generation observed when the profile was registered.
     execution_generation: NonZeroU64,
 }
 
@@ -680,18 +681,12 @@ fn validate_registration(
     result: DrmCastkmsRendererProfileResult,
     execution: Description,
 ) -> io::Result<ProfileRegistration> {
-    let expected_execution = execution
-        .generation
-        .get()
-        .checked_add(1)
-        .and_then(NonZeroU64::new)
-        .ok_or_else(|| invalid_data("CastKMS execution generation overflowed"))?;
     let registration = ProfileRegistration::from_values(
         result.transition,
         result.capability_generation,
         result.execution_generation,
     )?;
-    if result.reserved != 0 || registration.execution_generation != expected_execution {
+    if result.reserved != 0 || registration.execution_generation != execution.generation {
         return Err(invalid_data(
             "CastKMS returned an inconsistent profile registration",
         ));
@@ -830,12 +825,7 @@ mod tests {
                 registration: ProfileRegistration {
                     transition: NonZeroU64::new(13).unwrap(),
                     capability_generation: NonZeroU64::new(17).unwrap(),
-                    execution_generation: NonZeroU64::new(
-                        generation
-                            .checked_add(1)
-                            .expect("test generation has a successor"),
-                    )
-                    .unwrap(),
+                    execution_generation: NonZeroU64::new(generation).unwrap(),
                 },
                 host_capability: true,
             },
@@ -948,17 +938,17 @@ mod tests {
     }
 
     #[test]
-    fn profile_registration_names_the_next_execution() {
+    fn profile_registration_names_the_observed_execution() {
         let valid = DrmCastkmsRendererProfileResult {
             transition: 13,
             capability_generation: 17,
-            execution_generation: 8,
+            execution_generation: 7,
             reserved: 0,
         };
         let registration = validate_registration(valid, expected()).unwrap();
         assert_eq!(registration.transition().get(), 13);
         assert_eq!(registration.capability_generation().get(), 17);
-        assert_eq!(registration.execution_generation().get(), 8);
+        assert_eq!(registration.execution_generation().get(), 7);
         for invalid in [
             DrmCastkmsRendererProfileResult {
                 transition: 0,
@@ -969,7 +959,7 @@ mod tests {
                 ..valid
             },
             DrmCastkmsRendererProfileResult {
-                execution_generation: 7,
+                execution_generation: 8,
                 ..valid
             },
             DrmCastkmsRendererProfileResult {
