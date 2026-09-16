@@ -20,7 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::capability_lease::CapabilityLease;
 use crate::capture_health::{CaptureEvents, CaptureMonitor};
-use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
+use crate::device_session_port::{
+    DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget, RenderDeviceIdentity,
+};
 use crate::media_pipeline_port::{
     CaptureEvent, CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia,
 };
@@ -154,6 +156,7 @@ impl RendererCapturePipeline {
         stream: &RendererStream<OwnedFd>,
         generation: NonZeroU64,
     ) -> Result<DeviceMediaTarget, MediaPipelineError> {
+        let render_node = stream.render_node_identity();
         Ok(DeviceMediaTarget {
             kind: DeviceMediaKind::Video,
             node_name: stream.identity().node_name.clone(),
@@ -163,7 +166,10 @@ impl RendererCapturePipeline {
             connector_id: self.config.connector_id,
             output_index: self.config.output_index,
             media_generation: generation,
-            render_device: None,
+            render_device: Some(RenderDeviceIdentity {
+                major: render_node.major,
+                minor: render_node.minor,
+            }),
             caps: renderer_caps(stream.layout(), self.config.capture_rate_hz)?,
         })
     }
