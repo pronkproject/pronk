@@ -7,6 +7,7 @@
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,6 +72,7 @@ pub struct Session {
     monitor: Option<OwnedFd>,
     renderer: Option<OwnedFd>,
     capture: Option<OwnedFd>,
+    render_node: PathBuf,
     release: Option<oneshot::Sender<()>>,
     done: Option<oneshot::Receiver<Result<(), Error>>>,
 }
@@ -92,9 +94,15 @@ pub struct CaptureAccess {
 #[derive(Debug)]
 pub struct RendererAccess {
     renderer: OwnedFd,
+    render_node: PathBuf,
 }
 
 impl RendererAccess {
+    /// Render node for the GPU that produces the compositor's source images.
+    pub fn render_node(&self) -> &Path {
+        &self.render_node
+    }
+
     /// Open a validated renderer client while retaining the broker session.
     pub fn open(&self) -> std::io::Result<castkms_renderer::Renderer> {
         castkms_renderer::Renderer::from_fd(self.renderer.try_clone()?)
@@ -147,6 +155,7 @@ impl Session {
     pub fn renderer_access(&self) -> std::io::Result<RendererAccess> {
         Ok(RendererAccess {
             renderer: self.renderer()?.try_clone_to_owned()?,
+            render_node: self.render_node.clone(),
         })
     }
 
@@ -154,7 +163,10 @@ impl Session {
     pub fn take_renderer_access(&mut self) -> std::io::Result<RendererAccess> {
         self.renderer
             .take()
-            .map(|renderer| RendererAccess { renderer })
+            .map(|renderer| RendererAccess {
+                renderer,
+                render_node: self.render_node.clone(),
+            })
             .ok_or_else(|| std::io::Error::other("renderer access was already transferred"))
     }
 
@@ -294,15 +306,18 @@ async fn run_session(
             ),
         )
         .await;
-    let received =
-        result.and_then(|message| message.body().deserialize::<(BusFd, BusFd, BusFd, u64)>());
-    let (monitor, renderer, capture, id) = match received {
-        Ok((monitor, renderer, capture, id)) => {
+    let received = result.and_then(|message| {
+        message
+            .body()
+            .deserialize::<(BusFd, BusFd, BusFd, String, u64)>()
+    });
+    let (monitor, renderer, capture, render_node, id) = match received {
+        Ok((monitor, renderer, capture, render_node, id)) => {
             let Some(id) = NonZeroU64::new(id) else {
                 let _ = send.send(Err(Error::InvalidSession));
                 return;
             };
-            (monitor, renderer, capture, id)
+            (monitor, renderer, capture, PathBuf::from(render_node), id)
         }
         Err(error) => {
             let _ = send.send(Err(error.into()));
@@ -320,6 +335,7 @@ async fn run_session(
         monitor: Some(monitor),
         renderer: Some(renderer),
         capture: Some(capture),
+        render_node,
         release: Some(release),
         done: Some(wait_done),
     }));

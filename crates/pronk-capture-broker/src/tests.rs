@@ -45,7 +45,7 @@ impl Mutter {
         crtc: u32,
         connector: u32,
         #[zbus(header)] header: Header<'_>,
-    ) -> zbus::fdo::Result<(BusFd, BusFd, BusFd, u64)> {
+    ) -> zbus::fdo::Result<(BusFd, BusFd, BusFd, String, u64)> {
         self.state.requests.lock().unwrap().push((
             major,
             minor,
@@ -75,7 +75,13 @@ impl Mutter {
             .unwrap()
             .take()
             .ok_or_else(|| zbus::fdo::Error::Failed("renderer already issued".into()))?;
-        Ok((monitor.into(), renderer.into(), capture.into(), 91))
+        Ok((
+            monitor.into(),
+            renderer.into(),
+            capture.into(),
+            "/dev/dri/renderD128".into(),
+            91,
+        ))
     }
 
     fn release_display_session(
@@ -191,6 +197,10 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
     drop(monitor);
     fixture.renderer_peer.write_all(&[0x41]).unwrap();
     let renderer_access = session.renderer_access().unwrap();
+    assert_eq!(
+        renderer_access.render_node(),
+        std::path::Path::new("/dev/dri/renderD128")
+    );
     let mut renderer = std::os::unix::net::UnixStream::from(renderer_access.renderer);
     renderer
         .set_read_timeout(Some(Duration::from_secs(1)))
