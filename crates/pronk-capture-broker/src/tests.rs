@@ -12,6 +12,7 @@ type Request = (u32, u32, u32, u32, String);
 struct State {
     requests: Mutex<Vec<Request>>,
     releases: Mutex<Vec<(u64, String)>>,
+    transitions: Mutex<Vec<(u64, u64, String)>>,
     owner: Mutex<String>,
     entered: Notify,
     released: Notify,
@@ -82,6 +83,19 @@ impl Mutter {
             "/dev/dri/renderD128".into(),
             91,
         ))
+    }
+
+    fn install_renderer_transition(
+        &self,
+        session_id: u64,
+        transition: u64,
+        #[zbus(header)] header: Header<'_>,
+    ) {
+        self.state.transitions.lock().unwrap().push((
+            session_id,
+            transition,
+            header.destination().unwrap().to_string(),
+        ));
     }
 
     fn release_display_session(
@@ -200,6 +214,15 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
     assert_eq!(
         renderer_access.render_node(),
         std::path::Path::new("/dev/dri/renderD128")
+    );
+    renderer_access
+        .transition
+        .install(NonZeroU64::new(73).unwrap(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.state.transitions.lock().unwrap().as_slice(),
+        &[(91, 73, ":1.88".into())]
     );
     let mut renderer = std::os::unix::net::UnixStream::from(renderer_access.renderer);
     renderer

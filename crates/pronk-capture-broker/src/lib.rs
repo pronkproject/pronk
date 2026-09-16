@@ -50,6 +50,16 @@ pub enum Error {
     Bus(#[from] zbus::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RendererTransitionError {
+    #[error("renderer transition installation canceled")]
+    Cancelled,
+    #[error("renderer transition installation timed out")]
+    Timeout,
+    #[error("renderer transition broker operation failed: {0}")]
+    Bus(#[from] zbus::Error),
+}
+
 /// Clones share a limit on pending, active and retiring sessions.
 ///
 /// A stalled reply retains one slot, not an unbounded detached task. The caller's
@@ -73,6 +83,7 @@ pub struct Session {
     renderer: Option<OwnedFd>,
     capture: Option<OwnedFd>,
     render_node: PathBuf,
+    transition: RendererTransitionAccess,
     release: Option<oneshot::Sender<()>>,
     done: Option<oneshot::Receiver<Result<(), Error>>>,
 }
@@ -95,6 +106,16 @@ pub struct CaptureAccess {
 pub struct RendererAccess {
     renderer: OwnedFd,
     render_node: PathBuf,
+    transition: RendererTransitionAccess,
+}
+
+/// Permission to ask Mutter to bind a registered profile to the current scene.
+#[derive(Debug, Clone)]
+pub struct RendererTransitionAccess {
+    connection: zbus::Connection,
+    owner: OwnedUniqueName,
+    session_id: NonZeroU64,
+    timeout: Duration,
 }
 
 impl RendererAccess {
@@ -111,6 +132,47 @@ impl RendererAccess {
     /// Consume the sole application owner when worker lifetime must govern the descriptor.
     pub fn into_renderer(self) -> std::io::Result<castkms_renderer::Renderer> {
         castkms_renderer::Renderer::from_fd(self.renderer)
+    }
+
+    /// Consume the capability and preserve its paired GPU selection.
+    pub fn into_parts(
+        self,
+    ) -> std::io::Result<(
+        castkms_renderer::Renderer,
+        PathBuf,
+        RendererTransitionAccess,
+    )> {
+        Ok((
+            castkms_renderer::Renderer::from_fd(self.renderer)?,
+            self.render_node,
+            self.transition,
+        ))
+    }
+}
+
+impl RendererTransitionAccess {
+    pub async fn install(
+        &self,
+        transition: NonZeroU64,
+        cancellation: CancellationToken,
+    ) -> Result<(), RendererTransitionError> {
+        let request = (self.session_id.get(), transition.get());
+        let call = self.connection.call_method(
+            Some(self.owner.as_str()),
+            PATH,
+            Some(SERVICE),
+            "InstallRendererTransition",
+            &request,
+        );
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(RendererTransitionError::Cancelled),
+            result = tokio::time::timeout(self.timeout, call) => {
+                result.map_err(|_| RendererTransitionError::Timeout)?
+                    .and_then(|message| message.body().deserialize::<()>())
+                    .map_err(RendererTransitionError::from)
+            }
+        }
     }
 }
 
@@ -156,6 +218,7 @@ impl Session {
         Ok(RendererAccess {
             renderer: self.renderer()?.try_clone_to_owned()?,
             render_node: self.render_node.clone(),
+            transition: self.transition_access(),
         })
     }
 
@@ -166,8 +229,13 @@ impl Session {
             .map(|renderer| RendererAccess {
                 renderer,
                 render_node: self.render_node.clone(),
+                transition: self.transition_access(),
             })
             .ok_or_else(|| std::io::Error::other("renderer access was already transferred"))
+    }
+
+    fn transition_access(&self) -> RendererTransitionAccess {
+        self.transition.clone()
     }
 
     pub fn monitor_capabilities(&self) -> std::io::Result<monitor::Capabilities> {
@@ -263,6 +331,7 @@ impl Provider {
             .await
             .map_err(|_| Error::WorkerStopped)?;
         let connection = self.connection.clone();
+        let timeout = self.timeout;
         let (send, receive) = oneshot::channel();
         tokio::spawn(async move {
             let _permit = permit;
@@ -273,7 +342,7 @@ impl Provider {
                     return;
                 }
             };
-            run_session(connection, owner, target, send).await;
+            run_session(connection, owner, target, timeout, send).await;
         });
         receive.await.map_err(|_| Error::WorkerStopped)?
     }
@@ -290,6 +359,7 @@ async fn run_session(
     connection: zbus::Connection,
     owner: OwnedUniqueName,
     target: Target,
+    timeout: Duration,
     send: oneshot::Sender<Result<Session, Error>>,
 ) {
     let result = connection
@@ -336,6 +406,12 @@ async fn run_session(
         renderer: Some(renderer),
         capture: Some(capture),
         render_node,
+        transition: RendererTransitionAccess {
+            connection: connection.clone(),
+            owner: owner.clone(),
+            session_id: id,
+            timeout,
+        },
         release: Some(release),
         done: Some(wait_done),
     }));
