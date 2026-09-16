@@ -128,6 +128,7 @@ but it never receives renderer source descriptors.
 More detail is available in:
 
 - [`docs/drm-capture.md`](docs/drm-capture.md)
+- [`docs/kernel-sessions.md`](docs/kernel-sessions.md)
 - [`docs/display-executor.md`](docs/display-executor.md)
 - [`docs/gpu-media.md`](docs/gpu-media.md)
 - [`docs/faq.md`](docs/faq.md)
@@ -137,6 +138,7 @@ More detail is available in:
 
 - `crates/pronk`: session daemon and display lifecycle;
 - `crates/pronk-capture-broker`: Mutter broker client;
+- `crates/castkms-monitor`: monitor-control operations without an issuer;
 - `crates/castkms-renderer`: checked renderer protocol;
 - `crates/pronk-renderer-worker`: scene execution worker;
 - `crates/drm-capture`: generic final-image capture client;

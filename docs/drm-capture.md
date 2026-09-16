@@ -13,6 +13,13 @@ manager separately tracks downstream ownership and native reuse.
 
 ## Operation and ownership
 
+`Access::from_fd` retains an inherited descriptor without an ioctl. It is useful
+when authority arrives before the display has been activated. Retention is not
+validation: `Access::open` duplicates the descriptor with close-on-exec and
+queries the active output. Failure leaves the retained access available for a
+later attempt. Clones share the same kernel file and authorization, not a fresh
+namespace or an independent permission lifetime.
+
 `Client::from_fd` adopts an inherited descriptor after a successful description
 query. It rejects inactive or revoked grants rather than pretending to validate
 them without an active description. `create_grant` returns a client directly
@@ -92,10 +99,35 @@ No test claims to revoke previously exported backing allocations.
 
 ## Application integration
 
-Pronk obtains separate monitor-control, final-image capture, and renderer
-capabilities from Mutter's display-session broker. The production display
-observer retains the broker session and monitor capability, while the media
-pipeline receives only capture access.
+Pronk's application owns an issuer-independent display session. Its configured
+Mutter adapter obtains separate monitor-control, final-image capture, and
+renderer capabilities. The display observer retains monitor control and the
+issuer's release obligation. The selected media pipeline receives either
+renderer authority or final-image capture access, never monitor control or the
+issuer's revocation files. See [display-session ownership](kernel-sessions.md).
+
+`pronkd --capture-source final-image` selects capture without acquiring images
+through a renderer endpoint or requesting a renderer transition. The default
+is `renderer`. Selection is explicit, not an error fallback; it does not choose
+the backend currently rendering the display.
+
+`pronk_capture::Session` owns the stream and destination namespace for one
+issued capture file. Create it once and reuse it across media generations.
+Separate sessions made from duplicate descriptors would allocate conflicting
+names. Each `spawn` reserves fresh stream and destination names; failed setup
+does not reuse its reservation. Actors retain the file independently and each
+new generation receives fresh destination storage.
+
+The final-image pipeline performs pool allocation and stream setup on a
+blocking worker, with the session retained across cancelled or abandoned
+starts. Retries wait asynchronously for earlier setup. Cancellation is checked
+before queued work accesses the file and between setup stages; it does not
+cancel an allocator or ioctl already in progress. Failed registration attempts
+close the new stream and remove all destinations registered by that attempt.
+
+Both media paths report failures with the owning media generation. A normal
+stop cancels health observation before joining the media owner. Neither a
+stopped observer nor a timed-out cleanup wait establishes ended native access.
 
 The renderer and capture paths remain separate even when the renderer uses the
 GPU. The capture queue does not encode Chromecast's display cadence or transport

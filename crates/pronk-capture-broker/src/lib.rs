@@ -369,9 +369,9 @@ impl Session {
 
     /// Open a capture client while retaining the display session itself.
     ///
-    /// Inactive or unauthorized outputs fail with the kernel's error and request
-    /// session release. The client receives a close-on-exec duplicate of only
-    /// the capture descriptor. Call this after display activation; it does not
+    /// Inactive or unauthorized outputs fail with the kernel's error without
+    /// releasing the session. The client receives a close-on-exec duplicate of
+    /// only the capture descriptor. Call this after display activation; it does not
     /// wait for a modeset or reserve the returned offer. Dropping the client
     /// leaves monitor control and broker ownership with the session.
     pub fn open_capture(&self) -> std::io::Result<drm_capture::Client> {
