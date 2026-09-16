@@ -923,28 +923,13 @@ async fn run_display_setup_inner(
         kernel,
         media_renderer,
     } = attached;
-    let (renderer, render_node, transition) = match media_renderer.into_parts() {
-        Ok(parts) => parts,
-        Err(error) => {
-            stop_partial_backend(backend_session).await;
-            cleanup_kernel_display(kernel).await;
-            return Err(DisplaySetupError::Monitor(format!(
-                "open brokered renderer: {error}"
-            )));
-        }
-    };
     let session_id = context.display_id.to_string();
     let initial_session_generation =
         NonZeroU64::new(INITIAL_SESSION_GENERATION).expect("initial session generation is nonzero");
-    let (device_session, _device_control, session_replacement) = replaceable_device_session(
-        initial_session_generation,
-        Box::new(BackendDeviceSession::new(backend_session)),
-    );
     let device_instance = format!("cast-display-{}", context.display_id.object_segment());
     let video_bitrate = NonZeroU64::new(8_000_000).expect("fixed bitrate is nonzero");
-    let (capture, capture_events) = RendererCapturePipeline::new(
-        renderer,
-        transition,
+    let pipeline = RendererCapturePipeline::new(
+        media_renderer,
         remote_provider.clone(),
         RendererCapturePipelineConfig {
             connector_id: NonZeroU32::new(output.connector_id)
@@ -957,13 +942,26 @@ async fn run_display_setup_inner(
             video_bitrate,
             capture_rate_hz: NonZeroU32::new(RENDERER_CAPTURE_RATE_HZ)
                 .expect("fixed capture rate is nonzero"),
-            render_node,
             output_modifier: DRM_FORMAT_MOD_LINEAR,
             private_capacity: std::num::NonZeroUsize::new(RENDERER_PRIVATE_CAPACITY)
                 .expect("fixed private pool capacity is nonzero"),
             output_capacity: std::num::NonZeroUsize::new(RENDERER_OUTPUT_CAPACITY)
                 .expect("fixed output pool capacity is nonzero"),
         },
+    );
+    let (capture, capture_events) = match pipeline {
+        Ok(pipeline) => pipeline,
+        Err(error) => {
+            stop_partial_backend(backend_session).await;
+            cleanup_kernel_display(kernel).await;
+            return Err(DisplaySetupError::Monitor(format!(
+                "open brokered renderer: {error}"
+            )));
+        }
+    };
+    let (device_session, _device_control, session_replacement) = replaceable_device_session(
+        initial_session_generation,
+        Box::new(BackendDeviceSession::new(backend_session)),
     );
     let kernel = Box::new(KernelDisplayWithCapture::new(kernel, capture_events))
         as Box<dyn KernelDisplayPort>;

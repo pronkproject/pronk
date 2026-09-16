@@ -97,10 +97,9 @@ async fn run(
     let runtime = socket.parent().context("private socket has no directory")?;
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
-    let (renderer, render_node, transition) = session.take_renderer_access()?.into_parts()?;
+    let renderer_access = session.take_renderer_access()?;
     let (mut capture, mut renderer_events) = RendererCapturePipeline::new(
-        renderer,
-        transition,
+        renderer_access,
         remotes,
         RendererCapturePipelineConfig {
             connector_id: target.connector_id,
@@ -111,12 +110,11 @@ async fn run(
             video_profile_id: "raw-dmabuf".into(),
             video_bitrate: nz64(4_000_000),
             capture_rate_hz: nz(30),
-            render_node,
             output_modifier: modifier,
             private_capacity: NonZeroUsize::new(3).unwrap(),
             output_capacity: NonZeroUsize::new(4).unwrap(),
         },
-    );
+    )?;
     let prepared = capture
         .start(
             MediaStartRequest {

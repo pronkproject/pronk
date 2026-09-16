@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use castkms_renderer::Renderer;
-use pronk_capture_broker::RendererTransitionAccess;
+use pronk_capture_broker::{RendererAccess, RendererTransitionAccess};
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoPixelFormat,
@@ -37,7 +37,6 @@ pub struct RendererCapturePipelineConfig {
     pub video_profile_id: String,
     pub video_bitrate: NonZeroU64,
     pub capture_rate_hz: NonZeroU32,
-    pub render_node: PathBuf,
     pub output_modifier: u64,
     pub private_capacity: NonZeroUsize,
     pub output_capacity: NonZeroUsize,
@@ -59,6 +58,7 @@ struct Generation {
 /// Sole owner of renderer authority and its per-generation GPU producer.
 pub struct RendererCapturePipeline {
     renderer: Option<Renderer<OwnedFd>>,
+    render_node: PathBuf,
     transition: RendererTransitionAccess,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
@@ -116,15 +116,16 @@ impl Drop for ActiveMonitor {
 
 impl RendererCapturePipeline {
     pub fn new(
-        renderer: Renderer<OwnedFd>,
-        transition: RendererTransitionAccess,
+        access: RendererAccess,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
-    ) -> (Self, RendererCapturePipelineEvents) {
+    ) -> std::io::Result<(Self, RendererCapturePipelineEvents)> {
+        let (renderer, render_node, transition) = access.into_parts()?;
         let (events, receive) = mpsc::unbounded_channel();
-        (
+        Ok((
             Self {
                 renderer: Some(renderer),
+                render_node,
                 transition,
                 producer_remotes,
                 config,
@@ -132,7 +133,7 @@ impl RendererCapturePipeline {
                 events,
             },
             RendererCapturePipelineEvents { events: receive },
-        )
+        ))
     }
 
     async fn stop_generation(&mut self, id: NonZeroU64) -> Result<(), MediaPipelineError> {
@@ -242,7 +243,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 "renderer descriptor was consumed by an earlier active generation",
             ));
         }
-        let render_node = self.config.render_node.clone();
+        let render_node = self.render_node.clone();
         let mut device_task = tokio::task::spawn_blocking(move || Device::open(render_node));
         let device = tokio::select! {
             biased;

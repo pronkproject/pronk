@@ -129,11 +129,6 @@ impl RendererAccess {
         castkms_renderer::Renderer::from_fd(self.renderer.try_clone()?)
     }
 
-    /// Consume the sole application owner when worker lifetime must govern the descriptor.
-    pub fn into_renderer(self) -> std::io::Result<castkms_renderer::Renderer> {
-        castkms_renderer::Renderer::from_fd(self.renderer)
-    }
-
     /// Consume the capability and preserve its paired GPU selection.
     pub fn into_parts(
         self,
