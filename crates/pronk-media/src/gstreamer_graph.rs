@@ -1,5 +1,6 @@
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -97,6 +98,7 @@ pub(crate) struct GStreamerGraph {
     _video_remote: std::os::fd::OwnedFd,
     audio: Option<GStreamerAudioBranch>,
     statistics: MediaGraphStatistics,
+    raw_frames_dropped: Arc<AtomicU64>,
     video_output: Option<EncodedVideoOutput>,
     audio_output: Option<EncodedAudioOutput>,
     timeline: Option<GenerationMediaTimeline>,
@@ -192,6 +194,7 @@ impl GStreamerGraph {
             .map_err(|error| {
                 MediaGraphError::new(format!("construct bounded video queue: {error}"))
             })?;
+        let raw_frames_dropped = observe_raw_frame_drops(&queue);
         let convert = video_encoder.build_converter()?;
         let rate = gst::ElementFactory::make("videorate")
             .name("pronk-video-rate")
@@ -353,6 +356,7 @@ impl GStreamerGraph {
                 }),
                 ..MediaGraphStatistics::default()
             },
+            raw_frames_dropped,
             video_output: video_output.map(EncodedVideoOutput::new),
             audio_output: has_audio
                 .then(|| audio_output.map(EncodedAudioOutput::new))
@@ -424,7 +428,9 @@ impl GStreamerGraph {
     }
 
     pub(crate) fn statistics(&self) -> MediaGraphStatistics {
-        self.statistics.clone()
+        let mut statistics = self.statistics.clone();
+        statistics.raw_frames_dropped = self.raw_frames_dropped.load(Ordering::Relaxed);
+        statistics
     }
 
     pub(crate) fn request_key_frame(&mut self) -> Result<(), MediaGraphError> {
@@ -462,7 +468,7 @@ impl GStreamerGraph {
     pub(crate) fn stop(mut self) -> Result<MediaGraphStatistics, MediaGraphError> {
         self.pull_available_samples()?;
         let result = self.change_state(gst::State::Null, PIPELINE_STATE_TIMEOUT);
-        let statistics = self.statistics.clone();
+        let statistics = self.statistics();
         result.map(|()| statistics)
     }
 
@@ -830,6 +836,18 @@ fn configure_encoded_video_sink(app_sink: &gst_app::AppSink, caps: &gst::Caps) {
     app_sink.set_sync(false);
 }
 
+fn observe_raw_frame_drops(queue: &gst::Element) -> Arc<AtomicU64> {
+    let count = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&count);
+    queue.connect("overrun", false, move |_| {
+        let _ = observed.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(1))
+        });
+        None
+    });
+    count
+}
+
 impl Drop for GStreamerGraph {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
@@ -889,8 +907,8 @@ mod tests {
     use gstreamer::prelude::*;
 
     use super::{
-        configure_encoded_video_sink, is_segment_anchor, validate_remote_socket,
-        video_stream_properties, RAW_QUEUE_BUFFERS,
+        configure_encoded_video_sink, is_segment_anchor, observe_raw_frame_drops,
+        validate_remote_socket, video_stream_properties, RAW_QUEUE_BUFFERS,
     };
 
     #[test]
@@ -937,6 +955,21 @@ mod tests {
 
         assert_eq!(sink.max_buffers(), RAW_QUEUE_BUFFERS);
         assert!(!sink.is_drop());
+    }
+
+    #[test]
+    fn raw_queue_overruns_count_pre_encoder_shedding() {
+        gstreamer::init().unwrap();
+        let queue = gstreamer::ElementFactory::make("queue").build().unwrap();
+        let count = observe_raw_frame_drops(&queue);
+
+        queue.emit_by_name::<()>("overrun", &[]);
+        queue.emit_by_name::<()>("overrun", &[]);
+
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 2);
+        count.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        queue.emit_by_name::<()>("overrun", &[]);
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), u64::MAX);
     }
 
     #[test]
