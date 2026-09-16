@@ -28,7 +28,9 @@ struct State {
     entered: Notify,
     transition_entered: Notify,
     released: Notify,
+    release_entered: Notify,
     gate: Option<Notify>,
+    release_gate: Mutex<Option<Arc<Notify>>>,
     transition_gate: Mutex<Option<Arc<Notify>>>,
     release_error: bool,
     invalid_renderer: AtomicBool,
@@ -179,11 +181,16 @@ impl Mutter {
             .push((session_id, transition, destination));
     }
 
-    fn release_display_session(
+    async fn release_display_session(
         &self,
         id: u64,
         #[zbus(header)] header: Header<'_>,
     ) -> zbus::fdo::Result<()> {
+        let gate = self.state.release_gate.lock().unwrap().clone();
+        self.state.release_entered.notify_one();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         self.state
             .releases
             .lock()
@@ -801,6 +808,62 @@ async fn explicit_release_reports_a_broker_error() {
         .await
         .unwrap();
     assert!(matches!(session.release().await, Err(Error::Bus(_))));
+}
+
+#[tokio::test]
+async fn a_stalled_display_release_bounds_the_wait_without_freeing_capacity() {
+    let mut fixture = Fixture::new(false, false).await;
+    let mut session = fixture
+        .provider
+        .acquire(target(), CancellationToken::new())
+        .await
+        .unwrap();
+    session.timeout = Duration::from_millis(20);
+    fixture.provider.timeout = Duration::from_millis(20);
+    let gate = Arc::new(Notify::new());
+    *fixture.state.release_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    *fixture.state.owner.lock().unwrap() = ":1.99".into();
+
+    let release = tokio::spawn(session.release());
+    notified(&fixture.state.release_entered).await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), release)
+            .await
+            .expect("a broker release must not wait indefinitely")
+            .unwrap(),
+        Err(Error::Timeout)
+    ));
+    assert_eq!(fixture.provider.slots.available_permits(), 0);
+    assert!(matches!(
+        fixture
+            .provider
+            .acquire(target(), CancellationToken::new())
+            .await,
+        Err(Error::Timeout)
+    ));
+    assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
+    for peer in [
+        &mut fixture.monitor_peer,
+        &mut fixture.renderer_peer,
+        &mut fixture._peer,
+    ] {
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
+
+    gate.notify_one();
+    notified(&fixture.state.released).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while fixture.provider.slots.available_permits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture.state.releases.lock().unwrap().as_slice(),
+        &[(91, ":1.88".into())]
+    );
 }
 
 #[tokio::test]

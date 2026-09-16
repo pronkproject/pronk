@@ -32,7 +32,7 @@ pub struct Target {
 pub enum Error {
     #[error("display-session acquisition canceled")]
     Cancelled,
-    #[error("display-session acquisition timed out")]
+    #[error("display-session operation timed out")]
     Timeout,
     #[error("display-session worker stopped")]
     WorkerStopped,
@@ -81,6 +81,7 @@ pub struct Provider {
 #[derive(Debug)]
 pub struct Session {
     id: NonZeroU64,
+    timeout: Duration,
     monitor: Option<OwnedFd>,
     renderer: Option<(OwnedFd, NonZeroU64)>,
     capture: Option<OwnedFd>,
@@ -386,15 +387,19 @@ impl Session {
         self.renderer_access()?.open()
     }
 
+    /// Close local capabilities and observe release within the session deadline.
+    ///
+    /// Timeout stops the local wait, not the issuer's release operation. The
+    /// provider retains its capacity until that operation finishes.
     pub async fn release(mut self) -> Result<(), Error> {
         self.monitor.take();
         self.renderer.take();
         self.capture.take();
         self.release.take();
-        self.done
-            .take()
-            .expect("live session owns completion")
+        let done = self.done.take().expect("live session owns completion");
+        tokio::time::timeout(self.timeout, done)
             .await
+            .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::WorkerStopped)?
     }
 }
@@ -535,6 +540,7 @@ async fn run_session(
     let session = NonZeroU64::new(renderer_id)
         .map(|renderer_id| Session {
             id,
+            timeout,
             monitor: Some(monitor),
             renderer: Some((renderer, renderer_id)),
             capture: Some(capture),

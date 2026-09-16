@@ -12,7 +12,7 @@ use crate::renderer_session::RendererAccess;
 pub enum KernelSessionError {
     #[error("kernel display authorization was cancelled")]
     Cancelled,
-    #[error("kernel display authorization timed out")]
+    #[error("kernel display operation timed out")]
     Timeout,
     #[error("kernel display issuer is unavailable")]
     Unavailable,
