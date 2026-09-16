@@ -16,13 +16,13 @@ use pronk_renderer_pipewire::{
     RendererStreamState,
 };
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::capability_lease::CapabilityLease;
+use crate::capture_health::{CaptureEvents, CaptureMonitor};
 use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
 use crate::media_pipeline_port::{
-    CaptureEvent, CaptureEventPort, CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia,
+    CaptureEvent, CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia,
 };
 use crate::media_session::{MediaStartRequest, MediaStopReason, MediaSuspendReason};
 use crate::renderer_session::{OpenRenderer, RendererAccess, RendererSession};
@@ -47,7 +47,7 @@ enum Stream {
     Prepared(RendererStream<OwnedFd>),
     Active {
         stream: ActiveRendererStream<OwnedFd>,
-        monitor: ActiveMonitor,
+        monitor: CaptureMonitor,
     },
 }
 
@@ -68,67 +68,19 @@ pub struct RendererCapturePipeline {
     events: mpsc::UnboundedSender<CaptureEvent>,
 }
 
-/// Sole consumer of asynchronous renderer-pipeline health.
-pub struct RendererCapturePipelineEvents {
-    events: mpsc::UnboundedReceiver<CaptureEvent>,
-}
-
-#[async_trait]
-impl CaptureEventPort for RendererCapturePipelineEvents {
-    async fn next_event(&mut self) -> Option<CaptureEvent> {
-        self.events.recv().await
-    }
-}
-
-impl std::fmt::Debug for RendererCapturePipelineEvents {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RendererCapturePipelineEvents")
-            .finish_non_exhaustive()
-    }
-}
-
-struct ActiveMonitor {
-    stop: CancellationToken,
-    task: Option<JoinHandle<()>>,
-}
-
-impl ActiveMonitor {
-    fn cancel(&self) {
-        self.stop.cancel();
-    }
-
-    async fn shutdown(mut self) -> Result<(), MediaPipelineError> {
-        self.cancel();
-        self.task
-            .take()
-            .expect("live active renderer monitor owns its task")
-            .await
-            .map_err(|error| {
-                MediaPipelineError::new(format!("join active renderer monitor: {error}"))
-            })
-    }
-}
-
-impl Drop for ActiveMonitor {
-    fn drop(&mut self) {
-        self.stop.cancel();
-    }
-}
-
 impl RendererCapturePipeline {
     pub fn new(
         access: RendererAccess,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
-    ) -> std::io::Result<(Self, RendererCapturePipelineEvents)> {
+    ) -> std::io::Result<(Self, CaptureEvents)> {
         let OpenRenderer {
             renderer,
             lease,
             render_node,
             session,
         } = access.open()?;
-        let (events, receive) = mpsc::unbounded_channel();
+        let (events, receive) = CaptureEvents::channel();
         Ok((
             Self {
                 renderer: Some(renderer),
@@ -140,7 +92,7 @@ impl RendererCapturePipeline {
                 generation: None,
                 events,
             },
-            RendererCapturePipelineEvents { events: receive },
+            receive,
         ))
     }
 
@@ -637,7 +589,7 @@ fn combine_cleanup(
 
 async fn shutdown_active(
     stream: ActiveRendererStream<OwnedFd>,
-    monitor: ActiveMonitor,
+    monitor: CaptureMonitor,
 ) -> Result<(), MediaPipelineError> {
     monitor.cancel();
     let (stream, monitor) = tokio::join!(stream.shutdown(), monitor.shutdown());
@@ -653,47 +605,20 @@ async fn shutdown_active(
 
 fn monitor_active_renderer(
     media_generation: NonZeroU64,
-    mut state: tokio::sync::watch::Receiver<RendererStreamState>,
+    state: tokio::sync::watch::Receiver<RendererStreamState>,
     events: mpsc::UnboundedSender<CaptureEvent>,
-) -> ActiveMonitor {
-    let stop = CancellationToken::new();
-    let cancellation = stop.clone();
-    let task = tokio::spawn(async move {
-        loop {
-            if cancellation.is_cancelled() {
-                return;
-            }
-            let failure = match state.borrow().clone() {
-                RendererStreamState::Failed(error) => Some(error),
-                RendererStreamState::Stopped => Some("renderer stream stopped unexpectedly".into()),
-                RendererStreamState::Prepared | RendererStreamState::Active => None,
-            };
-            if let Some(error) = failure {
-                let _ = events.send(CaptureEvent::Failed {
-                    media_generation,
-                    error,
-                });
-                return;
-            }
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return,
-                changed = state.changed() => {
-                    if changed.is_err() {
-                        let _ = events.send(CaptureEvent::Failed {
-                            media_generation,
-                            error: "renderer stream health channel closed".into(),
-                        });
-                        return;
-                    }
-                }
-            }
-        }
-    });
-    ActiveMonitor {
-        stop,
-        task: Some(task),
-    }
+) -> CaptureMonitor {
+    CaptureMonitor::watch(
+        media_generation,
+        state,
+        events,
+        |state| match state {
+            RendererStreamState::Failed(error) => Some(error.clone()),
+            RendererStreamState::Stopped => Some("renderer stream stopped unexpectedly".into()),
+            RendererStreamState::Prepared | RendererStreamState::Active => None,
+        },
+        "renderer stream health channel closed",
+    )
 }
 
 fn renderer_caps(
