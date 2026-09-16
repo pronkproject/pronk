@@ -1,4 +1,5 @@
-use pronk::kernel_session_provider::{KernelSession, KernelSessionError, KernelSessionProvider};
+use pronk::kernel_session::{KernelSession, KernelSessionError};
+use pronk::kernel_session_provider::KernelSessionProvider;
 use pronk_core::output::CastKmsOutput;
 use tokio_util::sync::CancellationToken;
 

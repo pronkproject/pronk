@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use pronk::display_state::{RouteTarget, RoutedMode};
+use pronk::kernel_session::KernelSession;
 use pronk::media_pipeline_port::{CaptureEventPort, CapturePipelinePort};
 use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk::renderer_capture_pipeline::{RendererCapturePipeline, RendererCapturePipelineConfig};
@@ -89,7 +90,10 @@ async fn run(
         NonZeroUsize::new(1).unwrap(),
         Duration::from_secs(5),
     )?;
-    let mut session = provider.acquire(target, CancellationToken::new()).await?;
+    let mut session: KernelSession = provider
+        .acquire(target, CancellationToken::new())
+        .await?
+        .try_into()?;
     session.attach_monitor(None)?;
     tokio::time::sleep(Duration::from_secs(2)).await;
 

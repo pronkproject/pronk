@@ -1,4 +1,3 @@
-pub mod brokered_kernel_display;
 pub mod caller;
 pub mod capability_lease;
 pub mod cast_display_slot;
@@ -11,6 +10,7 @@ pub mod display;
 pub mod display_state;
 pub mod drm_capture_pipeline;
 pub mod gpu_output;
+pub mod kernel_display;
 pub mod kernel_display_port;
 pub mod kernel_display_with_capture;
 pub mod kernel_session;
@@ -21,6 +21,7 @@ pub mod media_pipeline_port;
 pub mod media_policy;
 pub mod media_remote;
 pub mod media_session;
+mod mutter_kernel_session;
 pub mod preparation;
 pub mod renderer_capture_pipeline;
 pub mod renderer_session;
@@ -32,9 +33,8 @@ pub(crate) mod test_support {
     use pronk_core::output::CastKmsOutput;
     use tokio_util::sync::CancellationToken;
 
-    use crate::kernel_session_provider::{
-        KernelSession, KernelSessionError, KernelSessionProvider,
-    };
+    use crate::kernel_session::{KernelSession, KernelSessionError};
+    use crate::kernel_session_provider::KernelSessionProvider;
 
     /// Unit-test dependency for paths that must never reach grant acquisition.
     #[derive(Debug)]

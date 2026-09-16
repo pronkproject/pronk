@@ -1,4 +1,4 @@
-//! Kernel-display observation and teardown for one brokered display session.
+//! Kernel-display observation and teardown for one authorized display session.
 
 use std::io;
 use std::num::NonZeroU32;
@@ -7,7 +7,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use drm_capture::Access as CaptureAccess;
 use nix::libc;
-use pronk_capture_broker::Session;
 use pronk_core::edid::EdidMode;
 use tokio::time::{interval, MissedTickBehavior};
 
@@ -18,12 +17,14 @@ use crate::kernel_display_port::{
     KernelDisplayError, KernelDisplayEvent, KernelDisplayMetadata, KernelDisplayObservation,
     KernelDisplayPort,
 };
+use crate::kernel_session::KernelSession;
+use crate::renderer_session::RendererAccess;
 
 pub const DEFAULT_TOPOLOGY_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Debug)]
-pub struct BrokeredKernelDisplay {
-    session: Option<Session>,
+pub struct KernelDisplay {
+    session: Option<KernelSession>,
     capture: CaptureAccess,
     crtc_id: NonZeroU32,
     modes: Vec<EdidMode>,
@@ -31,9 +32,9 @@ pub struct BrokeredKernelDisplay {
     poll: tokio::time::Interval,
 }
 
-impl BrokeredKernelDisplay {
+impl KernelDisplay {
     pub fn new(
-        session: Session,
+        session: KernelSession,
         capture: CaptureAccess,
         crtc_id: NonZeroU32,
         modes: Vec<EdidMode>,
@@ -41,7 +42,7 @@ impl BrokeredKernelDisplay {
     ) -> Result<Self, KernelDisplayError> {
         if modes.is_empty() || poll_interval.is_zero() {
             return Err(KernelDisplayError::new(
-                "configure brokered display observation",
+                "configure display observation",
                 "advertised modes and a nonzero poll interval are required",
             ));
         }
@@ -58,10 +59,18 @@ impl BrokeredKernelDisplay {
         })
     }
 
-    fn session(&self) -> &Session {
+    fn session(&self) -> &KernelSession {
         self.session
             .as_ref()
-            .expect("live kernel display owns its broker session")
+            .expect("live kernel display owns its display session")
+    }
+
+    /// Transfer media authority without transferring the display lifetime.
+    pub fn take_renderer_access(&mut self) -> io::Result<RendererAccess> {
+        self.session
+            .as_mut()
+            .expect("live kernel display owns its session")
+            .take_renderer_access()
     }
 
     fn observe(&self) -> Result<Observation, KernelDisplayError> {
@@ -102,7 +111,7 @@ fn classify_capture_error(
         })),
         Some(libc::EKEYREVOKED) | Some(libc::ECANCELED) => Ok(Observation::Revoked),
         _ => Err(KernelDisplayError::new(
-            "observe brokered capture output",
+            "observe capture output",
             error.to_string(),
         )),
     }
@@ -131,7 +140,7 @@ fn active_observation(
         .any(|mode| mode.width == width && mode.height == height)
     {
         return Err(KernelDisplayError::new(
-            "match brokered capture output",
+            "match capture output",
             format!("active {width}x{height} output was not advertised in its EDID"),
         ));
     }
@@ -153,7 +162,7 @@ fn active_observation(
 }
 
 #[async_trait]
-impl KernelDisplayPort for BrokeredKernelDisplay {
+impl KernelDisplayPort for KernelDisplay {
     fn metadata(&self) -> KernelDisplayMetadata {
         KernelDisplayMetadata {
             session_id: self.session().id(),
@@ -182,28 +191,25 @@ impl KernelDisplayPort for BrokeredKernelDisplay {
         let session = self
             .session
             .take()
-            .expect("live kernel display owns its broker session");
+            .expect("live kernel display owns its display session");
         let (session, detach) = tokio::task::spawn_blocking(move || {
             let result = normalize_detach(session.detach_monitor());
             (session, result)
         })
         .await
-        .map_err(|error| {
-            KernelDisplayError::new("join brokered monitor detach", error.to_string())
-        })?;
+        .map_err(|error| KernelDisplayError::new("join monitor detach", error.to_string()))?;
         let release = session.release().await;
         match (detach, release) {
             (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) => Err(KernelDisplayError::new(
-                "detach brokered monitor",
-                error.to_string(),
-            )),
+            (Err(error), Ok(())) => {
+                Err(KernelDisplayError::new("detach monitor", error.to_string()))
+            }
             (Ok(()), Err(error)) => Err(KernelDisplayError::new(
-                "release brokered display session",
+                "release authorized display session",
                 error.to_string(),
             )),
             (Err(detach), Err(release)) => Err(KernelDisplayError::new(
-                "detach and release brokered display session",
+                "detach and release authorized display session",
                 format!("detach: {detach}; release: {release}"),
             )),
         }

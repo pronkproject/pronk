@@ -25,16 +25,17 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crate::brokered_kernel_display::{BrokeredKernelDisplay, DEFAULT_TOPOLOGY_POLL_INTERVAL};
 use crate::device_recovery::{
     DeviceSessionFactoryError, DeviceSessionFactoryPort, PreparedDeviceSession,
 };
 use crate::device_session::{BackendDeviceSession, BackendDeviceSessionEvents};
 use crate::device_session_port::DeviceSessionEventPort;
 use crate::display_state::{DisplayGrantState, DisplayRuntimeState};
+use crate::kernel_display::{KernelDisplay, DEFAULT_TOPOLOGY_POLL_INTERVAL};
 use crate::kernel_display_port::KernelDisplayPort;
 use crate::kernel_display_with_capture::KernelDisplayWithCapture;
-use crate::kernel_session_provider::{KernelSession, KernelSessionError, KernelSessionProvider};
+use crate::kernel_session::{KernelSession, KernelSessionError};
+use crate::kernel_session_provider::KernelSessionProvider;
 use crate::manager::{
     DeviceSessionResolver, ManagerHandle, ReserveDisplaySlotError, ReservedCastDisplaySlot,
     ResolveDeviceError,
@@ -573,8 +574,8 @@ struct DisplaySetupContext {
 }
 
 struct AttachedKernelSession {
-    kernel: BrokeredKernelDisplay,
-    media_renderer: pronk_capture_broker::RendererAccess,
+    kernel: KernelDisplay,
+    media_renderer: crate::renderer_session::RendererAccess,
 }
 
 fn offer_for_kernel_session(offer: &PreparationRequest) -> PreparationRequest {
@@ -585,7 +586,7 @@ fn offer_for_kernel_session(offer: &PreparationRequest) -> PreparationRequest {
 }
 
 async fn attach_kernel_session(
-    mut session: KernelSession,
+    session: KernelSession,
     edid: ValidatedEdid,
     crtc_id: NonZeroU32,
     modes: Vec<EdidMode>,
@@ -593,9 +594,6 @@ async fn attach_kernel_session(
 ) -> Result<AttachedKernelSession, DisplaySetupError> {
     let display_capture = session
         .capture_access()
-        .map_err(DisplaySetupError::KernelAccess)?;
-    let media_renderer = session
-        .take_renderer_access()
         .map_err(DisplaySetupError::KernelAccess)?;
     let mut task = tokio::task::spawn_blocking(move || {
         let result = session.attach_monitor(Some(edid.as_bytes()));
@@ -606,7 +604,7 @@ async fn attach_kernel_session(
         _ = cancellation.cancelled() => {
             let joined = (&mut task).await;
             if let Ok((session, Ok(()))) = joined {
-                match BrokeredKernelDisplay::new(
+                match KernelDisplay::new(
                     session,
                     display_capture,
                     crtc_id,
@@ -615,11 +613,11 @@ async fn attach_kernel_session(
                 ) {
                     Ok(kernel) => {
                         if let Err(error) = Box::new(kernel).detach().await {
-                            warn!(%error, "cancelled setup could not release its brokered monitor");
+                            warn!(%error, "cancelled setup could not release its monitor");
                         }
                     }
                     Err(error) => {
-                        warn!(%error, "cancelled setup could not construct brokered cleanup");
+                        warn!(%error, "cancelled setup could not construct cleanup");
                     }
                 }
             }
@@ -627,21 +625,28 @@ async fn attach_kernel_session(
         }
         joined = &mut task => joined.map_err(DisplaySetupError::AttachTask)?,
     };
-    result.map_err(DisplaySetupError::BrokerAttach)?;
-    let kernel = BrokeredKernelDisplay::new(
+    result.map_err(DisplaySetupError::KernelAttach)?;
+    let mut kernel = KernelDisplay::new(
         session,
         display_capture,
         crtc_id,
         modes,
         DEFAULT_TOPOLOGY_POLL_INTERVAL,
     )
-    .map_err(DisplaySetupError::BrokerDisplay)?;
+    .map_err(DisplaySetupError::KernelDisplay)?;
     if cancellation.is_cancelled() {
         if let Err(error) = Box::new(kernel).detach().await {
-            warn!(%error, "cancelled setup could not release its brokered monitor");
+            warn!(%error, "cancelled setup could not release its monitor");
         }
         return Err(DisplaySetupError::Cancelled);
     }
+    let media_renderer = match kernel.take_renderer_access() {
+        Ok(renderer) => renderer,
+        Err(error) => {
+            cleanup_kernel_display(kernel).await;
+            return Err(DisplaySetupError::KernelAccess(error));
+        }
+    };
     Ok(AttachedKernelSession {
         kernel,
         media_renderer,
@@ -649,10 +654,13 @@ async fn attach_kernel_session(
 }
 
 async fn cleanup_attached_kernel_session(session: AttachedKernelSession) {
+    if let Err(error) = session.media_renderer.release().await {
+        warn!(%error, "display setup could not release its unused renderer");
+    }
     cleanup_kernel_display(session.kernel).await;
 }
 
-async fn cleanup_kernel_display(kernel: BrokeredKernelDisplay) {
+async fn cleanup_kernel_display(kernel: KernelDisplay) {
     let result = Box::new(kernel)
         .detach()
         .await
@@ -955,7 +963,7 @@ async fn run_display_setup_inner(
             stop_partial_backend(backend_session).await;
             cleanup_kernel_display(kernel).await;
             return Err(DisplaySetupError::Monitor(format!(
-                "open brokered renderer: {error}"
+                "open renderer: {error}"
             )));
         }
     };
@@ -1167,12 +1175,12 @@ pub enum DisplaySetupError {
     Backend(#[source] BackendSessionError),
     #[error("prepare selected Device identity and EDID: {0}")]
     Prepare(#[source] PrepareCastDeviceError),
-    #[error("derive brokered kernel access: {0}")]
+    #[error("derive kernel access: {0}")]
     KernelAccess(#[source] io::Error),
-    #[error("attach selected Device through brokered monitor control: {0}")]
-    BrokerAttach(#[source] io::Error),
-    #[error("construct brokered kernel display: {0}")]
-    BrokerDisplay(#[source] crate::kernel_display_port::KernelDisplayError),
+    #[error("attach selected Device through monitor control: {0}")]
+    KernelAttach(#[source] io::Error),
+    #[error("construct kernel display: {0}")]
+    KernelDisplay(#[source] crate::kernel_display_port::KernelDisplayError),
     #[error("CastKMS attach task failed: {0}")]
     AttachTask(tokio::task::JoinError),
     #[error("start CastKMS display monitor: {0}")]
@@ -1199,14 +1207,14 @@ impl DisplaySetupError {
             Self::KernelSession(_) => OperationErrorCode::AuthorizationFailed,
             Self::Backend(error) => backend_session_error_code(error),
             Self::Prepare(error) => prepare_device_error_code(error),
-            Self::BrokerAttach(_) => OperationErrorCode::AttachmentFailed,
+            Self::KernelAttach(_) => OperationErrorCode::AttachmentFailed,
             Self::CallerMonitor(_)
             | Self::CallerTask(_)
             | Self::ReservationConsumed
             | Self::Reserve(_)
             | Self::AttachTask(_)
             | Self::KernelAccess(_)
-            | Self::BrokerDisplay(_)
+            | Self::KernelDisplay(_)
             | Self::Monitor(_) => OperationErrorCode::Internal,
         }
     }
@@ -1282,6 +1290,10 @@ pub struct RemoveCastDisplayError {
     pub media: Option<String>,
     pub detach: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "display/kernel_session_tests.rs"]
+mod kernel_session_tests;
 
 #[cfg(test)]
 mod tests {

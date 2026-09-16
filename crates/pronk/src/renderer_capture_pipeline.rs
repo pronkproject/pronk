@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use castkms_renderer::{CapabilityProfile, Renderer};
-use pronk_capture_broker::{RendererAccess, RendererSessionAccess};
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoPixelFormat,
@@ -20,11 +19,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::capability_lease::CapabilityLease;
 use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
 use crate::media_pipeline_port::{
     CaptureEvent, CaptureEventPort, CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia,
 };
 use crate::media_session::{MediaStartRequest, MediaStopReason, MediaSuspendReason};
+use crate::renderer_session::{OpenRenderer, RendererAccess, RendererSession};
 
 /// Immutable GPU and media policy for one display's renderer pipeline.
 #[derive(Debug, Clone)]
@@ -58,9 +59,9 @@ struct Generation {
 /// Sole owner of renderer authority and its per-generation GPU producer.
 pub struct RendererCapturePipeline {
     renderer: Option<Renderer<OwnedFd>>,
-    renderer_endpoint_id: NonZeroU64,
+    renderer_lease: Option<CapabilityLease>,
     render_node: PathBuf,
-    renderer_session: RendererSessionAccess,
+    renderer_session: RendererSession,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
     generation: Option<Generation>,
@@ -121,15 +122,19 @@ impl RendererCapturePipeline {
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
     ) -> std::io::Result<(Self, RendererCapturePipelineEvents)> {
-        let (renderer, renderer_endpoint_id, render_node, renderer_session) =
-            access.into_parts()?;
+        let OpenRenderer {
+            renderer,
+            lease,
+            render_node,
+            session,
+        } = access.open()?;
         let (events, receive) = mpsc::unbounded_channel();
         Ok((
             Self {
                 renderer: Some(renderer),
-                renderer_endpoint_id,
+                renderer_lease: Some(lease),
                 render_node,
-                renderer_session,
+                renderer_session: session,
                 producer_remotes,
                 config,
                 generation: None,
@@ -174,8 +179,10 @@ impl RendererCapturePipeline {
                 }
                 let stopped = shutdown_active(stream, monitor).await;
                 let released = self
-                    .renderer_session
-                    .release_renderer(self.renderer_endpoint_id)
+                    .renderer_lease
+                    .take()
+                    .expect("active renderer owns its endpoint lifetime")
+                    .release()
                     .await
                     .map_err(|error| {
                         MediaPipelineError::new(format!(
@@ -265,35 +272,44 @@ impl CapturePipelinePort for RendererCapturePipeline {
         let generation = NonZeroU64::new(request.media_generation)
             .ok_or_else(|| MediaPipelineError::new("media generation must be nonzero"))?;
         if self.renderer.is_none() {
+            if let Some(lease) = self.renderer_lease.take() {
+                lease.release().await.map_err(|error| {
+                    MediaPipelineError::new(format!(
+                        "release unavailable renderer endpoint: {error}"
+                    ))
+                })?;
+            }
             let access = self
                 .renderer_session
-                .acquire_renderer(cancellation.clone())
+                .acquire(cancellation.clone())
                 .await
                 .map_err(|error| {
                     MediaPipelineError::new(format!("acquire renderer endpoint: {error}"))
                 })?;
-            let (renderer, endpoint_id, render_node, endpoint_session) =
-                access.into_parts().map_err(|error| {
-                    MediaPipelineError::new(format!("open renderer endpoint: {error}"))
-                })?;
+            let OpenRenderer {
+                renderer,
+                lease,
+                render_node,
+                session,
+            } = access.open().map_err(|error| {
+                MediaPipelineError::new(format!("open renderer endpoint: {error}"))
+            })?;
             if render_node != self.render_node {
                 drop(renderer);
                 let rejected = Err(MediaPipelineError::new(
                     "replacement renderer selected a different GPU",
                 ));
-                let released = endpoint_session
-                    .release_renderer(endpoint_id)
-                    .await
-                    .map_err(|error| {
-                        MediaPipelineError::new(format!(
-                            "release mismatched renderer endpoint: {error}"
-                        ))
-                    });
+                let released = lease.release().await.map_err(|error| {
+                    MediaPipelineError::new(format!(
+                        "release mismatched renderer endpoint: {error}"
+                    ))
+                });
                 return Err(combine_cleanup(rejected, released)
                     .expect_err("a rejected renderer endpoint remains an error"));
             }
             self.renderer = Some(renderer);
-            self.renderer_endpoint_id = endpoint_id;
+            self.renderer_lease = Some(lease);
+            self.renderer_session = session;
         }
         let render_node = self.render_node.clone();
         let mut device_task = tokio::task::spawn_blocking(move || Device::open(render_node));
@@ -449,8 +465,8 @@ impl CapturePipelinePort for RendererCapturePipeline {
                     self.restore_renderer(owner)?;
                     return Err(error);
                 }
-                // Once Mutter has installed the transition, finish the bounded
-                // kernel activation. Cancellation is handled by the ordinary
+                // Once the compositor installs the transition, finish the
+                // bounded kernel activation. Cancellation uses the ordinary
                 // stop path, which can first return execution to HOST.
                 let activated = stream.activate(CancellationToken::new()).await;
                 let stream = activated.map_err(|error| {
@@ -492,22 +508,32 @@ impl CapturePipelinePort for RendererCapturePipeline {
         if let Some(generation) = self.generation.as_ref().map(|generation| generation.id) {
             self.stop_generation(generation, cancellation).await?;
         }
+        self.renderer.take();
+        if let Some(lease) = self.renderer_lease.take() {
+            lease.release().await.map_err(|error| {
+                MediaPipelineError::new(format!("release idle renderer endpoint: {error}"))
+            })?;
+        }
         Ok(())
     }
 }
 
 async fn hand_back_to_host(
-    renderer_session: &RendererSessionAccess,
+    renderer_session: &RendererSession,
     cancellation: CancellationToken,
 ) -> Result<(), MediaPipelineError> {
     let access = renderer_session
-        .acquire_renderer(cancellation.clone())
+        .acquire(cancellation.clone())
         .await
         .map_err(|error| MediaPipelineError::new(format!("acquire HOST endpoint: {error}")))?;
-    let (mut renderer, endpoint_id, _, endpoint_session) =
-        access.into_parts().map_err(|error| {
-            MediaPipelineError::new(format!("open HOST renderer endpoint: {error}"))
-        })?;
+    let OpenRenderer {
+        mut renderer,
+        lease,
+        session: endpoint_session,
+        ..
+    } = access.open().map_err(|error| {
+        MediaPipelineError::new(format!("open HOST renderer endpoint: {error}"))
+    })?;
     let result = async {
         let description = renderer.describe().map_err(|error| {
             MediaPipelineError::new(format!("query HOST handback endpoint: {error}"))
@@ -536,12 +562,9 @@ async fn hand_back_to_host(
     }
     .await;
     drop(renderer);
-    let released = endpoint_session
-        .release_renderer(endpoint_id)
-        .await
-        .map_err(|error| {
-            MediaPipelineError::new(format!("release HOST handback endpoint: {error}"))
-        });
+    let released = lease.release().await.map_err(|error| {
+        MediaPipelineError::new(format!("release HOST handback endpoint: {error}"))
+    });
     combine_cleanup(result, released)
 }
 
