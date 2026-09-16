@@ -33,7 +33,7 @@ use pronk_backend_protocol::{
     AudioProfile, Backend1Proxy, BackendSession1Proxy, ControlKind, ControlOperation,
     DeviceAvailability, DisplayMode, MediaConfiguration, MediaKind, PipeWireTarget,
     PreparationRequest, SessionOptions, StopReason, SuspendReason, Validate, VideoProfile,
-    SESSION_FEATURE_AUDIO, SESSION_FEATURE_CONTROL,
+    PROTOCOL_MAJOR, SESSION_FEATURE_AUDIO, SESSION_FEATURE_CONTROL,
 };
 use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID};
 use pronk_core::output::{
@@ -124,15 +124,19 @@ async fn main() -> anyhow::Result<()> {
     normal.stop()?;
 
     let stale_path = temporary_socket_path("stale-major");
+    let stale_major = PROTOCOL_MAJOR
+        .checked_sub(1)
+        .unwrap_or_else(|| PROTOCOL_MAJOR.saturating_add(1));
+    let stale_major_text = stale_major.to_string();
     let mut stale = ActivationLauncher::start(
         &socket_activate,
         &mock_backend,
         &stale_path,
-        Some("2"),
+        Some(&stale_major_text),
         None,
     )?;
     stale.wait_until_listening().await?;
-    run_stale_major_connection(&stale_path).await?;
+    run_stale_major_connection(&stale_path, stale_major).await?;
     stale.stop()?;
 
     let gap_path = temporary_socket_path("revision-gap");
@@ -592,6 +596,7 @@ fn media_gate_target(
         connector_id: 40,
         output_index: 0,
         media_generation: media_generation.get(),
+        render_device: None,
         caps: "video/x-raw,format=BGRx,width=320,height=240,framerate=30/1".into(),
     }
 }
@@ -1080,6 +1085,7 @@ async fn run_supervised_media_lifecycle(
                     connector_id: NonZeroU32::new(40).unwrap(),
                     output_index: 0,
                     media_generation,
+                    render_device: None,
                     caps: "video/x-raw,format=BGRx,width=1920,height=1080,framerate=60/1".into(),
                 },
             }],
@@ -1288,7 +1294,7 @@ async fn run_valid_connection(path: &Path, connection_generation: u64) -> anyhow
     Ok(())
 }
 
-async fn run_stale_major_connection(path: &Path) -> anyhow::Result<()> {
+async fn run_stale_major_connection(path: &Path, stale_major: u16) -> anyhow::Result<()> {
     let endpoint = BackendEndpoint::new("mock", path, "pronk-backend-mock@.service")?;
     let error = BackendConnection::connect(
         endpoint,
@@ -1296,9 +1302,10 @@ async fn run_stale_major_connection(path: &Path) -> anyhow::Result<()> {
         Arc::new(ExactRegistrationValidator::new("mock", "development")),
     )
     .await
-    .expect_err("protocol major 2 unexpectedly connected");
+    .expect_err("stale protocol major unexpectedly connected");
     ensure!(
-        matches!(error, BackendConnectError::RegistrationRejected(ref message) if message.contains("protocol major 2")),
+        matches!(error, BackendConnectError::RegistrationRejected(ref message)
+            if message.contains(&format!("protocol major {stale_major}"))),
         "unexpected stale-major error: {error}"
     );
     Ok(())

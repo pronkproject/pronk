@@ -163,6 +163,7 @@ impl DrmCapturePipeline {
             connector_id: self.config.connector_id,
             output_index: self.config.output_index,
             media_generation: generation,
+            render_device: None,
             caps: format!(
                 "video/x-raw,format=BGRx,width={},height={},framerate={}/1",
                 layout.width, layout.height, self.config.capture_rate_hz

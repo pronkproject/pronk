@@ -15,8 +15,8 @@ use zbus::zvariant::OwnedFd as ZbusOwnedFd;
 use crate::device_control_port::{DeviceControlError, DeviceControlKind, DeviceControlOperation};
 use crate::device_session_port::{
     DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaSetup, DeviceMediaStopReason,
-    DeviceMediaSuspendReason, DeviceSessionError, DeviceSessionEvent, DeviceSessionEventPort,
-    DeviceSessionPort, DeviceSessionStopReason,
+    DeviceMediaSuspendReason, DeviceMediaTarget, DeviceSessionError, DeviceSessionEvent,
+    DeviceSessionEventPort, DeviceSessionPort, DeviceSessionStopReason,
 };
 
 #[derive(Debug)]
@@ -133,20 +133,7 @@ impl DeviceSessionPort for BackendDeviceSession {
             .map(|endpoint| {
                 (
                     ZbusOwnedFd::from(endpoint.remote),
-                    PipeWireTarget {
-                        kind: match endpoint.target.kind {
-                            DeviceMediaKind::Video => MediaKind::Video,
-                            DeviceMediaKind::Audio => MediaKind::Audio,
-                        },
-                        node_name: endpoint.target.node_name,
-                        object_serial: endpoint.target.object_serial.get(),
-                        session_id: endpoint.target.session_id,
-                        device_instance: endpoint.target.device_instance,
-                        connector_id: endpoint.target.connector_id.get(),
-                        output_index: endpoint.target.output_index,
-                        media_generation: endpoint.target.media_generation.get(),
-                        caps: endpoint.target.caps,
-                    },
+                    map_media_target(endpoint.target),
                 )
             })
             .unzip();
@@ -277,6 +264,29 @@ impl DeviceSessionPort for BackendDeviceSession {
     }
 }
 
+fn map_media_target(target: DeviceMediaTarget) -> PipeWireTarget {
+    PipeWireTarget {
+        kind: match target.kind {
+            DeviceMediaKind::Video => MediaKind::Video,
+            DeviceMediaKind::Audio => MediaKind::Audio,
+        },
+        node_name: target.node_name,
+        object_serial: target.object_serial.get(),
+        session_id: target.session_id,
+        device_instance: target.device_instance,
+        connector_id: target.connector_id.get(),
+        output_index: target.output_index,
+        media_generation: target.media_generation.get(),
+        render_device: target.render_device.map(|device| {
+            pronk_backend_protocol::RenderDeviceIdentity {
+                major: device.major,
+                minor: device.minor,
+            }
+        }),
+        caps: target.caps,
+    }
+}
+
 fn map_configuration(configuration: DeviceMediaConfiguration) -> MediaConfiguration {
     MediaConfiguration {
         video_profile_id: configuration.video_profile_id,
@@ -286,9 +296,9 @@ fn map_configuration(configuration: DeviceMediaConfiguration) -> MediaConfigurat
             height: configuration.mode.height,
             refresh_millihz: configuration.mode.refresh_millihz,
             // RoutedMode carries the kernel's DRM timing flags so topology
-            // changes remain lossless inside the core. Version 1 of the
-            // backend protocol reserves this field, and a Device backend has
-            // no use for KMS sync-polarity bits.
+            // changes remain lossless inside the core. The backend protocol
+            // reserves this field, and a Device backend has no use for KMS
+            // sync-polarity bits.
             flags: 0,
         },
         video_bitrate: configuration.video_bitrate.get(),
@@ -403,7 +413,10 @@ impl BackendMediaLifecycle {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
+    use crate::device_session_port::RenderDeviceIdentity;
     use crate::display_state::RoutedMode;
 
     fn generation(value: u64) -> NonZeroU64 {
@@ -468,5 +481,32 @@ mod tests {
         assert_eq!(configuration.mode.height, 1080);
         assert_eq!(configuration.mode.refresh_millihz, 60_000);
         assert_eq!(configuration.mode.flags, 0);
+    }
+
+    #[test]
+    fn backend_protocol_mapping_preserves_the_render_device() {
+        let target = map_media_target(DeviceMediaTarget {
+            kind: DeviceMediaKind::Video,
+            node_name: "pronk.video.test".into(),
+            object_serial: generation(11),
+            session_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
+            device_instance: "castkms-card1".into(),
+            connector_id: NonZeroU32::new(51).unwrap(),
+            output_index: 0,
+            media_generation: generation(7),
+            render_device: Some(RenderDeviceIdentity {
+                major: 226,
+                minor: 128,
+            }),
+            caps: "video/x-raw(memory:DMABuf)".into(),
+        });
+
+        assert_eq!(
+            target.render_device,
+            Some(pronk_backend_protocol::RenderDeviceIdentity {
+                major: 226,
+                minor: 128,
+            })
+        );
     }
 }

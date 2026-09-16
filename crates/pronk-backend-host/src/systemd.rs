@@ -407,7 +407,7 @@ mod tests {
             "pronk-backend-mock@.service",
         )
         .unwrap();
-        let info = BackendInfo::v1("mock", "Mock", "0", "connection-7", invocation_hex);
+        let info = BackendInfo::v2("mock", "Mock", "0", "connection-7", invocation_hex);
         SystemdRegistrationValidator::new(client_connection.clone())
             .validate(&endpoint, &info, 4242)
             .await

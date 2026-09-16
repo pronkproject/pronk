@@ -48,7 +48,7 @@ impl BackendEndpoint {
 
     fn validate(&self) -> Result<(), EndpointError> {
         // Reuse the wire grammar without inventing a second backend-ID policy.
-        let identity_probe = BackendInfo::v1(
+        let identity_probe = BackendInfo::v2(
             self.backend_id.clone(),
             "endpoint validation",
             "0",

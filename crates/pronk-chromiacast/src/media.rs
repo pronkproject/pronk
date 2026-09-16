@@ -2108,6 +2108,7 @@ mod tests {
             connector_id: 40,
             output_index: 0,
             media_generation,
+            render_device: None,
             caps: "video/x-raw,format=BGRx,width=640,height=480,framerate=60/1".into(),
         }
     }

@@ -20,7 +20,7 @@ mod session;
 
 pub use session::*;
 
-pub const PROTOCOL_MAJOR: u16 = 1;
+pub const PROTOCOL_MAJOR: u16 = 2;
 pub const PROTOCOL_MINOR: u16 = 0;
 
 pub const CAPABILITY_PIPEWIRE_REMOTE_FDS_V1: u64 = 1 << 0;
@@ -71,7 +71,7 @@ pub struct BackendInfo {
 }
 
 impl BackendInfo {
-    pub fn v1(
+    pub fn v2(
         backend_id: impl Into<String>,
         display_name: impl Into<String>,
         build_version: impl Into<String>,
@@ -523,8 +523,8 @@ mod tests {
     }
 
     #[test]
-    fn validates_v1_backend_info_and_capabilities() {
-        let info = BackendInfo::v1("mock", "Mock backend", "0.1.0", "mock", "deadbeef");
+    fn validates_v2_backend_info_and_capabilities() {
+        let info = BackendInfo::v2("mock", "Mock backend", "0.1.0", "mock", "deadbeef");
         info.validate().unwrap();
 
         let mut missing = info.clone();

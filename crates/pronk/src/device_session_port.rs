@@ -16,6 +16,12 @@ pub enum DeviceMediaKind {
     Audio,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderDeviceIdentity {
+    pub major: u32,
+    pub minor: u32,
+}
+
 /// Exact PipeWire object a backend endpoint is authorized to consume.
 ///
 /// These are application-owned values. The private-D-Bus adapter is
@@ -30,6 +36,7 @@ pub struct DeviceMediaTarget {
     pub connector_id: NonZeroU32,
     pub output_index: u32,
     pub media_generation: NonZeroU64,
+    pub render_device: Option<RenderDeviceIdentity>,
     pub caps: String,
 }
 

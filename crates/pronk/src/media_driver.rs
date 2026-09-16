@@ -631,6 +631,7 @@ mod tests {
             connector_id: NonZeroU32::new(40).unwrap(),
             output_index: 0,
             media_generation: generation,
+            render_device: None,
             caps: "video/x-raw,format=BGRx".into(),
         }
     }

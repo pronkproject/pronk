@@ -163,6 +163,7 @@ impl RendererCapturePipeline {
             connector_id: self.config.connector_id,
             output_index: self.config.output_index,
             media_generation: generation,
+            render_device: None,
             caps: renderer_caps(stream.layout(), self.config.capture_rate_hz)?,
         })
     }

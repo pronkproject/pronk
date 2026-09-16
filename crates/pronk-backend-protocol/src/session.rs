@@ -263,6 +263,23 @@ pub enum MediaKind {
     Audio = 2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct RenderDeviceIdentity {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl Validate for RenderDeviceIdentity {
+    fn validate(&self) -> Result<(), ValidationError> {
+        validate_range(
+            "render device major",
+            u64::from(self.major),
+            1,
+            u32::MAX as u64,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct PipeWireTarget {
     pub kind: MediaKind,
@@ -273,6 +290,7 @@ pub struct PipeWireTarget {
     pub connector_id: u32,
     pub output_index: u32,
     pub media_generation: u64,
+    pub render_device: Option<RenderDeviceIdentity>,
     pub caps: String,
 }
 
@@ -285,6 +303,14 @@ impl Validate for PipeWireTarget {
         validate_range("connector ID", self.connector_id as u64, 1, u32::MAX as u64)?;
         validate_range("output index", self.output_index as u64, 0, 127)?;
         validate_generation("media", self.media_generation)?;
+        if let Some(device) = self.render_device {
+            device.validate()?;
+            if self.kind != MediaKind::Video {
+                return Err(ValidationError::InvalidMediaLayout(
+                    "only video targets may identify a render device",
+                ));
+            }
+        }
         validate_text("PipeWire caps", &self.caps, MAX_NODE_NAME_BYTES)
     }
 }
@@ -329,7 +355,7 @@ pub fn validate_media_configuration(
     };
     if remote_count != expected {
         return Err(ValidationError::InvalidMediaLayout(
-            "version 1 requires video, then optional audio",
+            "media configuration requires video, then optional audio",
         ));
     }
     for target in targets {
@@ -726,6 +752,7 @@ mod tests {
             connector_id: 51,
             output_index: 0,
             media_generation: generation,
+            render_device: None,
             caps: "video/x-raw,format=BGRx".into(),
         }
     }
@@ -785,6 +812,35 @@ mod tests {
         assert!(matches!(
             validate_media_configuration(1, &[target(MediaKind::Video, 8)], &configuration, 7,),
             Err(ValidationError::InvalidMediaLayout(_))
+        ));
+    }
+
+    #[test]
+    fn validates_render_device_identity_on_video_targets() {
+        let identity = RenderDeviceIdentity {
+            major: 226,
+            minor: 128,
+        };
+        let mut video = target(MediaKind::Video, 7);
+        video.render_device = Some(identity);
+        video.validate().unwrap();
+
+        let mut audio = target(MediaKind::Audio, 7);
+        audio.render_device = Some(identity);
+        assert_eq!(
+            audio.validate(),
+            Err(ValidationError::InvalidMediaLayout(
+                "only video targets may identify a render device",
+            ))
+        );
+
+        video.render_device = Some(RenderDeviceIdentity { major: 0, minor: 0 });
+        assert!(matches!(
+            video.validate(),
+            Err(ValidationError::OutOfRange {
+                field: "render device major",
+                ..
+            })
         ));
     }
 
@@ -896,6 +952,8 @@ mod tests {
         assert_eq!(IdentitySource::SetupEndpoint as u32, 1);
         assert_eq!(DisplayIdentity::SIGNATURE, "(asuasuas)");
         assert_eq!(MediaKind::SIGNATURE, "u");
+        assert_eq!(RenderDeviceIdentity::SIGNATURE, "(uu)");
+        assert_eq!(PipeWireTarget::SIGNATURE, "(ustssuuta(uu)s)");
         assert_eq!(ControlKind::SIGNATURE, "u");
         assert_eq!(ControlOperation::SIGNATURE, "(tuasi)");
         assert_eq!(OwnedFd::SIGNATURE, "h");
