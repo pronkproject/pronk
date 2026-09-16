@@ -103,12 +103,19 @@ impl VideoCadence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedVideoCaps {
     pub width: NonZeroU32,
     pub height: NonZeroU32,
     pub framerate_numerator: NonZeroU32,
     pub framerate_denominator: NonZeroU32,
+    pub layout: VideoInputLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoInputLayout {
+    SystemMemoryBgrx,
+    DmaBuf { drm_format: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +164,7 @@ impl ValidatedVideoCaps {
         validate_caps(&caps)
     }
 
-    pub fn supports_cadence(self, cadence: VideoCadence) -> bool {
+    pub fn supports_cadence(&self, cadence: VideoCadence) -> bool {
         u64::from(self.framerate_numerator.get())
             .saturating_mul(u64::from(cadence.denominator.get()))
             >= u64::from(cadence.numerator.get())
@@ -212,11 +219,48 @@ fn validate_caps(caps: &gst::Caps) -> Result<ValidatedVideoCaps, MediaGraphError
     let format = structure
         .get::<&str>("format")
         .map_err(|_| MediaGraphError::new("video caps have no fixed string format"))?;
-    if format != "BGRx" {
-        return Err(MediaGraphError::new(format!(
-            "video caps format {format:?} is unsupported; expected BGRx"
-        )));
-    }
+    let features = caps
+        .features(0)
+        .ok_or_else(|| MediaGraphError::new("video caps have no memory features"))?;
+    let layout = if features.is_empty() || features.contains("memory:SystemMemory") {
+        if !features.is_empty() && features.size() != 1 {
+            return Err(MediaGraphError::new(
+                "system-memory video caps have unsupported features",
+            ));
+        }
+        if format != "BGRx" {
+            return Err(MediaGraphError::new(format!(
+                "system-memory video format {format:?} is unsupported; expected BGRx"
+            )));
+        }
+        VideoInputLayout::SystemMemoryBgrx
+    } else if features.size() == 1 && features.contains("memory:DMABuf") {
+        if format != "DMA_DRM" {
+            return Err(MediaGraphError::new(format!(
+                "DMA-BUF video format {format:?} is unsupported; expected DMA_DRM"
+            )));
+        }
+        let drm_format = structure
+            .get::<&str>("drm-format")
+            .map_err(|_| MediaGraphError::new("DMA-BUF video caps have no fixed DRM format"))?;
+        if drm_format.len() < 4
+            || drm_format.len() > 32
+            || !drm_format
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'x'))
+        {
+            return Err(MediaGraphError::new(
+                "DMA-BUF video caps have an invalid DRM format",
+            ));
+        }
+        VideoInputLayout::DmaBuf {
+            drm_format: drm_format.into(),
+        }
+    } else {
+        return Err(MediaGraphError::new(
+            "video caps have unsupported memory features",
+        ));
+    };
     let width = positive_caps_integer(structure, "width")?;
     let height = positive_caps_integer(structure, "height")?;
     let framerate = structure
@@ -235,6 +279,7 @@ fn validate_caps(caps: &gst::Caps) -> Result<ValidatedVideoCaps, MediaGraphError
         height,
         framerate_numerator: numerator,
         framerate_denominator: denominator,
+        layout,
     })
 }
 
@@ -394,6 +439,28 @@ mod tests {
             "video/x-raw,format=NV12,width=1920,height=1080,framerate=60/1",
             "video/x-raw,format=BGRx,width=[1,1920],height=1080,framerate=60/1",
             "audio/x-raw,format=S16LE,rate=48000,channels=2",
+        ] {
+            assert!(ValidatedVideoCaps::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn accepts_one_fixed_dma_buf_video_layout() {
+        let parsed = ValidatedVideoCaps::parse(
+            "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=AR24:0x0100000000000009,width=1920,height=1080,framerate=30/1",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.layout,
+            VideoInputLayout::DmaBuf {
+                drm_format: "AR24:0x0100000000000009".into(),
+            }
+        );
+
+        for invalid in [
+            "video/x-raw(memory:DMABuf),format=BGRx,drm-format=AR24,width=1920,height=1080,framerate=30/1",
+            "video/x-raw(memory:DMABuf),format=DMA_DRM,width=1920,height=1080,framerate=30/1",
+            "video/x-raw(memory:VAMemory),format=NV12,width=1920,height=1080,framerate=30/1",
         ] {
             assert!(ValidatedVideoCaps::parse(invalid).is_err(), "{invalid}");
         }

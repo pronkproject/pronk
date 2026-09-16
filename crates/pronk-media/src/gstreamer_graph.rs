@@ -134,6 +134,7 @@ impl GStreamerGraph {
         let video_encoder = configuration.video_encoder;
         let video_codec = video_encoder.codec();
         let video_cadence = configuration.video_cadence;
+        video_encoder.validate_input(&source_caps.layout)?;
         if !source_caps.supports_cadence(video_cadence) {
             return Err(MediaGraphError::new(format!(
                 "source video cadence {}/{} is below the requested {}/{}",

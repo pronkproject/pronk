@@ -4,7 +4,9 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 
 use crate::h264;
-use crate::model::{MediaGraphError, VideoCadence, VideoCodec, VideoEncoder, VideoFrameDependency};
+use crate::model::{
+    MediaGraphError, VideoCadence, VideoCodec, VideoEncoder, VideoFrameDependency, VideoInputLayout,
+};
 use crate::vp8;
 
 impl VideoCodec {
@@ -56,6 +58,15 @@ impl VideoCodec {
 }
 
 impl VideoEncoder {
+    pub(crate) fn validate_input(self, layout: &VideoInputLayout) -> Result<(), MediaGraphError> {
+        match (self, layout) {
+            (Self::Software(_), VideoInputLayout::SystemMemoryBgrx) => Ok(()),
+            (Self::Software(_), VideoInputLayout::DmaBuf { .. }) => Err(MediaGraphError::new(
+                "the software video encoder requires system-memory BGRx input",
+            )),
+        }
+    }
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Software(VideoCodec::Vp8) => vp8::ENCODER_NAME,
@@ -141,5 +152,23 @@ impl VideoEncoder {
                 Ok(u64::from(bitrate).saturating_mul(1_000))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn software_encoding_requires_its_system_memory_layout() {
+        let encoder = VideoEncoder::software(VideoCodec::H264);
+        assert!(encoder
+            .validate_input(&VideoInputLayout::SystemMemoryBgrx)
+            .is_ok());
+        assert!(encoder
+            .validate_input(&VideoInputLayout::DmaBuf {
+                drm_format: "AR24:0x0100000000000009".into(),
+            })
+            .is_err());
     }
 }
