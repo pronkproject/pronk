@@ -30,13 +30,13 @@ The binaries cover distinct boundaries:
   content. Obtain the exact output IDs from that test device.
 - Delegated GPU rendering:
   `pronk-renderer-pipewire-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
-  WIDTH HEIGHT REFRESH_MILLIHZ /dev/dri/renderDN MODIFIER
+  WIDTH HEIGHT REFRESH_MILLIHZ MODIFIER
   /path/to/pipewire-0-pronk-backend`
   transfers renderer authority from the Mutter broker into the application
   capture port, activates GPU takeover only after a private PipeWire consumer
   is ready, and requires twelve increasing DMA-BUF frame sequences while one
-  output remains held. Use the exact Vulkan render node and a supported output
-  modifier; hexadecimal modifiers may use a `0x` prefix.
+  output remains held. Mutter selects the Vulkan render node that produced the
+  scene; supply a supported output modifier, optionally with a `0x` prefix.
   Like the live Mutter media probe, it requires the sibling pattern client,
   the classified core/backend sockets, and the versioned WirePlumber policy.
 - `pronk-capture-pipewire-live-test /dev/dri/cardN /path/to/private/socket`:

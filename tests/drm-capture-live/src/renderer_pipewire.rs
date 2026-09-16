@@ -29,8 +29,8 @@ fn nz64(value: u64) -> NonZeroU64 {
 async fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     ensure!(
-        args.len() == 9,
-        "expected device, CRTC, connector, width, height, refresh millihertz, render node, output modifier and private socket"
+        args.len() == 8,
+        "expected device, CRTC, connector, width, height, refresh millihertz, output modifier and private socket"
     );
     let device = std::fs::metadata(&args[0])?.rdev();
     let target = Target {
@@ -42,20 +42,11 @@ async fn main() -> anyhow::Result<()> {
     let width = args[3].parse()?;
     let height = args[4].parse()?;
     let refresh_millihz = args[5].parse()?;
-    let render_node = PathBuf::from(&args[6]);
-    let modifier = parse_u64(&args[7]).context("output modifier")?;
-    let socket = PathBuf::from(&args[8]);
+    let modifier = parse_u64(&args[6]).context("output modifier")?;
+    let socket = PathBuf::from(&args[7]);
     tokio::time::timeout(
         Duration::from_secs(40),
-        run(
-            target,
-            width,
-            height,
-            refresh_millihz,
-            &render_node,
-            modifier,
-            &socket,
-        ),
+        run(target, width, height, refresh_millihz, modifier, &socket),
     )
     .await
     .context("renderer probe timed out")??;
@@ -70,7 +61,6 @@ async fn run(
     width: u32,
     height: u32,
     refresh_millihz: u32,
-    render_node: &Path,
     modifier: u64,
     socket: &Path,
 ) -> anyhow::Result<()> {
@@ -107,14 +97,7 @@ async fn run(
     let runtime = socket.parent().context("private socket has no directory")?;
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
-    let (renderer, broker_render_node, transition) =
-        session.take_renderer_access()?.into_parts()?;
-    ensure!(
-        broker_render_node == render_node,
-        "Mutter selected render node {}, but the test requested {}",
-        broker_render_node.display(),
-        render_node.display()
-    );
+    let (renderer, render_node, transition) = session.take_renderer_access()?.into_parts()?;
     let (mut capture, mut renderer_events) = RendererCapturePipeline::new(
         renderer,
         transition,
@@ -128,7 +111,7 @@ async fn run(
             video_profile_id: "raw-dmabuf".into(),
             video_bitrate: nz64(4_000_000),
             capture_rate_hz: nz(30),
-            render_node: render_node.into(),
+            render_node,
             output_modifier: modifier,
             private_capacity: NonZeroUsize::new(3).unwrap(),
             output_capacity: NonZeroUsize::new(4).unwrap(),
