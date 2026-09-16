@@ -57,6 +57,27 @@ fn main() {
         DrmCastkmsRendererReleaseSource,
         "drm_castkms_renderer_release_source"
     );
+    layout!(
+        DrmCastkmsCapabilityProfile,
+        "drm_castkms_capability_profile"
+    );
+    layout!(DrmCastkmsCapabilityFormat, "drm_castkms_capability_format");
+    layout!(
+        DrmCastkmsRendererRegisterProfile,
+        "drm_castkms_renderer_register_profile"
+    );
+    layout!(
+        DrmCastkmsRendererProfileResult,
+        "drm_castkms_renderer_profile_result"
+    );
+    layout!(
+        DrmCastkmsRendererCapabilities,
+        "drm_castkms_renderer_capabilities"
+    );
+    layout!(
+        DrmCastkmsRendererQueryCapabilities,
+        "drm_castkms_renderer_query_capabilities"
+    );
     layout!(DrmCastkmsCaptureFormat, "drm_castkms_capture_format");
     layout!(DrmCastkmsCaptureQueryCaps, "drm_castkms_capture_query_caps");
     layout!(DrmCastkmsCaptureStart, "drm_castkms_capture_start");
