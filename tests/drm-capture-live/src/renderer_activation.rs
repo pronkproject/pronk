@@ -2,13 +2,14 @@
 //! Does not open a DRM primary descriptor or submit a modeset directly.
 
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
 use castkms_renderer::{CapabilityProfile, Profile, RendererCapability};
 use drm_display_executor::scene::geometry::Extent;
-use pronk_capture_broker::{Provider, Target};
+use pronk_capture_broker::{Provider, RendererAccess, Target};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main(flavor = "current_thread")]
@@ -26,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         connector_id: NonZeroU32::new(args[2].parse()?).context("zero connector")?,
     };
     tokio::time::timeout(Duration::from_secs(30), run(target)).await??;
-    println!("PASS: live Mutter broker renderer activation and HOST cutoff");
+    println!("PASS: live Mutter broker renderer activation and HOST handback");
     Ok(())
 }
 
@@ -47,9 +48,10 @@ async fn run(target: Target) -> anyhow::Result<()> {
         NonZeroUsize::new(1).unwrap(),
         Duration::from_secs(5),
     )?;
-    let session = provider.acquire(target, CancellationToken::new()).await?;
+    let mut session = provider.acquire(target, CancellationToken::new()).await?;
     session.attach_monitor(None)?;
-    let (capture, mut renderer) = wait_for_output(&session).await?;
+    let (capture, renderer_access) = wait_for_output(&mut session).await?;
+    let (mut renderer, renderer_id, _, renderer_session) = renderer_access.into_parts()?;
     let before = renderer.describe()?;
     ensure!(before.profile() == Profile::HostV1);
     let candidate = renderer.begin_takeover(before)?;
@@ -57,10 +59,14 @@ async fn run(target: Target) -> anyhow::Result<()> {
     let profile = CapabilityProfile::Renderer(RendererCapability::linear_xrgb8888_primary(
         Extent::new(output.width().get(), output.height().get())?,
     ));
-    let submitted = candidate
+    let registered = candidate
         .register_profile(&profile)
-        .map_err(|failure| failure.into_parts().1)?
-        .submit_private_probe(None)?;
+        .map_err(|failure| failure.into_parts().1)?;
+    let transition = registered.registration().transition();
+    let submitted = registered.submit_private_probe(None)?;
+    renderer_session
+        .install_transition(transition, CancellationToken::new())
+        .await?;
     let active = submitted.activate().map_err(|error| error.into_error())?;
     let after = active.description();
     ensure!(after.profile() == Profile::GpuV1);
@@ -71,16 +77,71 @@ async fn run(target: Target) -> anyhow::Result<()> {
         .err()
         .context("capture description remained available after activation")?;
     ensure!(error.raw_os_error() == Some(nix::libc::EOPNOTSUPP));
+    let host_access = renderer_session
+        .acquire_renderer(CancellationToken::new())
+        .await?;
+    let (mut host_renderer, host_id, _, host_session) = host_access.into_parts()?;
+    let gpu = host_renderer.describe()?;
+    ensure!(gpu == after);
+    let host = host_renderer
+        .begin_takeover(gpu)?
+        .register_profile(&CapabilityProfile::Host)
+        .map_err(|failure| failure.into_parts().1)?;
+    let host_transition = host.registration().transition();
+    let host = host.into_host().map_err(|candidate| {
+        let _ = candidate.abort();
+        anyhow::anyhow!("registered HOST profile did not produce a HOST candidate")
+    })?;
+    host_session
+        .install_transition(host_transition, CancellationToken::new())
+        .await?;
+    let returned = activate_host(host).await?;
+    ensure!(returned.profile() == Profile::HostV1);
+    ensure!(returned.generation().get() == after.generation().get() + 1);
+    drop(host_renderer);
+    host_session.release_renderer(host_id).await?;
     drop(active);
     drop(renderer);
+    renderer_session.release_renderer(renderer_id).await?;
+    capture.describe()?;
     drop(capture);
     session.release().await?;
     Ok(())
 }
 
+async fn activate_host(
+    candidate: castkms_renderer::HostCandidate<'_, OwnedFd>,
+) -> anyhow::Result<castkms_renderer::Description> {
+    let mut pending = match candidate.activate() {
+        Ok(active) => {
+            let description = active.description();
+            drop(active);
+            return Ok(description);
+        }
+        Err(error) if error.error().raw_os_error() == Some(nix::libc::EAGAIN) => {
+            error.into_candidate()
+        }
+        Err(error) => return Err(error.into_error().into()),
+    };
+    loop {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        match pending.activate() {
+            Ok(active) => {
+                let description = active.description();
+                drop(active);
+                return Ok(description);
+            }
+            Err(error) if error.error().raw_os_error() == Some(nix::libc::EAGAIN) => {
+                pending = error.into_candidate();
+            }
+            Err(error) => return Err(error.into_error().into()),
+        }
+    }
+}
+
 async fn wait_for_output(
-    session: &pronk_capture_broker::Session,
-) -> anyhow::Result<(drm_capture::Client, castkms_renderer::Renderer)> {
+    session: &mut pronk_capture_broker::Session,
+) -> anyhow::Result<(drm_capture::Client, RendererAccess)> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let capture = match session.open_capture() {
@@ -91,7 +152,10 @@ async fn wait_for_output(
             }
             Err(error) => return Err(error.into()),
         };
-        let renderer = match session.open_renderer() {
+        let renderer = match session.renderer_access().and_then(|access| {
+            access.open()?;
+            Ok(access)
+        }) {
             Ok(renderer) => renderer,
             Err(error) if transient(&error) && Instant::now() < deadline => {
                 drop(capture);
@@ -100,7 +164,8 @@ async fn wait_for_output(
             }
             Err(error) => return Err(error.into()),
         };
-        return Ok((capture, renderer));
+        drop(renderer);
+        return Ok((capture, session.take_renderer_access()?));
     }
 }
 
