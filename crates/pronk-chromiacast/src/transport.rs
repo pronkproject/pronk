@@ -17,7 +17,14 @@ pub(crate) struct VideoTransportConfiguration {
     pub framerate_denominator: u32,
     pub bitrate: u32,
     pub target_playout_delay: Duration,
+    pub offer: VideoOffer,
     pub audio: Option<AudioTransportConfiguration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoOffer {
+    SoftwareCompatibility,
+    H264,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

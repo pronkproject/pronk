@@ -1,4 +1,7 @@
+use std::fs::OpenOptions;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream as StdUnixStream;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -18,8 +21,11 @@ use crate::discovery::{
     ChromiacastDiscoverySource, DiscoveryActor, DiscoveryConfiguration, DiscoverySource,
     EmptyTestDiscoverySource, FixtureTestDiscoverySource, CHROMIACAST_BACKEND_ID,
 };
+use crate::media::VideoEncoderPolicy;
 
 const TEST_MODE_ENV: &str = "PRONK_CHROMIACAST_TEST_MODE";
+const VIDEO_ENCODER_ENV: &str = "PRONK_CHROMIACAST_VIDEO_ENCODER";
+const RENDER_NODE_ENV: &str = "PRONK_CHROMIACAST_RENDER_NODE";
 const SESSION_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(7);
 const DISCOVERY_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 const SIGNAL_TASK_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -36,6 +42,7 @@ enum BackendMode {
 pub struct StartupConfiguration {
     info: BackendInfo,
     backend_mode: BackendMode,
+    encoder_policy: VideoEncoderPolicy,
 }
 
 impl StartupConfiguration {
@@ -60,7 +67,15 @@ impl StartupConfiguration {
                 anyhow::bail!("{TEST_MODE_ENV} is not UTF-8")
             }
         };
-        Ok(Self { info, backend_mode })
+        let encoder = optional_environment(VIDEO_ENCODER_ENV)?;
+        let render_node = optional_environment(RENDER_NODE_ENV)?;
+        let encoder_policy = parse_encoder_policy(encoder.as_deref(), render_node.as_deref())?;
+        validate_encoder_device(&encoder_policy)?;
+        Ok(Self {
+            info,
+            backend_mode,
+            encoder_policy,
+        })
     }
 
     fn discovery_source(&self) -> Box<dyn DiscoverySource> {
@@ -97,6 +112,7 @@ pub async fn run(
         configuration.info.clone(),
         discovery,
         configuration.device_connector(),
+        configuration.encoder_policy.clone(),
         shutdown_tx,
     );
     let connection = backend_peer_builder(stream)
@@ -147,6 +163,67 @@ pub async fn run(
         (Err(error), Err(cleanup)) => {
             Err(error.context(format!("backend cleanup also failed: {cleanup:#}")))
         }
+    }
+}
+
+fn parse_encoder_policy(
+    encoder: Option<&str>,
+    render_node: Option<&str>,
+) -> anyhow::Result<VideoEncoderPolicy> {
+    match encoder {
+        None | Some("software") => {
+            if render_node.is_some() {
+                anyhow::bail!("{RENDER_NODE_ENV} requires {VIDEO_ENCODER_ENV}=va-h264");
+            }
+            Ok(VideoEncoderPolicy::Software)
+        }
+        Some("va-h264") => {
+            let path = render_node
+                .ok_or_else(|| anyhow::anyhow!("{RENDER_NODE_ENV} is required for va-h264"))?;
+            let suffix = path.strip_prefix("/dev/dri/renderD").ok_or_else(|| {
+                anyhow::anyhow!("{RENDER_NODE_ENV} must name one DRM render node")
+            })?;
+            if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+                anyhow::bail!("{RENDER_NODE_ENV} must name one DRM render node");
+            }
+            Ok(VideoEncoderPolicy::VaH264 {
+                render_node: PathBuf::from(path),
+            })
+        }
+        Some(value) => anyhow::bail!(
+            "{VIDEO_ENCODER_ENV} value {value:?} is unsupported; expected software or va-h264"
+        ),
+    }
+}
+
+fn validate_encoder_device(policy: &VideoEncoderPolicy) -> anyhow::Result<()> {
+    let VideoEncoderPolicy::VaH264 { render_node } = policy else {
+        return Ok(());
+    };
+    let device = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(render_node)
+        .with_context(|| format!("open selected render device {}", render_node.display()))?;
+    if !device
+        .metadata()
+        .context("inspect selected render device")?
+        .file_type()
+        .is_char_device()
+    {
+        anyhow::bail!(
+            "selected render device {} is not a character device",
+            render_node.display()
+        );
+    }
+    Ok(())
+}
+
+fn optional_environment(name: &str) -> anyhow::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} is not UTF-8"),
     }
 }
 
@@ -258,4 +335,55 @@ async fn shutdown_runtime(
 
 fn environment_or(name: &str, fallback: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| fallback.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_policy_is_explicit_and_render_node_scoped() {
+        assert_eq!(
+            parse_encoder_policy(None, None).unwrap(),
+            VideoEncoderPolicy::Software
+        );
+        assert_eq!(
+            parse_encoder_policy(Some("software"), None).unwrap(),
+            VideoEncoderPolicy::Software
+        );
+        assert_eq!(
+            parse_encoder_policy(Some("va-h264"), Some("/dev/dri/renderD128")).unwrap(),
+            VideoEncoderPolicy::VaH264 {
+                render_node: PathBuf::from("/dev/dri/renderD128"),
+            }
+        );
+
+        for (encoder, render_node) in [
+            (None, Some("/dev/dri/renderD128")),
+            (Some("software"), Some("/dev/dri/renderD128")),
+            (Some("va-h264"), None),
+            (Some("va-h264"), Some("/dev/dri/card0")),
+            (Some("va-h264"), Some("/dev/dri/renderD")),
+            (Some("automatic"), None),
+        ] {
+            assert!(parse_encoder_policy(encoder, render_node).is_err());
+        }
+    }
+
+    #[test]
+    fn encoder_device_must_be_accessible_before_registration() {
+        validate_encoder_device(&VideoEncoderPolicy::Software).unwrap();
+        validate_encoder_device(&VideoEncoderPolicy::VaH264 {
+            render_node: PathBuf::from("/dev/null"),
+        })
+        .unwrap();
+        assert!(validate_encoder_device(&VideoEncoderPolicy::VaH264 {
+            render_node: std::env::current_exe().unwrap(),
+        })
+        .is_err());
+        assert!(validate_encoder_device(&VideoEncoderPolicy::VaH264 {
+            render_node: PathBuf::from("/dev/pronk-missing-render-node"),
+        })
+        .is_err());
+    }
 }

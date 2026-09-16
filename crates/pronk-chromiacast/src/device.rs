@@ -19,7 +19,9 @@ use tokio::task::JoinHandle;
 use zbus::zvariant::OwnedFd;
 
 use crate::discovery::DeviceRecord;
-use crate::media::{ChromiacastMediaSession, MediaSessionError, MediaSessionEvent};
+use crate::media::{
+    ChromiacastMediaSession, MediaSessionError, MediaSessionEvent, VideoEncoderPolicy,
+};
 use crate::transport::{
     AudioSendOutcome, AudioSenderPort, NegotiatedVideoTransport, VideoSendOutcome, VideoSenderPort,
     VideoTransportConfiguration, VideoTransportError, VideoTransportFeedbackSnapshot,
@@ -654,8 +656,9 @@ impl DeviceActor {
         session_generation: u64,
         allowed_features: u64,
         connector: Arc<dyn DeviceConnector>,
+        encoder_policy: VideoEncoderPolicy,
     ) -> Result<(Self, DeviceActorHandle, DeviceEventReceivers), DeviceActorError> {
-        let media = ChromiacastMediaSession::spawn(session_id, session_generation)?;
+        let media = ChromiacastMediaSession::spawn(session_id, session_generation, encoder_policy)?;
         let feedback = media.subscribe_feedback()?;
         let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let (event_tx, event_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
@@ -1532,6 +1535,7 @@ mod tests {
             1,
             0,
             connector,
+            VideoEncoderPolicy::Software,
         )
         .unwrap();
         (actor, handle)
@@ -1587,6 +1591,7 @@ mod tests {
             7,
             SESSION_FEATURE_CONTROL,
             Arc::new(FixtureDeviceConnector),
+            VideoEncoderPolicy::Software,
         )
         .unwrap();
         let mut offer = request();

@@ -12,9 +12,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::transport::{
-    AudioSendOutcome, AudioSenderPort, NegotiatedVideoTransport, VideoSendOutcome, VideoSenderPort,
-    VideoTransportConfiguration, VideoTransportError, VideoTransportFeedbackSnapshot,
-    VideoTransportPressure,
+    AudioSendOutcome, AudioSenderPort, NegotiatedVideoTransport, VideoOffer, VideoSendOutcome,
+    VideoSenderPort, VideoTransportConfiguration, VideoTransportError,
+    VideoTransportFeedbackSnapshot, VideoTransportPressure,
 };
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -63,7 +63,8 @@ async fn negotiate_launched_video(
         "received Cast streaming constraints"
     );
     validate_answer_constraints(&answer, configuration)?;
-    let video_codec = selected_video_codec(&answer, configuration.audio.is_some())?;
+    let video_codec =
+        selected_video_codec(&answer, configuration.audio.is_some(), configuration.offer)?;
     tracing::info!(?video_codec, "Cast receiver selected video codec");
     let minimum_bitrate = answer
         .constraints
@@ -124,24 +125,26 @@ fn build_offer(configuration: VideoTransportConfiguration) -> Result<Offer, Vide
         }),
         None => offer_builder,
     };
-    // Cast answers with one selected video-stream index. Keep VP8 first for
-    // the lower-cost interactive path and retain H.264 as the compatibility
-    // fallback.
+    let h264 = VideoStreamConfig {
+        codec: CastVideoCodec::H264,
+        max_bit_rate: configuration.bitrate,
+        max_frame_rate,
+        resolutions: vec![resolution],
+        target_delay: configuration.target_playout_delay,
+    };
+    let offer_builder = match configuration.offer {
+        VideoOffer::SoftwareCompatibility => offer_builder
+            .video(VideoStreamConfig {
+                codec: CastVideoCodec::Vp8,
+                max_bit_rate: configuration.bitrate,
+                max_frame_rate,
+                resolutions: vec![resolution],
+                target_delay: configuration.target_playout_delay,
+            })
+            .video(h264),
+        VideoOffer::H264 => offer_builder.video(h264),
+    };
     offer_builder
-        .video(VideoStreamConfig {
-            codec: CastVideoCodec::Vp8,
-            max_bit_rate: configuration.bitrate,
-            max_frame_rate,
-            resolutions: vec![resolution],
-            target_delay: configuration.target_playout_delay,
-        })
-        .video(VideoStreamConfig {
-            codec: CastVideoCodec::H264,
-            max_bit_rate: configuration.bitrate,
-            max_frame_rate,
-            resolutions: vec![resolution],
-            target_delay: configuration.target_playout_delay,
-        })
         .build()
         .map_err(|error| VideoTransportError::new(format!("build Cast OFFER: {error}")))
 }
@@ -149,13 +152,18 @@ fn build_offer(configuration: VideoTransportConfiguration) -> Result<Offer, Vide
 fn selected_video_codec(
     answer: &chromiacast::Answer,
     audio_offered: bool,
+    offer: VideoOffer,
 ) -> Result<VideoCodec, VideoTransportError> {
-    let vp8_index = usize::from(audio_offered);
-    let h264_index = vp8_index + 1;
-    let mut selected = answer.send_indexes.iter().filter_map(|index| match *index {
-        index if index == vp8_index => Some(VideoCodec::Vp8),
-        index if index == h264_index => Some(VideoCodec::H264),
-        _ => None,
+    let first_video_index = usize::from(audio_offered);
+    let mut selected = answer.send_indexes.iter().filter_map(|index| {
+        let relative = index.checked_sub(first_video_index)?;
+        match (offer, relative) {
+            (VideoOffer::SoftwareCompatibility, 0) => Some(VideoCodec::Vp8),
+            (VideoOffer::SoftwareCompatibility, 1) | (VideoOffer::H264, 0) => {
+                Some(VideoCodec::H264)
+            }
+            _ => None,
+        }
     });
     let Some(codec) = selected.next() else {
         return Err(VideoTransportError::new(
@@ -642,7 +650,7 @@ mod tests {
         project_sender_event, selected_video_codec, validate_answer_constraints,
     };
     use crate::transport::{
-        AudioTransportConfiguration, VideoTransportConfiguration, VideoTransportError,
+        AudioTransportConfiguration, VideoOffer, VideoTransportConfiguration, VideoTransportError,
         VideoTransportFeedbackSnapshot,
     };
 
@@ -669,6 +677,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 2_000_000,
             target_playout_delay: Duration::from_millis(33),
+            offer: VideoOffer::SoftwareCompatibility,
             audio: None,
         };
         assert!(validate_answer_constraints(&answer, configuration).is_err());
@@ -700,6 +709,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 8_000_000,
             target_playout_delay: Duration::from_millis(33),
+            offer: VideoOffer::SoftwareCompatibility,
             audio: None,
         };
         assert!(validate_answer_constraints(&answer, configuration).is_err());
@@ -717,6 +727,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 2_000_000,
             target_playout_delay: Duration::from_millis(33),
+            offer: VideoOffer::SoftwareCompatibility,
             audio: Some(AudioTransportConfiguration {
                 sample_rate: 48_000,
                 channels: 2,
@@ -731,18 +742,34 @@ mod tests {
         assert_eq!(streams[0]["codecName"], "opus");
         assert_eq!(streams[1]["codecName"], "vp8");
         assert_eq!(streams[2]["codecName"], "h264");
+
+        let hardware_offer = serde_json::to_value(
+            build_offer(VideoTransportConfiguration {
+                offer: VideoOffer::H264,
+                ..configuration
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let streams = hardware_offer["supportedStreams"].as_array().unwrap();
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0]["codecName"], "opus");
+        assert_eq!(streams[1]["codecName"], "h264");
     }
 
     #[test]
     fn receiver_selection_uses_vp8_first_and_h264_as_fallback() {
         let vp8: Answer =
             serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0],"ssrcs":[123]}"#).unwrap();
-        assert_eq!(selected_video_codec(&vp8, false).unwrap(), VideoCodec::Vp8);
+        assert_eq!(
+            selected_video_codec(&vp8, false, VideoOffer::SoftwareCompatibility).unwrap(),
+            VideoCodec::Vp8
+        );
 
         let h264: Answer =
             serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[1],"ssrcs":[123]}"#).unwrap();
         assert_eq!(
-            selected_video_codec(&h264, false).unwrap(),
+            selected_video_codec(&h264, false, VideoOffer::SoftwareCompatibility).unwrap(),
             VideoCodec::H264
         );
 
@@ -750,14 +777,23 @@ mod tests {
             serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0,2],"ssrcs":[123,456]}"#)
                 .unwrap();
         assert_eq!(
-            selected_video_codec(&audio_and_h264, true).unwrap(),
+            selected_video_codec(&audio_and_h264, true, VideoOffer::SoftwareCompatibility,)
+                .unwrap(),
             VideoCodec::H264
         );
 
         let both_video_codecs: Answer =
             serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0,1],"ssrcs":[123,456]}"#)
                 .unwrap();
-        assert!(selected_video_codec(&both_video_codecs, false).is_err());
+        assert!(
+            selected_video_codec(&both_video_codecs, false, VideoOffer::SoftwareCompatibility,)
+                .is_err()
+        );
+
+        assert_eq!(
+            selected_video_codec(&vp8, false, VideoOffer::H264).unwrap(),
+            VideoCodec::H264
+        );
     }
 
     #[test]
@@ -769,6 +805,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 2_000_000,
             target_playout_delay: Duration::from_millis(33),
+            offer: VideoOffer::SoftwareCompatibility,
             audio: None,
         };
 
@@ -835,6 +872,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 2_000_000,
             target_playout_delay: Duration::from_millis(33),
+            offer: VideoOffer::SoftwareCompatibility,
             audio: Some(AudioTransportConfiguration {
                 sample_rate: 48_000,
                 channels: 2,

@@ -22,6 +22,8 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 DevicePolicy=closed
+# A deployment enabling hardware encoding must bind and allow its selected
+# render node. This base unit intentionally exposes no DRM devices.
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 PrivateDevices=yes

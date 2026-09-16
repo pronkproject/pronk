@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::OwnedFd as StdOwnedFd;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -25,13 +26,40 @@ use crate::feedback::{
 };
 use crate::sender_actor::{VideoSenderActor, VideoSenderFeedbackSnapshot, VideoSenderStatistics};
 use crate::transport::{
-    AudioTransportConfiguration, VideoTransportConfiguration, VideoTransportError,
-    VideoTransportNegotiator,
+    AudioTransportConfiguration, NegotiatedVideoTransport, VideoOffer, VideoTransportConfiguration,
+    VideoTransportError, VideoTransportNegotiator,
 };
 
 const ENCODED_OUTPUT_CAPACITY: usize = 8;
 const ENCODED_AUDIO_OUTPUT_CAPACITY: usize = 32;
 const START_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VideoEncoderPolicy {
+    Software,
+    VaH264 { render_node: PathBuf },
+}
+
+impl VideoEncoderPolicy {
+    fn offer(&self) -> VideoOffer {
+        match self {
+            Self::Software => VideoOffer::SoftwareCompatibility,
+            Self::VaH264 { .. } => VideoOffer::H264,
+        }
+    }
+
+    fn encoder(&self, codec: VideoCodec) -> Result<VideoEncoder, MediaGraphError> {
+        match (self, codec) {
+            (Self::Software, codec) => Ok(VideoEncoder::software(codec)),
+            (Self::VaH264 { render_node }, VideoCodec::H264) => {
+                Ok(VideoEncoder::va_h264(render_node.clone()))
+            }
+            (Self::VaH264 { .. }, VideoCodec::Vp8) => Err(MediaGraphError::new(
+                "the selected VA encoder does not support VP8",
+            )),
+        }
+    }
+}
 
 fn chromecast_video_cadence() -> VideoCadence {
     VideoCadence::new(
@@ -169,15 +197,19 @@ struct PendingMediaGraphConfiguration {
 }
 
 impl PendingMediaGraphConfiguration {
-    fn with_software_encoder(self, video_codec: VideoCodec) -> MediaGraphConfiguration {
-        MediaGraphConfiguration {
+    fn with_encoder(
+        self,
+        policy: &VideoEncoderPolicy,
+        video_codec: VideoCodec,
+    ) -> Result<MediaGraphConfiguration, MediaGraphError> {
+        Ok(MediaGraphConfiguration {
             media_generation: self.media_generation,
             video: self.video,
             audio: self.audio,
-            video_encoder: VideoEncoder::software(video_codec),
+            video_encoder: policy.encoder(video_codec)?,
             video_cadence: self.video_cadence,
             video_bitrate: self.video_bitrate,
-        }
+        })
     }
 }
 
@@ -199,6 +231,7 @@ pub(crate) struct ChromiacastMediaSession {
     media_ready: bool,
     video_bitrate: u64,
     feedback_controller: Option<VideoFeedbackController>,
+    encoder_policy: VideoEncoderPolicy,
     graph: Box<dyn MediaGraphPort>,
     sender: Option<VideoSenderActor>,
     audio_sender: Option<AudioSenderActor>,
@@ -221,11 +254,13 @@ impl ChromiacastMediaSession {
     pub(crate) fn spawn(
         session_id: String,
         session_generation: u64,
+        encoder_policy: VideoEncoderPolicy,
     ) -> Result<Self, MediaSessionError> {
         let (graph, outputs) = GStreamerMediaGraph::spawn()?;
         Ok(Self::with_graph_outputs(
             session_id,
             session_generation,
+            encoder_policy,
             Box::new(graph),
             outputs.video,
             outputs.audio,
@@ -235,6 +270,7 @@ impl ChromiacastMediaSession {
     fn with_graph_outputs(
         session_id: String,
         session_generation: u64,
+        encoder_policy: VideoEncoderPolicy,
         graph: Box<dyn MediaGraphPort>,
         video_output: mpsc::Receiver<EncodedVideoAccessUnit>,
         audio_output: mpsc::Receiver<EncodedAudioPacket>,
@@ -254,6 +290,7 @@ impl ChromiacastMediaSession {
             media_ready: false,
             video_bitrate: 0,
             feedback_controller: None,
+            encoder_policy,
             graph,
             sender: Some(VideoSenderActor::spawn(video_output)),
             audio_sender: Some(AudioSenderActor::spawn(audio_output)),
@@ -271,6 +308,7 @@ impl ChromiacastMediaSession {
         Self::with_graph_outputs(
             session_id,
             session_generation,
+            VideoEncoderPolicy::Software,
             graph,
             video_output,
             audio_receiver,
@@ -357,10 +395,17 @@ impl ChromiacastMediaSession {
 
         let mut negotiated = transport.negotiate_video(transport_configuration).await?;
         self.transport_active = true;
-        let graph_configuration = graph_configuration.with_software_encoder(negotiated.video_codec);
+        let graph_configuration =
+            match graph_configuration.with_encoder(&self.encoder_policy, negotiated.video_codec) {
+                Ok(configuration) => configuration,
+                Err(error) => {
+                    discard_negotiated_transport(negotiated).await;
+                    return Err(error.into());
+                }
+            };
         self.graph_received_generation = true;
         if let Err(error) = self.graph.configure(graph_configuration).await {
-            let _ = negotiated.sender.shutdown().await;
+            discard_negotiated_transport(negotiated).await;
             return Err(error.into());
         }
         let adaptive_playout_delay = negotiated
@@ -933,6 +978,7 @@ impl ChromiacastMediaSession {
             framerate_denominator: video_cadence.denominator.get(),
             bitrate,
             target_playout_delay: INITIAL_PLAYOUT_DELAY.max(minimum_playout_delay),
+            offer: self.encoder_policy.offer(),
             audio: audio.as_ref().map(|(_, transport)| *transport),
         };
         let graph = PendingMediaGraphConfiguration {
@@ -1052,6 +1098,17 @@ impl ChromiacastMediaSession {
     }
 }
 
+async fn discard_negotiated_transport(negotiated: NegotiatedVideoTransport) {
+    let video = negotiated.sender.shutdown();
+    let audio = async move {
+        match negotiated.audio_sender {
+            Some(sender) => sender.shutdown().await,
+            None => Ok(()),
+        }
+    };
+    let _ = tokio::join!(video, audio);
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum MediaSessionError {
     #[error("invalid media request: {0}")]
@@ -1082,6 +1139,7 @@ impl From<VideoTransportError> for MediaSessionError {
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1255,6 +1313,7 @@ mod tests {
     struct FakeSender {
         feedback: watch::Sender<VideoTransportFeedbackSnapshot>,
         playout_delays: Option<Arc<Mutex<Vec<Duration>>>>,
+        shutdowns: Option<Arc<AtomicUsize>>,
     }
 
     #[derive(Debug)]
@@ -1312,6 +1371,9 @@ mod tests {
         }
 
         async fn shutdown(self: Box<Self>) -> Result<(), VideoTransportError> {
+            if let Some(shutdowns) = &self.shutdowns {
+                shutdowns.fetch_add(1, Ordering::Relaxed);
+            }
             Ok(())
         }
     }
@@ -1320,6 +1382,7 @@ mod tests {
     struct FakeTransport {
         configuration: Option<VideoTransportConfiguration>,
         video_codec: Option<VideoCodec>,
+        sender_shutdowns: Option<Arc<AtomicUsize>>,
         stops: u32,
     }
 
@@ -1340,6 +1403,7 @@ mod tests {
                 sender: Box::new(FakeSender {
                     feedback,
                     playout_delays: Some(self.playout_delays.clone()),
+                    shutdowns: None,
                 }),
                 audio_sender: None,
                 feedback: receiver,
@@ -1363,6 +1427,7 @@ mod tests {
             Ok(fake_transport(
                 with_audio,
                 self.video_codec.unwrap_or(VideoCodec::Vp8),
+                self.sender_shutdowns.clone(),
             ))
         }
 
@@ -1389,13 +1454,18 @@ mod tests {
         }
     }
 
-    fn fake_transport(with_audio: bool, video_codec: VideoCodec) -> NegotiatedVideoTransport {
+    fn fake_transport(
+        with_audio: bool,
+        video_codec: VideoCodec,
+        sender_shutdowns: Option<Arc<AtomicUsize>>,
+    ) -> NegotiatedVideoTransport {
         let (feedback, receiver) = watch::channel(VideoTransportFeedbackSnapshot::default());
         NegotiatedVideoTransport {
             video_codec,
             sender: Box::new(FakeSender {
                 feedback: feedback.clone(),
                 playout_delays: None,
+                shutdowns: sender_shutdowns,
             }),
             audio_sender: with_audio
                 .then(|| Box::new(FakeAudioSender { feedback }) as Box<dyn AudioSenderPort>),
@@ -1419,6 +1489,62 @@ mod tests {
             minimum_playout_delay(60_000, 1_001, false),
             Duration::from_millis(17)
         );
+    }
+
+    #[test]
+    fn va_policy_offers_only_its_h264_encoder() {
+        let policy = VideoEncoderPolicy::VaH264 {
+            render_node: PathBuf::from("/dev/dri/renderD128"),
+        };
+        assert_eq!(policy.offer(), VideoOffer::H264);
+        assert!(policy.encoder(VideoCodec::Vp8).is_err());
+        let encoder = policy.encoder(VideoCodec::H264).unwrap();
+        assert_eq!(encoder.codec(), VideoCodec::H264);
+        assert_eq!(
+            encoder.render_node(),
+            Some(std::path::Path::new("/dev/dri/renderD128"))
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_encoder_selection_closes_the_negotiated_sender() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (video_output, video_receiver) = mpsc::channel(4);
+        let (_audio_output, audio_receiver) = mpsc::channel(1);
+        let graph = FakeGraph::video(video_output);
+        let mut media = ChromiacastMediaSession::with_graph_outputs(
+            session_id.into(),
+            7,
+            VideoEncoderPolicy::VaH264 {
+                render_node: PathBuf::from("/dev/dri/renderD128"),
+            },
+            Box::new(graph),
+            video_receiver,
+            audio_receiver,
+        );
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let mut transport = FakeTransport {
+            video_codec: Some(VideoCodec::Vp8),
+            sender_shutdowns: Some(shutdowns.clone()),
+            ..FakeTransport::default()
+        };
+        media.complete_preparation(capabilities()).unwrap();
+
+        assert!(matches!(
+            media
+                .configure(
+                    remote(),
+                    vec![target(session_id, 1)],
+                    configuration(),
+                    1,
+                    &mut transport,
+                )
+                .await,
+            Err(MediaSessionError::Graph(_))
+        ));
+        assert_eq!(shutdowns.load(Ordering::Relaxed), 1);
+        media.stop_media(1, &mut transport).await.unwrap();
+        media.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1465,6 +1591,7 @@ mod tests {
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
                 target_playout_delay: INITIAL_PLAYOUT_DELAY,
+                offer: VideoOffer::SoftwareCompatibility,
                 audio: None,
             })
         );
@@ -1606,6 +1733,7 @@ mod tests {
         let mut media = ChromiacastMediaSession::with_graph_outputs(
             session_id.into(),
             7,
+            VideoEncoderPolicy::Software,
             Box::new(graph),
             video_receiver,
             audio_receiver,
@@ -1647,6 +1775,7 @@ mod tests {
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
                 target_playout_delay: INITIAL_PLAYOUT_DELAY,
+                offer: VideoOffer::SoftwareCompatibility,
                 audio: Some(AudioTransportConfiguration {
                     sample_rate: OPUS_SAMPLE_RATE,
                     channels: 2,

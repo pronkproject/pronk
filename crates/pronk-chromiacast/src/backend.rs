@@ -13,6 +13,7 @@ use zbus::Connection;
 
 use crate::device::{DeviceActor, DeviceActorError, DeviceConnector};
 use crate::discovery::{DiscoveryActorError, DiscoveryEvent, DiscoveryHandle};
+use crate::media::VideoEncoderPolicy;
 use crate::session::ChromiacastSession;
 
 #[derive(Debug, Clone)]
@@ -26,6 +27,7 @@ struct BackendShared {
     connection_generation: AtomicU64,
     discovery: DiscoveryHandle,
     connector: Arc<dyn DeviceConnector>,
+    encoder_policy: VideoEncoderPolicy,
     active_session: Mutex<Option<ActiveSession>>,
     shutdown: watch::Sender<bool>,
 }
@@ -42,6 +44,7 @@ impl ChromiacastBackend {
         info: BackendInfo,
         discovery: DiscoveryHandle,
         connector: Arc<dyn DeviceConnector>,
+        encoder_policy: VideoEncoderPolicy,
         shutdown: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -50,6 +53,7 @@ impl ChromiacastBackend {
                 connection_generation: AtomicU64::new(0),
                 discovery,
                 connector,
+                encoder_policy,
                 active_session: Mutex::new(None),
                 shutdown,
             }),
@@ -220,6 +224,7 @@ impl ChromiacastBackend {
             options.session_generation,
             options.requested_features,
             Arc::clone(&self.shared.connector),
+            self.shared.encoder_policy.clone(),
         )
         .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))?;
         let session =
