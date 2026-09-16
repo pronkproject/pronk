@@ -139,12 +139,26 @@ impl RendererAccess {
         PathBuf,
         RendererSessionAccess,
     )> {
+        let (fd, endpoint, node, session) = self.into_capability();
         Ok((
-            castkms_renderer::Renderer::from_fd(self.renderer)?,
+            castkms_renderer::Renderer::from_fd(fd)?,
+            endpoint,
+            node,
+            session,
+        ))
+    }
+
+    /// Transfer the issued capability before the output is active.
+    ///
+    /// The recipient owns endpoint cleanup even if validating the descriptor
+    /// fails. The endpoint identifier belongs only to the issuing broker.
+    pub fn into_capability(self) -> (OwnedFd, NonZeroU64, PathBuf, RendererSessionAccess) {
+        (
+            self.renderer,
             self.endpoint_id,
             self.session.render_node.clone(),
             self.session,
-        ))
+        )
     }
 }
 

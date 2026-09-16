@@ -450,9 +450,13 @@ async fn renderer_access_can_move_out_of_the_broker_session_once() {
     let renderer = session.take_renderer_access().unwrap();
     assert!(session.take_renderer_access().is_err());
     assert!(session.renderer_access().is_err());
+    let (descriptor, endpoint_id, render_node, issuer) = renderer.into_capability();
+    assert_eq!(endpoint_id.get(), 1);
+    assert_eq!(render_node, Path::new("/dev/dri/renderD128"));
+    assert_eq!(issuer.session_id, session.id());
 
     fixture.renderer_peer.write_all(&[0x53]).unwrap();
-    let mut renderer = std::os::unix::net::UnixStream::from(renderer.renderer);
+    let mut renderer = std::os::unix::net::UnixStream::from(descriptor);
     renderer
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
