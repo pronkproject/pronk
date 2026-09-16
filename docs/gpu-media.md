@@ -115,12 +115,15 @@ snapshot and reports individual failures without skipping the remaining slots.
 Stopped generations never accept new claims or publications. The immutable
 recipient scope and executor-owned graphics resource lifetimes still apply.
 
-The installed media path does not instantiate the adapter yet. The opt-in
-[generated GPU transport harness](../tests/gpu-media/README.md) connects it to
-the Vulkan allocator/producer and a real source generation on a private graph.
-Its optional VA H.264 profile converts into native NV12 storage, checks encoded
-access units and verifies their decoded pixels in a separate CPU-readback oracle.
-Neither the harness nor the adapter enables GPU media defaults.
+The installed renderer capture path instantiates this adapter with private
+composition storage, a shared output pool and a private PipeWire generation.
+It currently requests linear shared output. The opt-in
+[generated GPU transport harness](../tests/gpu-media/README.md) also exercises
+an explicit tiled tuple with a Vulkan producer and a real source generation on
+a private graph. Its optional VA H.264 profile converts into native NV12
+storage, checks encoded access units and verifies their decoded pixels in a
+separate CPU-readback oracle. The harness does not change installed encoder or
+service-sandbox policy.
 
 ## Optional Vulkan allocation
 
@@ -773,17 +776,18 @@ still uses opaque layers, followed by post-composition green inversion;
 alpha modes and orthogonal transforms are qualified
 by the separate native-versus-reference tests. The harness retains its private
 PipeWire transport, hardware-encoder and transient-sandbox checks without
-enabling the production renderer or claiming delivered frame rate.
+dequeueing CastKMS scenes or claiming delivered frame rate.
 
-Existing casting callers select `MappableLinear`; they do not opt into GPU
-layouts automatically. The generated-image harness joins a separate producer's
-source import, private staging, exported output reuse and hardware encoding for
-one explicit test tuple. It overwrites source and staging before checking the
-decoded output. Compositor-source
-composition and installed service render-node access remain separate integration
-work. The default software media graph and installed service
-sandboxes are unchanged. A transport-level modifier test is not qualification
-of the complete private PipeWire, encoder or receiver path.
+The installed renderer path currently selects linear shared output; it does not
+derive that choice from the encoder's import abilities. The generated-image
+harness joins a separate producer's source import, private staging, exported
+output reuse and hardware encoding for one explicit tiled tuple. It overwrites
+source and staging before checking the decoded output. Selecting a compatible
+nonlinear output through KMS constraints and authorizing the installed backend
+service to open its chosen render node remain integration work. The default
+software encoder and base service sandbox remain available without DRM access.
+A transport-level modifier test is not qualification of the complete private
+PipeWire, encoder or receiver path.
 
 Userspace-rendered video targets carry the major and minor number of the exact
 render node used to select their Vulkan device. The Chromecast backend records
