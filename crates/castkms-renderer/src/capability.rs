@@ -168,7 +168,25 @@ impl RendererCapability {
     /// The narrow shape lets a renderer reserve complete private storage before
     /// it claims the first source-bearing job.
     pub fn single_primary(output: Extent, format: CapabilityFormat) -> Self {
-        Self {
+        Self::single_primary_formats(output, vec![format].into_boxed_slice())
+            .expect("one valid format is a valid primary capability")
+    }
+
+    /// Limit a transition to one full-output primary plane with alternatives.
+    pub fn single_primary_formats(
+        output: Extent,
+        formats: Box<[CapabilityFormat]>,
+    ) -> io::Result<Self> {
+        if formats.is_empty()
+            || formats.len() > CAPABILITY_MAX_FORMATS
+            || formats
+                .iter()
+                .enumerate()
+                .any(|(index, format)| formats[..index].contains(format))
+        {
+            return Err(invalid("invalid primary capability format set"));
+        }
+        Ok(Self {
             flags: 0,
             min_output: output,
             max_output: output,
@@ -182,8 +200,8 @@ impl RendererCapability {
             max_lut_entries: 0,
             yuv_encodings: 0,
             yuv_ranges: 0,
-            formats: vec![format].into_boxed_slice(),
-        }
+            formats,
+        })
     }
 
     pub fn max_output(&self) -> Extent {
@@ -699,6 +717,17 @@ mod tests {
             NonZeroU32::new(1).unwrap(),
             NonZeroU32::new(1).unwrap(),
             NonZeroU32::new(1).unwrap(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn primary_profiles_require_unique_storage_alternatives() {
+        let output = Extent::new(1920, 1080).unwrap();
+        assert!(RendererCapability::single_primary_formats(output, Box::new([])).is_err());
+        assert!(RendererCapability::single_primary_formats(
+            output,
+            vec![format(), format()].into_boxed_slice(),
         )
         .is_err());
     }

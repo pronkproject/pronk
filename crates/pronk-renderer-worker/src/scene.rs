@@ -41,7 +41,7 @@ pub struct SceneStorageProfile {
     profile: Arc<()>,
     device: Device,
     output: Extent,
-    sources: Vec<SourceRequirements>,
+    sources: Vec<Box<[SourceRequirements]>>,
 }
 
 impl SceneStorageProfile {
@@ -51,26 +51,64 @@ impl SceneStorageProfile {
         output: Extent,
         sources: &[SourceRequirements],
     ) -> io::Result<Self> {
-        if sources.len() > MAX_SCENE_LAYERS {
-            return Err(invalid("scene exceeds its private layer limit"));
-        }
-        device.check_private_image(nonzero(output.width()), nonzero(output.height()))?;
-        for source in sources {
-            let width = nonzero(source.extent.width());
-            let height = nonzero(source.extent.height());
-            device.check_source_image(source.format, width, height, source.modifier)?;
-            device.check_private_image(width, height)?;
-        }
         let mut owned_sources = Vec::new();
         owned_sources
             .try_reserve_exact(sources.len())
             .map_err(io::Error::other)?;
-        owned_sources.extend_from_slice(sources);
+        owned_sources.extend(
+            sources
+                .iter()
+                .map(|source| vec![*source].into_boxed_slice()),
+        );
+        Self::with_source_options(device, output, owned_sources)
+    }
+
+    /// Define one primary layer with alternative native source layouts.
+    pub fn single_primary(
+        device: &Device,
+        output: Extent,
+        sources: Box<[SourceRequirements]>,
+    ) -> io::Result<Self> {
+        Self::with_source_options(device, output, vec![sources])
+    }
+
+    fn with_source_options(
+        device: &Device,
+        output: Extent,
+        sources: Vec<Box<[SourceRequirements]>>,
+    ) -> io::Result<Self> {
+        if sources.len() > MAX_SCENE_LAYERS
+            || sources.iter().any(|options| {
+                options.is_empty()
+                    || options
+                        .iter()
+                        .enumerate()
+                        .any(|(index, option)| options[..index].contains(option))
+                    || options
+                        .iter()
+                        .any(|option| option.extent != options[0].extent)
+            })
+        {
+            return Err(invalid("invalid scene source storage options"));
+        }
+        device.check_private_image(nonzero(output.width()), nonzero(output.height()))?;
+        for options in &sources {
+            let extent = options[0].extent;
+            device.check_private_image(nonzero(extent.width()), nonzero(extent.height()))?;
+            for source in options {
+                device.check_source_image(
+                    source.format,
+                    nonzero(source.extent.width()),
+                    nonzero(source.extent.height()),
+                    source.modifier,
+                )?;
+            }
+        }
         Ok(Self {
             profile: Arc::new(()),
             device: device.clone(),
             output,
-            sources: owned_sources,
+            sources,
         })
     }
 
@@ -82,8 +120,8 @@ impl SceneStorageProfile {
         self.sources.len()
     }
 
-    pub fn source_requirements(&self, index: usize) -> Option<SourceRequirements> {
-        self.sources.get(index).copied()
+    pub fn source_options(&self, index: usize) -> Option<&[SourceRequirements]> {
+        self.sources.get(index).map(AsRef::as_ref)
     }
 
     pub(crate) fn profile(&self) -> &Arc<()> {
@@ -99,7 +137,7 @@ impl SceneStorageProfile {
         ScenePool::new(
             &self.device,
             self.output,
-            self.sources.iter().map(|source| source.extent),
+            self.sources.iter().map(|options| options[0].extent),
             final_capacity,
             source_capacity,
             &self.profile,
@@ -113,7 +151,7 @@ impl SceneStorageProfile {
                 .sources
                 .iter()
                 .zip(scene.layers)
-                .all(|(source, layer)| *source == layer.source)
+                .all(|(options, layer)| options.contains(&layer.source))
     }
 }
 

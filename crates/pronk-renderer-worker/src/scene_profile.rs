@@ -1,18 +1,101 @@
 //! Adapt checked CastKMS scene metadata into a qualified native profile.
 
 use std::io;
+use std::num::NonZeroU32;
 use std::os::fd::AsFd;
 
-use castkms_renderer::{ColorOperation as WireColor, FormatModifier, SceneJob};
+use castkms_renderer::{
+    CapabilityFormat, ColorOperation as WireColor, FormatModifier, RendererCapability, SceneJob,
+    StorageProvenance,
+};
+use castkms_sys::{
+    DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
+    DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010,
+    DRM_FORMAT_XRGB8888,
+};
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
     color::{ColorMatrix, ColorOperation, ColorPipeline, Lut, OutputColor},
     transform::Transform,
 };
+use pronk_gpu::vulkan::{Device, PackedFormat};
 use pronk_gpu::vulkan::{LayerRequirements, SceneRequirements, SourceRequirements};
 
 use crate::source::packed_format;
 use crate::{SceneComposer, SceneStorageProfile};
+
+/// One advertised primary-plane contract paired with its private storage policy.
+pub struct PrimarySceneProfile {
+    capability: RendererCapability,
+    storage: SceneStorageProfile,
+}
+
+impl PrimarySceneProfile {
+    /// Discover every exact packed source layout accepted by the selected GPU.
+    pub fn discover(
+        device: &Device,
+        output: drm_display_executor::scene::geometry::Extent,
+    ) -> io::Result<Self> {
+        let width = NonZeroU32::new(output.width()).expect("scene output width is nonzero");
+        let height = NonZeroU32::new(output.height()).expect("scene output height is nonzero");
+        let mut formats = Vec::new();
+        let mut sources = Vec::new();
+        for (packed, fourccs) in source_formats() {
+            for modifier in device.source_modifiers(packed, width, height)? {
+                sources.push(SourceRequirements {
+                    format: packed,
+                    extent: output,
+                    modifier,
+                });
+                for &fourcc in fourccs {
+                    formats.push(CapabilityFormat::new(
+                        fourcc,
+                        FormatModifier::Explicit(modifier),
+                        NonZeroU32::new(1).expect("one source plane is nonzero"),
+                        StorageProvenance::new(true, true),
+                        NonZeroU32::new(1).expect("unit pitch alignment is nonzero"),
+                        NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
+                        NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
+                    )?);
+                }
+            }
+        }
+        let capability =
+            RendererCapability::single_primary_formats(output, formats.into_boxed_slice())?;
+        let storage =
+            SceneStorageProfile::single_primary(device, output, sources.into_boxed_slice())?;
+        Ok(Self {
+            capability,
+            storage,
+        })
+    }
+
+    pub fn into_parts(self) -> (RendererCapability, SceneStorageProfile) {
+        (self.capability, self.storage)
+    }
+}
+
+fn source_formats() -> [(PackedFormat, &'static [u32]); 5] {
+    [
+        (
+            PackedFormat::Bgra8,
+            &[DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888],
+        ),
+        (
+            PackedFormat::Rgba8,
+            &[DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888],
+        ),
+        (
+            PackedFormat::Bgr10A2,
+            &[DRM_FORMAT_XRGB2101010, DRM_FORMAT_ARGB2101010],
+        ),
+        (
+            PackedFormat::Rgb10A2,
+            &[DRM_FORMAT_XBGR2101010, DRM_FORMAT_ABGR2101010],
+        ),
+        (PackedFormat::Rgb565, &[DRM_FORMAT_RGB565]),
+    ]
+}
 
 impl SceneComposer {
     /// Qualify one checked complete-scene job for native execution.
@@ -207,5 +290,28 @@ mod tests {
         assert!(matches!(color[1], ColorOperation::Matrix(_)));
         assert!(matches!(color[2], ColorOperation::Lut(_)));
         assert!(matches!(color[3], ColorOperation::SrgbInverseEotf));
+    }
+
+    #[test]
+    #[ignore = "requires explicit Vulkan GPU selection"]
+    fn discovered_primary_contract_matches_private_storage_options() {
+        let node = std::env::var_os("PRONK_GPU_RENDER_NODE").unwrap();
+        let device = Device::open(node).unwrap();
+        let output = drm_display_executor::scene::geometry::Extent::new(1920, 1080).unwrap();
+        let (capability, storage) = PrimarySceneProfile::discover(&device, output)
+            .unwrap()
+            .into_parts();
+        let options = storage.source_options(0).unwrap();
+
+        assert!(!options.is_empty());
+        assert!(options.iter().all(|source| {
+            capability.formats().iter().any(|format| {
+                source_formats()
+                    .into_iter()
+                    .find(|(packed, _)| *packed == source.format)
+                    .is_some_and(|(_, fourccs)| fourccs.contains(&format.fourcc()))
+                    && format.modifier() == FormatModifier::Explicit(source.modifier)
+            })
+        }));
     }
 }

@@ -6,14 +6,14 @@ use std::os::fd::AsFd;
 use std::time::Duration;
 
 use castkms_renderer::{
-    CapabilityProfile, ProfileRegistration, RegisteredCandidate, Renderer, RendererCapability,
-    TakeoverCandidate,
+    CapabilityProfile, ProfileRegistration, RegisteredCandidate, Renderer, TakeoverCandidate,
 };
-use castkms_sys::DRM_FORMAT_MOD_LINEAR;
 use drm_display_executor::scene::geometry::Extent;
-use pronk_gpu::vulkan::{Device, PackedFormat, SourceRequirements};
+use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
-use pronk_renderer_worker::{OutputPool, PrivateProbe, SceneReader, SceneStorageProfile};
+use pronk_renderer_worker::{
+    OutputPool, PrimarySceneProfile, PrivateProbe, SceneReader, SceneStorageProfile,
+};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -264,13 +264,8 @@ async fn prepare_generation<'renderer, F: AsFd>(
     let configuration = candidate.configuration();
     let output_extent = Extent::new(configuration.width().get(), configuration.height().get())
         .expect("candidate output dimensions are nonzero");
-    let source = SourceRequirements {
-        format: PackedFormat::Bgra8,
-        extent: output_extent,
-        modifier: DRM_FORMAT_MOD_LINEAR,
-    };
-    let storage = match SceneStorageProfile::new(device, output_extent, &[source]) {
-        Ok(storage) => storage,
+    let (profile, storage) = match PrimarySceneProfile::discover(device, output_extent) {
+        Ok(profile) => profile.into_parts(),
         Err(error) => {
             let _ = started.send(Started::Failed);
             return Err(abort_candidate(candidate, error));
@@ -314,8 +309,7 @@ async fn prepare_generation<'renderer, F: AsFd>(
             return Err(abort_candidate(candidate, error));
         }
     };
-    let profile =
-        CapabilityProfile::Renderer(RendererCapability::linear_xrgb8888_primary(output_extent));
+    let profile = CapabilityProfile::Renderer(profile);
     let candidate = match candidate.register_profile(&profile) {
         Ok(candidate) => candidate,
         Err(failure) => {

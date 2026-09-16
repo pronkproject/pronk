@@ -29,6 +29,7 @@ pub use scene_pool::{
     RejectedComposedFrame, RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool,
     MAX_SCENE_LAYERS,
 };
+pub use scene_profile::PrimarySceneProfile;
 pub use scene_reader::{SceneAttempt, SceneAttemptError, SceneReader, SceneReaderStartError};
 pub use scene_transaction::{
     CancelSceneJobError, CompositableScene, PrepareSceneJobError, PreparedSceneJob,
