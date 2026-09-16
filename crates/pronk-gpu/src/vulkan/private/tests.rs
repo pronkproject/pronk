@@ -60,6 +60,30 @@ fn private_pixels_survive_independent_shared_output_reuse() {
 
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn packed_private_staging_separates_composition_from_recipient_reuse() {
+    let (device, modifier) = device();
+    let private = device
+        .allocate_private(nz(31), nz(17))
+        .unwrap()
+        .clear_and_wait([17, 85, 204])
+        .unwrap();
+    let packed = device.allocate(nz(31), nz(17), modifier).unwrap();
+    let recipient = device.allocate(nz(31), nz(17), modifier).unwrap();
+
+    let staged = private.copy_into_and_wait(packed).unwrap();
+    let copied = recipient.copy_from_and_wait(staged.destination).unwrap();
+    let private = staged.source.clear_and_wait([255; 3]).unwrap();
+    let packed = copied.source.clear_and_wait([0; 3]).unwrap().0;
+    let (_, pixels) = readback(copied.destination);
+
+    for pixel in pixels.chunks_exact(4) {
+        assert_eq!(pixel, &[204, 85, 17, 255]);
+    }
+    drop((private, packed));
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
 fn private_copy_rejects_uninitialized_or_mismatched_images() {
     let (device, modifier) = device();
     let private = device.allocate_private(nz(16), nz(16)).unwrap();
