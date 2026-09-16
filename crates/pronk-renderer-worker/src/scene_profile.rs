@@ -56,7 +56,8 @@ impl PrimarySceneProfile {
             }
         }
         let capability =
-            RendererCapability::single_primary_formats(output, formats.into_boxed_slice())?;
+            RendererCapability::single_primary_formats(output, formats.into_boxed_slice())?
+                .with_output_color(256, true)?;
         let storage =
             SceneStorageProfile::single_primary(device, output, sources.into_boxed_slice())?;
         Ok(Self {
