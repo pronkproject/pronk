@@ -113,7 +113,8 @@ but it never receives renderer source descriptors.
 ## Synchronization and lifetime rules
 
 - Preparation readiness means that source-read admission has closed and all
-  admitted reads have completed. It is not presentation completion.
+  admitted reads have been accounted for. Their GPU work can still be pending;
+  readiness is neither GPU completion nor presentation completion.
 - GPU completion fences describe work already submitted to the native driver;
   userspace responses are not represented as future fences.
 - Destination reuse must complete before a source-reading job acquires its
