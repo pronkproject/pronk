@@ -110,6 +110,10 @@ pub struct RendererAccess {
 }
 
 /// Permission to ask Mutter to bind a registered profile to the current scene.
+///
+/// Cancellation and deadlines bound the local wait. An operation already
+/// delivered to Mutter may still complete, so callers must retire the related
+/// renderer candidate when installation does not return success.
 #[derive(Debug, Clone)]
 pub struct RendererTransitionAccess {
     connection: zbus::Connection,
@@ -146,6 +150,10 @@ impl RendererAccess {
 }
 
 impl RendererTransitionAccess {
+    /// Ask the exact session issuer to bind one registered transition.
+    ///
+    /// An error does not promise remote cancellation after the request has
+    /// reached Mutter.
     pub async fn install(
         &self,
         transition: NonZeroU64,
