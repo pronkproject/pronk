@@ -1314,6 +1314,7 @@ dependencies = [
  "async-trait",
  "castkms-renderer",
  "castkms-sys",
+ "drm-capture",
  "futures-util",
  "nix 0.29.0",
  "pronk-backend-host",

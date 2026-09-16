@@ -5,8 +5,9 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use drm_capture::Access as CaptureAccess;
 use nix::libc;
-use pronk_capture_broker::{CaptureAccess, Session};
+use pronk_capture_broker::Session;
 use pronk_core::edid::EdidMode;
 use tokio::time::{interval, MissedTickBehavior};
 

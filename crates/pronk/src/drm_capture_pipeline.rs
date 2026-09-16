@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use drm_capture::Access as CaptureAccess;
 use pronk_capture::allocation::Heap;
 use pronk_capture::{Actor, Config as ActorConfig, Layout};
-use pronk_capture_broker::CaptureAccess;
 use pronk_capture_pipewire::Video;
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoSourceConfig, MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,

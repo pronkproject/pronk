@@ -324,7 +324,7 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
     drop(renderer);
     fixture._peer.write_all(&[0x49]).unwrap();
     let capture_access = session.capture_access().unwrap();
-    let mut capture = std::os::unix::net::UnixStream::from(capture_access.capture);
+    let mut capture = std::os::unix::net::UnixStream::from(capture_access.into_fd());
     capture
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();

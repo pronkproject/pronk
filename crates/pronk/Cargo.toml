@@ -15,6 +15,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 castkms-renderer = { path = "../castkms-renderer" }
 castkms-sys = { path = "../castkms-sys" }
+drm-capture = { path = "../drm-capture" }
 futures-util.workspace = true
 nix.workspace = true
 pronk-backend-host = { path = "../pronk-backend-host" }

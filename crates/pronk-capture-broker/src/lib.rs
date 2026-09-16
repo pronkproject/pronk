@@ -93,16 +93,6 @@ pub struct Session {
     done: Option<oneshot::Receiver<Result<(), Error>>>,
 }
 
-/// Capture authority derived from a display session's lifetime.
-///
-/// Cloning the underlying file description keeps capture available without
-/// transferring monitor control or responsibility for releasing the broker
-/// session.
-#[derive(Debug)]
-pub struct CaptureAccess {
-    capture: OwnedFd,
-}
-
 /// Renderer authority derived from a display session's lifetime.
 ///
 /// Cloning the underlying file description transfers no revocation authority,
@@ -289,12 +279,6 @@ async fn release_renderer(
     Ok(())
 }
 
-impl CaptureAccess {
-    pub fn open(&self) -> std::io::Result<drm_capture::Client> {
-        drm_capture::Client::from_fd(self.capture.try_clone()?)
-    }
-}
-
 impl Session {
     fn capture(&self) -> BorrowedFd<'_> {
         self.capture
@@ -321,10 +305,10 @@ impl Session {
         self.id
     }
 
-    pub fn capture_access(&self) -> std::io::Result<CaptureAccess> {
-        Ok(CaptureAccess {
-            capture: self.capture().try_clone_to_owned()?,
-        })
+    pub fn capture_access(&self) -> std::io::Result<drm_capture::Access> {
+        Ok(drm_capture::Access::from_fd(
+            self.capture().try_clone_to_owned()?,
+        ))
     }
 
     pub fn renderer_access(&self) -> std::io::Result<RendererAccess> {
