@@ -1,3 +1,5 @@
+mod daemon_options;
+
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,6 +9,7 @@ use anyhow::Context;
 use nix::unistd::Uid;
 use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
 use pronk::display::MediaRuntime;
+use pronk::display_media::CaptureSource;
 use pronk::kernel_session_provider::KernelSessionProvider;
 use pronk::manager::{BackendConfig, ManagerActor};
 use pronk_backend_host::{
@@ -23,11 +26,17 @@ const KERNEL_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> anyhow::Result<()> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    if arguments.as_slice() == [std::ffi::OsStr::new("--version")] {
-        println!("pronk {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-    anyhow::ensure!(arguments.is_empty(), "usage: pronkd");
+    let capture_source = match daemon_options::parse(&arguments).map_err(anyhow::Error::msg)? {
+        daemon_options::Command::Run { capture_source } => capture_source,
+        daemon_options::Command::Version => {
+            println!("pronk {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        daemon_options::Command::Help => {
+            println!("{}", daemon_options::USAGE);
+            return Ok(());
+        }
+    };
 
     tracing_subscriber::fmt()
         .with_ansi(false)
@@ -43,13 +52,14 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("create Tokio runtime")?;
-    runtime.block_on(run())
+    runtime.block_on(run(capture_source))
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run(capture_source: CaptureSource) -> anyhow::Result<()> {
     let effective_uid = Uid::effective();
     let runtime_directory = PathBuf::from(format!("/run/user/{}", effective_uid.as_raw()));
-    let media_runtime = MediaRuntime::for_user(effective_uid.as_raw());
+    let media_runtime =
+        MediaRuntime::for_user(effective_uid.as_raw()).with_capture_source(capture_source);
     let registry = BackendRegistry::load_installed(&runtime_directory)
         .context("load the installed backend registry")?;
     let connection = zbus::Connection::session()
@@ -103,6 +113,7 @@ async fn run() -> anyhow::Result<()> {
         .context("acquire the Pronk bus name")?;
     info!(
         backends = registry.len(),
+        ?capture_source,
         bus = "session",
         "Pronk device inventory is available"
     );

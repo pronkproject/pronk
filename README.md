@@ -5,7 +5,7 @@ as a Chromecast. It runs inside the graphical login, obtains narrowly scoped
 display capabilities from Mutter, and keeps display control, rendering, media
 transport, encoding, and network delivery in separate components.
 
-The current path is:
+The default path is:
 
 ```text
 Mutter session broker
@@ -67,6 +67,14 @@ pronkctl list-displays
 
 The current session bundle is video-only, so display creation must include
 `--no-audio` until the broker publishes a separate audio capability.
+
+`pronkd --capture-source final-image` selects the generic final-image capture
+pipeline instead of the userspace renderer. It does not activate a renderer or
+change display constraints. That pipeline uses CPU-mappable linear destinations
+from `/dev/dma_heap/system`, which must be accessible to the service account.
+The installed service keeps the `renderer` default; selecting either source
+never enables automatic fallback to the other on errors. Both selections still
+use the configured Mutter session issuer.
 
 Remove the display by the identifier printed by `add-display` or
 `list-displays`:
