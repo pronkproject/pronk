@@ -10,9 +10,9 @@ use castkms_renderer::{
     TakeoverCandidate,
 };
 use castkms_sys::{
-    DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
-    DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010,
-    DRM_FORMAT_XRGB8888,
+    CAPABILITY_MAX_FORMATS, DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010,
+    DRM_FORMAT_ARGB8888, DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888,
+    DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888,
 };
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
@@ -43,21 +43,15 @@ impl PrimarySceneProfile {
         let mut sources = Vec::new();
         for (packed, fourccs) in source_formats() {
             for modifier in device.source_modifiers(packed, width, height)? {
-                sources.push(SourceRequirements {
-                    format: packed,
-                    extent: output,
+                if !append_source_layout(
+                    &mut formats,
+                    &mut sources,
+                    packed,
+                    fourccs,
                     modifier,
-                });
-                for &fourcc in fourccs {
-                    formats.push(CapabilityFormat::new(
-                        fourcc,
-                        FormatModifier::Explicit(modifier),
-                        NonZeroU32::new(1).expect("one source plane is nonzero"),
-                        StorageProvenance::new(true, true),
-                        NonZeroU32::new(1).expect("unit pitch alignment is nonzero"),
-                        NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
-                        NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
-                    )?);
+                    output,
+                )? {
+                    break;
                 }
             }
         }
@@ -91,6 +85,45 @@ impl PrimarySceneProfile {
             .register_profile(&CapabilityProfile::Renderer(self.capability))
             .map(|candidate| (candidate, self.storage))
     }
+}
+
+fn append_source_layout(
+    formats: &mut Vec<CapabilityFormat>,
+    sources: &mut Vec<SourceRequirements>,
+    packed: PackedFormat,
+    fourccs: &[u32],
+    modifier: u64,
+    output: drm_display_executor::scene::geometry::Extent,
+) -> io::Result<bool> {
+    if formats.len().saturating_add(fourccs.len()) > CAPABILITY_MAX_FORMATS {
+        return Ok(false);
+    }
+    let mut records = Vec::new();
+    records
+        .try_reserve_exact(fourccs.len())
+        .map_err(io::Error::other)?;
+    for &fourcc in fourccs {
+        records.push(CapabilityFormat::new(
+            fourcc,
+            FormatModifier::Explicit(modifier),
+            NonZeroU32::new(1).expect("one source plane is nonzero"),
+            StorageProvenance::new(true, true),
+            NonZeroU32::new(1).expect("unit pitch alignment is nonzero"),
+            NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
+            NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
+        )?);
+    }
+    formats
+        .try_reserve_exact(records.len())
+        .map_err(io::Error::other)?;
+    sources.try_reserve(1).map_err(io::Error::other)?;
+    formats.extend(records);
+    sources.push(SourceRequirements {
+        format: packed,
+        extent: output,
+        modifier,
+    });
+    Ok(true)
 }
 
 fn source_formats() -> [(PackedFormat, &'static [u32]); 5] {
@@ -329,5 +362,30 @@ mod tests {
                     && format.modifier() == FormatModifier::Explicit(source.modifier)
             })
         }));
+    }
+
+    #[test]
+    fn source_discovery_never_partially_exceeds_the_wire_record_budget() {
+        let output = drm_display_executor::scene::geometry::Extent::new(1920, 1080).unwrap();
+        let mut formats = Vec::new();
+        let mut sources = Vec::new();
+        for modifier in 0..=CAPABILITY_MAX_FORMATS as u64 {
+            if !append_source_layout(
+                &mut formats,
+                &mut sources,
+                PackedFormat::Bgra8,
+                &[DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888],
+                modifier,
+                output,
+            )
+            .unwrap()
+            {
+                break;
+            }
+        }
+
+        assert_eq!(formats.len(), CAPABILITY_MAX_FORMATS);
+        assert_eq!(sources.len() * 2, formats.len());
+        assert_eq!(sources.last().unwrap().modifier, 127);
     }
 }
