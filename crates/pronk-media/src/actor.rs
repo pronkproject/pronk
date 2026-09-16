@@ -654,7 +654,7 @@ mod tests {
                 caps: "video/x-raw,format=BGRx,width=320,height=240,framerate=30/1".into(),
             },
             audio: None,
-            video_codec: crate::VideoCodec::Vp8,
+            video_encoder: crate::VideoEncoder::software(crate::VideoCodec::Vp8),
             video_cadence: VideoCadence::new(
                 std::num::NonZeroU32::new(30).unwrap(),
                 std::num::NonZeroU32::new(1).unwrap(),

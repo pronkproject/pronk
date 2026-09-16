@@ -15,7 +15,7 @@ use pronk_capture::{allocation::Heap, CaptureError, Config, Layout, Session};
 use pronk_capture_pipewire::Registration;
 use pronk_media::{
     MediaGraphActor, MediaGraphConfiguration, PipeWireVideoInput, VideoCadence, VideoCodec,
-    VideoFrameDependency,
+    VideoEncoder, VideoFrameDependency,
 };
 use pronk_pipewire::{
     PipeWireRemote, VideoSourceActor, VideoSourceActorEvent, VideoSourceConfig,
@@ -94,7 +94,7 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
             caps: "video/x-raw,format=BGRx,width=640,height=480,framerate=30/1".into(),
         },
         audio: None,
-        video_codec: VideoCodec::H264,
+        video_encoder: VideoEncoder::software(VideoCodec::H264),
         video_cadence: VideoCadence::new(nz(30), nz(1)),
         video_bitrate: nz64(2_000_000),
     };

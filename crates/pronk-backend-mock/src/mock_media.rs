@@ -129,7 +129,9 @@ impl MockMediaEngine {
                             caps: target.caps,
                         },
                         audio: None,
-                        video_codec: pronk_media::VideoCodec::H264,
+                        video_encoder: pronk_media::VideoEncoder::software(
+                            pronk_media::VideoCodec::H264,
+                        ),
                         video_cadence: pronk_media::VideoCadence::new(
                             NonZeroU32::new(30).unwrap(),
                             NonZeroU32::new(1).unwrap(),

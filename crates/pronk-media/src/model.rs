@@ -35,7 +35,7 @@ pub struct MediaGraphConfiguration {
     pub media_generation: NonZeroU64,
     pub video: PipeWireVideoInput,
     pub audio: Option<PipeWireAudioInput>,
-    pub video_codec: VideoCodec,
+    pub video_encoder: VideoEncoder,
     pub video_cadence: VideoCadence,
     pub video_bitrate: NonZeroU64,
 }
@@ -44,6 +44,24 @@ pub struct MediaGraphConfiguration {
 pub enum VideoCodec {
     Vp8,
     H264,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VideoEncoder {
+    Software(VideoCodec),
+}
+
+impl VideoEncoder {
+    pub const fn software(codec: VideoCodec) -> Self {
+        Self::Software(codec)
+    }
+
+    pub const fn codec(self) -> VideoCodec {
+        match self {
+            Self::Software(codec) => codec,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

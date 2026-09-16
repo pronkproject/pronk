@@ -19,7 +19,7 @@ use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk_capture_broker::{Provider, Target};
 use pronk_media::{
     MediaGraphActor, MediaGraphConfiguration, PipeWireVideoInput, VideoCadence, VideoCodec,
-    VideoFrameDependency,
+    VideoEncoder, VideoFrameDependency,
 };
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use tokio_util::sync::CancellationToken;
@@ -169,7 +169,7 @@ async fn run(
             caps: video_target.caps,
         },
         audio: None,
-        video_codec: VideoCodec::H264,
+        video_encoder: VideoEncoder::software(VideoCodec::H264),
         video_cadence: VideoCadence::new(nz(30), nz(1)),
         video_bitrate: nz64(4_000_000),
     };

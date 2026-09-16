@@ -12,7 +12,7 @@ use pronk_media::{
     EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit, MediaGraphActor,
     MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics, PipeWireAudioInput,
     PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence, VideoCodec,
-    OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
+    VideoEncoder, OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -169,12 +169,12 @@ struct PendingMediaGraphConfiguration {
 }
 
 impl PendingMediaGraphConfiguration {
-    fn with_video_codec(self, video_codec: VideoCodec) -> MediaGraphConfiguration {
+    fn with_software_encoder(self, video_codec: VideoCodec) -> MediaGraphConfiguration {
         MediaGraphConfiguration {
             media_generation: self.media_generation,
             video: self.video,
             audio: self.audio,
-            video_codec,
+            video_encoder: VideoEncoder::software(video_codec),
             video_cadence: self.video_cadence,
             video_bitrate: self.video_bitrate,
         }
@@ -357,7 +357,7 @@ impl ChromiacastMediaSession {
 
         let mut negotiated = transport.negotiate_video(transport_configuration).await?;
         self.transport_active = true;
-        let graph_configuration = graph_configuration.with_video_codec(negotiated.video_codec);
+        let graph_configuration = graph_configuration.with_software_encoder(negotiated.video_codec);
         self.graph_received_generation = true;
         if let Err(error) = self.graph.configure(graph_configuration).await {
             let _ = negotiated.sender.shutdown().await;
@@ -1142,7 +1142,7 @@ mod tests {
             self.statistics.video_cadence_denominator =
                 configuration.video_cadence.denominator.get();
             self.statistics.encoder_name = Some(
-                match configuration.video_codec {
+                match configuration.video_encoder.codec() {
                     VideoCodec::Vp8 => "vp8enc",
                     VideoCodec::H264 => "x264enc",
                 }
