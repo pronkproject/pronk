@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tokio::net::UnixStream;
 use tokio::sync::Notify;
@@ -30,6 +31,7 @@ struct State {
     gate: Option<Notify>,
     transition_gate: Mutex<Option<Arc<Notify>>>,
     release_error: bool,
+    invalid_renderer: AtomicBool,
 }
 
 struct Bus(Arc<State>);
@@ -91,7 +93,11 @@ impl Mutter {
         Ok((
             monitor.into(),
             renderer.into(),
-            1,
+            if self.state.invalid_renderer.load(Ordering::SeqCst) {
+                0
+            } else {
+                1
+            },
             capture.into(),
             "/dev/dri/renderD128".into(),
             91,
@@ -414,6 +420,32 @@ async fn a_stalled_transition_obeys_the_session_deadline() {
         fixture.state.transitions.lock().unwrap().as_slice(),
         &[(91, 75, ":1.88".into())]
     );
+}
+
+#[tokio::test]
+async fn rejecting_renderer_metadata_releases_the_issued_display_session() {
+    let mut fixture = Fixture::new(false, false).await;
+    fixture.state.invalid_renderer.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture
+            .provider
+            .acquire(target(), CancellationToken::new())
+            .await,
+        Err(Error::InvalidRenderer)
+    ));
+    notified(&fixture.state.released).await;
+    assert_eq!(
+        fixture.state.releases.lock().unwrap().as_slice(),
+        &[(91, ":1.88".into())]
+    );
+    for peer in [
+        &mut fixture.monitor_peer,
+        &mut fixture.renderer_peer,
+        &mut fixture._peer,
+    ] {
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
 }
 
 #[tokio::test]

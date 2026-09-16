@@ -495,10 +495,6 @@ async fn run_session(
                 let _ = send.send(Err(Error::InvalidSession));
                 return;
             };
-            let Some(renderer_id) = NonZeroU64::new(renderer_id) else {
-                let _ = send.send(Err(Error::InvalidRenderer));
-                return;
-            };
             (
                 monitor,
                 renderer,
@@ -518,23 +514,28 @@ async fn run_session(
     let capture: OwnedFd = capture.into();
     let (release, wait_release) = oneshot::channel();
     let (done, wait_done) = oneshot::channel();
-    // A rejected send drops the session here, waking the same cleanup path.
-    let _ = send.send(Ok(Session {
-        id,
-        monitor: Some(monitor),
-        renderer: Some((renderer, renderer_id)),
-        capture: Some(capture),
-        renderer_session: RendererSessionAccess {
-            connection: connection.clone(),
-            owner: owner.clone(),
-            session_id: id,
-            render_node,
-            timeout,
-            endpoint_slots: Arc::new(Semaphore::new(1)),
-        },
-        release: Some(release),
-        done: Some(wait_done),
-    }));
+    let renderer_session = RendererSessionAccess {
+        connection: connection.clone(),
+        owner: owner.clone(),
+        session_id: id,
+        render_node,
+        timeout,
+        endpoint_slots: Arc::new(Semaphore::new(1)),
+    };
+    // Validation owns the descriptors and release trigger. Rejection closes
+    // them and follows the same cleanup path as an unclaimed successful reply.
+    let session = NonZeroU64::new(renderer_id)
+        .map(|renderer_id| Session {
+            id,
+            monitor: Some(monitor),
+            renderer: Some((renderer, renderer_id)),
+            capture: Some(capture),
+            renderer_session,
+            release: Some(release),
+            done: Some(wait_done),
+        })
+        .ok_or(Error::InvalidRenderer);
+    let _ = send.send(session);
     let _ = wait_release.await;
     let result = connection
         .call_method(
