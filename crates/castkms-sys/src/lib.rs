@@ -20,7 +20,7 @@ pub const DRM_FORMAT_ABGR2101010: u32 = u32::from_le_bytes(*b"AB30");
 pub const DRM_FORMAT_RGB565: u32 = u32::from_le_bytes(*b"RG16");
 pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 pub const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
-pub const RENDERER_VERSION: u32 = 8;
+pub const RENDERER_VERSION: u32 = 9;
 pub const TRANSITION_PROPERTY: &str = "CASTKMS_TRANSITION";
 pub const EXECUTION_PROPERTY: &str = "CASTKMS_EXECUTION";
 pub const RENDERER_PROBE_PRIVATE: u32 = 1;
@@ -360,9 +360,30 @@ pub struct DrmCastkmsRendererReleaseSource {
 #[repr(C)]
 pub struct DrmCastkmsRendererDequeueScene {
     pub result: u64,
+    pub image_id: u64,
     pub capacity: u32,
     pub flags: u32,
     pub reserved: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererRegisterImage {
+    pub image_id: u64,
+    pub buffers: u64,
+    pub width: u32,
+    pub height: u32,
+    pub num_buffers: u32,
+    pub flags: u32,
+    pub reserved: [u64; 2],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererUnregisterImage {
+    pub image_id: u64,
+    pub flags: u32,
+    pub reserved: u32,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -472,6 +493,18 @@ nix::ioctl_write_ptr!(
     0x4e,
     DrmCastkmsRendererQueryCapabilities
 );
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_register_image,
+    b'd',
+    0x4f,
+    DrmCastkmsRendererRegisterImage
+);
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_unregister_image,
+    b'd',
+    0x50,
+    DrmCastkmsRendererUnregisterImage
+);
 
 #[cfg(test)]
 mod tests {
@@ -479,7 +512,7 @@ mod tests {
 
     #[test]
     fn renderer_operations_match_the_uapi_layouts() {
-        assert_eq!(RENDERER_VERSION, 8);
+        assert_eq!(RENDERER_VERSION, 9);
         assert_eq!(RENDERER_PROBE_PRIVATE, 1);
         assert_eq!(RENDERER_PROBE_STARTUP_IMAGE, 2);
         assert_eq!(EXECUTION_HOST_V1, 1);
@@ -530,8 +563,15 @@ mod tests {
         assert_eq!(RENDERER_SCENE_MAX_BYTES, 65_536);
         assert_eq!(RENDERER_SCENE_MAX_LAYERS, 24);
         assert_eq!(RENDERER_SCENE_MAX_COLOR_OPS, 16);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererDequeueScene>(), 24);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererDequeueScene>(), 32);
         assert_eq!(std::mem::align_of::<DrmCastkmsRendererDequeueScene>(), 8);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererDequeueScene, image_id),
+            8
+        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererRegisterImage>(), 48);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererRegisterImage>(), 8);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererUnregisterImage>(), 16);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererScene>(), 48);
         assert_eq!(std::mem::align_of::<DrmCastkmsRendererScene>(), 8);
         assert_eq!(std::mem::offset_of!(DrmCastkmsRendererScene, job_id), 8);

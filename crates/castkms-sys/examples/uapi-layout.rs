@@ -73,6 +73,18 @@ fn main() {
         DrmCastkmsRendererQueryCapabilities,
         "drm_castkms_renderer_query_capabilities"
     );
+    layout!(
+        DrmCastkmsRendererDequeueScene,
+        "drm_castkms_renderer_dequeue_scene"
+    );
+    layout!(
+        DrmCastkmsRendererRegisterImage,
+        "drm_castkms_renderer_register_image"
+    );
+    layout!(
+        DrmCastkmsRendererUnregisterImage,
+        "drm_castkms_renderer_unregister_image"
+    );
     field!(
         DrmCastkmsRendererTakeover,
         execution_generation,
@@ -97,5 +109,10 @@ fn main() {
         DrmCastkmsRendererSubmitProbe,
         completion_fd,
         "drm_castkms_renderer_submit_probe.completion_fd"
+    );
+    field!(
+        DrmCastkmsRendererDequeueScene,
+        image_id,
+        "drm_castkms_renderer_dequeue_scene.image_id"
     );
 }
