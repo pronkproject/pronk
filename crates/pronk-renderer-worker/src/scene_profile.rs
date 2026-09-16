@@ -11,8 +11,8 @@ use castkms_renderer::{
 };
 use castkms_sys::{
     CAPABILITY_MAX_FORMATS, DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010,
-    DRM_FORMAT_ARGB8888, DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888,
-    DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888,
+    DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010,
+    DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888,
 };
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
@@ -22,7 +22,7 @@ use drm_display_executor::scene::{
 use pronk_gpu::vulkan::{Device, PackedFormat};
 use pronk_gpu::vulkan::{LayerRequirements, SceneRequirements, SourceRequirements};
 
-use crate::source::packed_format;
+use crate::source::{packed_format, resolved_modifier};
 use crate::{SceneComposer, ScenePool, SceneStorageProfile};
 
 /// One advertised primary-plane contract paired with its private storage policy.
@@ -95,12 +95,18 @@ fn append_source_layout(
     modifier: u64,
     output: drm_display_executor::scene::geometry::Extent,
 ) -> io::Result<bool> {
-    if formats.len().saturating_add(fourccs.len()) > CAPABILITY_MAX_FORMATS {
+    let records_per_format = if modifier == DRM_FORMAT_MOD_LINEAR {
+        2
+    } else {
+        1
+    };
+    let record_count = fourccs.len().saturating_mul(records_per_format);
+    if formats.len().saturating_add(record_count) > CAPABILITY_MAX_FORMATS {
         return Ok(false);
     }
     let mut records = Vec::new();
     records
-        .try_reserve_exact(fourccs.len())
+        .try_reserve_exact(record_count)
         .map_err(io::Error::other)?;
     for &fourcc in fourccs {
         records.push(CapabilityFormat::new(
@@ -112,6 +118,17 @@ fn append_source_layout(
             NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
             NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
         )?);
+        if modifier == DRM_FORMAT_MOD_LINEAR {
+            records.push(CapabilityFormat::new(
+                fourcc,
+                FormatModifier::Unspecified,
+                NonZeroU32::new(1).expect("one source plane is nonzero"),
+                StorageProvenance::new(true, true),
+                NonZeroU32::new(1).expect("unit pitch alignment is nonzero"),
+                NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
+                NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
+            )?);
+        }
     }
     formats
         .try_reserve_exact(records.len())
@@ -168,12 +185,7 @@ impl SceneComposer {
         for (layer, color) in job.layers().iter().zip(&colors) {
             let image = layer.image();
             let format = packed_format(image.format())?;
-            let modifier = match image.modifier() {
-                FormatModifier::Explicit(modifier) => modifier,
-                FormatModifier::Unspecified => {
-                    return Err(unsupported("scene layer has no explicit format modifier"));
-                }
-            };
+            let modifier = resolved_modifier(image.modifier());
             layers.push(LayerRequirements {
                 source: SourceRequirements {
                     format,
@@ -385,7 +397,14 @@ mod tests {
         }
 
         assert_eq!(formats.len(), CAPABILITY_MAX_FORMATS);
-        assert_eq!(sources.len() * 2, formats.len());
-        assert_eq!(sources.last().unwrap().modifier, 127);
+        assert_eq!(sources.len(), 127);
+        assert_eq!(sources.last().unwrap().modifier, 126);
+        assert_eq!(
+            formats
+                .iter()
+                .filter(|format| format.modifier() == FormatModifier::Unspecified)
+                .count(),
+            2
+        );
     }
 }
