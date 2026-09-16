@@ -13,7 +13,7 @@ mod submission;
 mod test_support;
 
 pub use copy::CopiedImages;
-pub use device::{Device, DeviceIdentity};
+pub use device::{Device, DeviceIdentity, RenderNodeIdentity};
 pub use image::{Image, ImageLayout, PackedFormat};
 pub use private::{
     BlendedImages, Blender, ColorPipelineProgram, ComposedScene, Gamma, LayerRequirements,

@@ -25,6 +25,13 @@ pub struct DeviceIdentity {
     pub driver: [u8; vk::UUID_SIZE],
 }
 
+/// Kernel identity of the DRM render node used to select this device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderNodeIdentity {
+    pub major: u32,
+    pub minor: u32,
+}
+
 struct Instance {
     raw: ash::Instance,
     // Keep the dynamically loaded function pointers valid until instance teardown.
@@ -38,6 +45,7 @@ pub(super) struct DeviceInner {
     pub(super) queue_family: u32,
     pub(super) shader_int64: bool,
     pub(super) submission: Mutex<()>,
+    render_node: RenderNodeIdentity,
     _render_node: File,
 }
 
@@ -72,6 +80,10 @@ impl Device {
         }
     }
 
+    pub fn render_node_identity(&self) -> RenderNodeIdentity {
+        self.inner.render_node
+    }
+
     /// Diagnostic name of the device selected by render-node identity.
     pub fn name(&self) -> String {
         // SAFETY: The physical device belongs to the retained live instance.
@@ -95,6 +107,12 @@ impl Device {
         }
         let major = nix::sys::stat::major(metadata.rdev());
         let minor = nix::sys::stat::minor(metadata.rdev());
+        let render_node = RenderNodeIdentity {
+            major: u32::try_from(major)
+                .map_err(|_| unsupported("DRM render-node major number is too large"))?,
+            minor: u32::try_from(minor)
+                .map_err(|_| unsupported("DRM render-node minor number is too large"))?,
+        };
         // SAFETY: The system Vulkan loader is trusted native code. Entry remains
         // alive through every instance and device call via the owning hierarchy.
         let entry = unsafe { ash::Entry::load() }.map_err(io::Error::other)?;
@@ -206,6 +224,7 @@ impl Device {
                     queue_family: queue as u32,
                     shader_int64: available_features.shader_int64 == vk::TRUE,
                     submission: Mutex::new(()),
+                    render_node,
                     _render_node: node,
                 }),
             });
