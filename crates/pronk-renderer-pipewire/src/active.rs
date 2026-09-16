@@ -91,7 +91,11 @@ async fn run_until_stopped<F: AsFd>(
                 match SceneReader::try_render(reader).map_err(io::Error::other)? {
                     SceneAttempt::NoSlot | SceneAttempt::NoScene => {}
                     SceneAttempt::Rejected { cause } => return Err(cause),
-                    SceneAttempt::Rendered(frame) => pipeline.frames.push_back(frame),
+                    SceneAttempt::Rendered(frame) => {
+                        replace_backlog(&mut pipeline.frames, frame, |stale| {
+                            return_frame(reader, stale)
+                        })?;
+                    }
                 }
             }
         }
@@ -204,6 +208,20 @@ fn take_pair<L, R>(left: &mut VecDeque<L>, right: &mut VecDeque<R>) -> Option<(L
     ))
 }
 
+fn replace_backlog<T, E>(
+    queue: &mut VecDeque<T>,
+    newest: T,
+    mut retire: impl FnMut(T) -> Result<(), E>,
+) -> Result<(), E> {
+    // No destination has been claimed for these frames. Keep one recent scene
+    // while output is busy instead of replaying a burst after backpressure.
+    while let Some(stale) = queue.pop_front() {
+        retire(stale)?;
+    }
+    queue.push_back(newest);
+    Ok(())
+}
+
 fn monotonic_now_ns() -> io::Result<i64> {
     Ok(clock_gettime(ClockId::CLOCK_MONOTONIC)?.num_nanoseconds())
 }
@@ -218,7 +236,7 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{stop_tasks, take_pair};
+    use super::{replace_backlog, stop_tasks, take_pair};
     use pronk_renderer_worker::{CompletedOutput, RenderedFrame};
     use std::collections::VecDeque;
     use tokio::sync::oneshot;
@@ -243,6 +261,21 @@ mod tests {
         let mut right = VecDeque::from([2]);
         assert_eq!(take_pair(&mut left, &mut right), None);
         assert_eq!(right, [2]);
+    }
+
+    #[test]
+    fn newest_unbound_frame_replaces_the_private_backlog() {
+        let mut frames = VecDeque::from([1, 2]);
+        let mut retired = Vec::new();
+
+        replace_backlog(&mut frames, 3, |frame| {
+            retired.push(frame);
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+
+        assert_eq!(retired, [1, 2]);
+        assert_eq!(frames, [3]);
     }
 
     #[tokio::test]
