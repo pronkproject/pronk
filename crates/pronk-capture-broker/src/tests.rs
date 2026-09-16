@@ -21,6 +21,8 @@ struct State {
     renderer_acquire_calls: Mutex<usize>,
     renderer_acquire_entered: Notify,
     renderer_acquire_gate: Mutex<Option<Arc<Notify>>>,
+    renderer_release_entered: Notify,
+    renderer_release_gate: Mutex<Option<Arc<Notify>>>,
     owner: Mutex<String>,
     entered: Notify,
     transition_entered: Notify,
@@ -125,12 +127,17 @@ impl Mutter {
         Ok((renderer.into(), renderer_id))
     }
 
-    fn release_renderer(
+    async fn release_renderer(
         &self,
         session_id: u64,
         renderer_id: u64,
         #[zbus(header)] header: Header<'_>,
     ) -> zbus::fdo::Result<()> {
+        let gate = self.state.renderer_release_gate.lock().unwrap().clone();
+        self.state.renderer_release_entered.notify_one();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         self.state.renderer_releases.lock().unwrap().push((
             session_id,
             renderer_id,
@@ -553,6 +560,67 @@ async fn timed_out_renderer_acquisition_keeps_one_request_until_cleanup() {
         fixture.state.renderer_releases.lock().unwrap().as_slice(),
         &[(91, 2, ":1.88".into())]
     );
+}
+
+#[tokio::test]
+async fn timed_out_renderer_release_blocks_replacement_until_cleanup() {
+    let mut fixture = Fixture::new(false, false).await;
+    fixture.provider.timeout = Duration::from_millis(50);
+    let session = fixture
+        .provider
+        .acquire(target(), CancellationToken::new())
+        .await
+        .unwrap();
+    let renderer_session = session.renderer_access().unwrap().session;
+    let access = renderer_session
+        .acquire_renderer(CancellationToken::new())
+        .await
+        .unwrap();
+    let endpoint_id = access.endpoint_id;
+    drop(access);
+    let gate = Arc::new(Notify::new());
+    *fixture.state.renderer_release_gate.lock().unwrap() = Some(Arc::clone(&gate));
+
+    let release = {
+        let renderer_session = renderer_session.clone();
+        tokio::spawn(async move { renderer_session.release_renderer(endpoint_id).await })
+    };
+    notified(&fixture.state.renderer_release_entered).await;
+    assert!(matches!(
+        release.await.unwrap(),
+        Err(RendererSessionError::Timeout)
+    ));
+    assert!(matches!(
+        renderer_session
+            .acquire_renderer(CancellationToken::new())
+            .await,
+        Err(RendererSessionError::Timeout)
+    ));
+    assert_eq!(*fixture.state.renderer_acquire_calls.lock().unwrap(), 1);
+
+    *fixture.state.renderer_release_gate.lock().unwrap() = None;
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !fixture.state.renderer_releases.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let replacement = renderer_session
+        .acquire_renderer(CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(replacement.endpoint_id, NonZeroU64::new(3).unwrap());
+    let replacement_id = replacement.endpoint_id;
+    drop(replacement);
+    renderer_session
+        .release_renderer(replacement_id)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

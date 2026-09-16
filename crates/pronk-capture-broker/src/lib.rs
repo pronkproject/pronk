@@ -228,13 +228,27 @@ impl RendererSessionAccess {
     }
 
     /// Revoke one endpoint after its admitted source reads have drained.
+    ///
+    /// The local deadline does not abandon an issued endpoint. A delayed
+    /// release continues in one serialized worker so later acquisitions cannot
+    /// consume Mutter's bounded endpoint table ahead of cleanup.
     pub async fn release_renderer(
         &self,
         endpoint_id: NonZeroU64,
     ) -> Result<(), RendererSessionError> {
-        tokio::time::timeout(self.timeout, release_renderer(self, endpoint_id))
+        let (send, receive) = oneshot::channel();
+        let access = self.clone();
+        tokio::spawn(async move {
+            let result = match Arc::clone(&access.endpoint_slots).acquire_owned().await {
+                Ok(_permit) => release_renderer(&access, endpoint_id).await,
+                Err(_) => Err(RendererSessionError::WorkerStopped),
+            };
+            let _ = send.send(result);
+        });
+        tokio::time::timeout(self.timeout, receive)
             .await
             .map_err(|_| RendererSessionError::Timeout)?
+            .map_err(|_| RendererSessionError::WorkerStopped)?
     }
 }
 
