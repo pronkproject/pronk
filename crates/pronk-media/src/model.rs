@@ -366,6 +366,9 @@ pub enum MediaGraphState {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MediaGraphStatistics {
     pub frames: u64,
+    /// Raw images discarded at the bounded queue before encoding.
+    pub raw_frames_dropped: u64,
+    /// Encoded access units discarded at the graph's output port.
     pub dropped_frames: u64,
     pub key_frames: u64,
     pub encoded_bytes: u64,
