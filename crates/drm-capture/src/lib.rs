@@ -3,6 +3,7 @@
 //! Capture authority is separate from modesetting, allocation and renderer access.
 //! No operation on this client requires a primary DRM file or exposes source pixels.
 
+mod access;
 mod cancel;
 mod completion;
 mod description;
@@ -14,6 +15,7 @@ mod stream;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
+pub use access::Access;
 pub use completion::Completion;
 pub use description::{Description, OfferId};
 pub use destination::{Destination, DestinationId, Plane};
