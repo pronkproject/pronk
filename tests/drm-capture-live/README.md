@@ -62,9 +62,12 @@ The binaries cover distinct boundaries:
 - `pronk-capture-pipeline-live-test /dev/dri/cardN /path/to/private/socket`:
   the application's `DrmCapturePipeline` runs three media generations under
   one grant. It checks activation, changing pixels, retained storage across
-  generations, and orderly stop without a false health event. It uses the
-  versioned WirePlumber policy and classified core/backend sockets. The test
-  does not qualify broker issuance, hardware encoding, or a receiver.
+  generations, and orderly stop without a false health event. It then revokes
+  a separate grant during active delivery, checks its exact failure generation
+  and retained pixels, and resumes delivery through fresh authority and fresh
+  output storage. It uses the versioned WirePlumber policy and classified
+  core/backend sockets. The test does not qualify broker issuance, hardware
+  encoding, or a receiver.
 - Live Mutter media:
   `pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
   WIDTH HEIGHT /path/to/pipewire-0-pronk-backend` runs a fullscreen Wayland
