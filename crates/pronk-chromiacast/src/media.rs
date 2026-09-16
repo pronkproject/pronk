@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use pronk_backend_protocol::{
     validate_media_configuration, DeviceCapabilities, MediaConfiguration, MediaKind,
-    PipeWireTarget, SessionState, SessionStatistics, Validate, SESSION_FEATURE_AUDIO,
+    PipeWireTarget, RenderDeviceIdentity, SessionState, SessionStatistics, Validate,
+    SESSION_FEATURE_AUDIO,
 };
 use pronk_media::{
     EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit, MediaGraphActor,
@@ -37,7 +38,10 @@ const START_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VideoEncoderPolicy {
     Software,
-    VaH264 { render_node: PathBuf },
+    VaH264 {
+        render_node: PathBuf,
+        render_device: RenderDeviceIdentity,
+    },
 }
 
 impl VideoEncoderPolicy {
@@ -51,7 +55,7 @@ impl VideoEncoderPolicy {
     fn encoder(&self, codec: VideoCodec) -> Result<VideoEncoder, MediaGraphError> {
         match (self, codec) {
             (Self::Software, codec) => Ok(VideoEncoder::software(codec)),
-            (Self::VaH264 { render_node }, VideoCodec::H264) => {
+            (Self::VaH264 { render_node, .. }, VideoCodec::H264) => {
                 Ok(VideoEncoder::va_h264(render_node.clone()))
             }
             (Self::VaH264 { .. }, VideoCodec::Vp8) => Err(MediaGraphError::new(
@@ -1495,6 +1499,7 @@ mod tests {
     fn va_policy_offers_only_its_h264_encoder() {
         let policy = VideoEncoderPolicy::VaH264 {
             render_node: PathBuf::from("/dev/dri/renderD128"),
+            render_device: test_render_device(),
         };
         assert_eq!(policy.offer(), VideoOffer::H264);
         assert!(policy.encoder(VideoCodec::Vp8).is_err());
@@ -1517,6 +1522,7 @@ mod tests {
             7,
             VideoEncoderPolicy::VaH264 {
                 render_node: PathBuf::from("/dev/dri/renderD128"),
+                render_device: test_render_device(),
             },
             Box::new(graph),
             video_receiver,
@@ -2095,6 +2101,13 @@ mod tests {
             height: 480,
             refresh_millihz: 60_000,
             flags: 0,
+        }
+    }
+
+    fn test_render_device() -> RenderDeviceIdentity {
+        RenderDeviceIdentity {
+            major: 226,
+            minor: 128,
         }
     }
 

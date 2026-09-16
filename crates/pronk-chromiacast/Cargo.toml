@@ -11,6 +11,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 chromiacast.workspace = true
 futures-util.workspace = true
+nix.workspace = true
 pronk-backend-protocol = { path = "../pronk-backend-protocol" }
 pronk-media = { path = "../pronk-media" }
 pronk-systemd = { path = "../pronk-systemd" }
