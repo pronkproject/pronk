@@ -5,10 +5,15 @@ use std::io;
 use std::os::fd::AsFd;
 use std::time::Duration;
 
-use castkms_renderer::{Renderer, TakeoverCandidate};
-use pronk_gpu::vulkan::Device;
+use castkms_renderer::{
+    CapabilityProfile, ProfileRegistration, RegisteredCandidate, Renderer, RendererCapability,
+    TakeoverCandidate,
+};
+use castkms_sys::DRM_FORMAT_MOD_LINEAR;
+use drm_display_executor::scene::geometry::Extent;
+use pronk_gpu::vulkan::{Device, PackedFormat, SourceRequirements};
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
-use pronk_renderer_worker::{OutputPool, PrivatePool, PrivateProbe, SourceReader};
+use pronk_renderer_worker::{OutputPool, PrivateProbe, SceneReader, SceneStorageProfile};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +26,7 @@ pub(crate) enum Started {
     Ready {
         identity: VideoNodeIdentity,
         layout: VideoBufferLayout,
+        registration: ProfileRegistration,
     },
     Failed,
 }
@@ -78,14 +84,7 @@ async fn run_generation<F: AsFd>(
             Ok(generation) => generation,
             Err(error) => return GenerationOutcome::candidate(Err(error)),
         };
-    run_prepared(
-        generation,
-        device,
-        control.stop,
-        control.state,
-        control.activation,
-    )
-    .await
+    run_prepared(generation, control.stop, control.state, control.activation).await
 }
 
 struct GenerationControl<'a> {
@@ -97,7 +96,6 @@ struct GenerationControl<'a> {
 
 async fn run_prepared<F: AsFd>(
     generation: PreparedGeneration<'_, F>,
-    device: Device,
     stop: &CancellationToken,
     state: &watch::Sender<RendererStreamState>,
     mut activation: oneshot::Receiver<oneshot::Sender<()>>,
@@ -105,7 +103,8 @@ async fn run_prepared<F: AsFd>(
     let PreparedGeneration {
         mut video,
         probe,
-        private,
+        storage,
+        scene_pool,
         source_interval,
     } = generation;
     let mut available = VecDeque::new();
@@ -113,7 +112,7 @@ async fn run_prepared<F: AsFd>(
         tokio::select! {
             biased;
             _ = stop.cancelled() => {
-                let result = finish_candidate(video, probe, private, None).await;
+                let result = finish_candidate(video, probe, scene_pool, None).await;
                 return GenerationOutcome::candidate(result);
             }
             requested = &mut activation => {
@@ -123,7 +122,7 @@ async fn run_prepared<F: AsFd>(
                         let result = finish_candidate(
                             video,
                             probe,
-                            private,
+                            scene_pool,
                             Some(io::Error::other("renderer activation request was abandoned")),
                         ).await;
                         return GenerationOutcome::candidate(result);
@@ -133,10 +132,10 @@ async fn run_prepared<F: AsFd>(
                     PreparedGeneration {
                         video,
                         probe,
-                        private,
+                        storage,
+                        scene_pool,
                         source_interval,
                     },
-                    device,
                     available,
                     ActiveControl {
                         stop,
@@ -155,7 +154,7 @@ async fn run_prepared<F: AsFd>(
                     let slot = match video.finish_return(returned) {
                         Ok(slot) => slot,
                         Err(error) => {
-                            let result = finish_candidate(video, probe, private, Some(error)).await;
+                            let result = finish_candidate(video, probe, scene_pool, Some(error)).await;
                             return GenerationOutcome::candidate(result);
                         }
                     };
@@ -167,11 +166,11 @@ async fn run_prepared<F: AsFd>(
                         let returned = output.wait().await;
                         let _ = video.finish_return(returned);
                     }
-                    let result = finish_candidate(video, probe, private, Some(error)).await;
+                    let result = finish_candidate(video, probe, scene_pool, Some(error)).await;
                     return GenerationOutcome::candidate(result);
                 }
                 Err(error) => {
-                    let result = finish_candidate(video, probe, private, Some(error)).await;
+                    let result = finish_candidate(video, probe, scene_pool, Some(error)).await;
                     return GenerationOutcome::candidate(result);
                 }
             }
@@ -181,14 +180,14 @@ async fn run_prepared<F: AsFd>(
 
 async fn activate_generation<F: AsFd>(
     generation: PreparedGeneration<'_, F>,
-    device: Device,
     available: VecDeque<usize>,
     control: ActiveControl<'_>,
 ) -> GenerationOutcome {
     let PreparedGeneration {
         mut video,
         probe,
-        private,
+        storage,
+        scene_pool,
         source_interval,
     } = generation;
     let submitted = match probe.submit() {
@@ -205,7 +204,7 @@ async fn activate_generation<F: AsFd>(
             return GenerationOutcome::candidate(result);
         }
     };
-    let reader = match SourceReader::new(active_renderer, device, private) {
+    let reader = match SceneReader::new(active_renderer, storage, scene_pool) {
         Ok(reader) => reader,
         Err(failure) => {
             let (_, _, _, error) = failure.into_parts();
@@ -224,7 +223,9 @@ async fn activate_generation<F: AsFd>(
         .await;
         return GenerationOutcome::active(result);
     }
-    let result = active::run(reader, &mut video, available, source_interval, control.stop).await;
+    let result =
+        active::run_complete_scenes(reader, &mut video, available, source_interval, control.stop)
+            .await;
     GenerationOutcome::active(finish_video(video, result.err()).await)
 }
 
@@ -237,7 +238,8 @@ struct ActiveControl<'a> {
 struct PreparedGeneration<'renderer, F: AsFd> {
     video: Video,
     probe: PrivateProbe<'renderer, F>,
-    private: PrivatePool,
+    storage: SceneStorageProfile,
+    scene_pool: pronk_renderer_worker::ScenePool,
     source_interval: Duration,
 }
 
@@ -260,23 +262,25 @@ async fn prepare_generation<'renderer, F: AsFd>(
     let description = renderer.describe()?;
     let candidate = renderer.begin_takeover(description)?;
     let configuration = candidate.configuration();
-    let probe = match PrivateProbe::prepare(device, candidate) {
-        Ok(probe) => probe,
-        Err(failure) => {
-            let (candidate, error) = failure.into_parts();
+    let output_extent = Extent::new(configuration.width().get(), configuration.height().get())
+        .expect("candidate output dimensions are nonzero");
+    let source = SourceRequirements {
+        format: PackedFormat::Bgra8,
+        extent: output_extent,
+        modifier: DRM_FORMAT_MOD_LINEAR,
+    };
+    let storage = match SceneStorageProfile::new(device, output_extent, &[source]) {
+        Ok(storage) => storage,
+        Err(error) => {
+            let _ = started.send(Started::Failed);
             return Err(abort_candidate(candidate, error));
         }
     };
-    let private = match PrivatePool::new(
-        device,
-        configuration.width(),
-        configuration.height(),
-        config.private_capacity,
-    ) {
-        Ok(private) => private,
+    let scene_pool = match storage.create_pool(config.private_capacity, config.private_capacity) {
+        Ok(scene_pool) => scene_pool,
         Err(error) => {
             let _ = started.send(Started::Failed);
-            return Err(abort_probe(probe, error));
+            return Err(abort_candidate(candidate, error));
         }
     };
     let output = match OutputPool::new(
@@ -290,15 +294,15 @@ async fn prepare_generation<'renderer, F: AsFd>(
     {
         Ok(output) => output,
         Err(error) => {
-            drop(private);
-            return Err(abort_probe(probe, error));
+            drop(scene_pool);
+            return Err(abort_candidate(candidate, error));
         }
     };
     let registration = match Registration::new(output) {
         Ok(registration) => registration,
         Err(error) => {
-            drop(private);
-            return Err(abort_probe(probe, error));
+            drop(scene_pool);
+            return Err(abort_candidate(candidate, error));
         }
     };
     let layout = registration.layout();
@@ -306,16 +310,42 @@ async fn prepare_generation<'renderer, F: AsFd>(
         Ok(video) => video,
         Err(error) => {
             let _ = started.send(Started::Failed);
-            drop(private);
-            return Err(abort_probe(probe, error));
+            drop(scene_pool);
+            return Err(abort_candidate(candidate, error));
+        }
+    };
+    let profile =
+        CapabilityProfile::Renderer(RendererCapability::linear_xrgb8888_primary(output_extent));
+    let candidate = match candidate.register_profile(&profile) {
+        Ok(candidate) => candidate,
+        Err(failure) => {
+            let (candidate, error) = failure.into_parts();
+            drop(scene_pool);
+            return Err(finish_unregistered(video, candidate, error).await);
+        }
+    };
+    let profile_registration = candidate.registration();
+    let probe = match PrivateProbe::prepare(device, candidate) {
+        Ok(probe) => probe,
+        Err(failure) => {
+            let (candidate, error) = failure.into_parts();
+            drop(scene_pool);
+            return Err(finish_registered(video, candidate, error).await);
         }
     };
     let identity = video.identity().clone();
-    if started.send(Started::Ready { identity, layout }).is_err() {
+    if started
+        .send(Started::Ready {
+            identity,
+            layout,
+            registration: profile_registration,
+        })
+        .is_err()
+    {
         let failure = finish_candidate(
             video,
             probe,
-            private,
+            scene_pool,
             Some(io::Error::other("renderer stream setup was abandoned")),
         )
         .await
@@ -325,17 +355,36 @@ async fn prepare_generation<'renderer, F: AsFd>(
     Ok(PreparedGeneration {
         video,
         probe,
-        private,
+        storage,
+        scene_pool,
         source_interval: Duration::from_nanos(interval_ns),
     })
 }
 
-fn abort_probe<F: AsFd>(probe: PrivateProbe<'_, F>, error: io::Error) -> io::Error {
-    combine_abort(error, probe.abort())
-}
-
 fn abort_candidate<F: AsFd>(candidate: TakeoverCandidate<'_, F>, error: io::Error) -> io::Error {
     combine_abort(error, candidate.abort())
+}
+
+async fn finish_unregistered<F: AsFd>(
+    video: Video,
+    candidate: TakeoverCandidate<'_, F>,
+    error: io::Error,
+) -> io::Error {
+    let error = abort_candidate(candidate, error);
+    finish_video(video, Some(error))
+        .await
+        .expect_err("explicit setup failure remains terminal")
+}
+
+async fn finish_registered<F: AsFd>(
+    video: Video,
+    candidate: RegisteredCandidate<'_, F>,
+    error: io::Error,
+) -> io::Error {
+    let error = combine_abort(error, candidate.abort());
+    finish_video(video, Some(error))
+        .await
+        .expect_err("explicit setup failure remains terminal")
 }
 
 fn combine_abort(error: io::Error, abort: io::Result<()>) -> io::Error {
@@ -356,13 +405,13 @@ fn add_failure(failure: &mut Option<io::Error>, operation: &str, error: io::Erro
 async fn finish_candidate<F: AsFd>(
     video: Video,
     probe: PrivateProbe<'_, F>,
-    private: PrivatePool,
+    scene_pool: pronk_renderer_worker::ScenePool,
     mut failure: Option<io::Error>,
 ) -> io::Result<()> {
     if let Err(error) = probe.abort() {
         add_failure(&mut failure, "abort renderer takeover", error);
     }
-    drop(private);
+    drop(scene_pool);
     finish_video(video, failure).await
 }
 

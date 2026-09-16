@@ -1526,6 +1526,7 @@ dependencies = [
  "castkms-renderer",
  "cc",
  "drm-capture",
+ "drm-display-executor",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-video",
@@ -1605,6 +1606,8 @@ name = "pronk-renderer-pipewire"
 version = "0.1.0"
 dependencies = [
  "castkms-renderer",
+ "castkms-sys",
+ "drm-display-executor",
  "nix 0.29.0",
  "pronk-gpu",
  "pronk-pipewire",

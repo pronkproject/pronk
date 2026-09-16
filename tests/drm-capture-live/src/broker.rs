@@ -8,6 +8,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
+use castkms_renderer::{CapabilityProfile, RendererCapability};
+use drm_display_executor::scene::geometry::Extent;
 use pronk_capture::{allocation::Heap, Actor, Config, Layout};
 use pronk_capture_broker::{Provider, Target};
 use tokio_util::sync::CancellationToken;
@@ -87,7 +89,13 @@ async fn run(target: Target) -> anyhow::Result<()> {
             configuration.width() == offer.width && configuration.height() == offer.height,
             "renderer and capture output geometry differs"
         );
-        let startup = candidate.startup_image()?;
+        let profile = CapabilityProfile::Renderer(RendererCapability::linear_xrgb8888_primary(
+            Extent::new(configuration.width().get(), configuration.height().get())?,
+        ));
+        let startup = candidate
+            .register_profile(&profile)
+            .map_err(|failure| failure.into_parts().1)?
+            .startup_image()?;
         let image = startup.image();
         ensure!(
             image.width() == offer.width && image.height() == offer.height,

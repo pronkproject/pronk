@@ -3,7 +3,7 @@
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-use castkms_renderer::{FormatModifier, SourceGeometry, SourceJob, SourceReleaseError};
+use castkms_renderer::FormatModifier;
 use castkms_sys::{
     DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
     DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010,
@@ -12,15 +12,6 @@ use castkms_sys::{
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{Device, ImageLayout, PackedFormat, SourceImage};
 
-/// One claimed source paired with its ordinary Vulkan import.
-#[must_use = "release the source without access or submit its native read"]
-pub struct ImportedSource<'job, 'renderer, F: AsFd> {
-    pub(super) job: SourceJob<'job, 'renderer, F>,
-    pub(super) image: SourceImage,
-    pub(super) geometry: SourceGeometry,
-    pub(super) alpha: SourceAlpha,
-}
-
 /// Whether the imported fourth channel contains alpha or ignored padding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceAlpha {
@@ -28,72 +19,6 @@ pub enum SourceAlpha {
     Opaque,
     /// The native fourth component contains normalized pixel alpha.
     Channel,
-}
-
-impl<'job, 'renderer, F: AsFd> ImportedSource<'job, 'renderer, F> {
-    /// Import the source through the selected Vulkan device without reading it.
-    pub fn new(
-        device: &Device,
-        job: SourceJob<'job, 'renderer, F>,
-    ) -> Result<Self, ImportError<SourceJob<'job, 'renderer, F>>> {
-        match import(device, &job) {
-            Ok((image, alpha)) => Ok(Self {
-                geometry: job.geometry(),
-                job,
-                image,
-                alpha,
-            }),
-            Err(error) => Err(ImportError {
-                job: Box::new(job),
-                error,
-            }),
-        }
-    }
-
-    pub fn geometry(&self) -> SourceGeometry {
-        self.geometry
-    }
-
-    pub fn alpha(&self) -> SourceAlpha {
-        self.alpha
-    }
-
-    /// Destroy the unused import before promising that no pixels were accessed.
-    pub fn release_without_access(
-        self,
-    ) -> Result<(), SourceReleaseError<SourceJob<'job, 'renderer, F>>> {
-        let Self { job, image, .. } = self;
-        drop(image);
-        job.release_without_access()
-    }
-}
-
-/// A failed pre-submission import retaining the source job for no-access release.
-#[derive(Debug)]
-pub struct ImportError<J> {
-    job: Box<J>,
-    error: io::Error,
-}
-
-impl<J> ImportError<J> {
-    pub fn error(&self) -> &io::Error {
-        &self.error
-    }
-
-    pub fn into_job(self) -> J {
-        *self.job
-    }
-
-    pub fn into_parts(self) -> (J, io::Error) {
-        (*self.job, self.error)
-    }
-}
-
-fn import<F: AsFd>(
-    device: &Device,
-    job: &SourceJob<'_, '_, F>,
-) -> io::Result<(SourceImage, SourceAlpha)> {
-    import_image(device, job.image(), job.producer_completion())
 }
 
 pub(crate) fn import_image(

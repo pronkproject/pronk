@@ -9,24 +9,13 @@ use nix::sys::time::TimeValLike;
 use nix::time::{clock_gettime, ClockId};
 use pronk_renderer_worker::{
     CompletedOutput, CompletedReturn, ComposedFrame, FinishedOutput, PrivateBuffer, PrivateFrame,
-    ReleasedSceneJob, ReleasedSource, SceneAttempt, SceneReader, SourceAttempt, SourceReader,
+    SceneAttempt, SceneReader,
 };
 use tokio::task::JoinSet;
 use tokio::time::{self, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::{FramePublishError, Video, VideoEvent};
-
-/// Run source staging and output delivery until cancellation or terminal failure.
-pub(crate) async fn run<F: AsFd>(
-    reader: SourceReader<'_, F>,
-    video: &mut Video,
-    available: VecDeque<usize>,
-    source_interval: Duration,
-    stop: &CancellationToken,
-) -> io::Result<()> {
-    run_reader(reader, video, available, source_interval, stop).await
-}
 
 /// Run complete-scene composition and output delivery until cancellation.
 pub async fn run_complete_scenes<F: AsFd>(
@@ -36,19 +25,10 @@ pub async fn run_complete_scenes<F: AsFd>(
     source_interval: Duration,
     stop: &CancellationToken,
 ) -> io::Result<()> {
-    run_reader(reader, video, available, source_interval, stop).await
-}
-
-async fn run_reader<R: FrameReader>(
-    mut reader: R,
-    video: &mut Video,
-    available: VecDeque<usize>,
-    source_interval: Duration,
-    stop: &CancellationToken,
-) -> io::Result<()> {
     if source_interval.is_zero() {
         return Err(invalid("renderer source interval is zero"));
     }
+    let mut reader = reader;
     let mut pipeline = Pipeline::new(available);
     let mut source_tick = time::interval(source_interval);
     source_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -58,10 +38,10 @@ async fn run_reader<R: FrameReader>(
     result
 }
 
-async fn run_until_stopped<R: FrameReader>(
-    reader: &mut R,
+async fn run_until_stopped<F: AsFd>(
+    reader: &mut SceneReader<'_, F>,
     video: &mut Video,
-    pipeline: &mut Pipeline<R::Completed>,
+    pipeline: &mut Pipeline,
     source_tick: &mut time::Interval,
     stop: &CancellationToken,
 ) -> io::Result<()> {
@@ -82,7 +62,11 @@ async fn run_until_stopped<R: FrameReader>(
                     .ok_or_else(|| io::Error::other("frame completion set ended unexpectedly"))?
                     .map_err(join_error)?;
                 for completed in pipeline.completion_order.complete(sequence, completed?)? {
-                    let frame = reader.finish(completed)?;
+                    let frame = reader.finish_composition(completed).map_err(|_| {
+                        io::Error::other(
+                            "scene reader rejected its completed private source stages",
+                        )
+                    })?;
                     pipeline.frames.push_back(frame);
                 }
             }
@@ -101,7 +85,7 @@ async fn run_until_stopped<R: FrameReader>(
                 let first = !pipeline.published;
                 match video.publish(ready, monotonic_now_ns()?, first).await {
                     Ok((private, _)) => {
-                        reader.return_destination(private)?;
+                        return_destination(reader, private)?;
                         pipeline.published = true;
                     }
                     Err(error) => {
@@ -116,14 +100,14 @@ async fn run_until_stopped<R: FrameReader>(
                 let slot = video.finish_return(returned)?;
                 pipeline.available.push_back(slot);
             }
-            _ = source_tick.tick(), if reader.available() != 0 => {
-                match reader.try_submit()? {
-                    FrameAttempt::Idle => {}
-                    FrameAttempt::Rejected(cause) => return Err(cause),
-                    FrameAttempt::Submitted(source) => {
+            _ = source_tick.tick(), if reader.available_slots() != 0 => {
+                match SceneReader::try_submit(reader).map_err(io::Error::other)? {
+                    SceneAttempt::NoSlot | SceneAttempt::NoScene => {}
+                    SceneAttempt::Rejected { cause } => return Err(cause),
+                    SceneAttempt::Submitted(scene) => {
                         let sequence = pipeline.completion_order.admit()?;
                         pipeline.frame_tasks.spawn_blocking(move || {
-                            (sequence, R::complete(source))
+                            (sequence, scene.compose_and_wait().map_err(io::Error::other))
                         });
                     }
                 }
@@ -132,18 +116,18 @@ async fn run_until_stopped<R: FrameReader>(
     }
 }
 
-struct Pipeline<C: Send + 'static> {
+struct Pipeline {
     available: VecDeque<usize>,
     frames: VecDeque<PrivateFrame>,
-    frame_tasks: JoinSet<(u64, io::Result<C>)>,
-    completion_order: CompletionOrder<C>,
+    frame_tasks: JoinSet<(u64, io::Result<ComposedFrame>)>,
+    completion_order: CompletionOrder<ComposedFrame>,
     output_copies: JoinSet<io::Result<CompletedOutput>>,
     producer_waits: JoinSet<FinishedOutput>,
     reader_waits: JoinSet<CompletedReturn>,
     published: bool,
 }
 
-impl<C: Send + 'static> Pipeline<C> {
+impl Pipeline {
     fn new(available: VecDeque<usize>) -> Self {
         Self {
             available,
@@ -193,24 +177,24 @@ impl<C: Send + 'static> Pipeline<C> {
         }
     }
 
-    fn recover_publication<R: FrameReader>(
+    fn recover_publication<F: AsFd>(
         &mut self,
         error: FramePublishError,
-        reader: &mut R,
+        reader: &mut SceneReader<'_, F>,
     ) -> io::Result<io::Error> {
         let cause = io::Error::new(error.error().kind(), error.error().to_string());
         match error {
             FramePublishError::Prepare(error) => {
                 let (private, retirement, _) = error.into_parts();
                 if let Some(private) = private {
-                    reader.return_destination(private)?;
+                    return_destination(reader, private)?;
                 }
                 if let Some(output) = retirement {
                     self.reader_waits.spawn(async move { output.wait().await });
                 }
             }
             FramePublishError::Handoff { private, .. } => {
-                reader.return_destination(private)?;
+                return_destination(reader, private)?;
             }
         }
         Ok(cause)
@@ -270,87 +254,12 @@ impl<C> CompletionOrder<C> {
     }
 }
 
-trait FrameReader {
-    type Submitted: Send + 'static;
-    type Completed: Send + 'static;
-
-    fn available(&self) -> usize;
-    fn try_submit(&mut self) -> io::Result<FrameAttempt<Self::Submitted>>;
-    fn complete(submitted: Self::Submitted) -> io::Result<Self::Completed>;
-    fn finish(&mut self, completed: Self::Completed) -> io::Result<PrivateFrame>;
-    fn return_destination(&mut self, destination: PrivateBuffer) -> io::Result<()>;
-}
-
-enum FrameAttempt<S> {
-    Idle,
-    Rejected(io::Error),
-    Submitted(S),
-}
-
-impl<F: AsFd> FrameReader for SourceReader<'_, F> {
-    type Submitted = ReleasedSource;
-    type Completed = PrivateFrame;
-
-    fn available(&self) -> usize {
-        self.available_destinations()
-    }
-
-    fn try_submit(&mut self) -> io::Result<FrameAttempt<Self::Submitted>> {
-        Ok(
-            match SourceReader::try_submit(self).map_err(io::Error::other)? {
-                SourceAttempt::NoDestination | SourceAttempt::NoSource => FrameAttempt::Idle,
-                SourceAttempt::Rejected { cause } => FrameAttempt::Rejected(cause),
-                SourceAttempt::Submitted(source) => FrameAttempt::Submitted(source),
-            },
-        )
-    }
-
-    fn complete(submitted: Self::Submitted) -> io::Result<Self::Completed> {
-        submitted.wait()
-    }
-
-    fn finish(&mut self, completed: Self::Completed) -> io::Result<PrivateFrame> {
-        Ok(completed)
-    }
-
-    fn return_destination(&mut self, destination: PrivateBuffer) -> io::Result<()> {
-        SourceReader::return_destination(self, destination)
-            .map_err(|_| io::Error::other("source reader rejected its returned private buffer"))
-    }
-}
-
-impl<F: AsFd> FrameReader for SceneReader<'_, F> {
-    type Submitted = Box<ReleasedSceneJob>;
-    type Completed = ComposedFrame;
-
-    fn available(&self) -> usize {
-        self.available_slots()
-    }
-
-    fn try_submit(&mut self) -> io::Result<FrameAttempt<Self::Submitted>> {
-        Ok(
-            match SceneReader::try_submit(self).map_err(io::Error::other)? {
-                SceneAttempt::NoSlot | SceneAttempt::NoScene => FrameAttempt::Idle,
-                SceneAttempt::Rejected { cause } => FrameAttempt::Rejected(cause),
-                SceneAttempt::Submitted(scene) => FrameAttempt::Submitted(scene),
-            },
-        )
-    }
-
-    fn complete(submitted: Self::Submitted) -> io::Result<Self::Completed> {
-        submitted.compose_and_wait().map_err(io::Error::other)
-    }
-
-    fn finish(&mut self, completed: Self::Completed) -> io::Result<PrivateFrame> {
-        self.finish_composition(completed).map_err(|_| {
-            io::Error::other("scene reader rejected its completed private source stages")
-        })
-    }
-
-    fn return_destination(&mut self, destination: PrivateBuffer) -> io::Result<()> {
-        SceneReader::return_destination(self, destination)
-            .map_err(|_| io::Error::other("scene reader rejected its returned final image"))
-    }
+fn return_destination<F: AsFd>(
+    reader: &mut SceneReader<'_, F>,
+    destination: PrivateBuffer,
+) -> io::Result<()> {
+    SceneReader::return_destination(reader, destination)
+        .map_err(|_| io::Error::other("scene reader rejected its returned final image"))
 }
 
 async fn stop_tasks<T: 'static>(tasks: &mut JoinSet<T>) {

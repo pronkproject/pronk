@@ -3,8 +3,8 @@
 //! A renderer descriptor grants no modesetting or final-image capture access.
 //! Its operations reserve one takeover candidate and optionally copy the most
 //! recent HOST result into independent, read-only storage. An active renderer
-//! can claim one source or complete-scene job whose consuming release records
-//! how source access ended.
+//! claims one complete-scene job whose consuming release records how every
+//! source access ended.
 
 mod capability;
 mod scene;
@@ -15,9 +15,7 @@ pub use capability::{
     StorageProvenance,
 };
 pub use scene::{ColorEncoding, ColorOperation, ColorRange, LayerKind, SceneJob, SceneLayer};
-pub use source::{
-    FormatModifier, SourceGeometry, SourceImage, SourceJob, SourcePlane, SourceReleaseError,
-};
+pub use source::{FormatModifier, SourceImage, SourcePlane, SourceReleaseError};
 
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -243,6 +241,22 @@ pub struct ProfileRegistration {
 }
 
 impl ProfileRegistration {
+    /// Construct transport metadata without conferring renderer authority.
+    pub fn from_values(
+        transition: u64,
+        capability_generation: u64,
+        execution_generation: u64,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            transition: NonZeroU64::new(transition)
+                .ok_or_else(|| invalid_data("zero renderer transition"))?,
+            capability_generation: NonZeroU64::new(capability_generation)
+                .ok_or_else(|| invalid_data("zero capability generation"))?,
+            execution_generation: NonZeroU64::new(execution_generation)
+                .ok_or_else(|| invalid_data("zero execution generation"))?,
+        })
+    }
+
     pub fn transition(self) -> NonZeroU64 {
         self.transition
     }
@@ -293,8 +307,65 @@ impl<'renderer, F: AsFd> RegisteredCandidate<'renderer, F> {
         self,
         completion: Option<BorrowedFd<'_>>,
     ) -> io::Result<SubmittedCandidate<'renderer, F>> {
-        self.candidate
-            .submit_probe(RENDERER_PROBE_PRIVATE, completion)
+        self.submit_probe(RENDERER_PROBE_PRIVATE, completion)
+    }
+
+    /// Copy the newest eligible HOST result into independent storage.
+    ///
+    /// `ENODATA` means no retained HOST image is available. The operation does
+    /// not request a new HOST copy. Success pairs the only delivered image with
+    /// the registered contract; any error aborts the consumed candidate.
+    pub fn startup_image(self) -> io::Result<StartupCandidate<'renderer, F>> {
+        let mut result = DrmCastkmsRendererSnapshot {
+            dma_buf_fd: -1,
+            ..Default::default()
+        };
+        let request = DrmCastkmsRendererGetSnapshot {
+            candidate_id: self.candidate.id.get(),
+            result: (&mut result as *mut DrmCastkmsRendererSnapshot) as u64,
+            ..Default::default()
+        };
+        // SAFETY: The fixed-width input and separate writable result remain live
+        // throughout the synchronous ioctl. Success installs one fresh descriptor.
+        unsafe {
+            drm_ioctl_castkms_renderer_get_snapshot(
+                self.candidate.renderer.fd.as_fd().as_raw_fd(),
+                &request,
+            )
+        }?;
+        if result.dma_buf_fd < 0 {
+            return Err(invalid_data("CastKMS returned an invalid startup image fd"));
+        }
+        // SAFETY: A successful snapshot call installs one fresh descriptor for
+        // the caller, and no other Rust owner has adopted it.
+        let dma_buf = unsafe { OwnedFd::from_raw_fd(result.dma_buf_fd) };
+        let image = validate_startup_image(result, dma_buf, self.candidate.configuration)?;
+        Ok(StartupCandidate {
+            candidate: self,
+            image,
+        })
+    }
+
+    fn submit_probe(
+        self,
+        source: u32,
+        completion: Option<BorrowedFd<'_>>,
+    ) -> io::Result<SubmittedCandidate<'renderer, F>> {
+        let request = DrmCastkmsRendererSubmitProbe {
+            candidate_id: self.candidate.id.get(),
+            completion_fd: completion.map_or(-1, |fd| fd.as_raw_fd()),
+            source,
+            ..Default::default()
+        };
+        // SAFETY: The initialized fixed-width request and any borrowed
+        // completion descriptor remain live throughout the synchronous ioctl.
+        unsafe {
+            drm_ioctl_castkms_renderer_submit_probe(
+                self.candidate.renderer.fd.as_fd().as_raw_fd(),
+                &request,
+            )
+        }?;
+        Ok(SubmittedCandidate { candidate: self })
     }
 
     pub fn abort(self) -> io::Result<()> {
@@ -356,80 +427,6 @@ impl<'renderer, F: AsFd> TakeoverCandidate<'renderer, F> {
         }
     }
 
-    /// Copy the newest eligible HOST result into independent storage.
-    ///
-    /// `ENODATA` means no retained HOST image is available. The operation does
-    /// not request a new HOST copy. Success pairs the only delivered image with
-    /// the candidate; any error aborts the consumed candidate.
-    pub fn startup_image(self) -> io::Result<StartupCandidate<'renderer, F>> {
-        let mut result = DrmCastkmsRendererSnapshot {
-            dma_buf_fd: -1,
-            ..Default::default()
-        };
-        let request = DrmCastkmsRendererGetSnapshot {
-            candidate_id: self.id.get(),
-            result: (&mut result as *mut DrmCastkmsRendererSnapshot) as u64,
-            ..Default::default()
-        };
-        // SAFETY: The fixed-width input and separate writable result remain live
-        // throughout the synchronous ioctl. Success installs one fresh descriptor.
-        unsafe {
-            drm_ioctl_castkms_renderer_get_snapshot(self.renderer.fd.as_fd().as_raw_fd(), &request)
-        }?;
-        if result.dma_buf_fd < 0 {
-            return Err(invalid_data("CastKMS returned an invalid startup image fd"));
-        }
-        // SAFETY: A successful snapshot call installs one fresh descriptor for
-        // the caller, and no other Rust owner has adopted it.
-        let dma_buf = unsafe { OwnedFd::from_raw_fd(result.dma_buf_fd) };
-        let image = validate_startup_image(result, dma_buf, self.configuration)?;
-        Ok(StartupCandidate {
-            candidate: self,
-            image,
-        })
-    }
-
-    /// Submit test work over renderer-owned storage.
-    ///
-    /// The candidate is consumed so safe Rust cannot submit a second test or
-    /// request a startup image afterward. The native completion may remain
-    /// pending after the operation returns.
-    ///
-    /// ```compile_fail
-    /// use castkms_renderer::TakeoverCandidate;
-    /// use std::os::fd::AsFd;
-    ///
-    /// fn submit_twice<F: AsFd>(candidate: TakeoverCandidate<'_, F>) {
-    ///     let submitted = candidate.submit_private_probe(None).unwrap();
-    ///     submitted.submit_private_probe(None);
-    /// }
-    /// ```
-    pub fn submit_private_probe(
-        self,
-        completion: Option<BorrowedFd<'_>>,
-    ) -> io::Result<SubmittedCandidate<'renderer, F>> {
-        self.submit_probe(RENDERER_PROBE_PRIVATE, completion)
-    }
-
-    fn submit_probe(
-        self,
-        source: u32,
-        completion: Option<BorrowedFd<'_>>,
-    ) -> io::Result<SubmittedCandidate<'renderer, F>> {
-        let request = DrmCastkmsRendererSubmitProbe {
-            candidate_id: self.id.get(),
-            completion_fd: completion.map_or(-1, |fd| fd.as_raw_fd()),
-            source,
-            ..Default::default()
-        };
-        // SAFETY: The initialized fixed-width request and any borrowed
-        // completion descriptor remain live throughout the synchronous ioctl.
-        unsafe {
-            drm_ioctl_castkms_renderer_submit_probe(self.renderer.fd.as_fd().as_raw_fd(), &request)
-        }?;
-        Ok(SubmittedCandidate { candidate: self })
-    }
-
     /// Release the candidate without changing the active execution profile.
     pub fn abort(mut self) -> io::Result<()> {
         let result = abort(self.renderer.as_fd(), self.id);
@@ -444,7 +441,7 @@ impl<'renderer, F: AsFd> TakeoverCandidate<'renderer, F> {
 #[must_use = "submit startup test work or abort the candidate deliberately"]
 #[derive(Debug)]
 pub struct StartupCandidate<'renderer, F: AsFd> {
-    candidate: TakeoverCandidate<'renderer, F>,
+    candidate: RegisteredCandidate<'renderer, F>,
     image: StartupImage,
 }
 
@@ -474,7 +471,7 @@ impl<'renderer, F: AsFd> StartupCandidate<'renderer, F> {
 #[must_use = "retain the submitted candidate for activation or abort it deliberately"]
 #[derive(Debug)]
 pub struct SubmittedCandidate<'renderer, F: AsFd> {
-    candidate: TakeoverCandidate<'renderer, F>,
+    candidate: RegisteredCandidate<'renderer, F>,
 }
 
 impl<'renderer, F: AsFd> SubmittedCandidate<'renderer, F> {
@@ -494,31 +491,16 @@ impl<'renderer, F: AsFd> SubmittedCandidate<'renderer, F> {
     pub fn activate(
         mut self,
     ) -> Result<ActiveRenderer<'renderer, F>, ActivationError<'renderer, F>> {
-        let generation = match self
-            .candidate
-            .execution
-            .generation
-            .get()
-            .checked_add(1)
-            .and_then(NonZeroU64::new)
-        {
-            Some(generation) => generation,
-            None => {
-                return Err(ActivationError {
-                    submitted: self,
-                    error: invalid_data("CastKMS execution generation overflowed"),
-                });
-            }
-        };
+        let generation = self.candidate.registration.execution_generation;
         let request = DrmCastkmsRendererCommitTakeover {
-            candidate_id: self.candidate.id.get(),
+            candidate_id: self.candidate.candidate.id.get(),
             ..Default::default()
         };
         // SAFETY: The initialized fixed-width request remains live throughout
         // the synchronous ioctl.
         if let Err(error) = unsafe {
             drm_ioctl_castkms_renderer_commit_takeover(
-                self.candidate.renderer.fd.as_fd().as_raw_fd(),
+                self.candidate.candidate.renderer.fd.as_fd().as_raw_fd(),
                 &request,
             )
         } {
@@ -527,7 +509,7 @@ impl<'renderer, F: AsFd> SubmittedCandidate<'renderer, F> {
                 error: error.into(),
             });
         }
-        self.candidate.active = false;
+        self.candidate.candidate.active = false;
         Ok(ActiveRenderer {
             submitted: self,
             description: Description {
@@ -585,7 +567,7 @@ impl<F: AsFd> ActiveRenderer<'_, F> {
 
 impl<F: AsFd> AsFd for ActiveRenderer<'_, F> {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.submitted.candidate.renderer.as_fd()
+        self.submitted.candidate.candidate.renderer.as_fd()
     }
 }
 
@@ -672,14 +654,11 @@ fn validate_registration(
         .checked_add(1)
         .and_then(NonZeroU64::new)
         .ok_or_else(|| invalid_data("CastKMS execution generation overflowed"))?;
-    let registration = ProfileRegistration {
-        transition: NonZeroU64::new(result.transition)
-            .ok_or_else(|| invalid_data("CastKMS returned a zero transition"))?,
-        capability_generation: NonZeroU64::new(result.capability_generation)
-            .ok_or_else(|| invalid_data("CastKMS returned a zero capability generation"))?,
-        execution_generation: NonZeroU64::new(result.execution_generation)
-            .ok_or_else(|| invalid_data("CastKMS returned a zero target execution generation"))?,
-    };
+    let registration = ProfileRegistration::from_values(
+        result.transition,
+        result.capability_generation,
+        result.execution_generation,
+    )?;
     if result.reserved != 0 || registration.execution_generation != expected_execution {
         return Err(invalid_data(
             "CastKMS returned an inconsistent profile registration",
@@ -803,16 +782,28 @@ mod tests {
         generation: u64,
     ) -> SubmittedCandidate<'_, std::fs::File> {
         SubmittedCandidate {
-            candidate: TakeoverCandidate {
-                renderer,
-                id: NonZeroU64::new(9).unwrap(),
-                profile: Profile::HostV1,
-                execution: Description {
+            candidate: RegisteredCandidate {
+                candidate: TakeoverCandidate {
+                    renderer,
+                    id: NonZeroU64::new(9).unwrap(),
                     profile: Profile::HostV1,
-                    generation: NonZeroU64::new(generation).unwrap(),
+                    execution: Description {
+                        profile: Profile::HostV1,
+                        generation: NonZeroU64::new(generation).unwrap(),
+                    },
+                    configuration: configuration(),
+                    active: true,
                 },
-                configuration: configuration(),
-                active: true,
+                registration: ProfileRegistration {
+                    transition: NonZeroU64::new(13).unwrap(),
+                    capability_generation: NonZeroU64::new(17).unwrap(),
+                    execution_generation: NonZeroU64::new(
+                        generation
+                            .checked_add(1)
+                            .expect("test generation has a successor"),
+                    )
+                    .unwrap(),
+                },
             },
         }
     }
@@ -1039,11 +1030,5 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.error().raw_os_error(), Some(nix::libc::ENOTTY));
         assert_eq!(error.into_candidate().configuration(), configuration());
-
-        let error = submitted_candidate(&mut renderer, u64::MAX)
-            .activate()
-            .unwrap_err();
-        assert_eq!(error.error().kind(), io::ErrorKind::InvalidData);
-        assert_eq!(error.into_candidate().profile(), Profile::HostV1);
     }
 }

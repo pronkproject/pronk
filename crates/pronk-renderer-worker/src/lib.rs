@@ -3,7 +3,6 @@
 mod activation;
 mod output;
 mod pool;
-mod reader;
 mod reads;
 mod scene;
 mod scene_job;
@@ -13,20 +12,13 @@ mod scene_reader;
 mod scene_reads;
 mod scene_transaction;
 mod source;
-mod submission;
 
-pub use activation::{
-    activate_with_private_probe, PrivateProbe, ProbePreparationError, RendererActivationError,
-};
+pub use activation::{PrivateProbe, ProbePreparationError};
 pub use output::{
     CompletedOutput, CompletedReturn, FinishedOutput, OutputDestination, OutputPool, OutputReturn,
     OutputScope, PendingOutput, PublishedOutput, ReadyOutput,
 };
 pub use pool::{PrivateBuffer, PrivateFrame, PrivatePool, RejectedBuffer};
-pub use reader::{
-    RejectedSource, SourceAttempt, SourceAttemptError, SourceOpportunity, SourceReader,
-    SourceReaderStartError,
-};
 pub use reads::{ReadCollectionError, SubmittedReads};
 pub use scene::{
     ComposedFrame, RejectedScene, RejectedSceneFrames, SceneComposer, SceneCompositionError,
@@ -43,8 +35,4 @@ pub use scene_transaction::{
     ReleaseSubmittedSceneError, ReleasedSceneJob, SceneCompletionError, SceneWaitError,
     SubmitSceneJobError, SubmittedSceneJob,
 };
-pub use source::{ImportError, ImportedSource, SourceAlpha};
-pub use submission::{
-    PreparedSource, ReleasedSource, SourcePreparationError, SourceReleaseError,
-    SourceSubmissionError, SubmittedSource,
-};
+pub use source::SourceAlpha;

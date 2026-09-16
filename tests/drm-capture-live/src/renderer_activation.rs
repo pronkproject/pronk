@@ -6,7 +6,8 @@ use std::os::unix::fs::MetadataExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
-use castkms_renderer::Profile;
+use castkms_renderer::{CapabilityProfile, Profile, RendererCapability};
+use drm_display_executor::scene::geometry::Extent;
 use pronk_capture_broker::{Provider, Target};
 use tokio_util::sync::CancellationToken;
 
@@ -51,8 +52,14 @@ async fn run(target: Target) -> anyhow::Result<()> {
     let (capture, mut renderer) = wait_for_output(&session).await?;
     let before = renderer.describe()?;
     ensure!(before.profile() == Profile::HostV1);
-    let submitted = renderer
-        .begin_takeover(before)?
+    let candidate = renderer.begin_takeover(before)?;
+    let output = candidate.configuration();
+    let profile = CapabilityProfile::Renderer(RendererCapability::linear_xrgb8888_primary(
+        Extent::new(output.width().get(), output.height().get())?,
+    ));
+    let submitted = candidate
+        .register_profile(&profile)
+        .map_err(|failure| failure.into_parts().1)?
         .submit_private_probe(None)?;
     let active = submitted.activate().map_err(|error| error.into_error())?;
     let after = active.description();

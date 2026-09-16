@@ -11,6 +11,7 @@ use castkms_sys::{
     RENDERER_COLOR_SRGB_EOTF, RENDERER_COLOR_SRGB_INVERSE_EOTF, RENDERER_LAYER_CURSOR,
     RENDERER_LAYER_OVERLAY, RENDERER_LAYER_PRIMARY, RENDERER_MAX_PLANES, RENDERER_SCENE_MAX_BYTES,
     RENDERER_SCENE_MAX_COLOR_OPS, RENDERER_SCENE_MAX_LAYERS, RENDERER_SCENE_VERSION,
+    YUV_ENCODING_BT2020, YUV_ENCODING_BT601, YUV_ENCODING_BT709, YUV_RANGE_FULL, YUV_RANGE_LIMITED,
 };
 use drm_display_executor::scene::geometry::{DestinationRect, Extent, SourceRect};
 
@@ -375,14 +376,14 @@ fn decode_layer(
         _ => return Err(invalid("CastKMS returned an unknown scene layer role")),
     };
     let encoding = match raw.color_encoding {
-        0 => ColorEncoding::Bt601,
-        1 => ColorEncoding::Bt709,
-        2 => ColorEncoding::Bt2020,
+        YUV_ENCODING_BT601 => ColorEncoding::Bt601,
+        YUV_ENCODING_BT709 => ColorEncoding::Bt709,
+        YUV_ENCODING_BT2020 => ColorEncoding::Bt2020,
         _ => return Err(invalid("CastKMS returned an unknown color encoding")),
     };
     let range = match raw.color_range {
-        0 => ColorRange::Limited,
-        1 => ColorRange::Full,
+        YUV_RANGE_LIMITED => ColorRange::Limited,
+        YUV_RANGE_FULL => ColorRange::Full,
         _ => return Err(invalid("CastKMS returned an unknown color range")),
     };
     let extent = Extent::new(raw.width, raw.height)

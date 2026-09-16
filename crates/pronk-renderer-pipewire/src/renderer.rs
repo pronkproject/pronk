@@ -3,7 +3,7 @@
 use std::io;
 use std::os::fd::AsFd;
 
-use castkms_renderer::Renderer;
+use castkms_renderer::{ProfileRegistration, Renderer};
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
 use tokio::sync::{oneshot, watch};
@@ -30,6 +30,7 @@ pub struct ActiveRendererStream<F> {
 struct StreamHandle<F> {
     identity: VideoNodeIdentity,
     layout: VideoBufferLayout,
+    registration: ProfileRegistration,
     state: watch::Receiver<RendererStreamState>,
     stop: CancellationToken,
     task: Option<JoinHandle<(Option<F>, io::Result<()>)>>,
@@ -94,10 +95,15 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             response = response => response,
         };
         match response {
-            Ok(Started::Ready { identity, layout }) => Ok(Self {
+            Ok(Started::Ready {
+                identity,
+                layout,
+                registration,
+            }) => Ok(Self {
                 handle: Some(StreamHandle {
                     identity,
                     layout,
+                    registration,
                     state: receive,
                     stop,
                     task: Some(starting.take_task()),
@@ -123,6 +129,11 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
 
     pub fn layout(&self) -> VideoBufferLayout {
         self.handle().layout
+    }
+
+    /// Return the transition that the KMS client must install before activation.
+    pub fn profile_registration(&self) -> ProfileRegistration {
+        self.handle().registration
     }
 
     /// Activate delegated execution and consume the one-shot candidate handle.
@@ -463,6 +474,10 @@ mod tests {
         }
     }
 
+    fn profile_registration() -> ProfileRegistration {
+        ProfileRegistration::from_values(4, 5, 6).unwrap()
+    }
+
     #[test]
     fn renderer_stream_ownership_can_cross_tasks() {
         assert_send::<RendererStream<std::fs::File>>();
@@ -521,6 +536,7 @@ mod tests {
                 size: NonZeroU64::new(4).unwrap(),
                 storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
             },
+            registration: profile_registration(),
             state,
             stop: stop.clone(),
             task: Some(task),
@@ -545,6 +561,7 @@ mod tests {
                     size: NonZeroU64::new(4).unwrap(),
                     storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
                 },
+                registration: profile_registration(),
                 state,
                 stop,
                 task: Some(task),

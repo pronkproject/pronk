@@ -58,6 +58,7 @@ gstreamer.workspace = true
 gstreamer-app.workspace = true
 gstreamer-video.workspace = true
 drm-capture = { path = "../../crates/drm-capture" }
+drm-display-executor = { path = "../../crates/drm-display-executor" }
 nix.workspace = true
 pronk = { path = "../../crates/pronk" }
 pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }

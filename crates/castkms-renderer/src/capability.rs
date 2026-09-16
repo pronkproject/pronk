@@ -6,11 +6,15 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 
 use castkms_sys::{
     drm_ioctl_castkms_renderer_query_capabilities, DrmCastkmsRendererQueryCapabilities,
-    CAPABILITY_CROP, CAPABILITY_EXPLICIT_MODIFIER, CAPABILITY_FRACTIONAL, CAPABILITY_GATED,
-    CAPABILITY_HOST, CAPABILITY_IMPORTED, CAPABILITY_MAX_BYTES, CAPABILITY_MAX_FORMATS,
-    CAPABILITY_NATIVE, CAPABILITY_OUTPUT_MATRIX, CAPABILITY_PENDING, CAPABILITY_PLANE_MATRIX,
-    CAPABILITY_POSITION, CAPABILITY_QUERY_MAX_BYTES, CAPABILITY_RENDERER, CAPABILITY_SCALE,
-    CAPABILITY_SRGB, CAPABILITY_VERSION, DRM_FORMAT_MOD_INVALID,
+    CAPABILITY_FORMAT_EXPLICIT_MODIFIER, CAPABILITY_FORMAT_IMPORTED, CAPABILITY_FORMAT_NATIVE,
+    CAPABILITY_KIND_HOST, CAPABILITY_KIND_RENDERER, CAPABILITY_MAX_BYTES, CAPABILITY_MAX_FORMATS,
+    CAPABILITY_PROFILE_CROP, CAPABILITY_PROFILE_FRACTIONAL, CAPABILITY_PROFILE_OUTPUT_MATRIX,
+    CAPABILITY_PROFILE_PLANE_MATRIX, CAPABILITY_PROFILE_POSITION, CAPABILITY_PROFILE_SCALE,
+    CAPABILITY_PROFILE_SRGB, CAPABILITY_QUERY_MAX_BYTES, CAPABILITY_STATE_GATED,
+    CAPABILITY_STATE_PENDING, CAPABILITY_VERSION, CAPABILITY_YUV_ENCODING_BT2020,
+    CAPABILITY_YUV_ENCODING_BT601, CAPABILITY_YUV_ENCODING_BT709, CAPABILITY_YUV_RANGE_FULL,
+    CAPABILITY_YUV_RANGE_LIMITED, DRM_FORMAT_MOD_INVALID, DRM_FORMAT_MOD_LINEAR,
+    DRM_FORMAT_XRGB8888,
 };
 use drm_display_executor::scene::geometry::Extent;
 
@@ -18,13 +22,16 @@ use crate::FormatModifier;
 
 const PROFILE_BYTES: usize = 128;
 const FORMAT_BYTES: usize = 32;
-const FEATURE_FLAGS: u32 = CAPABILITY_CROP
-    | CAPABILITY_FRACTIONAL
-    | CAPABILITY_POSITION
-    | CAPABILITY_SCALE
-    | CAPABILITY_SRGB
-    | CAPABILITY_PLANE_MATRIX
-    | CAPABILITY_OUTPUT_MATRIX;
+const FEATURE_FLAGS: u32 = CAPABILITY_PROFILE_CROP
+    | CAPABILITY_PROFILE_FRACTIONAL
+    | CAPABILITY_PROFILE_POSITION
+    | CAPABILITY_PROFILE_SCALE
+    | CAPABILITY_PROFILE_SRGB
+    | CAPABILITY_PROFILE_PLANE_MATRIX
+    | CAPABILITY_PROFILE_OUTPUT_MATRIX;
+const YUV_ENCODINGS: u32 =
+    CAPABILITY_YUV_ENCODING_BT601 | CAPABILITY_YUV_ENCODING_BT709 | CAPABILITY_YUV_ENCODING_BT2020;
+const YUV_RANGES: u32 = CAPABILITY_YUV_RANGE_LIMITED | CAPABILITY_YUV_RANGE_FULL;
 const SNAPSHOT_BYTES: usize = 72;
 const FIXED_SCALE: u32 = 1 << 16;
 
@@ -125,7 +132,9 @@ impl CapabilityFormat {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RendererCapability {
     flags: u32,
+    min_output: Extent,
     max_output: Extent,
+    min_source: Extent,
     max_source: Extent,
     min_scale: NonZeroU32,
     max_scale: NonZeroU32,
@@ -139,6 +148,21 @@ pub struct RendererCapability {
 }
 
 impl RendererCapability {
+    /// Describe the exact linear XRGB8888 contract used by the reference worker.
+    pub fn linear_xrgb8888_primary(output: Extent) -> Self {
+        let format = CapabilityFormat::new(
+            DRM_FORMAT_XRGB8888,
+            FormatModifier::Explicit(DRM_FORMAT_MOD_LINEAR),
+            NonZeroU32::new(1).expect("one memory plane is nonzero"),
+            StorageProvenance::new(true, true),
+            NonZeroU32::new(1).expect("unit pitch alignment is nonzero"),
+            NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
+            NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
+        )
+        .expect("linear XRGB8888 is a valid capability format");
+        Self::single_primary(output, format)
+    }
+
     /// Limit a transition to one unscaled full-output primary plane.
     ///
     /// The narrow shape lets a renderer reserve complete private storage before
@@ -146,7 +170,9 @@ impl RendererCapability {
     pub fn single_primary(output: Extent, format: CapabilityFormat) -> Self {
         Self {
             flags: 0,
+            min_output: output,
             max_output: output,
+            min_source: output,
             max_source: output,
             min_scale: NonZeroU32::new(FIXED_SCALE).expect("fixed scale is nonzero"),
             max_scale: NonZeroU32::new(FIXED_SCALE).expect("fixed scale is nonzero"),
@@ -164,8 +190,16 @@ impl RendererCapability {
         self.max_output
     }
 
+    pub fn min_output(&self) -> Extent {
+        self.min_output
+    }
+
     pub fn max_source(&self) -> Extent {
         self.max_source
+    }
+
+    pub fn min_source(&self) -> Extent {
+        self.min_source
     }
 
     pub fn formats(&self) -> &[CapabilityFormat] {
@@ -176,7 +210,7 @@ impl RendererCapability {
         let mut bytes = Vec::with_capacity(PROFILE_BYTES + self.formats.len() * FORMAT_BYTES);
         for value in [
             CAPABILITY_VERSION,
-            CAPABILITY_RENDERER,
+            CAPABILITY_KIND_RENDERER,
             self.flags,
             self.formats.len() as u32,
             self.max_output.width(),
@@ -193,6 +227,10 @@ impl RendererCapability {
             self.max_lut_entries,
             self.yuv_encodings,
             self.yuv_ranges,
+            self.min_output.width(),
+            self.min_output.height(),
+            self.min_source.width(),
+            self.min_source.height(),
         ] {
             put_u32(&mut bytes, value);
         }
@@ -298,7 +336,7 @@ fn decode_snapshot(bytes: &[u8]) -> io::Result<CapabilitySnapshot> {
     if version != CAPABILITY_VERSION
         || !(SNAPSHOT_BYTES..=CAPABILITY_QUERY_MAX_BYTES).contains(&size)
         || size > bytes.len()
-        || flags & !(CAPABILITY_PENDING | CAPABILITY_GATED) != 0
+        || flags & !(CAPABILITY_STATE_PENDING | CAPABILITY_STATE_GATED) != 0
     {
         return Err(invalid("CastKMS returned an invalid capability snapshot"));
     }
@@ -315,7 +353,7 @@ fn decode_snapshot(bytes: &[u8]) -> io::Result<CapabilitySnapshot> {
         ));
     }
     let active = CapabilityProfile::decode(&bytes[active_offset..active_end])?;
-    let pending = if flags & CAPABILITY_PENDING != 0 {
+    let pending = if flags & CAPABILITY_STATE_PENDING != 0 {
         let pending_end = pending_offset
             .checked_add(pending_size)
             .ok_or_else(|| invalid("CastKMS pending capability range overflowed"))?;
@@ -327,11 +365,11 @@ fn decode_snapshot(bytes: &[u8]) -> io::Result<CapabilitySnapshot> {
         Some(PendingCapability {
             generation: nonzero64(get_u64(bytes, 32)?, "zero pending capability generation")?,
             transition: nonzero64(get_u64(bytes, 40)?, "zero capability transition")?,
-            gated: flags & CAPABILITY_GATED != 0,
+            gated: flags & CAPABILITY_STATE_GATED != 0,
             profile: CapabilityProfile::decode(&bytes[pending_offset..pending_end])?,
         })
     } else {
-        if flags & CAPABILITY_GATED != 0
+        if flags & CAPABILITY_STATE_GATED != 0
             || get_u64(bytes, 32)? != 0
             || get_u64(bytes, 40)? != 0
             || pending_offset != 0
@@ -358,7 +396,7 @@ impl CapabilityProfile {
             Self::Host => {
                 let mut bytes = vec![0; PROFILE_BYTES];
                 bytes[0..4].copy_from_slice(&CAPABILITY_VERSION.to_ne_bytes());
-                bytes[4..8].copy_from_slice(&CAPABILITY_HOST.to_ne_bytes());
+                bytes[4..8].copy_from_slice(&CAPABILITY_KIND_HOST.to_ne_bytes());
                 bytes
             }
             Self::Renderer(profile) => profile.encode(),
@@ -374,21 +412,21 @@ impl CapabilityProfile {
         if version != CAPABILITY_VERSION {
             return Err(unsupported("unsupported CastKMS capability version"));
         }
-        if kind == CAPABILITY_HOST {
+        if kind == CAPABILITY_KIND_HOST {
             if bytes.len() != PROFILE_BYTES || bytes[8..].iter().any(|byte| *byte != 0) {
                 return Err(invalid("CastKMS returned an invalid HOST capability"));
             }
             return Ok(Self::Host);
         }
         let flags = get_u32(bytes, 8)?;
-        if kind != CAPABILITY_RENDERER || flags & !FEATURE_FLAGS != 0 {
+        if kind != CAPABILITY_KIND_RENDERER || flags & !FEATURE_FLAGS != 0 {
             return Err(invalid("CastKMS returned an invalid renderer capability"));
         }
         let count = get_u32(bytes, 12)? as usize;
         if count == 0
             || count > CAPABILITY_MAX_FORMATS
             || bytes.len() != PROFILE_BYTES + count * FORMAT_BYTES
-            || bytes[72..PROFILE_BYTES].iter().any(|byte| *byte != 0)
+            || bytes[88..PROFILE_BYTES].iter().any(|byte| *byte != 0)
         {
             return Err(invalid("CastKMS returned malformed capability records"));
         }
@@ -406,14 +444,20 @@ impl CapabilityProfile {
         let max_lut_entries = get_u32(bytes, 60)?;
         let yuv_encodings = get_u32(bytes, 64)?;
         let yuv_ranges = get_u32(bytes, 68)?;
+        let min_output = extent(bytes, 72)?;
+        let min_source = extent(bytes, 80)?;
         if min_scale > max_scale
+            || min_output.width() > max_output.width()
+            || min_output.height() > max_output.height()
+            || min_source.width() > max_source.width()
+            || min_source.height() > max_source.height()
             || max_layers.get() > 24
             || max_roles.iter().any(|count| *count > max_layers.get())
             || max_roles == [0; 3]
             || max_color_operations > 16
             || max_lut_entries > 256
-            || yuv_encodings & !7 != 0
-            || yuv_ranges & !3 != 0
+            || yuv_encodings & !YUV_ENCODINGS != 0
+            || yuv_ranges & !YUV_RANGES != 0
         {
             return Err(invalid("CastKMS returned unsupported scene limits"));
         }
@@ -424,7 +468,9 @@ impl CapabilityProfile {
         }
         Ok(Self::Renderer(RendererCapability {
             flags,
+            min_output,
             max_output,
+            min_source,
             max_source,
             min_scale,
             max_scale,
@@ -447,9 +493,9 @@ fn put_format(bytes: &mut Vec<u8>, format: CapabilityFormat) {
         FormatModifier::Explicit(modifier) => (modifier, true),
     };
     put_u64(bytes, modifier);
-    let flags = (u32::from(format.provenance.native) * CAPABILITY_NATIVE)
-        | (u32::from(format.provenance.imported) * CAPABILITY_IMPORTED)
-        | (u32::from(explicit) * CAPABILITY_EXPLICIT_MODIFIER);
+    let flags = (u32::from(format.provenance.native) * CAPABILITY_FORMAT_NATIVE)
+        | (u32::from(format.provenance.imported) * CAPABILITY_FORMAT_IMPORTED)
+        | (u32::from(explicit) * CAPABILITY_FORMAT_EXPLICIT_MODIFIER);
     put_u32(bytes, flags);
     put_u32(bytes, format.pitch_alignment.get());
     put_u32(bytes, format.offset_alignment.get());
@@ -458,13 +504,18 @@ fn put_format(bytes: &mut Vec<u8>, format: CapabilityFormat) {
 
 fn decode_format(bytes: &[u8], offset: usize) -> io::Result<CapabilityFormat> {
     let flags = get_u32(bytes, offset + 16)?;
-    if flags & !(CAPABILITY_NATIVE | CAPABILITY_IMPORTED | CAPABILITY_EXPLICIT_MODIFIER) != 0 {
+    if flags
+        & !(CAPABILITY_FORMAT_NATIVE
+            | CAPABILITY_FORMAT_IMPORTED
+            | CAPABILITY_FORMAT_EXPLICIT_MODIFIER)
+        != 0
+    {
         return Err(invalid("CastKMS returned unknown storage capability flags"));
     }
     let modifier = get_u64(bytes, offset + 8)?;
     CapabilityFormat::new(
         get_u32(bytes, offset)?,
-        if flags & CAPABILITY_EXPLICIT_MODIFIER != 0 {
+        if flags & CAPABILITY_FORMAT_EXPLICIT_MODIFIER != 0 {
             FormatModifier::Explicit(modifier)
         } else if modifier == 0 {
             FormatModifier::Unspecified
@@ -473,8 +524,8 @@ fn decode_format(bytes: &[u8], offset: usize) -> io::Result<CapabilityFormat> {
         },
         nonzero(get_u32(bytes, offset + 4)?, "zero memory-plane count")?,
         StorageProvenance::new(
-            flags & CAPABILITY_NATIVE != 0,
-            flags & CAPABILITY_IMPORTED != 0,
+            flags & CAPABILITY_FORMAT_NATIVE != 0,
+            flags & CAPABILITY_FORMAT_IMPORTED != 0,
         ),
         nonzero(get_u32(bytes, offset + 20)?, "zero pitch alignment")?,
         nonzero(get_u32(bytes, offset + 24)?, "zero offset alignment")?,
@@ -550,7 +601,7 @@ mod tests {
     fn host_profile_bytes() -> Vec<u8> {
         let mut bytes = vec![0; PROFILE_BYTES];
         bytes[0..4].copy_from_slice(&CAPABILITY_VERSION.to_ne_bytes());
-        bytes[4..8].copy_from_slice(&CAPABILITY_HOST.to_ne_bytes());
+        bytes[4..8].copy_from_slice(&CAPABILITY_KIND_HOST.to_ne_bytes());
         bytes
     }
 
@@ -558,7 +609,7 @@ mod tests {
         let mut bytes = Vec::with_capacity(PROFILE_BYTES + FORMAT_BYTES);
         for value in [
             CAPABILITY_VERSION,
-            CAPABILITY_RENDERER,
+            CAPABILITY_KIND_RENDERER,
             0,
             1,
             1920,
@@ -575,6 +626,10 @@ mod tests {
             0,
             0,
             0,
+            1920,
+            1080,
+            1920,
+            1080,
         ] {
             put_u32(&mut bytes, value);
         }
@@ -584,7 +639,9 @@ mod tests {
         put_u64(&mut bytes, DRM_FORMAT_MOD_LINEAR);
         put_u32(
             &mut bytes,
-            CAPABILITY_NATIVE | CAPABILITY_IMPORTED | CAPABILITY_EXPLICIT_MODIFIER,
+            CAPABILITY_FORMAT_NATIVE
+                | CAPABILITY_FORMAT_IMPORTED
+                | CAPABILITY_FORMAT_EXPLICIT_MODIFIER,
         );
         put_u32(&mut bytes, 4);
         put_u32(&mut bytes, 4);
@@ -600,7 +657,13 @@ mod tests {
         ));
         let bytes = profile.encode();
         assert_eq!(bytes.len(), PROFILE_BYTES + FORMAT_BYTES);
-        assert_eq!(CapabilityProfile::decode(&bytes).unwrap(), profile);
+        let decoded = CapabilityProfile::decode(&bytes).unwrap();
+        assert_eq!(decoded, profile);
+        let CapabilityProfile::Renderer(decoded) = decoded else {
+            panic!("narrow primary profile changed kind");
+        };
+        assert_eq!(decoded.min_output(), Extent::new(1920, 1080).unwrap());
+        assert_eq!(decoded.min_source(), Extent::new(1920, 1080).unwrap());
     }
 
     #[test]
@@ -641,6 +704,17 @@ mod tests {
     }
 
     #[test]
+    fn profile_rejects_inverted_geometry_ranges() {
+        let mut bytes = renderer_profile_bytes();
+        bytes[72..76].copy_from_slice(&1921_u32.to_ne_bytes());
+        assert!(CapabilityProfile::decode(&bytes).is_err());
+
+        let mut bytes = renderer_profile_bytes();
+        bytes[84..88].copy_from_slice(&1081_u32.to_ne_bytes());
+        assert!(CapabilityProfile::decode(&bytes).is_err());
+    }
+
+    #[test]
     fn snapshot_keeps_active_and_pending_identities_together() {
         let active = host_profile_bytes();
         let pending = renderer_profile_bytes();
@@ -649,7 +723,10 @@ mod tests {
         put_u32(&mut bytes, CAPABILITY_VERSION);
         put_u32(&mut bytes, size as u32);
         put_u32(&mut bytes, castkms_sys::EXECUTION_HOST_V1);
-        put_u32(&mut bytes, CAPABILITY_PENDING | CAPABILITY_GATED);
+        put_u32(
+            &mut bytes,
+            CAPABILITY_STATE_PENDING | CAPABILITY_STATE_GATED,
+        );
         put_u64(&mut bytes, 7);
         put_u64(&mut bytes, 11);
         put_u64(&mut bytes, 12);
@@ -674,7 +751,9 @@ mod tests {
         let CapabilityProfile::Renderer(profile) = pending.profile() else {
             panic!("pending profile is delegated");
         };
+        assert_eq!(profile.min_output(), Extent::new(1920, 1080).unwrap());
         assert_eq!(profile.max_output(), Extent::new(1920, 1080).unwrap());
+        assert_eq!(profile.min_source(), Extent::new(1920, 1080).unwrap());
         assert_eq!(profile.formats(), &[format()]);
     }
 }

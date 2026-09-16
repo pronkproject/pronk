@@ -357,11 +357,10 @@ each channel through private storage into BGRA output. Their original images
 are overwritten before exported output is allocated. Cropped RGBA tests include
 scaling and background initialization. Ordinary byte-copy paths reject
 different packed formats, while private-image blits perform channel conversion.
-The installed single-source worker preserves an alpha-bearing format's fourth
-channel but has no overlapping layer that would interpret it. The complete-scene
-path binds X padding or pixel alpha to each imported format and applies the
-scene's qualified blend mode after source color processing. PipeWire output
-remains BGRx independently of source channel order and alpha semantics.
+The complete-scene worker binds X padding or pixel alpha to each imported
+format and applies the scene's qualified blend mode after source color
+processing. PipeWire output remains BGRx independently of source channel order
+and alpha semantics.
 
 Ten-bit native tests generate all 1024 color values in both packed orders,
 check the original words, then overwrite the originals after reading into
@@ -623,7 +622,7 @@ acquiring source uses; supplied invisible or mismatched crops are errors.
 Opaque alpha and a shared encoded RGB domain remain caller requirements. The
 API does not apply the reference renderer's selectable alpha equations, scale
 images or convert colors. Accepted native work retains its resources through
-completion on failure paths just as in single-source staging.
+completion on failure paths.
 
 Native tests compare three overlapping clipped planes with the CPU reference
 in both stacking orders after every source is overwritten and staging is
@@ -731,11 +730,11 @@ source stages to their profile pool and yields only the final private frame for
 output delivery. A profile mismatch returns every source and the final frame
 without changing any pool.
 
-The renderer-to-PipeWire scheduler treats single-source and complete-scene
-readers through one private frame-source contract. Both paths share cadence,
-output availability, publication, return and cancellation handling. Complete
-scenes specialize only the blocking wait/composition operation and the atomic
-return of source stages before their final frame enters output copying.
+The renderer-to-PipeWire scheduler consumes complete scenes through one private
+frame-source contract. Cadence, output availability, publication, return and
+cancellation handling remain independent of the blocking composition operation
+and the atomic return of source stages before their final frame enters output
+copying.
 Blocking work may finish concurrently, but an explicit admission sequence
 holds later results until every earlier admitted frame completes. PipeWire
 therefore observes source order rather than host thread wake-up order. Final
@@ -743,12 +742,12 @@ output copying through publication is serialized after that ordered boundary;
 source staging and scene composition remain concurrent and independently
 bounded.
 
-The version-6 scene records can be decoded, qualified and executed by the
-complete-scene reader above. `castkms-renderer` owns and validates the complete
-packet under one kernel job, including all installed descriptors, geometry,
-stacking and color payloads. The installed renderer generation still selects
-the older single-source reader; it does not yet construct a reusable scene
-storage profile or call the complete-scene scheduler.
+The scene records can be decoded, qualified and executed by the complete-scene
+reader above. `castkms-renderer` owns and validates the complete packet under
+one kernel job, including all installed descriptors, geometry, stacking and
+color payloads. Renderer startup registers an exact whole-scene capability,
+constructs the matching reusable storage profile and activates only after the
+KMS client has published the registered transition.
 
 Output color also remains an ordered raw operation list: the current record
 gives both degamma and gamma tables the same LUT kind while omitting absent
@@ -758,10 +757,8 @@ arrangement and rejects a lone LUT as unsupported. The UAPI needs stage
 identity before that final valid configuration can be accepted without
 guessing. The current record also lacks explicit layer transform and blend
 fields; its adapter therefore uses identity transforms, premultiplied pixel
-alpha and full plane alpha. Production activation must consume a versioned
-profile that states those operations rather than silently extending those
-defaults. The older single-source job is not a per-layer substitute for that
-transaction.
+alpha and full plane alpha. The registered capability states the operations
+accepted by the worker rather than extending those defaults implicitly.
 
 ## Current scope
 
