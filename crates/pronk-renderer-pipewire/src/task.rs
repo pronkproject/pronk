@@ -10,10 +10,11 @@ use drm_display_executor::scene::geometry::Extent;
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
 use pronk_renderer_worker::{
-    OutputPool, PreparedSceneImages, PrimarySceneProfile, PrivateProbe, SceneReader,
-    SceneStorageProfile,
+    CompletedReturn, OutputPool, PreparedSceneImages, PrimarySceneProfile, PrivateProbe,
+    SceneReader, SceneStorageProfile,
 };
 use tokio::sync::{oneshot, watch};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::active;
@@ -108,11 +109,12 @@ async fn run_prepared<F: AsFd>(
         scene_images,
     } = generation;
     let mut available = VecDeque::new();
+    let mut reader_waits = JoinSet::new();
     loop {
         tokio::select! {
             biased;
             _ = stop.cancelled() => {
-                let result = finish_candidate(video, probe, scene_pool, None).await;
+                let result = finish_candidate(video, probe, scene_pool, reader_waits, None).await;
                 return GenerationOutcome::candidate(result);
             }
             requested = &mut activation => {
@@ -123,6 +125,7 @@ async fn run_prepared<F: AsFd>(
                             video,
                             probe,
                             scene_pool,
+                            reader_waits,
                             Some(io::Error::other("renderer activation request was abandoned")),
                         ).await;
                         return GenerationOutcome::candidate(result);
@@ -138,6 +141,7 @@ async fn run_prepared<F: AsFd>(
                         scene_images,
                     },
                     available,
+                    reader_waits,
                     ActiveControl {
                         stop,
                         state,
@@ -151,28 +155,60 @@ async fn run_prepared<F: AsFd>(
                     available.push_back(slot);
                 }
                 Ok(VideoEvent::Released(output)) => {
-                    let returned = output.wait().await;
-                    let slot = match video.finish_return(returned) {
-                        Ok(slot) => slot,
-                        Err(error) => {
-                            let result = finish_candidate(video, probe, scene_pool, Some(error)).await;
-                            return GenerationOutcome::candidate(result);
-                        }
-                    };
-                    available.push_back(slot);
+                    reader_waits.spawn(async move { output.wait().await });
                 }
                 Ok(VideoEvent::Failed { cause, returns }) => {
                     let error = io::Error::other(cause.to_string());
                     for output in returns.into_vec() {
-                        let returned = output.wait().await;
-                        let _ = video.finish_return(returned);
+                        reader_waits.spawn(async move { output.wait().await });
                     }
-                    let result = finish_candidate(video, probe, scene_pool, Some(error)).await;
+                    let result = finish_candidate(
+                        video,
+                        probe,
+                        scene_pool,
+                        reader_waits,
+                        Some(error),
+                    ).await;
                     return GenerationOutcome::candidate(result);
                 }
                 Err(error) => {
-                    let result = finish_candidate(video, probe, scene_pool, Some(error)).await;
+                    let result = finish_candidate(
+                        video,
+                        probe,
+                        scene_pool,
+                        reader_waits,
+                        Some(error),
+                    ).await;
                     return GenerationOutcome::candidate(result);
+                }
+            },
+            completed = reader_waits.join_next(), if !reader_waits.is_empty() => {
+                let returned = match completed {
+                    Some(Ok(returned)) => returned,
+                    Some(Err(error)) => {
+                        let result = finish_candidate(
+                            video,
+                            probe,
+                            scene_pool,
+                            reader_waits,
+                            Some(io::Error::other(format!("join output return wait: {error}"))),
+                        ).await;
+                        return GenerationOutcome::candidate(result);
+                    }
+                    None => unreachable!("nonempty output return wait set ended"),
+                };
+                match video.finish_return(returned) {
+                    Ok(slot) => available.push_back(slot),
+                    Err(error) => {
+                        let result = finish_candidate(
+                            video,
+                            probe,
+                            scene_pool,
+                            reader_waits,
+                            Some(error),
+                        ).await;
+                        return GenerationOutcome::candidate(result);
+                    }
                 }
             }
         }
@@ -182,6 +218,7 @@ async fn run_prepared<F: AsFd>(
 async fn activate_generation<F: AsFd>(
     generation: PreparedGeneration<'_, F>,
     available: VecDeque<usize>,
+    reader_waits: JoinSet<CompletedReturn>,
     control: ActiveControl<'_>,
 ) -> GenerationOutcome {
     let PreparedGeneration {
@@ -195,14 +232,14 @@ async fn activate_generation<F: AsFd>(
     let submitted = match probe.submit() {
         Ok(submitted) => submitted,
         Err(error) => {
-            let result = finish_video(video, Some(error)).await;
+            let result = finish_video(video, reader_waits, Some(error)).await;
             return GenerationOutcome::candidate(result);
         }
     };
     let active_renderer = match submitted.activate() {
         Ok(active) => active,
         Err(failure) => {
-            let result = finish_video(video, Some(failure.into_error())).await;
+            let result = finish_video(video, reader_waits, Some(failure.into_error())).await;
             return GenerationOutcome::candidate(result);
         }
     };
@@ -210,7 +247,7 @@ async fn activate_generation<F: AsFd>(
         Ok(reader) => reader,
         Err(failure) => {
             let (_, _, _, error) = failure.into_parts();
-            let result = finish_video(video, Some(error)).await;
+            let result = finish_video(video, reader_waits, Some(error)).await;
             return GenerationOutcome::active(result);
         }
     };
@@ -218,6 +255,7 @@ async fn activate_generation<F: AsFd>(
     if control.acknowledge.send(()).is_err() {
         let result = finish_video(
             video,
+            reader_waits,
             Some(io::Error::other(
                 "renderer activation acknowledgement was abandoned",
             )),
@@ -225,10 +263,16 @@ async fn activate_generation<F: AsFd>(
         .await;
         return GenerationOutcome::active(result);
     }
-    let result =
-        active::run_complete_scenes(reader, &mut video, available, source_interval, control.stop)
-            .await;
-    GenerationOutcome::active(finish_video(video, result.err()).await)
+    let result = active::run_complete_scenes(
+        reader,
+        &mut video,
+        available,
+        reader_waits,
+        source_interval,
+        control.stop,
+    )
+    .await;
+    GenerationOutcome::active(finish_video(video, JoinSet::new(), result.err()).await)
 }
 
 struct ActiveControl<'a> {
@@ -356,6 +400,7 @@ async fn prepare_generation<'renderer, F: AsFd>(
             video,
             probe,
             scene_pool,
+            JoinSet::new(),
             Some(io::Error::other("renderer stream setup was abandoned")),
         )
         .await
@@ -382,7 +427,7 @@ async fn finish_unregistered<F: AsFd>(
     error: io::Error,
 ) -> io::Error {
     let error = abort_candidate(candidate, error);
-    finish_video(video, Some(error))
+    finish_video(video, JoinSet::new(), Some(error))
         .await
         .expect_err("explicit setup failure remains terminal")
 }
@@ -393,7 +438,7 @@ async fn finish_registered<F: AsFd>(
     error: io::Error,
 ) -> io::Error {
     let error = combine_abort(error, candidate.abort());
-    finish_video(video, Some(error))
+    finish_video(video, JoinSet::new(), Some(error))
         .await
         .expect_err("explicit setup failure remains terminal")
 }
@@ -417,16 +462,35 @@ async fn finish_candidate<F: AsFd>(
     video: Video,
     probe: PrivateProbe<'_, F>,
     scene_pool: pronk_renderer_worker::ScenePool,
+    reader_waits: JoinSet<CompletedReturn>,
     mut failure: Option<io::Error>,
 ) -> io::Result<()> {
     if let Err(error) = probe.abort() {
         add_failure(&mut failure, "abort renderer takeover", error);
     }
     drop(scene_pool);
-    finish_video(video, failure).await
+    finish_video(video, reader_waits, failure).await
 }
 
-async fn finish_video(video: Video, mut failure: Option<io::Error>) -> io::Result<()> {
+async fn finish_video(
+    mut video: Video,
+    mut reader_waits: JoinSet<CompletedReturn>,
+    mut failure: Option<io::Error>,
+) -> io::Result<()> {
+    while let Some(returned) = reader_waits.join_next().await {
+        match returned {
+            Ok(returned) => {
+                if let Err(error) = video.finish_return(returned) {
+                    add_failure(&mut failure, "finish output return", error);
+                }
+            }
+            Err(error) => add_failure(
+                &mut failure,
+                "join output return wait",
+                io::Error::other(error),
+            ),
+        }
+    }
     let stopped = video.shutdown().await;
     if let Err(error) = stopped.finish().await {
         add_failure(&mut failure, "stop renderer video", error);

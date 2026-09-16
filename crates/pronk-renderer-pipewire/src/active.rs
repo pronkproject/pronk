@@ -21,6 +21,7 @@ pub async fn run_complete_scenes<F: AsFd>(
     reader: SceneReader<'_, F>,
     video: &mut Video,
     available: VecDeque<usize>,
+    reader_waits: JoinSet<CompletedReturn>,
     source_interval: Duration,
     stop: &CancellationToken,
 ) -> io::Result<()> {
@@ -28,7 +29,7 @@ pub async fn run_complete_scenes<F: AsFd>(
         return Err(invalid("renderer source interval is zero"));
     }
     let mut reader = reader;
-    let mut pipeline = Pipeline::new(available);
+    let mut pipeline = Pipeline::new(available, reader_waits);
     let mut source_tick = time::interval(source_interval);
     source_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -107,13 +108,13 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn new(available: VecDeque<usize>) -> Self {
+    fn new(available: VecDeque<usize>, reader_waits: JoinSet<CompletedReturn>) -> Self {
         Self {
             available,
             frames: VecDeque::new(),
             output_copies: JoinSet::new(),
             producer_waits: JoinSet::new(),
-            reader_waits: JoinSet::new(),
+            reader_waits,
             published: false,
         }
     }
