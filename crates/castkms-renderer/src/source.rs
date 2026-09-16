@@ -482,6 +482,9 @@ fn invalid_data(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
     use super::*;
     use std::os::fd::IntoRawFd;
 
@@ -528,7 +531,18 @@ mod tests {
         std::fs::File::open("/dev/null").unwrap().into_raw_fd()
     }
 
-    fn source_result() -> DrmCastkmsRendererSource {
+    fn tracked_descriptor() -> (i32, UnixStream) {
+        let (descriptor, peer) = UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        (descriptor.into_raw_fd(), peer)
+    }
+
+    fn assert_descriptor_closed(peer: &mut UnixStream) {
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    }
+
+    fn source_result_with_descriptor(dma_buf_fd: i32) -> DrmCastkmsRendererSource {
         let mut result = empty_source_result();
         result.job_id = 13;
         result.content_serial = 14;
@@ -541,11 +555,15 @@ mod tests {
         result.destination = [1920, 1080];
         result.output = [1920, 1080];
         result.planes[0] = DrmCastkmsRendererSourcePlane {
-            dma_buf_fd: descriptor(),
+            dma_buf_fd,
             pitch: 7680,
             ..Default::default()
         };
         result
+    }
+
+    fn source_result() -> DrmCastkmsRendererSource {
+        source_result_with_descriptor(descriptor())
     }
 
     #[test]
@@ -614,28 +632,19 @@ mod tests {
 
     #[test]
     fn source_validation_closes_descriptors_from_malformed_results() {
-        let mut result = source_result();
-        let first = result.planes[0].dma_buf_fd;
-        let second = descriptor();
+        let (first, mut first_peer) = tracked_descriptor();
+        let (second, mut second_peer) = tracked_descriptor();
+        let mut result = source_result_with_descriptor(first);
         result.planes[1].dma_buf_fd = second;
         assert!(validate_source(result).is_err());
-        assert_eq!(
-            fcntl(first, FcntlArg::F_GETFD),
-            Err(nix::errno::Errno::EBADF)
-        );
-        assert_eq!(
-            fcntl(second, FcntlArg::F_GETFD),
-            Err(nix::errno::Errno::EBADF)
-        );
+        assert_descriptor_closed(&mut first_peer);
+        assert_descriptor_closed(&mut second_peer);
 
-        let mut result = source_result();
-        let duplicate = result.planes[0].dma_buf_fd;
+        let (duplicate, mut duplicate_peer) = tracked_descriptor();
+        let mut result = source_result_with_descriptor(duplicate);
         result.producer_fd = duplicate;
         assert!(validate_source(result).is_err());
-        assert_eq!(
-            fcntl(duplicate, FcntlArg::F_GETFD),
-            Err(nix::errno::Errno::EBADF)
-        );
+        assert_descriptor_closed(&mut duplicate_peer);
     }
 
     #[test]

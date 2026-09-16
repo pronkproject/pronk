@@ -547,7 +547,9 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixStream;
 
     use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 
@@ -565,8 +567,27 @@ mod tests {
         bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
     }
 
-    fn scene_packet() -> (Vec<u8>, i32) {
-        let dma_buf = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+    fn tracked_descriptor() -> (i32, UnixStream) {
+        let (descriptor, peer) = UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        (descriptor.into_raw_fd(), peer)
+    }
+
+    fn assert_descriptor_open(peer: &mut UnixStream) {
+        let mut byte = [0];
+        assert_eq!(
+            peer.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    fn assert_descriptor_closed(peer: &mut UnixStream) {
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    }
+
+    fn scene_packet() -> (Vec<u8>, i32, UnixStream) {
+        let (dma_buf, peer) = tracked_descriptor();
         let mut bytes = Vec::new();
         word(&mut bytes, RENDERER_SCENE_VERSION);
         word(&mut bytes, 0);
@@ -627,12 +648,12 @@ mod tests {
         }
         let total = bytes.len() as u32;
         patch(&mut bytes, 4, total);
-        (bytes, dma_buf)
+        (bytes, dma_buf, peer)
     }
 
     #[test]
     fn scene_packet_preserves_geometry_color_and_descriptor_ownership() {
-        let (bytes, raw_fd) = scene_packet();
+        let (bytes, _raw_fd, mut peer) = scene_packet();
         let scene = decode_scene(&bytes).unwrap();
         assert_eq!(scene.id.get(), 7);
         assert_eq!(scene.content_serial.get(), 11);
@@ -657,12 +678,9 @@ mod tests {
             scene.color.as_ref(),
             [ColorOperation::Lut(Box::new([[1, 2, 3], [4, 5, 6]]))]
         );
-        assert!(fcntl(raw_fd, FcntlArg::F_GETFD).is_ok());
+        assert_descriptor_open(&mut peer);
         drop(scene);
-        assert_eq!(
-            fcntl(raw_fd, FcntlArg::F_GETFD),
-            Err(nix::errno::Errno::EBADF)
-        );
+        assert_descriptor_closed(&mut peer);
     }
 
     #[test]
@@ -695,7 +713,7 @@ mod tests {
 
     #[test]
     fn duplicate_scene_descriptors_are_closed_once() {
-        let (mut bytes, raw_fd) = scene_packet();
+        let (mut bytes, raw_fd, mut peer) = scene_packet();
         let layer = size_of::<DrmCastkmsRendererScene>();
         patch(&mut bytes, layer + 72, 2);
         patch(&mut bytes, layer + 80 + 16, raw_fd as u32);
@@ -704,15 +722,12 @@ mod tests {
             decode_scene(&bytes).err().unwrap().kind(),
             io::ErrorKind::InvalidData
         );
-        assert_eq!(
-            fcntl(raw_fd, FcntlArg::F_GETFD),
-            Err(nix::errno::Errno::EBADF)
-        );
+        assert_descriptor_closed(&mut peer);
     }
 
     #[test]
     fn descriptors_are_closed_when_later_scene_metadata_is_rejected() {
-        let (mut bytes, raw_fd) = scene_packet();
+        let (mut bytes, _raw_fd, mut peer) = scene_packet();
         let reserved = bytes.len() - size_of::<u16>();
         bytes[reserved..].copy_from_slice(&1_u16.to_ne_bytes());
 
@@ -720,16 +735,13 @@ mod tests {
             decode_scene(&bytes).err().unwrap().kind(),
             io::ErrorKind::InvalidData
         );
-        assert_eq!(
-            fcntl(raw_fd, FcntlArg::F_GETFD),
-            Err(nix::errno::Errno::EBADF)
-        );
+        assert_descriptor_closed(&mut peer);
     }
 
     #[test]
     fn invalid_producer_flags_do_not_leak_layer_descriptors() {
-        let (mut bytes, layer_fd) = scene_packet();
-        let producer_fd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        let (mut bytes, _layer_fd, mut layer_peer) = scene_packet();
+        let (producer_fd, mut producer_peer) = tracked_descriptor();
         fcntl(producer_fd, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
         patch(
             &mut bytes,
@@ -741,8 +753,7 @@ mod tests {
             decode_scene(&bytes).err().unwrap().kind(),
             io::ErrorKind::InvalidData
         );
-        for fd in [producer_fd, layer_fd] {
-            assert_eq!(fcntl(fd, FcntlArg::F_GETFD), Err(nix::errno::Errno::EBADF));
-        }
+        assert_descriptor_closed(&mut producer_peer);
+        assert_descriptor_closed(&mut layer_peer);
     }
 }
