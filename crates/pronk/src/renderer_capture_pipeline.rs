@@ -534,8 +534,8 @@ async fn hand_back_to_host(
     combine_cleanup(result, released)
 }
 
-async fn activate_host<'renderer>(
-    candidate: castkms_renderer::HostCandidate<'renderer, OwnedFd>,
+async fn activate_host(
+    candidate: castkms_renderer::HostCandidate<'_, OwnedFd>,
     cancellation: CancellationToken,
 ) -> Result<(), MediaPipelineError> {
     let deadline = tokio::time::sleep(std::time::Duration::from_secs(5));

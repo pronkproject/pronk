@@ -75,13 +75,11 @@ impl PrimarySceneProfile {
     }
 
     /// Register the advertised contract and release its matching storage policy.
-    pub fn register<'renderer, F: AsFd>(
+    pub fn register<F: AsFd>(
         self,
-        candidate: TakeoverCandidate<'renderer, F>,
-    ) -> Result<
-        (RegisteredCandidate<'renderer, F>, SceneStorageProfile),
-        ProfileRegistrationError<'renderer, F>,
-    > {
+        candidate: TakeoverCandidate<'_, F>,
+    ) -> Result<(RegisteredCandidate<'_, F>, SceneStorageProfile), ProfileRegistrationError<'_, F>>
+    {
         candidate
             .register_profile(&CapabilityProfile::Renderer(self.capability))
             .map(|candidate| (candidate, self.storage))
