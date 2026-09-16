@@ -208,6 +208,23 @@ async fn independent_provider_uses_the_production_attachment_lifecycle() {
 }
 
 #[tokio::test]
+async fn cancellation_before_attachment_does_not_change_the_monitor() {
+    let state = Arc::new(State::default());
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert!(matches!(
+        attach(session(&state).await, cancellation).await,
+        Err(DisplaySetupError::Cancelled)
+    ));
+    notified(&state.release_done).await;
+    assert!(!state.attached.load(Ordering::SeqCst));
+    assert_eq!(
+        state.events.lock().unwrap().as_slice(),
+        &["renderer release", "session release"]
+    );
+}
+
+#[tokio::test]
 async fn cancellation_retires_a_monitor_that_finishes_attaching_later() {
     let state = Arc::new(State {
         gate: Some((Mutex::new(false), Condvar::new())),

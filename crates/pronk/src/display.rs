@@ -592,6 +592,12 @@ async fn attach_kernel_session(
     modes: Vec<EdidMode>,
     cancellation: &CancellationToken,
 ) -> Result<AttachedKernelSession, DisplaySetupError> {
+    if cancellation.is_cancelled() {
+        if let Err(error) = session.release().await {
+            warn!(%error, "cancelled setup could not release its unused session");
+        }
+        return Err(DisplaySetupError::Cancelled);
+    }
     let display_capture = session
         .capture_access()
         .map_err(DisplaySetupError::KernelAccess)?;
