@@ -43,6 +43,25 @@ fn source_profiles_can_be_checked_without_allocating_storage() {
 
 #[test]
 #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+fn source_modifier_discovery_returns_only_checked_layouts() {
+    let (device, selected) = selected();
+    let width = NonZeroU32::new(1920).unwrap();
+    let height = NonZeroU32::new(1080).unwrap();
+    let modifiers = device
+        .source_modifiers(PackedFormat::Bgra8, width, height)
+        .unwrap();
+
+    assert!(modifiers.contains(&selected));
+    assert!(modifiers.windows(2).all(|pair| pair[0] < pair[1]));
+    for modifier in modifiers {
+        device
+            .check_source_image(PackedFormat::Bgra8, width, height, modifier)
+            .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires explicit Vulkan GPU and modifier selection"]
 fn exported_images_retain_device_and_allocation_identity() {
     let (device, modifier) = selected();
     eprintln!("selected GPU: {}", device.name());

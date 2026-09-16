@@ -66,6 +66,42 @@ impl Device {
         )
     }
 
+    /// Enumerate exact modifiers accepted for importing one packed source.
+    ///
+    /// Every returned modifier supports a single memory plane, transfer reads,
+    /// DMA-BUF import and the requested extent. The result describes source
+    /// access only; it does not promise allocation or output export support.
+    pub fn source_modifiers(
+        &self,
+        format: PackedFormat,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> io::Result<Vec<u64>> {
+        let usage = ImageUse::ImportedSource;
+        let properties = self.modifier_properties(format)?;
+        let mut modifiers = Vec::new();
+        modifiers
+            .try_reserve_exact(properties.len())
+            .map_err(io::Error::other)?;
+        for property in properties {
+            let modifier = property.drm_format_modifier;
+            if usage.supports_modifier(&property, modifier)
+                && self.supports_external_image(
+                    format,
+                    width.get(),
+                    height.get(),
+                    modifier,
+                    usage,
+                )?
+            {
+                modifiers.push(modifier);
+            }
+        }
+        modifiers.sort_unstable();
+        modifiers.dedup();
+        Ok(modifiers)
+    }
+
     /// Allocate BGRA storage with an explicitly selected modifier.
     ///
     /// The caller negotiates the modifier with its intended importer. Capability
@@ -209,6 +245,25 @@ impl Device {
         modifier: u64,
         usage: ImageUse,
     ) -> io::Result<()> {
+        let properties = self.modifier_properties(packed)?;
+        if !properties
+            .iter()
+            .any(|entry| usage.supports_modifier(entry, modifier))
+        {
+            return Err(unsupported("modifier does not support single-plane blits"));
+        }
+        if !self.supports_external_image(packed, width, height, modifier, usage)? {
+            return Err(unsupported(
+                "image dimensions or requested DMA-BUF sharing are unsupported",
+            ));
+        }
+        Ok(())
+    }
+
+    fn modifier_properties(
+        &self,
+        packed: PackedFormat,
+    ) -> io::Result<Vec<vk::DrmFormatModifierPropertiesEXT>> {
         let instance = self.inner.instance();
         let physical = self.inner.physical;
         let mut list = vk::DrmFormatModifierPropertiesListEXT::default();
@@ -217,10 +272,10 @@ impl Device {
         unsafe {
             instance.get_physical_device_format_properties2(physical, packed.native(), &mut format)
         };
-        let mut entries = vec![
-            vk::DrmFormatModifierPropertiesEXT::default();
-            list.drm_format_modifier_count as usize
-        ];
+        let count = list.drm_format_modifier_count as usize;
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(count).map_err(io::Error::other)?;
+        entries.resize(count, vk::DrmFormatModifierPropertiesEXT::default());
         let mut list = vk::DrmFormatModifierPropertiesListEXT::default()
             .drm_format_modifier_properties(&mut entries);
         let mut format = vk::FormatProperties2::default().push_next(&mut list);
@@ -228,12 +283,26 @@ impl Device {
         unsafe {
             instance.get_physical_device_format_properties2(physical, packed.native(), &mut format)
         };
-        if !entries
-            .iter()
-            .any(|entry| usage.supports_modifier(entry, modifier))
-        {
-            return Err(unsupported("modifier does not support single-plane blits"));
+        let returned = list.drm_format_modifier_count as usize;
+        if returned > entries.len() {
+            return Err(io::Error::other(
+                "Vulkan modifier count grew during enumeration",
+            ));
         }
+        entries.truncate(returned);
+        Ok(entries)
+    }
+
+    fn supports_external_image(
+        &self,
+        packed: PackedFormat,
+        width: u32,
+        height: u32,
+        modifier: u64,
+        usage: ImageUse,
+    ) -> io::Result<bool> {
+        let instance = self.inner.instance();
+        let physical = self.inner.physical;
         let mut tiling = vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
             .drm_format_modifier(modifier)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
@@ -249,24 +318,21 @@ impl Device {
         let mut memory = vk::ExternalImageFormatProperties::default();
         let mut properties = vk::ImageFormatProperties2::default().push_next(&mut memory);
         // SAFETY: Valid query chain for enabled capabilities; outputs are live.
-        unsafe {
+        let result = unsafe {
             instance.get_physical_device_image_format_properties2(physical, &query, &mut properties)
+        };
+        if result == Err(vk::Result::ERROR_FORMAT_NOT_SUPPORTED) {
+            return Ok(false);
         }
-        .map_err(native)?;
+        result.map_err(native)?;
         let limits = properties.image_format_properties;
-        if width > limits.max_extent.width
+        Ok(!(width > limits.max_extent.width
             || height > limits.max_extent.height
             || !limits.sample_counts.contains(vk::SampleCountFlags::TYPE_1)
             || !memory
                 .external_memory_properties
                 .external_memory_features
-                .contains(usage.sharing())
-        {
-            return Err(unsupported(
-                "image dimensions or requested DMA-BUF sharing are unsupported",
-            ));
-        }
-        Ok(())
+                .contains(usage.sharing())))
     }
 }
 
