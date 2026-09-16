@@ -1,6 +1,6 @@
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
 use crate::Client;
 
@@ -48,11 +48,16 @@ nix::ioctl_read!(describe, b'd', 0x00, Describe);
 impl<F: AsFd> Client<F> {
     /// Query current permission and the latest configuration without capturing.
     pub fn describe(&self) -> io::Result<Description> {
-        let mut output = Describe::default();
-        // SAFETY: The initialized output is writable for its complete ABI size.
-        unsafe { describe(self.as_fd().as_raw_fd(), &mut output) }?;
-        output.decode()
+        query(self.as_fd())
     }
+}
+
+pub(crate) fn query(fd: BorrowedFd<'_>) -> io::Result<Description> {
+    let mut output = Describe::default();
+    // SAFETY: The initialized output is writable for its complete ABI size,
+    // and the borrowed file remains live throughout the query.
+    unsafe { describe(fd.as_raw_fd(), &mut output) }?;
+    output.decode()
 }
 
 impl Describe {
