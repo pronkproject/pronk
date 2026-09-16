@@ -747,6 +747,12 @@ separate from kernel source retirement. CastKMS admits one scene job per
 endpoint, so source-to-private work is ordered without a second userspace
 reordering queue.
 
+Only a frame paired with an available recipient image enters output work. If
+transport backpressure leaves completed private frames unpaired, each newer
+frame retires the older private backlog and becomes the sole queued frame.
+That policy bounds post-stall latency without cancelling work that has already
+claimed a recipient or coupling recipient reuse to compositor-source release.
+
 The scene records can be decoded, qualified and executed by the complete-scene
 reader above. `castkms-renderer` owns and validates the complete packet under
 one kernel job, including all installed descriptors, geometry, stacking and
