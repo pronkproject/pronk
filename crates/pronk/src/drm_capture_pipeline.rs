@@ -1,20 +1,21 @@
 //! Generic DRM capture and PipeWire adapter for production media sessions.
 
+mod setup;
+
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use drm_capture::Access as CaptureAccess;
-use pronk_capture::allocation::Heap;
-use pronk_capture::{Actor, Config as ActorConfig, Layout, Session as CaptureSession};
+use pronk_capture::{Actor, Layout};
 use pronk_capture_pipewire::{State as VideoState, Video};
 use pronk_pipewire::{
     ClassifiedSocketRemoteProvider, VideoSourceConfig, MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
 };
 use tokio_util::sync::CancellationToken;
 
+use self::setup::{CaptureOwner, Setup};
 use crate::capture_health::{CaptureEvents, CaptureMonitor};
 use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
 use crate::media_pipeline_port::{
@@ -42,8 +43,6 @@ pub struct DrmCapturePipelineConfig {
     pub shutdown_timeout: Duration,
 }
 
-type CaptureOwner = Arc<drm_capture::Client>;
-
 struct ActiveCapture {
     monitor: CaptureMonitor,
     generation: NonZeroU64,
@@ -52,8 +51,7 @@ struct ActiveCapture {
 
 /// Sole owner of capture access and its per-generation PipeWire producer.
 pub struct DrmCapturePipeline {
-    capture: CaptureAccess,
-    session: Option<CaptureSession>,
+    setup: Setup,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: DrmCapturePipelineConfig,
     active: Option<ActiveCapture>,
@@ -82,8 +80,7 @@ impl DrmCapturePipeline {
         let (events, receive) = CaptureEvents::channel();
         (
             Self {
-                capture,
-                session: None,
+                setup: Setup::new(capture),
                 producer_remotes,
                 config,
                 active: None,
@@ -116,54 +113,6 @@ impl DrmCapturePipeline {
             ));
         }
         Ok(())
-    }
-
-    async fn create_actor(
-        &mut self,
-        request: MediaStartRequest,
-        cancellation: CancellationToken,
-    ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
-        if cancellation.is_cancelled() {
-            return Err(MediaPipelineError::new("capture start was cancelled"));
-        }
-        if self.session.is_none() {
-            let client = self.capture.open().map_err(|error| {
-                MediaPipelineError::new(format!("open capture session: {error}"))
-            })?;
-            self.session = Some(CaptureSession::new(client));
-        }
-        let session = self
-            .session
-            .as_mut()
-            .expect("capture file retains its namespace");
-        let offer = session.describe().map_err(|error| {
-            MediaPipelineError::new(format!("describe capture output: {error}"))
-        })?;
-        let layout = Layout {
-            width: offer.width,
-            height: offer.height,
-        };
-        require_route_layout(layout, request)?;
-        let buffers = Heap::open(&self.config.heap_path)
-            .and_then(|heap| {
-                heap.allocate(layout, self.config.pool_size, self.config.pool_byte_limit)
-            })
-            .map_err(|error| MediaPipelineError::new(format!("allocate capture pool: {error}")))?;
-        let actor = session
-            .spawn(
-                buffers,
-                ActorConfig {
-                    capacity: self.config.request_capacity,
-                    poll_interval: self.config.poll_interval,
-                    shutdown_timeout: self.config.shutdown_timeout,
-                },
-            )
-            .map_err(|error| MediaPipelineError::new(format!("start capture actor: {error}")))?;
-        let layout = actor.layout();
-        require_route_layout(layout, request).map_err(|_| {
-            MediaPipelineError::new("capture layout changed while the generation was starting")
-        })?;
-        Ok((actor, layout))
     }
 
     async fn prepare_video(
@@ -263,7 +212,10 @@ impl CapturePipelinePort for DrmCapturePipeline {
         self.validate_config()?;
         let generation = NonZeroU64::new(request.media_generation)
             .ok_or_else(|| MediaPipelineError::new("media generation must be nonzero"))?;
-        let (actor, layout) = self.create_actor(request, cancellation.clone()).await?;
+        let (actor, layout) = self
+            .setup
+            .create_actor(self.config.clone(), request, cancellation.clone())
+            .await?;
         let video = self
             .prepare_video(actor, generation, cancellation.clone())
             .await?;
