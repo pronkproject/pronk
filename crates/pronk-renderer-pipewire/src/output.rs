@@ -310,6 +310,15 @@ impl TransportOutput {
             }
             indices.push(slot);
         }
+        if indices.len()
+            != self
+                .slots
+                .iter()
+                .filter(|slot| slot.publication.is_some())
+                .count()
+        {
+            return Err(invalid("stop report omits a renderer publication"));
+        }
         self.stopped = true;
         let outputs = self
             .slots
