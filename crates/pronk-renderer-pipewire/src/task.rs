@@ -137,7 +137,10 @@ async fn prepare_generation<F: AsFd>(
             return Err(error);
         }
     };
-    let scene_pool = match profile.create_pool(config.private_capacity, config.private_capacity) {
+    let scene_pool = match profile.create_pool(
+        config.private_pool.frame_capacity,
+        config.private_pool.source_capacity,
+    ) {
         Ok(scene_pool) => scene_pool,
         Err(error) => {
             let _ = started.send(Started::Failed);
@@ -148,8 +151,8 @@ async fn prepare_generation<F: AsFd>(
         device,
         width,
         height,
-        config.output_modifier,
-        config.private_capacity,
+        config.private_pool.modifier,
+        config.private_pool.frame_capacity,
     ) {
         Ok(images) => images,
         Err(error) => {
@@ -162,8 +165,8 @@ async fn prepare_generation<F: AsFd>(
         device,
         width,
         height,
-        config.output_modifier,
-        config.output_capacity,
+        config.output_pool.modifier,
+        config.output_pool.capacity,
     )
     .await
     {

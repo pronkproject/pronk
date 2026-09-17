@@ -13,7 +13,10 @@ use pronk::display_state::{RouteTarget, RoutedMode};
 use pronk::kernel_session::KernelSession;
 use pronk::media_pipeline_port::{CaptureEventPort, CapturePipelinePort};
 use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
-use pronk::renderer_capture_pipeline::{RendererCapturePipeline, RendererCapturePipelineConfig};
+use pronk::renderer_capture_pipeline::{
+    RendererCapturePipeline, RendererCapturePipelineConfig, RendererOutputPoolConfig,
+    RendererPrivatePoolConfig,
+};
 use pronk_capture_broker::{Provider, Target};
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use tokio_util::sync::CancellationToken;
@@ -114,9 +117,15 @@ async fn run(
             video_profile_id: "raw-dmabuf".into(),
             video_bitrate: nz64(4_000_000),
             video_frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
-            output_modifier: modifier,
-            private_capacity: NonZeroUsize::new(3).unwrap(),
-            output_capacity: NonZeroUsize::new(4).unwrap(),
+            private_pool: RendererPrivatePoolConfig {
+                modifier,
+                frame_capacity: NonZeroUsize::new(3).unwrap(),
+                source_capacity: NonZeroUsize::new(3).unwrap(),
+            },
+            output_pool: RendererOutputPoolConfig {
+                modifier,
+                capacity: NonZeroUsize::new(4).unwrap(),
+            },
         },
     )?;
     let mode = RoutedMode {

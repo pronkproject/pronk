@@ -12,8 +12,8 @@ use pronk_pipewire::{
     VideoPixelFormat, VideoSourceConfig,
 };
 use pronk_renderer_pipewire::{
-    ActiveRendererStream, RendererStream, RendererStreamConfig, RendererStreamError,
-    RendererStreamState,
+    ActiveRendererStream, OutputPoolConfig, PrivatePoolConfig, RendererStream,
+    RendererStreamConfig, RendererStreamError, RendererStreamState,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -40,9 +40,23 @@ pub struct RendererCapturePipelineConfig {
     pub video_profile_id: String,
     pub video_bitrate: NonZeroU64,
     pub video_frame_rate: VideoFrameRate,
-    pub output_modifier: u64,
-    pub private_capacity: NonZeroUsize,
-    pub output_capacity: NonZeroUsize,
+    pub private_pool: RendererPrivatePoolConfig,
+    pub output_pool: RendererOutputPoolConfig,
+}
+
+/// Allocation policy for renderer-private scene storage.
+#[derive(Debug, Clone, Copy)]
+pub struct RendererPrivatePoolConfig {
+    pub modifier: u64,
+    pub frame_capacity: NonZeroUsize,
+    pub source_capacity: NonZeroUsize,
+}
+
+/// Allocation policy for images exported to the media pipeline.
+#[derive(Debug, Clone, Copy)]
+pub struct RendererOutputPoolConfig {
+    pub modifier: u64,
+    pub capacity: NonZeroUsize,
 }
 
 enum Stream {
@@ -337,9 +351,15 @@ impl CapturePipelinePort for RendererCapturePipeline {
                     media_generation: generation,
                     frame_rate: self.config.video_frame_rate,
                 },
-                output_modifier: self.config.output_modifier,
-                private_capacity: self.config.private_capacity,
-                output_capacity: self.config.output_capacity,
+                private_pool: PrivatePoolConfig {
+                    modifier: self.config.private_pool.modifier,
+                    frame_capacity: self.config.private_pool.frame_capacity,
+                    source_capacity: self.config.private_pool.source_capacity,
+                },
+                output_pool: OutputPoolConfig {
+                    modifier: self.config.output_pool.modifier,
+                    capacity: self.config.output_pool.capacity,
+                },
             },
             remote.into_remote(),
             cancellation.clone(),

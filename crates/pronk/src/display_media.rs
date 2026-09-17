@@ -10,7 +10,10 @@ use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate};
 use crate::capture_health::CaptureEvents;
 use crate::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
 use crate::media_pipeline_port::CapturePipelinePort;
-use crate::renderer_capture_pipeline::{RendererCapturePipeline, RendererCapturePipelineConfig};
+use crate::renderer_capture_pipeline::{
+    RendererCapturePipeline, RendererCapturePipelineConfig, RendererOutputPoolConfig,
+    RendererPrivatePoolConfig,
+};
 use crate::renderer_session::RendererAccess;
 
 /// Explicit source of media images, independent of the authorization issuer.
@@ -72,9 +75,15 @@ impl DisplayMediaAccess {
                         video_profile_id: config.video_profile_id,
                         video_bitrate: config.video_bitrate,
                         video_frame_rate: config.video_frame_rate,
-                        output_modifier: DRM_FORMAT_MOD_LINEAR,
-                        private_capacity: NonZeroUsize::new(3).unwrap(),
-                        output_capacity: NonZeroUsize::new(4).unwrap(),
+                        private_pool: RendererPrivatePoolConfig {
+                            modifier: DRM_FORMAT_MOD_LINEAR,
+                            frame_capacity: NonZeroUsize::new(3).unwrap(),
+                            source_capacity: NonZeroUsize::new(3).unwrap(),
+                        },
+                        output_pool: RendererOutputPoolConfig {
+                            modifier: DRM_FORMAT_MOD_LINEAR,
+                            capacity: NonZeroUsize::new(4).unwrap(),
+                        },
                     },
                 )?;
                 Ok((Box::new(pipeline), events))
