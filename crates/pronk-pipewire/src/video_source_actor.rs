@@ -718,6 +718,7 @@ fn return_trigger_interval(frame_rate: crate::VideoFrameRate) -> Duration {
         u64::try_from(
             frame_rate
                 .frame_interval()
+                .expect("validated video frame rate has a nanosecond interval")
                 .as_nanos()
                 .div_ceil(u128::from(RETURN_TRIGGER_DIVISOR)),
         )
@@ -1450,6 +1451,20 @@ mod tests {
         ));
         request.buffers[0].layout.format = crate::VideoPixelFormat::Argb8888;
         assert!(request.config.validate(&request.buffers).is_ok());
+    }
+
+    #[test]
+    fn a_generation_rejects_an_unrepresentable_frame_rate() {
+        let mut request = generation(1);
+        request.config.frame_rate = crate::VideoFrameRate::integer(nonzero32(1_000_000_001));
+
+        assert!(matches!(
+            request.config.validate(&request.buffers),
+            Err(crate::ConfigurationError::FrameRate {
+                numerator: 1_000_000_001,
+                denominator: 1,
+            })
+        ));
     }
 
     fn video_buffer(id: u32) -> VideoBuffer {

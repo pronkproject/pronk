@@ -69,10 +69,10 @@ impl<F: AsFd + Send + 'static> Video<F> {
         config: VideoSourceConfig,
         remote: PipeWireRemote,
     ) -> io::Result<Self> {
-        let period = config.frame_rate.frame_interval();
-        if period.is_zero() {
-            return Err(invalid("capture cadence is not representable"));
-        }
+        let period = config
+            .frame_rate
+            .frame_interval()
+            .ok_or_else(|| invalid("capture cadence is not representable"))?;
         let registration = Registration::new(&actor)?;
         let source = VideoSourceActor::spawn().map_err(error)?;
         let identity = source

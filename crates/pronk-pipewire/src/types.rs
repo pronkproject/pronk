@@ -110,11 +110,15 @@ impl VideoFrameRate {
         self.denominator
     }
 
-    pub fn frame_interval(self) -> Duration {
-        let nanoseconds = u64::from(self.denominator.get())
-            .saturating_mul(1_000_000_000)
-            .div_ceil(u64::from(self.numerator.get()));
-        Duration::from_nanos(nanoseconds)
+    pub fn frame_interval(self) -> Option<Duration> {
+        let scaled_denominator = u64::from(self.denominator.get()) * 1_000_000_000;
+        if scaled_denominator < u64::from(self.numerator.get()) {
+            return None;
+        }
+
+        Some(Duration::from_nanos(
+            scaled_denominator.div_ceil(u64::from(self.numerator.get())),
+        ))
     }
 
     pub(crate) fn matches_fraction(self, numerator: u32, denominator: u32) -> bool {
@@ -150,6 +154,12 @@ impl VideoSourceConfig {
         validate_string("node description", &self.node_description)?;
         validate_string("session ID", &self.session_id)?;
         validate_string("device instance", &self.device_instance)?;
+        if self.frame_rate.frame_interval().is_none() {
+            return Err(ConfigurationError::FrameRate {
+                numerator: self.frame_rate.numerator.get(),
+                denominator: self.frame_rate.denominator.get(),
+            });
+        }
         if buffers.len() < MIN_VIDEO_BUFFERS || buffers.len() > MAX_VIDEO_BUFFERS {
             return Err(ConfigurationError::BufferCount(buffers.len()));
         }
@@ -235,6 +245,8 @@ pub enum ConfigurationError {
     SynchronizationMismatch(usize),
     #[error("duplicate video buffer ID {0}")]
     DuplicateBufferId(u32),
+    #[error("video frame rate {numerator}/{denominator} exceeds nanosecond clock resolution")]
+    FrameRate { numerator: u32, denominator: u32 },
     #[error("frame dimensions {width}x{height} exceed the supported bound")]
     FrameDimensions { width: u32, height: u32 },
     #[error("DRM modifier {0:#x} is not a concrete image layout")]
@@ -362,7 +374,17 @@ mod layout_tests {
             NonZeroU32::new(1_001).unwrap(),
         );
 
-        assert_eq!(rate.frame_interval(), Duration::from_nanos(33_366_667));
+        assert_eq!(
+            rate.frame_interval(),
+            Some(Duration::from_nanos(33_366_667))
+        );
+    }
+
+    #[test]
+    fn sub_nanosecond_frame_rate_has_no_interval() {
+        let rate = VideoFrameRate::integer(NonZeroU32::new(1_000_000_001).unwrap());
+
+        assert_eq!(rate.frame_interval(), None);
     }
 
     #[test]

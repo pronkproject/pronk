@@ -297,13 +297,12 @@ async fn prepare_generation<'renderer, F: AsFd>(
     remote: PipeWireRemote,
     started: oneshot::Sender<Started>,
 ) -> io::Result<PreparedGeneration<'renderer, F>> {
-    let source_interval = config.pipewire.frame_rate.frame_interval();
-    if source_interval.is_zero() {
-        return Err(io::Error::new(
+    let source_interval = config.pipewire.frame_rate.frame_interval().ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
             "renderer frame rate exceeds the source clock resolution",
-        ));
-    }
+        )
+    })?;
     let description = renderer.describe()?;
     let candidate = renderer.begin_takeover(description)?;
     let configuration = candidate.configuration();
