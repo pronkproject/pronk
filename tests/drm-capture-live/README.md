@@ -46,6 +46,10 @@ The binaries cover distinct boundaries:
   private-image modifier, optionally with a `0x` prefix.
   Like the live Mutter media probe, it requires the sibling pattern client,
   the classified core/backend sockets, and the versioned WirePlumber policy.
+  The compositor and Vulkan worker must also be able to import each other's
+  DMA-BUFs through the selected GPU driver. A virtual GPU that accelerates
+  OpenGL and Vulkan in separate contexts qualifies only when buffers can cross
+  that boundary; successful renderer discovery and selection are not enough.
 - `pronk-capture-pipewire-live-test /dev/dri/cardN /path/to/private/socket`:
   twelve real frames through PipeWire and GStreamer, checking every pixel,
   retained DMA-BUF memory, changing content, and a held sample across six
