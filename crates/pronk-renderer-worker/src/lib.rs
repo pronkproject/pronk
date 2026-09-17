@@ -4,6 +4,7 @@ mod activation;
 mod output;
 mod pool;
 mod reads;
+mod recipient;
 mod scene;
 mod scene_image;
 mod scene_job;
@@ -21,6 +22,7 @@ pub use output::{
 };
 pub use pool::{PrivateBuffer, PrivateFrame, PrivatePool, RejectedBuffer};
 pub use reads::{ReadCollectionError, SubmittedReads};
+pub use recipient::{DeliveryAttempt, DeliveryError};
 pub use scene::{
     ComposedFrame, RejectedScene, RejectedSceneFrames, SceneComposer, SceneCompositionError,
     SceneFrames, SceneInputs, SceneStorageProfile,

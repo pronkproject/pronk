@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use castkms_renderer::{RegisteredImage, RendererDraft};
 use pronk_dmabuf::SyncFile;
-use pronk_gpu::vulkan::{Device, Image, ImageLayout, PrivateCopy};
+use pronk_gpu::vulkan::{
+    DestinationCopy, DestinationImage, Device, Image, ImageLayout, PrivateCopy,
+};
 
 use crate::pool::{MAX_PRIVATE_BUFFERS, MAX_PRIVATE_POOL_BYTES};
 use crate::{PrivateBuffer, PrivateFrame};
@@ -74,6 +76,26 @@ impl SceneImage {
             completion: copied.completion,
         })
     }
+
+    pub(crate) fn copy_to_recipient(
+        self,
+        destination: DestinationImage,
+    ) -> io::Result<CopiedRecipientImage> {
+        let DestinationCopy {
+            source,
+            destination,
+            completion,
+        } = destination.copy_from_and_wait(self.image)?;
+        Ok(CopiedRecipientImage {
+            scene: SceneImage {
+                pool: self.pool,
+                registration: self.registration,
+                image: source,
+            },
+            destination,
+            completion,
+        })
+    }
 }
 
 /// A private float image and its packed CastKMS scene image.
@@ -91,6 +113,12 @@ pub(crate) struct CompletedSceneImage {
 pub(crate) struct CopiedSceneImage {
     pub(crate) scene: SceneImage,
     pub(crate) destination: Image,
+    pub(crate) completion: SyncFile,
+}
+
+pub(crate) struct CopiedRecipientImage {
+    pub(crate) scene: SceneImage,
+    pub(crate) destination: DestinationImage,
     pub(crate) completion: SyncFile,
 }
 

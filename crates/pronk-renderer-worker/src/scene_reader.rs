@@ -3,7 +3,7 @@
 use std::io;
 use std::os::fd::AsFd;
 
-use castkms_renderer::PublishedRenderer;
+use castkms_renderer::{OutputChannel, PublishedRenderer};
 
 use crate::scene_image::RegisteredSceneImages;
 use crate::{QualifiedSceneJob, RenderedFrame, ScenePool, SceneStorageProfile};
@@ -11,6 +11,7 @@ use crate::{QualifiedSceneJob, RenderedFrame, ScenePool, SceneStorageProfile};
 /// Active scene endpoint and the reusable private pool for its storage profile.
 pub struct SceneReader<F: AsFd> {
     renderer: PublishedRenderer<F>,
+    pub(crate) output: OutputChannel,
     storage: SceneStorageProfile,
     private: ScenePool,
     images: RegisteredSceneImages,
@@ -19,7 +20,7 @@ pub struct SceneReader<F: AsFd> {
 impl<F: AsFd> SceneReader<F> {
     /// Bind the active endpoint to an already allocated matching scene pool.
     pub fn new(
-        renderer: PublishedRenderer<F>,
+        mut renderer: PublishedRenderer<F>,
         storage: SceneStorageProfile,
         private: ScenePool,
         images: RegisteredSceneImages,
@@ -33,8 +34,20 @@ impl<F: AsFd> SceneReader<F> {
                 cause: invalid("scene pool does not match the active renderer profile"),
             }));
         }
+        let output = match renderer.open_output_channel() {
+            Ok(output) => output,
+            Err(cause) => {
+                return Err(Box::new(SceneReaderStartError {
+                    renderer,
+                    storage,
+                    private: Box::new(private),
+                    cause,
+                }));
+            }
+        };
         Ok(Self {
             renderer,
+            output,
             storage,
             private,
             images,
@@ -43,6 +56,10 @@ impl<F: AsFd> SceneReader<F> {
 
     pub fn available_slots(&self) -> usize {
         self.private.available().min(self.images.available())
+    }
+
+    pub(crate) fn device(&self) -> &pronk_gpu::vulkan::Device {
+        self.storage.device()
     }
 
     /// Render at most one changed complete scene into registered private storage.
@@ -180,10 +197,12 @@ impl<F: AsFd> SceneReader<F> {
     pub fn withdraw(self) -> io::Result<()> {
         let Self {
             renderer,
+            output,
             storage,
             private,
             images,
         } = self;
+        drop(output);
         let result = match renderer.withdraw() {
             Ok(renderer) => {
                 drop(renderer);
@@ -275,6 +294,8 @@ mod tests {
 
         assert_send::<SceneReader<std::fs::File>>();
         assert_send::<SceneAttempt>();
+        assert_send::<crate::DeliveryAttempt>();
+        assert_send::<crate::DeliveryError>();
         assert_send::<SceneReaderStartError<std::fs::File>>();
     }
 }

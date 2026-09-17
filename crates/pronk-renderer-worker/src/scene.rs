@@ -116,6 +116,10 @@ impl SceneStorageProfile {
         self.output
     }
 
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
+    }
+
     pub fn layer_count(&self) -> usize {
         self.sources.len()
     }
