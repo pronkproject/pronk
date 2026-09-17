@@ -2,15 +2,18 @@
 //!
 //! A renderer descriptor grants no modesetting or final-image capture access.
 //! It prepares one immutable whole-scene offer, names renderer-private storage,
-//! and reports submitted source reads after KMS selects that offer.
+//! reports submitted source reads after KMS selects that offer, and transfers
+//! completed private images into separately authorized recipient storage.
 
 mod constraints;
 mod image;
+mod output;
 mod scene;
 mod source;
 
 pub use constraints::{ConstraintsFormat, RendererConstraints, StorageProvenance};
 pub use image::{RegisteredImage, UnregisterImageError};
+pub use output::{OutputChannel, OutputJob, OutputReleaseError, RecipientImage};
 pub use scene::{ColorEncoding, ColorOperation, ColorRange, LayerKind, SceneJob, SceneLayer};
 pub use source::{FormatModifier, SourceImage, SourcePlane, SourceReleaseError};
 
@@ -211,6 +214,7 @@ impl<F: AsFd> ProbedRenderer<F> {
         Ok(PublishedRenderer {
             draft: self.draft,
             constraints_id,
+            withdrawn: false,
         })
     }
 }
@@ -227,6 +231,7 @@ impl<F: AsFd> AsFd for ProbedRenderer<F> {
 pub struct PublishedRenderer<F: AsFd> {
     draft: RendererDraft<F>,
     constraints_id: NonZeroU64,
+    withdrawn: bool,
 }
 
 impl<F: AsFd> PublishedRenderer<F> {
@@ -239,16 +244,20 @@ impl<F: AsFd> PublishedRenderer<F> {
     }
 
     /// Stop new selection and source admission without ending cleanup access.
-    pub fn withdraw(self) -> Result<WithdrawnRenderer<F>, OperationError<Self>> {
-        let request = DrmCastkmsRendererWithdrawOffer::default();
-        // SAFETY: The initialized request remains live throughout the
-        // synchronous ioctl.
-        if let Err(error) =
-            unsafe { drm_ioctl_castkms_renderer_withdraw_offer(self.as_fd().as_raw_fd(), &request) }
-        {
-            return Err(OperationError::new(self, error.into()));
+    pub fn withdraw(mut self) -> Result<WithdrawnRenderer<F>, OperationError<Self>> {
+        if let Err(error) = withdraw_offer(self.as_fd()) {
+            return Err(OperationError::new(self, error));
         }
+        self.withdrawn = true;
         Ok(WithdrawnRenderer { published: self })
+    }
+}
+
+impl<F: AsFd> Drop for PublishedRenderer<F> {
+    fn drop(&mut self) {
+        if !self.withdrawn {
+            let _ = withdraw_offer(self.as_fd());
+        }
     }
 }
 
@@ -275,6 +284,14 @@ impl<F: AsFd> AsFd for WithdrawnRenderer<F> {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.published.as_fd()
     }
+}
+
+fn withdraw_offer(fd: BorrowedFd<'_>) -> io::Result<()> {
+    let request = DrmCastkmsRendererWithdrawOffer::default();
+    // SAFETY: The initialized request remains live throughout the synchronous
+    // ioctl.
+    unsafe { drm_ioctl_castkms_renderer_withdraw_offer(fd.as_raw_fd(), &request) }?;
+    Ok(())
 }
 
 /// A failed state transition retaining its input endpoint for retry or close.
@@ -376,6 +393,7 @@ struct Endpoint<F> {
     fd: F,
     image_scope: Arc<()>,
     next_image_id: Option<NonZeroU64>,
+    output_channel_issued: bool,
 }
 
 impl<F: AsFd> Endpoint<F> {
@@ -384,6 +402,7 @@ impl<F: AsFd> Endpoint<F> {
             fd,
             image_scope: Arc::new(()),
             next_image_id: NonZeroU64::new(1),
+            output_channel_issued: false,
         }
     }
 
