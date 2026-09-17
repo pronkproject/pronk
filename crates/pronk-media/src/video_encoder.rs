@@ -274,7 +274,10 @@ mod tests {
             .is_ok());
         assert!(encoder
             .validate_input(&VideoInputLayout::DmaBuf {
-                drm_format: "AR24:0x0100000000000009".into(),
+                drm_format: DrmVideoFormat {
+                    format: u32::from_le_bytes(*b"AR24"),
+                    modifier: 0x0100_0000_0000_0009,
+                },
             })
             .is_err());
     }
@@ -286,7 +289,10 @@ mod tests {
         assert_eq!(encoder.codec(), VideoCodec::H264);
         assert!(encoder
             .validate_input(&VideoInputLayout::DmaBuf {
-                drm_format: "AR24:0x0100000000000009".into(),
+                drm_format: DrmVideoFormat {
+                    format: u32::from_le_bytes(*b"AR24"),
+                    modifier: 0x0100_0000_0000_0009,
+                },
             })
             .is_ok());
         assert!(encoder

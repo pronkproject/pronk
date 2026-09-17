@@ -17,8 +17,8 @@ mod vp8;
 
 pub use actor::{EncodedMediaReceivers, MediaGraphActor};
 pub use model::{
-    EncodedAudioPacket, EncodedVideoAccessUnit, MediaGraphConfiguration, MediaGraphError,
-    MediaGraphSnapshot, MediaGraphState, MediaGraphStatistics, PipeWireAudioInput,
+    DrmVideoFormat, EncodedAudioPacket, EncodedVideoAccessUnit, MediaGraphConfiguration,
+    MediaGraphError, MediaGraphSnapshot, MediaGraphState, MediaGraphStatistics, PipeWireAudioInput,
     PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence, VideoCodec,
     VideoEncoder, VideoFrameDependency, VideoInputLayout, MAX_ENCODED_ACCESS_UNIT_BYTES,
     MAX_ENCODED_AUDIO_PACKET_BYTES, MAX_ENCODED_OUTPUT_CAPACITY, OPUS_BITRATE, OPUS_CHANNELS,

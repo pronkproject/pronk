@@ -131,7 +131,58 @@ pub struct ValidatedVideoCaps {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoInputLayout {
     SystemMemoryBgrx,
-    DmaBuf { drm_format: String },
+    DmaBuf { drm_format: DrmVideoFormat },
+}
+
+/// One DRM format/modifier tuple accepted at a DMA-BUF video input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DrmVideoFormat {
+    pub format: u32,
+    pub modifier: u64,
+}
+
+impl DrmVideoFormat {
+    const INVALID_MODIFIER: u64 = 0x00ff_ffff_ffff_ffff;
+
+    pub fn parse(value: &str) -> Result<Self, MediaGraphError> {
+        let (fourcc, modifier) = match value.split_once(':') {
+            Some((fourcc, modifier)) => {
+                let modifier = modifier.strip_prefix("0x").ok_or_else(|| {
+                    MediaGraphError::new("DRM video modifier lacks its hexadecimal prefix")
+                })?;
+                if modifier.is_empty() || modifier.len() > 16 {
+                    return Err(MediaGraphError::new(
+                        "DRM video modifier has an invalid width",
+                    ));
+                }
+                let modifier = u64::from_str_radix(modifier, 16)
+                    .map_err(|_| MediaGraphError::new("DRM video modifier is not hexadecimal"))?;
+                if modifier == Self::INVALID_MODIFIER {
+                    return Err(MediaGraphError::new(
+                        "DRM video modifier is a negotiation sentinel",
+                    ));
+                }
+                (fourcc, modifier)
+            }
+            None => (value, 0),
+        };
+        let bytes: [u8; 4] = fourcc
+            .as_bytes()
+            .try_into()
+            .map_err(|_| MediaGraphError::new("DRM video format is not a four-character code"))?;
+        if !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        {
+            return Err(MediaGraphError::new(
+                "DRM video format contains a non-printable character",
+            ));
+        }
+        Ok(Self {
+            format: u32::from_le_bytes(bytes),
+            modifier,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,18 +310,8 @@ fn validate_caps(caps: &gst::Caps) -> Result<ValidatedVideoCaps, MediaGraphError
         let drm_format = structure
             .get::<&str>("drm-format")
             .map_err(|_| MediaGraphError::new("DMA-BUF video caps have no fixed DRM format"))?;
-        if drm_format.len() < 4
-            || drm_format.len() > 32
-            || !drm_format
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'x'))
-        {
-            return Err(MediaGraphError::new(
-                "DMA-BUF video caps have an invalid DRM format",
-            ));
-        }
         VideoInputLayout::DmaBuf {
-            drm_format: drm_format.into(),
+            drm_format: DrmVideoFormat::parse(drm_format)?,
         }
     } else {
         return Err(MediaGraphError::new(
@@ -482,7 +523,10 @@ mod tests {
         assert_eq!(
             parsed.layout,
             VideoInputLayout::DmaBuf {
-                drm_format: "AR24:0x0100000000000009".into(),
+                drm_format: DrmVideoFormat {
+                    format: u32::from_le_bytes(*b"AR24"),
+                    modifier: 0x0100_0000_0000_0009,
+                },
             }
         );
 
@@ -490,8 +534,44 @@ mod tests {
             "video/x-raw(memory:DMABuf),format=BGRx,drm-format=AR24,width=1920,height=1080,framerate=30/1",
             "video/x-raw(memory:DMABuf),format=DMA_DRM,width=1920,height=1080,framerate=30/1",
             "video/x-raw(memory:VAMemory),format=NV12,width=1920,height=1080,framerate=30/1",
+            "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=XR24:0x00ffffffffffffff,width=1920,height=1080,framerate=30/1",
         ] {
             assert!(ValidatedVideoCaps::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn drm_video_formats_preserve_fourcc_and_modifier_identity() {
+        assert_eq!(
+            DrmVideoFormat::parse("AR24:0x0100000000000009").unwrap(),
+            DrmVideoFormat {
+                format: u32::from_le_bytes(*b"AR24"),
+                modifier: 0x0100_0000_0000_0009,
+            }
+        );
+        assert_eq!(
+            DrmVideoFormat::parse("YU12").unwrap(),
+            DrmVideoFormat {
+                format: u32::from_le_bytes(*b"YU12"),
+                modifier: 0,
+            }
+        );
+        assert_eq!(
+            DrmVideoFormat::parse("R8  ").unwrap(),
+            DrmVideoFormat {
+                format: u32::from_le_bytes(*b"R8  "),
+                modifier: 0,
+            }
+        );
+        for invalid in [
+            "RGB",
+            "XR24:9",
+            "XR24:0x",
+            "XR\n4",
+            "XR24:0xnothex",
+            "XR24:0x00ffffffffffffff",
+        ] {
+            assert!(DrmVideoFormat::parse(invalid).is_err(), "{invalid}");
         }
     }
 
