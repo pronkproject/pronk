@@ -7,7 +7,8 @@ use gstreamer::prelude::*;
 
 use crate::h264;
 use crate::model::{
-    MediaGraphError, VideoCadence, VideoCodec, VideoEncoder, VideoFrameDependency, VideoInputLayout,
+    DrmVideoFormat, MediaGraphError, VideoCadence, VideoCodec, VideoEncoder, VideoFrameDependency,
+    VideoInputLayout,
 };
 use crate::vp8;
 
@@ -60,6 +61,56 @@ impl VideoCodec {
 }
 
 impl VideoEncoder {
+    /// Query concrete DMA-BUF layouts accepted by the selected converter.
+    pub fn supported_dma_buf_formats(&self) -> Result<Vec<DrmVideoFormat>, MediaGraphError> {
+        let Self::VaH264 { .. } = self else {
+            return Ok(Vec::new());
+        };
+        gst::init().map_err(|error| {
+            MediaGraphError::new(format!(
+                "initialize GStreamer while probing encoder input: {error}"
+            ))
+        })?;
+        let converter = self.build_converter()?;
+        let template = converter
+            .pad_template("sink")
+            .ok_or_else(|| MediaGraphError::new("VA converter has no sink pad template"))?;
+        let mut formats = Vec::new();
+        for (structure, features) in template.caps().iter_with_features() {
+            if features.size() != 1
+                || !features.contains("memory:DMABuf")
+                || structure.get::<&str>("format").ok() != Some("DMA_DRM")
+            {
+                continue;
+            }
+            if let Ok(values) = structure.get::<gst::ListRef<'_>>("drm-format") {
+                for value in values.iter() {
+                    let text = value.get::<&str>().map_err(|_| {
+                        MediaGraphError::new("VA converter exposes a non-string DRM format")
+                    })?;
+                    let format = DrmVideoFormat::parse(text)?;
+                    if !formats.contains(&format) {
+                        formats.push(format);
+                    }
+                }
+            } else {
+                let text = structure.get::<&str>("drm-format").map_err(|_| {
+                    MediaGraphError::new("VA converter exposes no concrete DRM formats")
+                })?;
+                let format = DrmVideoFormat::parse(text)?;
+                if !formats.contains(&format) {
+                    formats.push(format);
+                }
+            }
+        }
+        if formats.is_empty() {
+            return Err(MediaGraphError::new(
+                "VA converter exposes no DMA-BUF DRM formats",
+            ));
+        }
+        Ok(formats)
+    }
+
     pub(crate) fn validate_input(&self, layout: &VideoInputLayout) -> Result<(), MediaGraphError> {
         match (self, layout) {
             (Self::Software(_), VideoInputLayout::SystemMemoryBgrx) => Ok(()),
@@ -306,5 +357,17 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("memory:VAMemory"));
+    }
+
+    #[test]
+    #[ignore = "requires PRONK_GPU_RENDER_NODE and a matching VA converter"]
+    fn selected_va_converter_reports_concrete_dma_buf_formats() {
+        let render_node = std::env::var_os("PRONK_GPU_RENDER_NODE")
+            .expect("PRONK_GPU_RENDER_NODE names the selected VA render node");
+        let formats = VideoEncoder::va_h264(render_node)
+            .supported_dma_buf_formats()
+            .unwrap();
+        assert!(!formats.is_empty());
+        assert!(formats.iter().all(|format| format.format != 0));
     }
 }
