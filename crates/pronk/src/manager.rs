@@ -2111,7 +2111,7 @@ mod tests {
         BackendSupervisorEvent::Connected {
             connection_generation,
             negotiated_minor: 0,
-            info: BackendInfo::v2("mock", "Mock", "test", "mock", "development"),
+            info: BackendInfo::new("mock", "Mock", "test", "mock", "development"),
             inventory,
         }
     }

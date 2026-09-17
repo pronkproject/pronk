@@ -861,7 +861,7 @@ fn media_failure(error: MockMediaError) -> zbus::fdo::Error {
 }
 
 fn backend_info_from_environment() -> anyhow::Result<BackendInfo> {
-    let mut info = BackendInfo::v2(
+    let mut info = BackendInfo::new(
         MOCK_BACKEND_ID,
         "Deterministic mock backend",
         env!("CARGO_PKG_VERSION"),

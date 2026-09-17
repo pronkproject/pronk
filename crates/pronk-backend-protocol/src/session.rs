@@ -73,6 +73,19 @@ impl Validate for DisplayMode {
     }
 }
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr, Type)]
+pub enum RawVideoStorage {
+    SystemMemory = 1,
+    DmaBuf = 2,
+}
+
+impl Validate for RawVideoStorage {
+    fn validate(&self) -> Result<(), ValidationError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct VideoProfile {
     pub profile_id: String,
@@ -80,6 +93,8 @@ pub struct VideoProfile {
     pub max_width: u32,
     pub max_height: u32,
     pub max_refresh_millihz: u32,
+    /// Raw-frame storage paths that can feed the encoded profile.
+    pub raw_storage: Vec<RawVideoStorage>,
 }
 
 impl Validate for VideoProfile {
@@ -93,7 +108,18 @@ impl Validate for VideoProfile {
             self.max_refresh_millihz as u64,
             1_000,
             240_000,
-        )
+        )?;
+        validate_nonempty_bounded("raw video storage", &self.raw_storage, 2)?;
+        let mut storage = HashSet::with_capacity(self.raw_storage.len());
+        for kind in &self.raw_storage {
+            if !storage.insert(*kind as u32) {
+                return Err(ValidationError::DuplicateIdentifier {
+                    field: "raw video storage",
+                    value: (*kind as u32).to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -727,6 +753,7 @@ mod tests {
             max_width: 3840,
             max_height: 2160,
             max_refresh_millihz: 60_000,
+            raw_storage: vec![RawVideoStorage::SystemMemory],
         }
     }
 
@@ -782,6 +809,22 @@ mod tests {
             ..identity
         };
         assert_eq!(invalid.validate(), Err(ValidationError::InvalidPnpId));
+    }
+
+    #[test]
+    fn video_profiles_require_distinct_raw_storage_paths() {
+        let mut profile = video_profile();
+        profile.raw_storage.clear();
+        assert!(profile.validate().is_err());
+
+        profile.raw_storage = vec![RawVideoStorage::DmaBuf, RawVideoStorage::SystemMemory];
+        profile.validate().unwrap();
+
+        profile.raw_storage = vec![RawVideoStorage::DmaBuf, RawVideoStorage::DmaBuf];
+        assert!(matches!(
+            profile.validate(),
+            Err(ValidationError::DuplicateIdentifier { .. })
+        ));
     }
 
     #[test]
@@ -946,7 +989,8 @@ mod tests {
     fn session_wire_signatures_are_stable() {
         assert_eq!(SessionOptions::SIGNATURE, "(tttt)");
         assert_eq!(DisplayMode::SIGNATURE, "(uuuu)");
-        assert_eq!(VideoProfile::SIGNATURE, "(ssuuu)");
+        assert_eq!(RawVideoStorage::SIGNATURE, "u");
+        assert_eq!(VideoProfile::SIGNATURE, "(ssuuuau)");
         assert_eq!(AudioProfile::SIGNATURE, "(ssyau)");
         assert_eq!(IdentitySource::SIGNATURE, "u");
         assert_eq!(IdentitySource::SetupEndpoint as u32, 1);

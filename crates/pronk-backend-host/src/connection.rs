@@ -435,7 +435,7 @@ mod tests {
             "pronk-backend-mock@.service",
         )
         .unwrap();
-        let info = BackendInfo::v2("mock", "Mock", "0", "instance", "invocation");
+        let info = BackendInfo::new("mock", "Mock", "0", "instance", "invocation");
         let validator = ExactRegistrationValidator::new("instance", "invocation");
         validator
             .validate(&endpoint, &info, std::process::id())

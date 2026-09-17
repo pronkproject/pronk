@@ -53,7 +53,7 @@ pub struct StartupConfiguration {
 
 impl StartupConfiguration {
     pub fn from_environment(peer_policy: &BackendPeerPolicy) -> anyhow::Result<Self> {
-        let info = BackendInfo::v2(
+        let info = BackendInfo::new(
             CHROMIACAST_BACKEND_ID,
             "Google Cast device backend",
             env!("CARGO_PKG_VERSION"),

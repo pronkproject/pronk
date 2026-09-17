@@ -1522,6 +1522,7 @@ mod tests {
                 max_width: 1_920,
                 max_height: 1_080,
                 max_refresh_millihz: 60_000,
+                raw_storage: vec![pronk_backend_protocol::RawVideoStorage::SystemMemory],
             }],
             audio_profiles: Vec::new(),
             requested_features: 0,
