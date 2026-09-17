@@ -61,6 +61,7 @@ drm-capture = { path = "../../crates/drm-capture" }
 drm-display-executor = { path = "../../crates/drm-display-executor" }
 nix.workspace = true
 pronk = { path = "../../crates/pronk" }
+pronk-backend-protocol = { path = "../../crates/pronk-backend-protocol" }
 pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
 pronk-capture = { path = "../../crates/pronk-capture" }
 pronk-capture-broker = { path = "../../crates/pronk-capture-broker" }

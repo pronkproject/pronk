@@ -1524,6 +1524,7 @@ dependencies = [
  "nix 0.29.0",
  "pkg-config",
  "pronk",
+ "pronk-backend-protocol",
  "pronk-capture",
  "pronk-capture-broker",
  "pronk-capture-pipewire",

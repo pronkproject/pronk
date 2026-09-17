@@ -8,6 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use castkms_renderer::Renderer;
 use drm_capture::Access as CaptureAccess;
+use pronk_backend_protocol::RawVideoStorage;
 use pronk_capture::Buffer;
 use pronk_capture_pipewire::{State as CaptureVideoState, Video as CaptureVideo};
 use pronk_gpu::vulkan::{Device, PackedFormat};
@@ -40,6 +41,7 @@ pub struct RendererCapturePipelineConfig {
     pub device_instance: String,
     pub node_description: String,
     pub video_profile_id: String,
+    pub raw_storage: RawVideoStorage,
     pub video_bitrate: NonZeroU64,
     pub video_frame_rate: VideoFrameRate,
     pub private_pool: RendererPrivatePoolConfig,
@@ -447,44 +449,59 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 )
                 .await);
         }
-        let count = self.config.capture_pool_size;
-        let budget = self.config.capture_pool_byte_limit;
-        let mut allocation = tokio::task::spawn_blocking(move || {
-            allocate_capture_buffers(&capture_device, selected, count, budget)
-        });
-        let buffers = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                let _ = (&mut allocation).await;
-                return Err(self.finish_prepared_renderer(
-                    renderer,
-                    MediaPipelineError::new("renderer start was cancelled"),
-                ).await);
+        let capture = match self.config.raw_storage {
+            RawVideoStorage::SystemMemory => {
+                self.capture_setup
+                    .create_actor(
+                        self.capture_config(),
+                        request,
+                        Some(selected.offer),
+                        cancellation.clone(),
+                    )
+                    .await
             }
-            result = &mut allocation => match result {
-                Ok(Ok(buffers)) => buffers,
-                Ok(Err(error)) => {
-                    return Err(self.finish_prepared_renderer(renderer, error).await);
-                }
-                Err(error) => {
-                    return Err(self.finish_prepared_renderer(
-                        renderer,
-                        MediaPipelineError::new(format!("join capture GPU allocation: {error}")),
-                    ).await);
-                }
-            },
+            RawVideoStorage::DmaBuf => {
+                let count = self.config.capture_pool_size;
+                let budget = self.config.capture_pool_byte_limit;
+                let mut allocation = tokio::task::spawn_blocking(move || {
+                    allocate_capture_buffers(&capture_device, selected, count, budget)
+                });
+                let buffers = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        let _ = (&mut allocation).await;
+                        return Err(self.finish_prepared_renderer(
+                            renderer,
+                            MediaPipelineError::new("renderer start was cancelled"),
+                        ).await);
+                    }
+                    result = &mut allocation => match result {
+                        Ok(Ok(buffers)) => buffers,
+                        Ok(Err(error)) => {
+                            return Err(self.finish_prepared_renderer(renderer, error).await);
+                        }
+                        Err(error) => {
+                            return Err(self.finish_prepared_renderer(
+                                renderer,
+                                MediaPipelineError::new(format!(
+                                    "join capture GPU allocation: {error}"
+                                )),
+                            ).await);
+                        }
+                    },
+                };
+                self.capture_setup
+                    .create_actor_with_buffers(
+                        self.capture_config(),
+                        request,
+                        selected.offer,
+                        buffers,
+                        cancellation.clone(),
+                    )
+                    .await
+            }
         };
-        let (actor, layout) = match self
-            .capture_setup
-            .create_actor_with_buffers(
-                self.capture_config(),
-                request,
-                selected.offer,
-                buffers,
-                cancellation.clone(),
-            )
-            .await
-        {
+        let (actor, layout) = match capture {
             Ok(created) => created,
             Err(error) => return Err(self.finish_prepared_renderer(renderer, error).await),
         };

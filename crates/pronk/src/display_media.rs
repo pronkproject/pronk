@@ -5,6 +5,7 @@ use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
 use castkms_sys::DRM_FORMAT_MOD_LINEAR;
+use pronk_backend_protocol::RawVideoStorage;
 use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate};
 
 use crate::capture_health::CaptureEvents;
@@ -26,6 +27,32 @@ pub enum CaptureSource {
     FinalImage,
 }
 
+impl CaptureSource {
+    pub(crate) fn raw_storage(self) -> &'static [RawVideoStorage] {
+        match self {
+            Self::Renderer => &[RawVideoStorage::SystemMemory, RawVideoStorage::DmaBuf],
+            Self::FinalImage => &[RawVideoStorage::SystemMemory],
+        }
+    }
+
+    pub(crate) fn select_raw_storage(
+        self,
+        offered: &[RawVideoStorage],
+    ) -> io::Result<RawVideoStorage> {
+        self.raw_storage()
+            .iter()
+            .rev()
+            .copied()
+            .find(|storage| offered.contains(storage))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "backend video storage is incompatible with the capture source",
+                )
+            })
+    }
+}
+
 /// Authority for the selected media path, without the display lifetime.
 #[derive(Debug)]
 pub(crate) enum DisplayMediaAccess {
@@ -43,6 +70,7 @@ pub(crate) struct DisplayMediaConfig {
     pub device_instance: String,
     pub node_description: String,
     pub video_profile_id: String,
+    pub raw_storage: RawVideoStorage,
     pub video_bitrate: NonZeroU64,
     pub video_frame_rate: VideoFrameRate,
 }
@@ -79,6 +107,7 @@ impl DisplayMediaAccess {
                         device_instance: config.device_instance,
                         node_description: config.node_description,
                         video_profile_id: config.video_profile_id,
+                        raw_storage: config.raw_storage,
                         video_bitrate: config.video_bitrate,
                         video_frame_rate: config.video_frame_rate,
                         private_pool: RendererPrivatePoolConfig {
@@ -97,6 +126,12 @@ impl DisplayMediaAccess {
                 Ok((Box::new(pipeline), events))
             }
             Self::FinalImage(capture) => {
+                if config.raw_storage != RawVideoStorage::SystemMemory {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "final-image capture requires system-memory video storage",
+                    ));
+                }
                 let (pipeline, events) = DrmCapturePipeline::new(
                     capture,
                     remotes,
@@ -142,9 +177,39 @@ mod tests {
             device_instance: "device-test".into(),
             node_description: "test output".into(),
             video_profile_id: "h264".into(),
+            raw_storage: RawVideoStorage::SystemMemory,
             video_bitrate: NonZeroU64::new(4_000_000).unwrap(),
             video_frame_rate: VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
         }
+    }
+
+    #[test]
+    fn renderer_prefers_graphics_storage_without_requiring_it() {
+        assert_eq!(
+            CaptureSource::Renderer
+                .select_raw_storage(&[RawVideoStorage::SystemMemory, RawVideoStorage::DmaBuf,])
+                .unwrap(),
+            RawVideoStorage::DmaBuf
+        );
+        assert_eq!(
+            CaptureSource::Renderer
+                .select_raw_storage(&[RawVideoStorage::SystemMemory])
+                .unwrap(),
+            RawVideoStorage::SystemMemory
+        );
+    }
+
+    #[test]
+    fn final_image_capture_requires_mappable_storage() {
+        assert!(CaptureSource::FinalImage
+            .select_raw_storage(&[RawVideoStorage::DmaBuf])
+            .is_err());
+        assert_eq!(
+            CaptureSource::FinalImage
+                .select_raw_storage(&[RawVideoStorage::SystemMemory])
+                .unwrap(),
+            RawVideoStorage::SystemMemory
+        );
     }
 
     fn remotes() -> ClassifiedSocketRemoteProvider {

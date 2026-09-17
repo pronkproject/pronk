@@ -351,7 +351,10 @@ impl ManagerHandle {
                 Arc::clone(&self.kernel_session_provider),
                 Arc::clone(&self.pnp_resolver),
                 self.media_runtime.clone(),
-                initial_preparation_offer(audio_enabled),
+                initial_preparation_offer(
+                    audio_enabled,
+                    self.media_runtime.capture_source().raw_storage(),
+                ),
                 audio_enabled,
             ),
         )

@@ -81,6 +81,10 @@ impl MediaRuntime {
         self.capture_source = capture_source;
         self
     }
+
+    pub(crate) fn capture_source(&self) -> CaptureSource {
+        self.capture_source
+    }
 }
 
 pub(crate) struct DisplaySetupDependencies {
@@ -821,6 +825,19 @@ async fn run_display_setup_inner(
         stop_partial_backend(backend_session).await;
         return Err(DisplaySetupError::Cancelled);
     }
+    let video_profile = &prepared.capabilities().video_profiles[0];
+    let video_profile_id = video_profile.profile_id.clone();
+    let raw_storage = match context
+        .media_runtime
+        .capture_source
+        .select_raw_storage(&video_profile.raw_storage)
+    {
+        Ok(raw_storage) => raw_storage,
+        Err(error) => {
+            stop_partial_backend(backend_session).await;
+            return Err(DisplaySetupError::Monitor(error.to_string()));
+        }
+    };
     let revalidation = {
         let revalidation = slot.revalidate_device();
         tokio::pin!(revalidation);
@@ -907,7 +924,6 @@ async fn run_display_setup_inner(
                 )));
             }
         };
-    let video_profile_id = prepared.capabilities().video_profiles[0].profile_id.clone();
     let remote_provider = ClassifiedSocketRemoteProvider::new_for_server_uid(
         pipewire_paths,
         Uid::from_raw(context.media_runtime.server_uid),
@@ -928,6 +944,7 @@ async fn run_display_setup_inner(
             device_instance: device_instance.clone(),
             node_description: device.display_name.clone(),
             video_profile_id: video_profile_id.clone(),
+            raw_storage,
             video_bitrate,
             video_frame_rate: VideoFrameRate::new(
                 NonZeroU32::new(VIDEO_FRAME_RATE_NUMERATOR)
@@ -1367,7 +1384,10 @@ mod tests {
                 provider,
                 resolver,
                 MediaRuntime::for_user(Uid::effective().as_raw()),
-                crate::preparation::initial_preparation_offer(false),
+                crate::preparation::initial_preparation_offer(
+                    false,
+                    CaptureSource::Renderer.raw_storage(),
+                ),
                 false,
             ),
             DisplaySetupStage::Validating,
@@ -1438,7 +1458,10 @@ mod tests {
                 provider,
                 resolver,
                 MediaRuntime::for_user(Uid::effective().as_raw()),
-                crate::preparation::initial_preparation_offer(false),
+                crate::preparation::initial_preparation_offer(
+                    false,
+                    CaptureSource::Renderer.raw_storage(),
+                ),
                 false,
             ),
             DisplaySetupStage::Authorizing,

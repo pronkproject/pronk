@@ -170,7 +170,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("create Chromiacast BackendSession1 proxy")?;
     let capabilities = session
-        .prepare(pronk::preparation::initial_preparation_offer(false))
+        .prepare(pronk::preparation::initial_preparation_offer(
+            false,
+            &[pronk_backend_protocol::RawVideoStorage::SystemMemory],
+        ))
         .await
         .context("prepare authenticated Chromiacast device")?;
     capabilities
