@@ -147,11 +147,15 @@ async fn run(
             },
         },
     };
-    receiver_media::run(&mut capture, request, socket, receiver, address).await?;
-    capture
+    let media_result = receiver_media::run(&mut capture, request, socket, receiver, address).await;
+    let capture_result = capture
         .shutdown(MediaStopReason::BackendShutdown, CancellationToken::new())
-        .await?;
-    session.release().await?;
-    pattern.kill().await?;
+        .await;
+    let release_result = session.release().await;
+    let pattern_result = pattern.kill().await;
+    media_result?;
+    capture_result?;
+    release_result?;
+    pattern_result?;
     Ok(())
 }
