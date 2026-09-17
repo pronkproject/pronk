@@ -59,7 +59,7 @@ async fn run(device: &Path) -> anyhow::Result<()> {
             connector_id: nz(fixture.connector()),
             output_index: 0,
             media_generation: NonZeroU64::new(1).unwrap(),
-            refresh_hz: nz(30),
+            frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
         },
         PipeWireRemote::AmbientDevelopment,
     )

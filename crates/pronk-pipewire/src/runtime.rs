@@ -628,7 +628,7 @@ fn run(
     });
 
     let format = format_parameter(
-        state.borrow().config.refresh_hz,
+        state.borrow().config.frame_rate,
         state.borrow().buffers[0].descriptor.layout,
     )?;
     let mut params = [Pod::from_bytes(&format).ok_or_else(|| {
@@ -700,7 +700,7 @@ fn source_properties(config: &VideoSourceConfig) -> pw::properties::PropertiesBo
 }
 
 fn format_parameter(
-    refresh_hz: NonZeroU32,
+    frame_rate: crate::VideoFrameRate,
     layout: crate::VideoBufferLayout,
 ) -> Result<Vec<u8>, VideoSourceRuntimeError> {
     // Only the CPU-copy profile omits the modifier. Explicit GPU layouts keep
@@ -727,8 +727,8 @@ fn format_parameter(
             FormatProperties::VideoFramerate,
             Fraction,
             Fraction {
-                num: refresh_hz.get(),
-                denom: 1,
+                num: frame_rate.numerator().get(),
+                denom: frame_rate.denominator().get(),
             }
         ),
     );
@@ -766,8 +766,10 @@ fn negotiate_buffers(
         || !storage_matches(&info, layout.storage)
         || info.size().width != layout.width.get()
         || info.size().height != layout.height.get()
-        || info.framerate().num != state.config.refresh_hz.get()
-        || info.framerate().denom != 1
+        || !state
+            .config
+            .frame_rate
+            .matches_fraction(info.framerate().num, info.framerate().denom)
     {
         return Err(VideoSourceRuntimeError::UnsupportedFormat);
     }
@@ -1262,7 +1264,7 @@ mod tests {
             connector_id: NonZeroU32::new(1).unwrap(),
             output_index: 0,
             media_generation: NonZeroU64::new(2).unwrap(),
-            refresh_hz: NonZeroU32::new(30).unwrap(),
+            frame_rate: crate::VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
         };
         let properties = source_properties(&config);
         assert_eq!(properties.get("api.pronk.grant-id"), None);
@@ -1309,7 +1311,11 @@ mod tests {
             size: NonZeroU64::new(8_294_400).unwrap(),
             storage: crate::VideoBufferStorage::MappableLinear,
         };
-        let bytes = format_parameter(NonZeroU32::new(60).unwrap(), layout).unwrap();
+        let bytes = format_parameter(
+            crate::VideoFrameRate::integer(NonZeroU32::new(60).unwrap()),
+            layout,
+        )
+        .unwrap();
         let pod = Pod::from_bytes(&bytes).unwrap();
         let mut info = VideoInfoRaw::new();
         info.parse(pod).unwrap();
@@ -1318,6 +1324,28 @@ mod tests {
         assert_eq!(info.size().width, 1920);
         assert_eq!(info.size().height, 1080);
         assert!(!info.flags().contains(VideoFlags::MODIFIER));
+    }
+
+    #[test]
+    fn format_preserves_a_fractional_frame_rate() {
+        let layout = crate::VideoBufferLayout {
+            format: crate::VideoPixelFormat::Xrgb8888,
+            width: NonZeroU32::new(1920).unwrap(),
+            height: NonZeroU32::new(1080).unwrap(),
+            pitch: NonZeroU32::new(7680).unwrap(),
+            size: NonZeroU64::new(8_294_400).unwrap(),
+            storage: crate::VideoBufferStorage::MappableLinear,
+        };
+        let frame_rate = crate::VideoFrameRate::new(
+            NonZeroU32::new(30_000).unwrap(),
+            NonZeroU32::new(1_001).unwrap(),
+        );
+        let bytes = format_parameter(frame_rate, layout).unwrap();
+        let mut info = VideoInfoRaw::new();
+        info.parse(Pod::from_bytes(&bytes).unwrap()).unwrap();
+
+        assert_eq!(info.framerate().num, 30_000);
+        assert_eq!(info.framerate().denom, 1_001);
     }
 
     #[test]
@@ -1335,7 +1363,11 @@ mod tests {
                 size: NonZeroU64::new(8192).unwrap(),
                 storage,
             };
-            let bytes = format_parameter(NonZeroU32::new(30).unwrap(), layout).unwrap();
+            let bytes = format_parameter(
+                crate::VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
+                layout,
+            )
+            .unwrap();
             let mut info = VideoInfoRaw::new();
             info.parse(Pod::from_bytes(&bytes).unwrap()).unwrap();
             assert!(storage_matches(&info, storage));
@@ -1352,7 +1384,7 @@ mod tests {
             ));
 
             let bytes = format_parameter(
-                NonZeroU32::new(30).unwrap(),
+                crate::VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
                 crate::VideoBufferLayout {
                     storage: crate::VideoBufferStorage::MappableLinear,
                     ..layout
@@ -1464,7 +1496,11 @@ mod tests {
             size: NonZeroU64::new(8_294_400).unwrap(),
             storage: crate::VideoBufferStorage::MappableLinear,
         };
-        let bytes = format_parameter(NonZeroU32::new(60).unwrap(), layout).unwrap();
+        let bytes = format_parameter(
+            crate::VideoFrameRate::integer(NonZeroU32::new(60).unwrap()),
+            layout,
+        )
+        .unwrap();
         let pod = Pod::from_bytes(&bytes).unwrap();
         assert!(matches!(
             classify_format_change(Some(pod)),
@@ -1497,7 +1533,11 @@ mod tests {
                     size: NonZeroU64::new(512).unwrap(),
                     storage,
                 };
-                let bytes = format_parameter(NonZeroU32::new(30).unwrap(), layout).unwrap();
+                let bytes = format_parameter(
+                    crate::VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
+                    layout,
+                )
+                .unwrap();
                 let mut info = VideoInfoRaw::new();
                 info.parse(Pod::from_bytes(&bytes).unwrap()).unwrap();
                 assert_eq!(info.format(), pixel_format(format));

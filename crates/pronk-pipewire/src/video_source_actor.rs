@@ -593,7 +593,7 @@ async fn start_generation<F: SourceFactory>(
             generation.config.node_name,
         ));
     }
-    let return_trigger_interval = return_trigger_interval(generation.config.refresh_hz);
+    let return_trigger_interval = return_trigger_interval(generation.config.frame_rate);
     let buffer_ids = generation.buffers.iter().map(|buffer| buffer.id).collect();
     let source = factory.start(generation).await?;
     let identity = source.identity().clone();
@@ -713,10 +713,17 @@ async fn report_generation_failure<S: ManagedSource>(
         .is_err()
 }
 
-fn return_trigger_interval(refresh_hz: NonZeroU32) -> Duration {
-    let frame_ns = 1_000_000_000_u64.div_ceil(u64::from(refresh_hz.get()));
-    Duration::from_nanos(frame_ns.div_ceil(RETURN_TRIGGER_DIVISOR))
-        .clamp(MIN_RETURN_TRIGGER_INTERVAL, MAX_RETURN_TRIGGER_INTERVAL)
+fn return_trigger_interval(frame_rate: crate::VideoFrameRate) -> Duration {
+    Duration::from_nanos(
+        u64::try_from(
+            frame_rate
+                .frame_interval()
+                .as_nanos()
+                .div_ceil(u128::from(RETURN_TRIGGER_DIVISOR)),
+        )
+        .unwrap_or(u64::MAX),
+    )
+    .clamp(MIN_RETURN_TRIGGER_INTERVAL, MAX_RETURN_TRIGGER_INTERVAL)
 }
 
 async fn stop_generation<S: ManagedSource>(
@@ -1087,15 +1094,15 @@ mod tests {
     #[test]
     fn return_trigger_interval_is_a_bounded_fraction_of_the_frame_period() {
         assert_eq!(
-            return_trigger_interval(nonzero32(60)),
+            return_trigger_interval(crate::VideoFrameRate::integer(nonzero32(60))),
             Duration::from_nanos(4_166_667)
         );
         assert_eq!(
-            return_trigger_interval(nonzero32(240)),
+            return_trigger_interval(crate::VideoFrameRate::integer(nonzero32(240))),
             MIN_RETURN_TRIGGER_INTERVAL
         );
         assert_eq!(
-            return_trigger_interval(nonzero32(24)),
+            return_trigger_interval(crate::VideoFrameRate::integer(nonzero32(24))),
             MAX_RETURN_TRIGGER_INTERVAL
         );
     }
@@ -1426,7 +1433,7 @@ mod tests {
                 connector_id: nonzero32(7),
                 output_index: 0,
                 media_generation,
-                refresh_hz: nonzero32(60),
+                frame_rate: crate::VideoFrameRate::integer(nonzero32(60)),
             },
             buffers: vec![video_buffer(1), video_buffer(2)],
             remote: PipeWireRemote::AmbientDevelopment,

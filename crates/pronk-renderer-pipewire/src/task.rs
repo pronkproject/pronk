@@ -297,15 +297,13 @@ async fn prepare_generation<'renderer, F: AsFd>(
     remote: PipeWireRemote,
     started: oneshot::Sender<Started>,
 ) -> io::Result<PreparedGeneration<'renderer, F>> {
-    let interval_ns = 1_000_000_000u64
-        .checked_div(u64::from(config.pipewire.refresh_hz.get()))
-        .filter(|interval| *interval != 0)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "renderer refresh rate exceeds the source clock resolution",
-            )
-        })?;
+    let source_interval = config.pipewire.frame_rate.frame_interval();
+    if source_interval.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "renderer frame rate exceeds the source clock resolution",
+        ));
+    }
     let description = renderer.describe()?;
     let candidate = renderer.begin_takeover(description)?;
     let configuration = candidate.configuration();
@@ -412,7 +410,7 @@ async fn prepare_generation<'renderer, F: AsFd>(
         probe,
         storage,
         scene_pool,
-        source_interval: Duration::from_nanos(interval_ns),
+        source_interval,
         scene_images,
     })
 }

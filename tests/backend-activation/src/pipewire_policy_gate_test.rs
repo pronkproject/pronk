@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
             connector_id: nonzero32(1),
             output_index: 0,
             media_generation: nonzero64(1),
-            refresh_hz: nonzero32(60),
+            frame_rate: pronk_pipewire::VideoFrameRate::integer(nonzero32(60)),
         },
         vec![video_buffer(1)?, video_buffer(2)?],
         remote,

@@ -195,7 +195,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                 connector_id: nz(1),
                 output_index: 0,
                 media_generation: generation,
-                refresh_hz: nz(30),
+                frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
             },
             buffers,
             remote: PipeWireRemote::AmbientDevelopment,

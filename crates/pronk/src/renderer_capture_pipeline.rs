@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use castkms_renderer::{CapabilityProfile, Renderer};
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{
-    ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoPixelFormat,
-    VideoSourceConfig,
+    ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoFrameRate,
+    VideoPixelFormat, VideoSourceConfig,
 };
 use pronk_renderer_pipewire::{
     ActiveRendererStream, RendererStream, RendererStreamConfig, RendererStreamError,
@@ -309,7 +309,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
                     connector_id: self.config.connector_id,
                     output_index: self.config.output_index,
                     media_generation: generation,
-                    refresh_hz: self.config.capture_rate_hz,
+                    frame_rate: VideoFrameRate::integer(self.config.capture_rate_hz),
                 },
                 output_modifier: self.config.output_modifier,
                 private_capacity: self.config.private_capacity,

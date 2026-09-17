@@ -69,7 +69,7 @@ impl<F: AsFd + Send + 'static> Video<F> {
         config: VideoSourceConfig,
         remote: PipeWireRemote,
     ) -> io::Result<Self> {
-        let period = Duration::from_secs(1) / config.refresh_hz.get();
+        let period = config.frame_rate.frame_interval();
         if period.is_zero() {
             return Err(invalid("capture cadence is not representable"));
         }

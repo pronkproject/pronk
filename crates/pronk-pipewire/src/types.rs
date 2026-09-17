@@ -1,5 +1,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::OwnedFd;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -76,6 +77,61 @@ pub enum PipeWireRemote {
     AmbientDevelopment,
 }
 
+/// A positive rational video frame rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoFrameRate {
+    numerator: NonZeroU32,
+    denominator: NonZeroU32,
+}
+
+impl VideoFrameRate {
+    pub fn new(numerator: NonZeroU32, denominator: NonZeroU32) -> Self {
+        let divisor = greatest_common_divisor(numerator.get(), denominator.get());
+        Self {
+            numerator: NonZeroU32::new(numerator.get() / divisor)
+                .expect("a positive numerator remains positive after reduction"),
+            denominator: NonZeroU32::new(denominator.get() / divisor)
+                .expect("a positive denominator remains positive after reduction"),
+        }
+    }
+
+    pub const fn integer(frames_per_second: NonZeroU32) -> Self {
+        Self {
+            numerator: frames_per_second,
+            denominator: NonZeroU32::MIN,
+        }
+    }
+
+    pub const fn numerator(self) -> NonZeroU32 {
+        self.numerator
+    }
+
+    pub const fn denominator(self) -> NonZeroU32 {
+        self.denominator
+    }
+
+    pub fn frame_interval(self) -> Duration {
+        let nanoseconds = u64::from(self.denominator.get())
+            .saturating_mul(1_000_000_000)
+            .div_ceil(u64::from(self.numerator.get()));
+        Duration::from_nanos(nanoseconds)
+    }
+
+    pub(crate) fn matches_fraction(self, numerator: u32, denominator: u32) -> bool {
+        numerator != 0
+            && denominator != 0
+            && u64::from(self.numerator.get()) * u64::from(denominator)
+                == u64::from(numerator) * u64::from(self.denominator.get())
+    }
+}
+
+fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoSourceConfig {
     pub node_name: String,
@@ -85,7 +141,7 @@ pub struct VideoSourceConfig {
     pub connector_id: NonZeroU32,
     pub output_index: u32,
     pub media_generation: NonZeroU64,
-    pub refresh_hz: NonZeroU32,
+    pub frame_rate: VideoFrameRate,
 }
 
 impl VideoSourceConfig {
@@ -298,6 +354,30 @@ pub enum VideoSourceRuntimeError {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    #[test]
+    fn fractional_frame_rate_preserves_its_period() {
+        let rate = VideoFrameRate::new(
+            NonZeroU32::new(30_000).unwrap(),
+            NonZeroU32::new(1_001).unwrap(),
+        );
+
+        assert_eq!(rate.frame_interval(), Duration::from_nanos(33_366_667));
+    }
+
+    #[test]
+    fn frame_rate_reduces_equivalent_fractions() {
+        let rate = VideoFrameRate::new(
+            NonZeroU32::new(60_000).unwrap(),
+            NonZeroU32::new(2_002).unwrap(),
+        );
+
+        assert_eq!(rate.numerator().get(), 30_000);
+        assert_eq!(rate.denominator().get(), 1_001);
+        assert!(rate.matches_fraction(90_000, 3_003));
+        assert!(!rate.matches_fraction(30_000, 0));
+        assert!(!rate.matches_fraction(30_001, 1_001));
+    }
 
     fn layout(storage: VideoBufferStorage) -> VideoBufferLayout {
         VideoBufferLayout {

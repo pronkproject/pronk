@@ -77,7 +77,7 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
                 connector_id: nz(fixture.connector()),
                 output_index: 0,
                 media_generation: nz64(1),
-                refresh_hz: nz(30),
+                frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
             },
             buffers: registration.export()?,
             remote: PipeWireRemote::AmbientDevelopment,

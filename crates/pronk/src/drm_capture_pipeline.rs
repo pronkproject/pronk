@@ -11,7 +11,8 @@ use drm_capture::Access as CaptureAccess;
 use pronk_capture::{Actor, Layout};
 use pronk_capture_pipewire::{State as VideoState, Video};
 use pronk_pipewire::{
-    ClassifiedSocketRemoteProvider, VideoSourceConfig, MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
+    ClassifiedSocketRemoteProvider, VideoFrameRate, VideoSourceConfig, MAX_VIDEO_BUFFERS,
+    MIN_VIDEO_BUFFERS,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -140,7 +141,7 @@ impl DrmCapturePipeline {
                 connector_id: self.config.connector_id,
                 output_index: self.config.output_index,
                 media_generation: generation,
-                refresh_hz: self.config.capture_rate_hz,
+                frame_rate: VideoFrameRate::integer(self.config.capture_rate_hz),
             },
             remote.into_remote(),
         )

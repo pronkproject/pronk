@@ -1,7 +1,7 @@
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use pronk_gpu::vulkan::Device;
-use pronk_pipewire::{PipeWireRemote, VideoSourceConfig};
+use pronk_pipewire::{PipeWireRemote, VideoFrameRate, VideoSourceConfig};
 use pronk_renderer_pipewire::{Registration, Video};
 use pronk_renderer_worker::OutputPool;
 
@@ -33,7 +33,7 @@ async fn generation_starts_and_quiesces_without_publication() {
             connector_id: NonZeroU32::new(1).unwrap(),
             output_index: 0,
             media_generation: generation,
-            refresh_hz: NonZeroU32::new(30).unwrap(),
+            frame_rate: VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
         },
         PipeWireRemote::AmbientDevelopment,
     )
