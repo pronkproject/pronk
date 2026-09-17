@@ -43,29 +43,23 @@ renderer endpoint, and then releases display control. A renderer release error
 does not skip control release. Ordinary drop requests cleanup too, but does
 not wait for it or promise successful recovery after a process crash.
 
-## Authority is not migration
+## Authority is not constraints selection
 
-`RendererSession` has two independent ports:
+`RendererSession` uses `RendererProvider` to issue a renderer endpoint for one
+display lifetime. Acquiring that endpoint neither publishes an offer nor
+selects display constraints.
 
-- `RendererProvider` issues a renderer endpoint for the display lifetime.
-- Optional `RendererMigration` asks the compositor to install a registered
-  transition required by the selected kernel protocol.
+The renderer pipeline validates the endpoint and render node, prepares private
+storage, completes its native readiness check, and publishes an immutable
+offer. The compositor discovers that offer through the generic KMS constraints
+list and selects its ID with an ordinary atomic update. No private broker
+request acknowledges or completes that selection.
 
-A provider can supply authority without supplying migration. The current
-renderer path still requires its kernel transition protocol; absent migration
-returns an error, not permission to bypass activation. A failed or cancelled
-compositor request may already have taken effect, so candidate retirement
-remains the caller's responsibility.
-
-The Mutter adapter implements both ports. Its endpoint numbers and D-Bus
-connection never become native graphics identities. The renderer pipeline receives a
-checked descriptor, render-node selection, and an opaque release obligation.
-Optional cooperation is not another source of pixel authority.
-
-The generic constraints interface can replace the private transition exchange
-when the kernel and KMS client implement it. The application ownership model
-does not prescribe its wire layout or treat a future acknowledgement as GPU
-completion.
+The Mutter adapter only issues and revokes authority. Its endpoint numbers and
+D-Bus connection never become native graphics identities. The renderer
+pipeline receives a checked descriptor, render-node selection, and an opaque
+release obligation. Compositor cooperation grants no additional pixel access,
+and atomic acceptance is not GPU completion.
 
 ## Release and abandoned operations
 
@@ -88,8 +82,9 @@ reported failure, not confirmation that kernel or native work has ended.
 
 `CaptureSource::Renderer` is the default. It transfers renderer access into the
 GPU pipeline. `CaptureSource::FinalImage` instead clones capture access and
-uses the generic final-image queue. It neither activates a userspace renderer
-nor changes display constraints. Unused renderer access stays session-owned.
+uses the generic final-image queue. It neither publishes a userspace renderer
+offer nor changes display constraints. Unused renderer access stays
+session-owned.
 
 The final-image path can operate with a provider that has no renderer endpoint.
 Both paths keep the same display, media-generation, private PipeWire, and
