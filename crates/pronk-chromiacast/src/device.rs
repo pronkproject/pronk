@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chromiacast::{AppAvailability, CastApp, CastConnection, SetupInfoOutcome, APP_MIRRORING};
 use pronk_backend_protocol::{
     AudioProfile, ControlKind, ControlOperation, DeviceCapabilities, DisplayIdentity, DisplayMode,
-    IdentitySource, MediaConfiguration, PipeWireTarget, PreparationRequest, SessionStatistics,
-    StopReason, SuspendReason, Validate, VideoProfile, MAX_ERROR_TEXT_BYTES,
+    IdentitySource, MediaConfiguration, PipeWireTarget, PreparationRequest, RawVideoStorage,
+    SessionStatistics, StopReason, SuspendReason, Validate, VideoProfile, MAX_ERROR_TEXT_BYTES,
     MAX_MANUFACTURER_NAME_BYTES, MAX_PRODUCT_NAME_BYTES, SESSION_FEATURE_AUDIO,
     SESSION_FEATURE_CONTROL,
 };
@@ -1077,7 +1077,7 @@ async fn prepare_device(
             return Err(error);
         }
     };
-    let capabilities = match negotiate_capabilities(request, identity) {
+    let capabilities = match negotiate_capabilities(request, identity, media.raw_video_storage()) {
         Ok(capabilities) => capabilities,
         Err(error) => {
             let _ = control.close().await;
@@ -1275,6 +1275,7 @@ fn bounded_identity(
 fn negotiate_capabilities(
     request: PreparationRequest,
     display_identity: DisplayIdentity,
+    raw_storage: RawVideoStorage,
 ) -> Result<DeviceCapabilities, DeviceActorError> {
     let audio_requested = request.requested_features & SESSION_FEATURE_AUDIO != 0;
     let control_requested = request.requested_features & SESSION_FEATURE_CONTROL != 0;
@@ -1289,7 +1290,7 @@ fn negotiate_capabilities(
     let video_profiles: Vec<_> = request
         .video_profiles
         .into_iter()
-        .filter_map(narrow_h264_profile)
+        .filter_map(|profile| narrow_h264_profile(profile, raw_storage))
         .take(1)
         .collect();
     if video_profiles.is_empty() {
@@ -1338,13 +1339,17 @@ fn narrow_opus_profile(profile: AudioProfile) -> Option<AudioProfile> {
     })
 }
 
-fn narrow_h264_profile(mut profile: VideoProfile) -> Option<VideoProfile> {
-    if profile.codec != "h264" {
+fn narrow_h264_profile(
+    mut profile: VideoProfile,
+    raw_storage: RawVideoStorage,
+) -> Option<VideoProfile> {
+    if profile.codec != "h264" || !profile.raw_storage.contains(&raw_storage) {
         return None;
     }
     profile.max_width = profile.max_width.min(3_840);
     profile.max_height = profile.max_height.min(2_160);
     profile.max_refresh_millihz = profile.max_refresh_millihz.min(60_000);
+    profile.raw_storage = vec![raw_storage];
     Some(profile)
 }
 
@@ -1896,7 +1901,9 @@ mod tests {
         offer.video_profiles[0].max_height = 4_320;
         offer.video_profiles[0].max_refresh_millihz = 240_000;
 
-        let capabilities = negotiate_capabilities(offer, display_identity()).unwrap();
+        let capabilities =
+            negotiate_capabilities(offer, display_identity(), RawVideoStorage::SystemMemory)
+                .unwrap();
         assert_eq!(capabilities.modes.len(), 4);
         assert!(capabilities.modes.iter().any(|mode| (
             mode.width,
@@ -1938,7 +1945,12 @@ mod tests {
             max_channels: 6,
             sample_rates: vec![44_100, OPUS_SAMPLE_RATE],
         }];
-        let capabilities = negotiate_capabilities(supported_request, display_identity()).unwrap();
+        let capabilities = negotiate_capabilities(
+            supported_request,
+            display_identity(),
+            RawVideoStorage::SystemMemory,
+        )
+        .unwrap();
         assert_eq!(capabilities.features, SESSION_FEATURE_AUDIO);
         assert_eq!(
             capabilities.audio_profiles,
@@ -1959,8 +1971,31 @@ mod tests {
             sample_rates: vec![44_100],
         }];
         assert_eq!(
-            negotiate_capabilities(unsupported_request, display_identity()),
+            negotiate_capabilities(
+                unsupported_request,
+                display_identity(),
+                RawVideoStorage::SystemMemory,
+            ),
             Err(DeviceActorError::NoSupportedAudioProfile)
+        );
+    }
+
+    #[test]
+    fn video_capability_selects_the_configured_encoder_storage() {
+        let mut offer = request();
+        offer.video_profiles[0].raw_storage =
+            vec![RawVideoStorage::SystemMemory, RawVideoStorage::DmaBuf];
+
+        for storage in [RawVideoStorage::SystemMemory, RawVideoStorage::DmaBuf] {
+            let capabilities =
+                negotiate_capabilities(offer.clone(), display_identity(), storage).unwrap();
+            assert_eq!(capabilities.video_profiles[0].raw_storage, [storage]);
+        }
+
+        offer.video_profiles[0].raw_storage = vec![RawVideoStorage::SystemMemory];
+        assert_eq!(
+            negotiate_capabilities(offer, display_identity(), RawVideoStorage::DmaBuf),
+            Err(DeviceActorError::NoSupportedVideoProfile)
         );
     }
 

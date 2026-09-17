@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use pronk_backend_protocol::{
     validate_media_configuration, DeviceCapabilities, MediaConfiguration, MediaKind,
-    PipeWireTarget, RenderDeviceIdentity, SessionState, SessionStatistics, Validate,
-    SESSION_FEATURE_AUDIO,
+    PipeWireTarget, RawVideoStorage, RenderDeviceIdentity, SessionState, SessionStatistics,
+    Validate, SESSION_FEATURE_AUDIO,
 };
 use pronk_media::{
     EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit, MediaGraphActor,
@@ -45,6 +45,13 @@ pub(crate) enum VideoEncoderPolicy {
 }
 
 impl VideoEncoderPolicy {
+    fn raw_storage(&self) -> RawVideoStorage {
+        match self {
+            Self::Software => RawVideoStorage::SystemMemory,
+            Self::VaH264 { .. } => RawVideoStorage::DmaBuf,
+        }
+    }
+
     fn offer(&self) -> VideoOffer {
         match self {
             Self::Software => VideoOffer::SoftwareCompatibility,
@@ -284,6 +291,10 @@ pub(crate) enum MediaSessionEvent {
 }
 
 impl ChromiacastMediaSession {
+    pub(crate) fn raw_video_storage(&self) -> RawVideoStorage {
+        self.encoder_policy.raw_storage()
+    }
+
     pub(crate) fn spawn(
         session_id: String,
         session_generation: u64,
