@@ -738,6 +738,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoked_stream_waits_for_returned_authority_before_replacement() {
+        let driver = FakeDriver::default();
+        let policy = DisplayMediaPolicyActor::spawn_with_recovery_policy(
+            Box::new(driver.clone()),
+            input(None),
+            MediaRecoveryPolicy {
+                maximum_attempts: 1,
+                initial_delay: Duration::from_millis(20),
+                maximum_delay: Duration::from_millis(20),
+            },
+        )
+        .unwrap();
+        let mut state = policy.subscribe();
+
+        policy.observe(input(Some(route(1))));
+        wait_for_state(&mut state, MediaState::Running).await;
+
+        policy
+            .report_failure("capture stream was revoked".into())
+            .await
+            .unwrap();
+        wait_for_state(&mut state, MediaState::Failed).await;
+        let mut transferred = input(Some(route(1)));
+        transferred.grant = DisplayGrantState::SuspendedOtherMaster;
+        policy.observe(transferred);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(state.borrow().media_generation, 1);
+
+        policy.observe(input(Some(route(1))));
+        wait_for_state(&mut state, MediaState::Running).await;
+        assert_eq!(state.borrow().media_generation, 2);
+        policy
+            .shutdown(MediaStopReason::DisplayRemoved)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *driver.calls.lock().unwrap(),
+            vec![
+                Call::Capture(1),
+                Call::Media(1),
+                Call::Stop(1, MediaStopReason::TransportFailure),
+                Call::Stop(1, MediaStopReason::TransportFailure),
+                Call::Capture(2),
+                Call::Media(2),
+                Call::Stop(2, MediaStopReason::DisplayRemoved),
+                Call::Shutdown(MediaStopReason::DisplayRemoved),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn policy_reports_exhausted_activation_recovery_to_its_owner() {
         let driver = FakeDriver {
             fail_capture_attempts: Arc::new(AtomicU32::new(u32::MAX)),
