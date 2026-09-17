@@ -51,6 +51,15 @@ fn main() {
         "drm_castkms_renderer_release_source"
     );
     layout!(
+        DrmCastkmsRendererDequeueOutput,
+        "drm_castkms_renderer_dequeue_output"
+    );
+    layout!(DrmCastkmsRendererOutput, "drm_castkms_renderer_output");
+    layout!(
+        DrmCastkmsRendererReleaseOutput,
+        "drm_castkms_renderer_release_output"
+    );
+    layout!(
         DrmCastkmsRendererConstraints,
         "drm_castkms_renderer_constraints"
     );
@@ -89,6 +98,21 @@ fn main() {
         DrmCastkmsRendererDequeueScene,
         image_id,
         "drm_castkms_renderer_dequeue_scene.image_id"
+    );
+    field!(
+        DrmCastkmsRendererDequeueOutput,
+        image_id,
+        "drm_castkms_renderer_dequeue_output.image_id"
+    );
+    field!(
+        DrmCastkmsRendererOutput,
+        dma_buf_fd,
+        "drm_castkms_renderer_output.dma_buf_fd"
+    );
+    field!(
+        DrmCastkmsRendererOutput,
+        offset,
+        "drm_castkms_renderer_output.offset"
     );
     layout!(DrmCastkmsRendererScene, "drm_castkms_renderer_scene");
     field!(

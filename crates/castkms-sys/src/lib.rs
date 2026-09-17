@@ -278,6 +278,42 @@ pub struct DrmCastkmsRendererReleaseSource {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
+pub struct DrmCastkmsRendererDequeueOutput {
+    pub result: u64,
+    pub image_id: u64,
+    pub flags: u32,
+    pub reserved: u32,
+    pub padding: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererOutput {
+    pub job_id: u64,
+    pub image_id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub plane_count: u32,
+    pub modifier: u64,
+    pub dma_buf_fd: i32,
+    pub pitch: u32,
+    pub offset: u64,
+    pub reserved: [u64; 2],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererReleaseOutput {
+    pub job_id: u64,
+    pub completion_fd: i32,
+    pub kind: u32,
+    pub flags: u32,
+    pub reserved: [u32; 3],
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct DrmCastkmsRendererDequeueScene {
     pub result: u64,
     pub image_id: u64,
@@ -391,6 +427,18 @@ nix::ioctl_write_ptr!(
     DrmCastkmsRendererReleaseSource
 );
 nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_dequeue_output,
+    b'd',
+    0x49,
+    DrmCastkmsRendererDequeueOutput
+);
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_release_output,
+    b'd',
+    0x4a,
+    DrmCastkmsRendererReleaseOutput
+);
+nix::ioctl_write_ptr!(
     drm_ioctl_castkms_renderer_dequeue_scene,
     b'd',
     0x47,
@@ -452,6 +500,20 @@ mod tests {
         );
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererSourcePlane>(), 16);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererReleaseSource>(), 32);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererDequeueOutput>(), 32);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererDequeueOutput>(), 8);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererDequeueOutput, image_id),
+            8
+        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererOutput>(), 72);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererOutput>(), 8);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererOutput, dma_buf_fd),
+            40
+        );
+        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererOutput, offset), 48);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererReleaseOutput>(), 32);
         assert_eq!(RENDERER_SCENE_VERSION, 1);
         assert_eq!(RENDERER_SCENE_MAX_BYTES, 65_536);
         assert_eq!(RENDERER_SCENE_MAX_LAYERS, 24);
