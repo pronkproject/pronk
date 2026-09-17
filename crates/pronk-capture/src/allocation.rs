@@ -72,7 +72,11 @@ impl Heap {
             })?;
             // SAFETY: Successful DMA_HEAP_IOCTL_ALLOC installs a fresh owned fd.
             let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-            buffers.push(Buffer::new(fd, stride));
+            buffers.push(Buffer::new_mappable(
+                fd,
+                stride,
+                NonZeroU64::new(len).expect("page-rounded allocation is nonzero"),
+            ));
         }
         Ok(buffers)
     }

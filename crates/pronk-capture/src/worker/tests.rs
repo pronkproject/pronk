@@ -72,7 +72,13 @@ fn fixture(count: usize) -> (Actor<File>, Arc<Shared>) {
         owner: File::open("/dev/null").unwrap(),
     };
     let buffers = (0..count)
-        .map(|_| Buffer::new(File::open("/dev/null").unwrap().into(), nz(4)))
+        .map(|_| {
+            Buffer::new_mappable(
+                File::open("/dev/null").unwrap().into(),
+                nz(4),
+                std::num::NonZeroU64::new(4).unwrap(),
+            )
+        })
         .collect();
     let actor = spawn(
         backend,

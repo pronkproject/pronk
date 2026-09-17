@@ -75,7 +75,11 @@ fn main() -> anyhow::Result<()> {
             let observer = Client::from_fd(client.as_fd().try_clone_to_owned()?)?;
             let mut session = Session::new(client);
             let mut incomplete = heap.allocate(layout, nz(3), budget)?;
-            incomplete[1] = Buffer::new(std::fs::File::open("/dev/null")?.into(), nz(640 * 4));
+            incomplete[1] = Buffer::new_mappable(
+                std::fs::File::open("/dev/null")?.into(),
+                nz(640 * 4),
+                std::num::NonZeroU64::new(640 * 480 * 4).unwrap(),
+            );
             ensure!(
                 session.spawn(incomplete, config).is_err(),
                 "an ordinary file was accepted as a DMA-BUF destination"

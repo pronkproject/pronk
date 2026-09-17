@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use pronk_capture::{Actor, CaptureError};
 use pronk_pipewire::{
-    PipeWireRemote, VideoNodeIdentity, VideoSourceActor, VideoSourceActorEvent, VideoSourceConfig,
-    VideoSourceGeneration,
+    PipeWireRemote, VideoBufferLayout, VideoNodeIdentity, VideoSourceActor, VideoSourceActorEvent,
+    VideoSourceConfig, VideoSourceGeneration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -31,6 +31,7 @@ pub enum State {
 /// reused on uncertain teardown. Frame cadence belongs to the source config.
 pub struct Video<F> {
     identity: VideoNodeIdentity,
+    layout: VideoBufferLayout,
     state: watch::Receiver<State>,
     commands: mpsc::Sender<Command>,
     stop: CancellationToken,
@@ -74,6 +75,7 @@ impl<F: AsFd + Send + 'static> Video<F> {
             .frame_interval()
             .ok_or_else(|| invalid("capture cadence is not representable"))?;
         let registration = Registration::new(&actor)?;
+        let layout = registration.video_layout();
         let source = VideoSourceActor::spawn().map_err(error)?;
         let identity = source
             .start(VideoSourceGeneration {
@@ -101,6 +103,7 @@ impl<F: AsFd + Send + 'static> Video<F> {
         ));
         Ok(Self {
             identity,
+            layout,
             state: receive,
             commands,
             stop,
@@ -114,6 +117,10 @@ impl<F: AsFd + Send + 'static> Video<F> {
 
     pub fn subscribe(&self) -> watch::Receiver<State> {
         self.state.clone()
+    }
+
+    pub fn layout(&self) -> VideoBufferLayout {
+        self.layout
     }
 
     /// Admit captures for this immutable source generation.

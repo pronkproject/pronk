@@ -31,10 +31,13 @@ impl<F: AsFd> Native<F> {
                 "capture offer changed while the generation was starting",
             ));
         }
-        if offer.format != u32::from_le_bytes(*b"XR24") || offer.modifier != 0 {
+        if buffers.iter().any(|buffer| {
+            let description = buffer.description();
+            description.format != offer.format || description.modifier() != offer.modifier
+        }) {
             return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "capture actor requires linear XRGB8888",
+                io::ErrorKind::InvalidInput,
+                "capture buffers do not match the current offer",
             ));
         }
         if config.capacity > offer.max_requests {
@@ -83,8 +86,8 @@ impl<F: AsFd> Setup for StreamSetup<'_, F> {
         let buffer = &self.buffers[slot];
         let planes = [Plane {
             buffer: buffer.as_fd(),
-            stride: buffer.stride,
-            offset: 0,
+            stride: buffer.description().pitch,
+            offset: u64::from(buffer.description().offset()),
         }];
         self.client.register_destination(
             self.registration.destination(slot),

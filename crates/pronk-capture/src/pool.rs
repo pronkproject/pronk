@@ -2,7 +2,7 @@ use std::num::NonZeroU32;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::Arc;
 
-use crate::{Buffer, Frame};
+use crate::{Buffer, BufferDescription, Frame};
 
 /// Storage identity for one actor destination, not permission to read its pixels.
 ///
@@ -20,7 +20,11 @@ impl BufferHandle {
     }
 
     pub fn stride(&self) -> NonZeroU32 {
-        self.0.stride
+        self.0.description.pitch
+    }
+
+    pub fn description(&self) -> BufferDescription {
+        self.0.description
     }
 }
 

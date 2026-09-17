@@ -8,21 +8,24 @@ mod video;
 pub use video::{State, Video};
 
 use std::io;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU32;
 use std::os::fd::AsFd;
 
-use pronk_capture::{Actor, BufferHandle, Frame, Layout};
+use pronk_capture::{Actor, BufferHandle, BufferStorage, Frame, Layout};
 use pronk_pipewire::{
     PipeWireBufferTransport, VideoBuffer, VideoBufferLayout, VideoBufferStorage, VideoDamage,
     VideoFrame, VideoNodeIdentity, VideoPixelFormat, VideoSourceActorEvent, VideoSourceStopReport,
     MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS,
 };
 
-/// One CPU-mappable linear pool, before its PipeWire node has been started.
-/// The allocator must support CPU mapping; modifier zero alone does not prove it.
+/// One uniform authorized capture pool before its PipeWire node has started.
+///
+/// Storage metadata distinguishes CPU-mappable linear memory from an explicit
+/// graphics modifier, including explicit modifier zero.
 pub struct Registration {
     buffers: Vec<BufferHandle>,
     layout: Layout,
+    video_layout: VideoBufferLayout,
 }
 
 impl Registration {
@@ -30,17 +33,24 @@ impl Registration {
         if !(MIN_VIDEO_BUFFERS..=MAX_VIDEO_BUFFERS).contains(&actor.buffers().len()) {
             return Err(invalid("capture pool is outside PipeWire buffer limits"));
         }
+        let description = actor.buffers()[0].description();
         if actor
             .buffers()
             .iter()
-            .any(|buffer| buffer.stride() != actor.buffers()[0].stride())
+            .any(|buffer| buffer.description() != description)
         {
-            return Err(invalid("PipeWire requires a uniform capture stride"));
+            return Err(invalid("PipeWire requires a uniform capture layout"));
         }
+        let layout = actor.layout();
         Ok(Self {
             buffers: actor.buffers().to_vec(),
-            layout: actor.layout(),
+            layout,
+            video_layout: describe_video_layout(layout, description)?,
         })
+    }
+
+    pub fn video_layout(&self) -> VideoBufferLayout {
+        self.video_layout
     }
 
     /// Export only destinations, to the same authorized media recipient.
@@ -54,17 +64,7 @@ impl Registration {
                     id: id(index),
                     dma_buf: buffer.as_fd().try_clone_to_owned()?,
                     timelines: None,
-                    layout: VideoBufferLayout {
-                        format: VideoPixelFormat::Xrgb8888,
-                        width: self.layout.width,
-                        height: self.layout.height,
-                        pitch: buffer.stride(),
-                        size: NonZeroU64::new(
-                            u64::from(buffer.stride().get()) * u64::from(self.layout.height.get()),
-                        )
-                        .expect("nonzero layout"),
-                        storage: VideoBufferStorage::MappableLinear,
-                    },
+                    layout: self.video_layout,
                 })
             })
             .collect()
@@ -88,6 +88,35 @@ impl Registration {
             stopped: false,
         }
     }
+}
+
+fn describe_video_layout(
+    layout: Layout,
+    description: pronk_capture::BufferDescription,
+) -> io::Result<VideoBufferLayout> {
+    let format = match description.format {
+        value if value == u32::from_le_bytes(*b"XR24") => VideoPixelFormat::Xrgb8888,
+        value if value == u32::from_le_bytes(*b"AR24") => VideoPixelFormat::Argb8888,
+        _ => {
+            return Err(invalid(
+                "PipeWire does not support the capture pixel format",
+            ))
+        }
+    };
+    let storage = match description.storage {
+        BufferStorage::MappableLinear => VideoBufferStorage::MappableLinear,
+        BufferStorage::DrmModifier { modifier, offset } => {
+            VideoBufferStorage::DrmModifier { modifier, offset }
+        }
+    };
+    Ok(VideoBufferLayout {
+        format,
+        width: layout.width,
+        height: layout.height,
+        pitch: description.pitch,
+        size: description.size,
+        storage,
+    })
 }
 
 struct Slot {
@@ -235,4 +264,63 @@ fn id(index: usize) -> NonZeroU32 {
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pronk_capture::{BufferDescription, BufferStorage};
+    use std::num::{NonZeroU32, NonZeroU64};
+
+    fn nz(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).unwrap()
+    }
+
+    #[test]
+    fn graphics_storage_keeps_its_explicit_linear_modifier() {
+        let layout = describe_video_layout(
+            Layout {
+                width: nz(1920),
+                height: nz(1080),
+            },
+            BufferDescription {
+                format: u32::from_le_bytes(*b"XR24"),
+                pitch: nz(7680),
+                size: NonZeroU64::new(8_294_400).unwrap(),
+                storage: BufferStorage::DrmModifier {
+                    modifier: 0,
+                    offset: 0,
+                },
+            },
+        )
+        .unwrap();
+
+        assert_eq!(layout.format, VideoPixelFormat::Xrgb8888);
+        assert_eq!(
+            layout.storage,
+            VideoBufferStorage::DrmModifier {
+                modifier: 0,
+                offset: 0
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_capture_formats_do_not_reach_pipewire() {
+        let error = describe_video_layout(
+            Layout {
+                width: nz(1),
+                height: nz(1),
+            },
+            BufferDescription {
+                format: u32::from_le_bytes(*b"RG16"),
+                pitch: nz(2),
+                size: NonZeroU64::new(2).unwrap(),
+                storage: BufferStorage::MappableLinear,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
 }

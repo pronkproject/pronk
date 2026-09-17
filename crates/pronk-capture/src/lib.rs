@@ -16,7 +16,7 @@ pub use pool::BufferHandle;
 pub use session::Session;
 
 use std::io;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,16 +30,51 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub struct Buffer {
     fd: OwnedFd,
-    stride: NonZeroU32,
+    description: BufferDescription,
 }
 
 impl Buffer {
-    /// Transfer exclusive write ownership. The kernel validates size and layout.
+    /// Transfer exclusive write ownership of CPU-mappable linear XRGB8888.
     ///
     /// Distinct entries must not alias one another, and no other component may
     /// submit access except while holding the corresponding completed frame.
-    pub fn new(fd: OwnedFd, stride: NonZeroU32) -> Self {
-        Self { fd, stride }
+    pub fn new_mappable(fd: OwnedFd, pitch: NonZeroU32, size: NonZeroU64) -> Self {
+        Self {
+            fd,
+            description: BufferDescription {
+                format: u32::from_le_bytes(*b"XR24"),
+                pitch,
+                size,
+                storage: BufferStorage::MappableLinear,
+            },
+        }
+    }
+
+    /// Transfer exclusive write ownership of a graphics-allocated DMA-BUF.
+    pub fn new_drm(
+        fd: OwnedFd,
+        format: u32,
+        modifier: u64,
+        pitch: NonZeroU32,
+        offset: u32,
+        size: NonZeroU64,
+    ) -> io::Result<Self> {
+        if format == 0 || u64::from(offset) >= size.get() {
+            return Err(invalid("invalid capture buffer description"));
+        }
+        Ok(Self {
+            fd,
+            description: BufferDescription {
+                format,
+                pitch,
+                size,
+                storage: BufferStorage::DrmModifier { modifier, offset },
+            },
+        })
+    }
+
+    pub fn description(&self) -> BufferDescription {
+        self.description
     }
 }
 
@@ -47,6 +82,38 @@ impl AsFd for Buffer {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
+}
+
+/// Transport-relevant layout of one packed single-plane destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferDescription {
+    pub format: u32,
+    pub pitch: NonZeroU32,
+    pub size: NonZeroU64,
+    pub storage: BufferStorage,
+}
+
+impl BufferDescription {
+    pub fn modifier(self) -> u64 {
+        match self.storage {
+            BufferStorage::MappableLinear => 0,
+            BufferStorage::DrmModifier { modifier, .. } => modifier,
+        }
+    }
+
+    pub fn offset(self) -> u32 {
+        match self.storage {
+            BufferStorage::MappableLinear => 0,
+            BufferStorage::DrmModifier { offset, .. } => offset,
+        }
+    }
+}
+
+/// How an authorized media recipient may describe the allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferStorage {
+    MappableLinear,
+    DrmModifier { modifier: u64, offset: u32 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,7 +178,7 @@ impl Frame {
     }
 
     pub fn stride(&self) -> NonZeroU32 {
-        self.buffer.stride
+        self.buffer.description.pitch
     }
 
     /// Permanently withhold this destination from further captures in the actor.
@@ -224,4 +291,46 @@ impl<F> Drop for Actor<F> {
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    #[test]
+    fn graphics_buffers_reject_out_of_allocation_offsets() {
+        let fd = std::fs::File::open("/dev/null").unwrap().into();
+        let error = Buffer::new_drm(
+            fd,
+            u32::from_le_bytes(*b"XR24"),
+            0,
+            NonZeroU32::new(4).unwrap(),
+            4,
+            NonZeroU64::new(4).unwrap(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn graphics_buffers_distinguish_explicit_linear_storage() {
+        let buffer = Buffer::new_drm(
+            std::fs::File::open("/dev/null").unwrap().into(),
+            u32::from_le_bytes(*b"XR24"),
+            0,
+            NonZeroU32::new(4).unwrap(),
+            0,
+            NonZeroU64::new(4).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            buffer.description().storage,
+            BufferStorage::DrmModifier {
+                modifier: 0,
+                offset: 0
+            }
+        );
+    }
 }
