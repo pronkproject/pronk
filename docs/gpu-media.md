@@ -28,6 +28,23 @@ checks dimensions, signed PipeWire field bounds and offset containment; it
 does not validate vendor-specific tiling. Auxiliary memory planes and other
 pixel formats beyond those two are not supported by this initial adapter.
 
+The backend protocol describes encoder input as bounded
+`(storage, DRM fourcc, modifier)` tuples. Pronk offers the tuples its selected
+capture source can produce, and the backend returns one exact tuple in the
+selected video profile. The media target must repeat that tuple in its fixed
+PipeWire caps. Matching DMA-BUF storage alone is insufficient: a format or
+modifier mismatch fails preparation or media configuration before a graph is
+started.
+
+The Chromecast backend queries the selected VA converter's DMA-BUF sink-pad
+template during startup. Its advertised tuples therefore belong to the
+selected render device and converter rather than to a hard-coded assumption
+about VA support. The current renderer source offers linear XRGB8888. A host
+whose converter accepts only another tuple, such as tiled ARGB8888, has no
+compatible hardware-encoding path until capture allocation can select that
+tuple. Pronk reports the incompatibility instead of silently changing either
+layout.
+
 ## Ownership and synchronization
 
 The layout API does not submit GPU work or allocate buffers. Those operations

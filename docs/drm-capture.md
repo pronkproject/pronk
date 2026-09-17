@@ -138,11 +138,12 @@ The renderer path reuses the same generic capture actor and PipeWire publisher
 as final-image capture. Final-image capture allocates CPU-mappable destinations
 from the configured DMA heap. A renderer pipeline also uses that allocation
 path when its selected media profile requires system memory. When the profile
-selects DMA-BUF storage instead, the renderer allocates the exact capture offer
-on its selected Vulkan device and transfers those destinations into the shared
-actor. Its additional renderer service only produces private completed images
-and satisfies kernel-issued recipient claims. The capture queue does not encode
-Chromecast's display cadence or transport window.
+selects DMA-BUF storage instead, the renderer allocates the exact negotiated
+format and modifier on its selected Vulkan device and transfers those
+destinations into the shared actor. Its additional renderer service only
+produces private completed images and satisfies kernel-issued recipient
+claims. The capture queue does not encode Chromecast's display cadence or
+transport window.
 
 If upstream chooses V4L2 for buffer transport, it would replace these transport
 operations rather than introduce a second production path. Keeping the client
