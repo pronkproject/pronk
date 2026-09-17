@@ -34,6 +34,13 @@ use castkms_sys::{
 };
 use drm_display_executor::scene::geometry::Extent;
 
+fn dequeue_is_idle(error: nix::errno::Errno) -> bool {
+    matches!(
+        error,
+        nix::errno::Errno::ENODATA | nix::errno::Errno::ESTALE
+    )
+}
+
 /// Advisory state returned by the renderer endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointState {
@@ -456,6 +463,14 @@ fn unsupported(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unselected_live_offer_is_idle() {
+        assert!(dequeue_is_idle(nix::errno::Errno::ESTALE));
+        assert!(dequeue_is_idle(nix::errno::Errno::ENODATA));
+        assert!(!dequeue_is_idle(nix::errno::Errno::EKEYREVOKED));
+        assert!(!dequeue_is_idle(nix::errno::Errno::EBUSY));
+    }
 
     #[test]
     fn endpoint_description_binds_identity_to_published_states() {

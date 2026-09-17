@@ -211,7 +211,7 @@ impl OutputChannel {
         if let Err(error) =
             unsafe { drm_ioctl_castkms_renderer_dequeue_output(self.as_fd().as_raw_fd(), &request) }
         {
-            if error == nix::errno::Errno::ENODATA {
+            if crate::dequeue_is_idle(error) {
                 return Ok(None);
             }
             return Err(error.into());
