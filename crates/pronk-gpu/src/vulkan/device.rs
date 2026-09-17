@@ -3,9 +3,11 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ash::vk;
+
+static INSTANCE: OnceLock<Result<Instance, String>> = OnceLock::new();
 
 /// A Vulkan device selected by an opened DRM render node, never enumeration order.
 ///
@@ -34,13 +36,13 @@ pub struct RenderNodeIdentity {
 
 struct Instance {
     raw: ash::Instance,
-    // Keep the dynamically loaded function pointers valid until instance teardown.
+    // Keep the dynamically loaded function pointers valid for process lifetime.
     _entry: ash::Entry,
 }
 
 pub(super) struct DeviceInner {
     pub(super) raw: ash::Device,
-    instance: Instance,
+    instance: &'static Instance,
     pub(super) physical: vk::PhysicalDevice,
     pub(super) queue_family: u32,
     pub(super) shader_int64: bool,
@@ -113,16 +115,7 @@ impl Device {
             minor: u32::try_from(minor)
                 .map_err(|_| unsupported("DRM render-node minor number is too large"))?,
         };
-        // SAFETY: The system Vulkan loader is trusted native code. Entry remains
-        // alive through every instance and device call via the owning hierarchy.
-        let entry = unsafe { ash::Entry::load() }.map_err(io::Error::other)?;
-        let app = vk::ApplicationInfo::default()
-            .application_name(c"pronk-gpu")
-            .api_version(vk::API_VERSION_1_1);
-        let create = vk::InstanceCreateInfo::default().application_info(&app);
-        // SAFETY: All create-info pointers reference live local values.
-        let raw = unsafe { entry.create_instance(&create, None) }.map_err(native)?;
-        let instance = Instance { raw, _entry: entry };
+        let instance = load_instance()?;
         // SAFETY: The instance is live and enumeration retains no borrowed pointers.
         let physicals = unsafe { instance.raw.enumerate_physical_devices() }.map_err(native)?;
         for physical in physicals {
@@ -235,6 +228,25 @@ impl Device {
     }
 }
 
+fn load_instance() -> io::Result<&'static Instance> {
+    INSTANCE
+        .get_or_init(|| {
+            // SAFETY: The system Vulkan loader is trusted native code. The
+            // process-wide instance keeps loader and driver TLS callbacks loaded.
+            let entry = unsafe { ash::Entry::load() }.map_err(|error| error.to_string())?;
+            let app = vk::ApplicationInfo::default()
+                .application_name(c"pronk-gpu")
+                .api_version(vk::API_VERSION_1_1);
+            let create = vk::InstanceCreateInfo::default().application_info(&app);
+            // SAFETY: All create-info pointers reference live local values.
+            let raw = unsafe { entry.create_instance(&create, None) }
+                .map_err(|error| error.to_string())?;
+            Ok(Instance { raw, _entry: entry })
+        })
+        .as_ref()
+        .map_err(|error| io::Error::other(error.clone()))
+}
+
 impl DeviceInner {
     pub(super) fn instance(&self) -> &ash::Instance {
         &self.instance.raw
@@ -246,13 +258,6 @@ impl Drop for DeviceInner {
         // SAFETY: Child resources retain an Arc to this device. Submitted jobs
         // retain their resources until completion or device loss permits teardown.
         unsafe { self.raw.destroy_device(None) };
-    }
-}
-
-impl Drop for Instance {
-    fn drop(&mut self) {
-        // SAFETY: Device teardown precedes instance teardown, with Entry still live.
-        unsafe { self.raw.destroy_instance(None) };
     }
 }
 
