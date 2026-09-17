@@ -34,7 +34,7 @@ pub async fn run_complete_scenes<F: AsFd>(
     source_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let result = run_until_stopped(&mut reader, video, &mut pipeline, &mut source_tick, stop).await;
-    let result = combine_shutdown(result, pipeline.shutdown().await);
+    let result = combine_shutdown(result, pipeline.shutdown(video, &mut reader).await);
     combine_shutdown(result, reader.withdraw())
 }
 
@@ -182,10 +182,55 @@ impl Pipeline {
         Ok(cause)
     }
 
-    async fn shutdown(&mut self) -> io::Result<()> {
-        let mut failure = finish_fallible_tasks(&mut self.output_copies).await.err();
-        append_shutdown_failure(&mut failure, finish_tasks(&mut self.producer_waits).await);
-        append_shutdown_failure(&mut failure, finish_tasks(&mut self.reader_waits).await);
+    async fn shutdown<F: AsFd>(
+        &mut self,
+        video: &mut Video,
+        reader: &mut SceneReader<F>,
+    ) -> io::Result<()> {
+        let mut failure = None;
+        while let Some(result) = self.output_copies.join_next().await {
+            match result {
+                Ok(Ok(output)) => match video.submit(output) {
+                    Ok(output) => {
+                        let output = output.wait().await;
+                        match video
+                            .finish(output)
+                            .and_then(|output| video.discard(output))
+                        {
+                            Ok(frame) => {
+                                append_shutdown_failure(&mut failure, return_frame(reader, frame))
+                            }
+                            Err(error) => append_shutdown_failure(&mut failure, Err(error)),
+                        }
+                    }
+                    Err(error) => append_shutdown_failure(&mut failure, Err(error)),
+                },
+                Ok(Err(error)) => append_shutdown_failure(&mut failure, Err(error)),
+                Err(error) => append_shutdown_failure(&mut failure, Err(join_error(error))),
+            }
+        }
+        while let Some(result) = self.producer_waits.join_next().await {
+            match result {
+                Ok(output) => match video
+                    .finish(output)
+                    .and_then(|output| video.discard(output))
+                {
+                    Ok(frame) => append_shutdown_failure(&mut failure, return_frame(reader, frame)),
+                    Err(error) => append_shutdown_failure(&mut failure, Err(error)),
+                },
+                Err(error) => append_shutdown_failure(&mut failure, Err(join_error(error))),
+            }
+        }
+        append_shutdown_failure(
+            &mut failure,
+            finish_tasks(&mut self.reader_waits, |returned| {
+                video.finish_return(returned).map(drop)
+            })
+            .await,
+        );
+        while let Some(frame) = self.frames.pop_front() {
+            append_shutdown_failure(&mut failure, return_frame(reader, frame));
+        }
         failure.map_or(Ok(()), Err)
     }
 }
@@ -195,21 +240,14 @@ fn return_frame<F: AsFd>(reader: &mut SceneReader<F>, frame: RenderedFrame) -> i
         .map_err(|_| io::Error::other("scene reader rejected its returned private images"))
 }
 
-async fn finish_tasks<T: 'static>(tasks: &mut JoinSet<T>) -> io::Result<()> {
-    let mut failure = None;
-    while let Some(result) = tasks.join_next().await {
-        if let Err(error) = result {
-            append_shutdown_failure(&mut failure, Err(join_error(error)));
-        }
-    }
-    failure.map_or(Ok(()), Err)
-}
-
-async fn finish_fallible_tasks<T: 'static>(tasks: &mut JoinSet<io::Result<T>>) -> io::Result<()> {
+async fn finish_tasks<T: 'static>(
+    tasks: &mut JoinSet<T>,
+    mut finish: impl FnMut(T) -> io::Result<()>,
+) -> io::Result<()> {
     let mut failure = None;
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(result) => append_shutdown_failure(&mut failure, result.map(drop)),
+            Ok(value) => append_shutdown_failure(&mut failure, finish(value)),
             Err(error) => append_shutdown_failure(&mut failure, Err(join_error(error))),
         }
     }
@@ -275,9 +313,7 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        combine_shutdown, finish_fallible_tasks, finish_tasks, replace_backlog, take_pair,
-    };
+    use super::{combine_shutdown, finish_tasks, replace_backlog, take_pair};
     use pronk_renderer_worker::{CompletedOutput, RenderedFrame};
     use std::collections::VecDeque;
     use std::io;
@@ -331,7 +367,8 @@ mod tests {
         });
         entered_rx.await.unwrap();
 
-        let stopping = tokio::spawn(async move { finish_tasks(&mut tasks).await.unwrap() });
+        let stopping =
+            tokio::spawn(async move { finish_tasks(&mut tasks, |_| Ok(())).await.unwrap() });
         tokio::task::yield_now().await;
         assert!(!stopping.is_finished());
         release.send(()).unwrap();
@@ -349,7 +386,8 @@ mod tests {
         });
         entered_rx.await.unwrap();
 
-        let finishing = tokio::spawn(async move { finish_tasks(&mut tasks).await.unwrap() });
+        let finishing =
+            tokio::spawn(async move { finish_tasks(&mut tasks, |_| Ok(())).await.unwrap() });
         tokio::task::yield_now().await;
         assert!(!finishing.is_finished());
         release.send(()).unwrap();
@@ -357,14 +395,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finishing_reports_every_late_task_failure() {
+    async fn finishing_applies_every_completed_result() {
         let mut tasks = JoinSet::new();
-        tasks.spawn(async { Err::<(), _>(io::Error::other("native copy failed")) });
-        tasks.spawn(async { panic!("native worker panicked") });
+        tasks.spawn(async { 1 });
+        tasks.spawn(async { 2 });
+        let mut finished = Vec::new();
 
-        let error = finish_fallible_tasks(&mut tasks).await.unwrap_err();
-        assert!(error.to_string().contains("native copy failed"));
-        assert!(error.to_string().contains("native worker panicked"));
+        let error = finish_tasks(&mut tasks, |value| {
+            finished.push(value);
+            Err(io::Error::other(format!("failed result {value}")))
+        })
+        .await
+        .unwrap_err();
+
+        finished.sort_unstable();
+        assert_eq!(finished, [1, 2]);
+        assert!(error.to_string().contains("failed result 1"));
+        assert!(error.to_string().contains("failed result 2"));
     }
 
     #[test]

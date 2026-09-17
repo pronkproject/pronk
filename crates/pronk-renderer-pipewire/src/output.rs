@@ -65,6 +65,11 @@ impl OutputSession {
         self.pool.finish(output)
     }
 
+    /// Restore a completed output without making it visible to PipeWire.
+    pub fn discard(&mut self, output: ReadyOutput) -> io::Result<RenderedFrame> {
+        self.pool.discard(output)
+    }
+
     /// Publish completed pixels while retaining their transport ownership.
     pub fn publish(
         &mut self,

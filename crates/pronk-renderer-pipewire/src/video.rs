@@ -71,6 +71,11 @@ impl Video {
         self.output.finish(output)
     }
 
+    /// Restore a completed output that will not be published during shutdown.
+    pub fn discard(&mut self, output: ReadyOutput) -> io::Result<RenderedFrame> {
+        self.output.discard(output)
+    }
+
     pub fn finish_return(&mut self, returned: CompletedReturn) -> io::Result<usize> {
         self.output.finish_return(returned)
     }
