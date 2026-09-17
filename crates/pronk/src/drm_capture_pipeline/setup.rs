@@ -9,7 +9,7 @@ use std::{
 
 use drm_capture::Access;
 use pronk_capture::allocation::Heap;
-use pronk_capture::{Actor, Config as ActorConfig, Layout, Session};
+use pronk_capture::{Actor, Buffer, Config as ActorConfig, Layout, Session};
 use pronk_pipewire::{MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -86,6 +86,20 @@ impl Setup {
         .await
     }
 
+    pub(crate) async fn create_actor_with_buffers(
+        &self,
+        config: SetupConfig,
+        request: MediaStartRequest,
+        expected_offer: drm_capture::OfferId,
+        buffers: Vec<Buffer>,
+        cancellation: CancellationToken,
+    ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
+        on_worker(Arc::clone(&self.0), cancellation, move |state, cancel| {
+            state.create_actor_from_buffers(config, request, Some(expected_offer), buffers, cancel)
+        })
+        .await
+    }
+
     pub(crate) async fn describe(
         &self,
         cancellation: CancellationToken,
@@ -114,17 +128,7 @@ impl State {
         expected_offer: Option<drm_capture::OfferId>,
         cancellation: &CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
-        if self.session.is_none() {
-            let client = self.access.open().map_err(|error| {
-                MediaPipelineError::new(format!("open capture session: {error}"))
-            })?;
-            self.session = Some(Session::new(client));
-        }
-        let session = self
-            .session
-            .as_mut()
-            .expect("capture file retains its namespace");
-        let offer = session.describe().map_err(|error| {
+        let offer = self.describe().map_err(|error| {
             MediaPipelineError::new(format!("describe capture output: {error}"))
         })?;
         if expected_offer.is_some_and(|expected| expected != offer.offer) {
@@ -141,6 +145,43 @@ impl State {
         let buffers = Heap::open(&config.heap_path)
             .and_then(|heap| heap.allocate(layout, config.pool_size, config.pool_byte_limit))
             .map_err(|error| MediaPipelineError::new(format!("allocate capture pool: {error}")))?;
+        self.spawn_actor(config, request, expected_offer, buffers, cancellation)
+    }
+
+    fn create_actor_from_buffers(
+        &mut self,
+        config: SetupConfig,
+        request: MediaStartRequest,
+        expected_offer: Option<drm_capture::OfferId>,
+        buffers: Vec<Buffer>,
+        cancellation: &CancellationToken,
+    ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
+        if buffers.len() != config.pool_size.get() as usize {
+            return Err(MediaPipelineError::new(
+                "capture buffer count does not match pool policy",
+            ));
+        }
+        self.spawn_actor(config, request, expected_offer, buffers, cancellation)
+    }
+
+    fn spawn_actor(
+        &mut self,
+        config: SetupConfig,
+        request: MediaStartRequest,
+        expected_offer: Option<drm_capture::OfferId>,
+        buffers: Vec<Buffer>,
+        cancellation: &CancellationToken,
+    ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
+        if self.session.is_none() {
+            let client = self.access.open().map_err(|error| {
+                MediaPipelineError::new(format!("open capture session: {error}"))
+            })?;
+            self.session = Some(Session::new(client));
+        }
+        let session = self
+            .session
+            .as_mut()
+            .expect("capture file retains its namespace");
         check_cancellation(cancellation)?;
         let actor_config = ActorConfig {
             capacity: config.request_capacity,

@@ -8,8 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use castkms_renderer::Renderer;
 use drm_capture::Access as CaptureAccess;
+use pronk_capture::Buffer;
 use pronk_capture_pipewire::{State as CaptureVideoState, Video as CaptureVideo};
-use pronk_gpu::vulkan::Device;
+use pronk_gpu::vulkan::{Device, PackedFormat};
 use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate, VideoSourceConfig};
 use pronk_renderer_service::{
     ActiveRendererStream, PrivatePoolConfig, RendererStream, RendererStreamConfig,
@@ -385,6 +386,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 .map_err(|error| MediaPipelineError::new(format!("join renderer GPU setup: {error}")))?
                 .map_err(|error| MediaPipelineError::new(format!("open renderer GPU: {error}")))?,
         };
+        let capture_device = device.clone();
         let previous_offer = self
             .capture_setup
             .describe(cancellation.clone())
@@ -429,12 +431,56 @@ impl CapturePipelinePort for RendererCapturePipeline {
             Ok(selected) => selected,
             Err(error) => return Err(self.finish_prepared_renderer(renderer, error).await),
         };
+        if selected.width.get() != request.route.mode.width
+            || selected.height.get() != request.route.mode.height
+        {
+            return Err(self
+                .finish_prepared_renderer(
+                    renderer,
+                    MediaPipelineError::new(format!(
+                        "capture output is {}x{}; active route is {}x{}",
+                        selected.width,
+                        selected.height,
+                        request.route.mode.width,
+                        request.route.mode.height
+                    )),
+                )
+                .await);
+        }
+        let count = self.config.capture_pool_size;
+        let budget = self.config.capture_pool_byte_limit;
+        let mut allocation = tokio::task::spawn_blocking(move || {
+            allocate_capture_buffers(&capture_device, selected, count, budget)
+        });
+        let buffers = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                let _ = (&mut allocation).await;
+                return Err(self.finish_prepared_renderer(
+                    renderer,
+                    MediaPipelineError::new("renderer start was cancelled"),
+                ).await);
+            }
+            result = &mut allocation => match result {
+                Ok(Ok(buffers)) => buffers,
+                Ok(Err(error)) => {
+                    return Err(self.finish_prepared_renderer(renderer, error).await);
+                }
+                Err(error) => {
+                    return Err(self.finish_prepared_renderer(
+                        renderer,
+                        MediaPipelineError::new(format!("join capture GPU allocation: {error}")),
+                    ).await);
+                }
+            },
+        };
         let (actor, layout) = match self
             .capture_setup
-            .create_actor(
+            .create_actor_with_buffers(
                 self.capture_config(),
                 request,
-                Some(selected.offer),
+                selected.offer,
+                buffers,
                 cancellation.clone(),
             )
             .await
@@ -665,6 +711,66 @@ impl CapturePipelinePort for RendererCapturePipeline {
     }
 }
 
+fn allocate_capture_buffers(
+    device: &Device,
+    description: drm_capture::Description,
+    count: NonZeroU32,
+    budget: NonZeroU64,
+) -> Result<Vec<Buffer>, MediaPipelineError> {
+    let format = capture_format(description.format)?;
+    let mut total = 0u64;
+    let mut buffers = Vec::new();
+    buffers
+        .try_reserve_exact(count.get() as usize)
+        .map_err(|error| MediaPipelineError::new(format!("reserve capture pool: {error}")))?;
+    for _ in 0..count.get() {
+        let image = device
+            .allocate_with_format(
+                format,
+                description.width,
+                description.height,
+                description.modifier,
+            )
+            .map_err(|error| {
+                MediaPipelineError::new(format!("allocate GPU capture image: {error}"))
+            })?;
+        let layout = image.layout();
+        total = total
+            .checked_add(layout.allocation_size)
+            .filter(|total| *total <= budget.get())
+            .ok_or_else(|| MediaPipelineError::new("GPU capture pool exceeds its byte budget"))?;
+        let pitch = u32::try_from(layout.pitch)
+            .ok()
+            .and_then(NonZeroU32::new)
+            .ok_or_else(|| MediaPipelineError::new("GPU capture pitch exceeds the interface"))?;
+        let offset = u32::try_from(layout.offset)
+            .map_err(|_| MediaPipelineError::new("GPU capture offset exceeds the interface"))?;
+        let size = NonZeroU64::new(layout.allocation_size)
+            .ok_or_else(|| MediaPipelineError::new("GPU capture allocation is empty"))?;
+        let fd = image.export().map_err(|error| {
+            MediaPipelineError::new(format!("export GPU capture image: {error}"))
+        })?;
+        buffers.push(
+            Buffer::new_drm(fd, description.format, layout.modifier, pitch, offset, size).map_err(
+                |error| MediaPipelineError::new(format!("describe GPU capture image: {error}")),
+            )?,
+        );
+    }
+    Ok(buffers)
+}
+
+fn capture_format(format: u32) -> Result<PackedFormat, MediaPipelineError> {
+    Ok(match format {
+        value if value == u32::from_le_bytes(*b"XR24") => PackedFormat::Bgra8,
+        value if value == u32::from_le_bytes(*b"AR24") => PackedFormat::Bgra8,
+        _ => {
+            return Err(MediaPipelineError::new(
+                "renderer capture offer has an unsupported pixel format",
+            ))
+        }
+    })
+}
+
 impl Monitors {
     fn cancel(&self) {
         self.renderer.cancel();
@@ -798,6 +904,17 @@ fn stream_error<F>(operation: &str, error: RendererStreamError<F>) -> MediaPipel
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_formats_accept_only_the_renderer_output_encodings() {
+        for format in [*b"XR24", *b"AR24"] {
+            assert_eq!(
+                capture_format(u32::from_le_bytes(format)).unwrap(),
+                PackedFormat::Bgra8
+            );
+        }
+        assert!(capture_format(u32::from_le_bytes(*b"XB24")).is_err());
+    }
 
     #[test]
     fn selection_wait_rejects_a_renderer_that_already_failed() {
