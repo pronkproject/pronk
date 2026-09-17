@@ -5,6 +5,7 @@ use ash::vk;
 #[derive(Clone, Copy)]
 pub(in crate::vulkan) enum ImageUse {
     ImportedSource,
+    ImportedDestination,
     OwnedStorage,
 }
 
@@ -12,6 +13,7 @@ impl ImageUse {
     pub(in crate::vulkan) fn flags(self) -> vk::ImageUsageFlags {
         match self {
             Self::ImportedSource => vk::ImageUsageFlags::TRANSFER_SRC,
+            Self::ImportedDestination => vk::ImageUsageFlags::TRANSFER_DST,
             Self::OwnedStorage => {
                 vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST
             }
@@ -20,7 +22,9 @@ impl ImageUse {
 
     pub(in crate::vulkan) fn sharing(self) -> vk::ExternalMemoryFeatureFlags {
         match self {
-            Self::ImportedSource => vk::ExternalMemoryFeatureFlags::IMPORTABLE,
+            Self::ImportedSource | Self::ImportedDestination => {
+                vk::ExternalMemoryFeatureFlags::IMPORTABLE
+            }
             Self::OwnedStorage => vk::ExternalMemoryFeatureFlags::EXPORTABLE,
         }
     }
@@ -32,6 +36,7 @@ impl ImageUse {
     ) -> bool {
         let needed = match self {
             Self::ImportedSource => vk::FormatFeatureFlags::BLIT_SRC,
+            Self::ImportedDestination => vk::FormatFeatureFlags::TRANSFER_DST,
             Self::OwnedStorage => {
                 vk::FormatFeatureFlags::BLIT_SRC | vk::FormatFeatureFlags::BLIT_DST
             }
@@ -68,6 +73,25 @@ mod tests {
     }
 
     #[test]
+    fn destination_imports_require_writing_but_not_source_reads() {
+        assert_eq!(
+            ImageUse::ImportedDestination.flags(),
+            vk::ImageUsageFlags::TRANSFER_DST
+        );
+        assert_eq!(
+            ImageUse::ImportedDestination.sharing(),
+            vk::ExternalMemoryFeatureFlags::IMPORTABLE
+        );
+        let properties = vk::DrmFormatModifierPropertiesEXT {
+            drm_format_modifier: 7,
+            drm_format_modifier_plane_count: 1,
+            drm_format_modifier_tiling_features: vk::FormatFeatureFlags::TRANSFER_DST,
+        };
+        assert!(ImageUse::ImportedDestination.supports_modifier(&properties, 7));
+        assert!(!ImageUse::ImportedSource.supports_modifier(&properties, 7));
+    }
+
+    #[test]
     fn owned_storage_retains_read_write_and_export_requirements() {
         assert_eq!(
             ImageUse::OwnedStorage.flags(),
@@ -87,8 +111,12 @@ mod tests {
     }
 
     #[test]
-    fn neither_use_infers_missing_planes_modifiers_or_read_support() {
-        for usage in [ImageUse::ImportedSource, ImageUse::OwnedStorage] {
+    fn image_uses_require_exact_modifier_plane_and_operation_support() {
+        for usage in [
+            ImageUse::ImportedSource,
+            ImageUse::ImportedDestination,
+            ImageUse::OwnedStorage,
+        ] {
             for (modifier, planes, features) in [
                 (
                     8,
@@ -105,7 +133,6 @@ mod tests {
                     2,
                     vk::FormatFeatureFlags::BLIT_SRC | vk::FormatFeatureFlags::BLIT_DST,
                 ),
-                (7, 1, vk::FormatFeatureFlags::BLIT_DST),
             ] {
                 let properties = vk::DrmFormatModifierPropertiesEXT {
                     drm_format_modifier: modifier,
@@ -114,6 +141,21 @@ mod tests {
                 };
                 assert!(!usage.supports_modifier(&properties, 7));
             }
+        }
+        for (usage, features) in [
+            (ImageUse::ImportedSource, vk::FormatFeatureFlags::BLIT_DST),
+            (
+                ImageUse::ImportedDestination,
+                vk::FormatFeatureFlags::TRANSFER_SRC,
+            ),
+            (ImageUse::OwnedStorage, vk::FormatFeatureFlags::BLIT_DST),
+        ] {
+            let properties = vk::DrmFormatModifierPropertiesEXT {
+                drm_format_modifier: 7,
+                drm_format_modifier_plane_count: 1,
+                drm_format_modifier_tiling_features: features,
+            };
+            assert!(!usage.supports_modifier(&properties, 7));
         }
     }
 }
