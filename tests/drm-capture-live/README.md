@@ -129,13 +129,18 @@ disposable VM, like the other fixture probes.
 ## Optional receiver test
 
 Only after arranging permission to interrupt a specific receiver, append
-`--receiver IP:PORT` to the live Mutter media probe. There is no automatic
-receiver selection. For example, inside the disposable compositor environment:
+`--receiver IP:PORT` to the live Mutter media or delegated-renderer probe.
+There is no automatic receiver selection. For example, inside the disposable
+compositor environment:
 
 ```sh
 pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
     WIDTH HEIGHT /path/to/pipewire-0-pronk-backend \
     --receiver RECEIVER_IP:8009
+
+pronk-renderer-capture-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
+    WIDTH HEIGHT REFRESH_MILLIHZ MODIFIER \
+    /path/to/pipewire-0-pronk-backend --receiver RECEIVER_IP:8009
 ```
 
 The probe authenticates the receiver and launches its mirroring application,
@@ -165,9 +170,11 @@ units, not capture descriptors or raw images. The qualification executable
 combines capture and networking only for testing; it is not the installed
 backend's process or sandbox boundary.
 
-The capture probes use reference CPU composition. The renderer capture probe
-explicitly selects DMA-BUF storage and qualifies delegated GPU composition into
-a Vulkan-allocated destination through generic final-image delivery. It does
-not qualify hardware encoding or the installed service sandbox. The default
-probes do not exercise receiver transport; even the optional receiver probe
-needs visual confirmation to establish television playback.
+The final-image capture probes use reference CPU composition. The renderer
+capture probe explicitly selects DMA-BUF storage and qualifies delegated GPU
+composition into a Vulkan-allocated destination through generic final-image
+delivery. Its receiver mode carries that output through the production media
+graph and software H.264 encoder. It does not qualify hardware encoding or the
+installed service sandbox. The default probes do not exercise receiver
+transport; either optional receiver mode still needs visual confirmation to
+establish television playback.

@@ -1,8 +1,11 @@
 //! Live delegated GPU rendering through the application capture port.
 //! Requires a disposable compositor and isolated session bus; no DRM master fd.
 
+mod decoder;
+mod receiver_media;
 mod renderer_consumer;
 
+use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -17,6 +20,7 @@ use pronk::renderer_capture_pipeline::{
     RendererCapturePipeline, RendererCapturePipelineConfig, RendererPrivatePoolConfig,
 };
 use pronk_capture_broker::{Provider, Target};
+use pronk_capture_receiver_test::Receiver;
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use tokio_util::sync::CancellationToken;
 
@@ -28,13 +32,30 @@ fn nz64(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).unwrap()
 }
 
+struct Probe {
+    target: Target,
+    width: u32,
+    height: u32,
+    refresh_millihz: u32,
+    modifier: u64,
+    socket: PathBuf,
+    receiver: Option<SocketAddr>,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("initialize probe logging: {error}"))?;
     let args: Vec<_> = std::env::args().skip(1).collect();
     ensure!(
-        args.len() == 8,
-        "expected device, CRTC, connector, width, height, refresh millihertz, output modifier and private socket"
+        args.len() == 8 || (args.len() == 10 && args[8] == "--receiver"),
+        "expected device, CRTC, connector, width, height, refresh millihertz, output modifier and private socket, optionally --receiver IP:PORT; receiver mode interrupts playback"
     );
+    let address: Option<SocketAddr> = args.get(9).map(|address| address.parse()).transpose()?;
     let device = std::fs::metadata(&args[0])?.rdev();
     let target = Target {
         device_major: nix::sys::stat::major(device).try_into()?,
@@ -42,31 +63,51 @@ async fn main() -> anyhow::Result<()> {
         crtc_id: NonZeroU32::new(args[1].parse()?).context("zero CRTC")?,
         connector_id: NonZeroU32::new(args[2].parse()?).context("zero connector")?,
     };
-    let width = args[3].parse()?;
-    let height = args[4].parse()?;
-    let refresh_millihz = args[5].parse()?;
-    let modifier = parse_u64(&args[6]).context("output modifier")?;
-    let socket = PathBuf::from(&args[7]);
-    tokio::time::timeout(
-        Duration::from_secs(40),
-        run(target, width, height, refresh_millihz, modifier, &socket),
-    )
-    .await
-    .context("renderer probe timed out")??;
+    let probe = Probe {
+        target,
+        width: args[3].parse()?,
+        height: args[4].parse()?,
+        refresh_millihz: args[5].parse()?,
+        modifier: parse_u64(&args[6]).context("output modifier")?,
+        socket: PathBuf::from(&args[7]),
+        receiver: address,
+    };
+    let mut receiver = Receiver::default();
+    let result = tokio::select! {
+        result = tokio::time::timeout(
+            Duration::from_secs(40),
+            run(probe, &mut receiver),
+        ) => result.context("renderer probe timed out").and_then(|result| result),
+        signal = tokio::signal::ctrl_c() => match signal {
+            Ok(()) => Err(anyhow::anyhow!("renderer probe interrupted")),
+            Err(error) => Err(error.into()),
+        },
+    };
+    let retired = receiver.shutdown().await;
+    if let Err(error) = &retired {
+        eprintln!("Receiver cleanup failed: {error:#}");
+    }
+    result?;
+    retired?;
     println!(
         "PASS: live Mutter scene through delegated GPU rendering and private PipeWire DMA-BUFs"
     );
+    if address.is_some() {
+        println!("PASS: receiver acknowledged the delegated-renderer stream; visible playback still requires observation");
+    }
     Ok(())
 }
 
-async fn run(
-    target: Target,
-    width: u32,
-    height: u32,
-    refresh_millihz: u32,
-    modifier: u64,
-    socket: &Path,
-) -> anyhow::Result<()> {
+async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
+    let Probe {
+        target,
+        width,
+        height,
+        refresh_millihz,
+        modifier,
+        socket,
+        receiver: address,
+    } = probe;
     let mut pattern = tokio::process::Command::new(
         std::env::current_exe()?.with_file_name("pronk-capture-pattern-client"),
     )
@@ -141,30 +182,54 @@ async fn run(
         refresh_millihz,
         flags: 0,
     };
-    run_generation(
-        &mut capture,
-        &mut renderer_events,
-        target,
-        mode,
-        generation,
-        socket,
-    )
-    .await?;
-    let next_generation = nz64(
-        generation
-            .get()
-            .checked_add(1)
-            .context("generation overflow")?,
-    );
-    run_generation(
-        &mut capture,
-        &mut renderer_events,
-        target,
-        mode,
-        next_generation,
-        socket,
-    )
-    .await?;
+    if address.is_some() {
+        let media = receiver_media::run(
+            &mut capture,
+            MediaStartRequest {
+                media_generation: generation.get(),
+                route: MediaRoute {
+                    route_generation: generation.get(),
+                    target: RouteTarget::new(target.crtc_id),
+                    mode,
+                },
+            },
+            &socket,
+            receiver,
+            address,
+        );
+        tokio::pin!(media);
+        tokio::select! {
+            result = &mut media => result?,
+            event = renderer_events.next_event() => {
+                anyhow::bail!("renderer stopped while qualifying receiver output: {event:?}")
+            }
+        }
+    } else {
+        run_generation(
+            &mut capture,
+            &mut renderer_events,
+            target,
+            mode,
+            generation,
+            &socket,
+        )
+        .await?;
+        let next_generation = nz64(
+            generation
+                .get()
+                .checked_add(1)
+                .context("generation overflow")?,
+        );
+        run_generation(
+            &mut capture,
+            &mut renderer_events,
+            target,
+            mode,
+            next_generation,
+            &socket,
+        )
+        .await?;
+    }
     capture
         .shutdown(MediaStopReason::BackendShutdown, CancellationToken::new())
         .await?;
