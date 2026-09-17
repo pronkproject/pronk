@@ -1,11 +1,11 @@
-//! Task ownership for one userspace-rendered video generation.
+//! Task ownership for one userspace-rendered output generation.
 
 use std::io;
 use std::os::fd::AsFd;
 
 use castkms_renderer::Renderer;
+use drm_display_executor::scene::geometry::Extent;
 use pronk_gpu::vulkan::{Device, RenderNodeIdentity};
-use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -13,10 +13,10 @@ use tokio_util::sync::CancellationToken;
 use crate::task::{run, Started, TaskControl};
 use crate::types::{RendererStreamConfig, RendererStreamState};
 
-/// Published renderer offer and PipeWire generation owned by one dedicated thread.
+/// Published renderer offer owned by one dedicated native-work thread.
 ///
 /// Publication does not select the offer. Explicit shutdown joins the task and
-/// stops PipeWire before closing the renderer endpoint.
+/// closes the renderer endpoint after its native work ends.
 pub struct RendererStream<F> {
     handle: Option<StreamHandle<F>>,
 }
@@ -27,8 +27,7 @@ pub struct ActiveRendererStream<F> {
 }
 
 struct StreamHandle<F> {
-    identity: VideoNodeIdentity,
-    layout: VideoBufferLayout,
+    output: Extent,
     render_node: RenderNodeIdentity,
     state: watch::Receiver<RendererStreamState>,
     stop: CancellationToken,
@@ -36,12 +35,11 @@ struct StreamHandle<F> {
 }
 
 impl<F: AsFd + Send + 'static> RendererStream<F> {
-    /// Prepare private GPU work, publish an offer and start output transport.
+    /// Prepare private GPU work and publish a selectable renderer offer.
     pub async fn prepare(
         renderer: Renderer<F>,
         device: Device,
         config: RendererStreamConfig,
-        remote: PipeWireRemote,
         cancellation: CancellationToken,
     ) -> Result<Self, RendererStreamError<F>> {
         if cancellation.is_cancelled() {
@@ -61,25 +59,23 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             renderer,
             device,
             config,
-            remote,
             TaskControl {
                 stop: stop.clone(),
                 started,
                 state,
             },
         );
-        let task =
-            match crate::native_task::spawn(input, |(renderer, device, config, remote, control)| {
-                run(renderer, device, config, remote, control)
-            }) {
-                Ok(task) => task,
-                Err(((renderer, ..), error)) => {
-                    return Err(RendererStreamError {
-                        owner: Some(renderer.into_owner()),
-                        error,
-                    });
-                }
-            };
+        let task = match crate::native_task::spawn(input, |(renderer, device, config, control)| {
+            run(renderer, device, config, control)
+        }) {
+            Ok(task) => task,
+            Err(((renderer, ..), error)) => {
+                return Err(RendererStreamError {
+                    owner: Some(renderer.into_owner()),
+                    error,
+                });
+            }
+        };
         let mut starting = Starting {
             stop: stop.clone(),
             task: Some(task),
@@ -93,10 +89,9 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             response = response => response,
         };
         match response {
-            Ok(Started::Ready { identity, layout }) => Ok(Self {
+            Ok(Started::Ready { output }) => Ok(Self {
                 handle: Some(StreamHandle {
-                    identity,
-                    layout,
+                    output,
                     render_node,
                     state: receive,
                     stop,
@@ -108,10 +103,6 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         }
     }
 
-    pub fn identity(&self) -> &VideoNodeIdentity {
-        &self.handle().identity
-    }
-
     pub fn subscribe(&self) -> watch::Receiver<RendererStreamState> {
         self.handle().state.clone()
     }
@@ -120,8 +111,8 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         self.handle().state.borrow().clone()
     }
 
-    pub fn layout(&self) -> VideoBufferLayout {
-        self.handle().layout
+    pub fn output(&self) -> Extent {
+        self.handle().output
     }
 
     pub fn render_node_identity(&self) -> RenderNodeIdentity {
@@ -150,7 +141,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         })
     }
 
-    /// Stop transport and close the published renderer endpoint.
+    /// Stop native work and close the published renderer endpoint.
     pub async fn shutdown(mut self) -> Result<(), RendererStreamError<F>> {
         let mut handle = self.take_handle();
         handle.stop.cancel();
@@ -183,26 +174,18 @@ impl<F> std::fmt::Debug for RendererStream<F> {
         formatter
             .debug_struct("RendererStream")
             .field(
-                "identity",
+                "output",
                 &self
                     .handle
                     .as_ref()
                     .expect("live renderer stream owns its handle")
-                    .identity,
+                    .output,
             )
             .finish_non_exhaustive()
     }
 }
 
 impl<F: AsFd + Send + 'static> ActiveRendererStream<F> {
-    pub fn identity(&self) -> &VideoNodeIdentity {
-        &self
-            .handle
-            .as_ref()
-            .expect("live active renderer stream owns its handle")
-            .identity
-    }
-
     pub fn subscribe(&self) -> watch::Receiver<RendererStreamState> {
         self.handle
             .as_ref()
@@ -220,14 +203,14 @@ impl<F: AsFd + Send + 'static> ActiveRendererStream<F> {
             .clone()
     }
 
-    pub fn layout(&self) -> VideoBufferLayout {
+    pub fn output(&self) -> Extent {
         self.handle
             .as_ref()
             .expect("live active renderer stream owns its handle")
-            .layout
+            .output
     }
 
-    /// Stop transport and release the task's active renderer descriptor.
+    /// Stop native work and release the task's active renderer descriptor.
     pub async fn shutdown(mut self) -> Result<(), RendererStreamError<F>> {
         let mut handle = self
             .handle
@@ -392,7 +375,6 @@ fn join_error(error: tokio::task::JoinError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::{NonZeroU32, NonZeroU64};
     use std::time::Duration;
 
     fn assert_send<T: Send>() {}
@@ -406,13 +388,8 @@ mod tests {
         })
     }
 
-    fn identity() -> VideoNodeIdentity {
-        VideoNodeIdentity {
-            node_name: "renderer-test".into(),
-            object_id: NonZeroU32::new(1).unwrap(),
-            object_serial: NonZeroU64::new(2).unwrap(),
-            media_generation: NonZeroU64::new(3).unwrap(),
-        }
+    fn output() -> Extent {
+        Extent::new(1920, 1080).unwrap()
     }
 
     #[test]
@@ -464,15 +441,7 @@ mod tests {
         let task = waiting_start(stop.clone());
         let (_, state) = watch::channel(RendererStreamState::Prepared);
         drop(StreamHandle {
-            identity: identity(),
-            layout: VideoBufferLayout {
-                format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
-                width: NonZeroU32::new(1).unwrap(),
-                height: NonZeroU32::new(1).unwrap(),
-                pitch: NonZeroU32::new(4).unwrap(),
-                size: NonZeroU64::new(4).unwrap(),
-                storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
-            },
+            output: output(),
             render_node: RenderNodeIdentity {
                 major: 226,
                 minor: 128,
@@ -491,15 +460,7 @@ mod tests {
         let (_, state) = watch::channel(RendererStreamState::Prepared);
         let stream = RendererStream {
             handle: Some(StreamHandle {
-                identity: identity(),
-                layout: VideoBufferLayout {
-                    format: pronk_pipewire::VideoPixelFormat::Xrgb8888,
-                    width: NonZeroU32::new(1).unwrap(),
-                    height: NonZeroU32::new(1).unwrap(),
-                    pitch: NonZeroU32::new(4).unwrap(),
-                    size: NonZeroU64::new(4).unwrap(),
-                    storage: pronk_pipewire::VideoBufferStorage::MappableLinear,
-                },
+                output: output(),
                 render_node: RenderNodeIdentity {
                     major: 226,
                     minor: 128,

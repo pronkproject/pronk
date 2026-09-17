@@ -4,7 +4,7 @@ use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 
-use drm_capture::Client;
+use drm_capture::{Client, OfferId};
 
 use crate::names::Names;
 use crate::{invalid, native, worker, Actor, Buffer, Config};
@@ -43,6 +43,29 @@ impl<F: AsFd + Send + Sync + 'static> Session<F> {
         buffers: Vec<Buffer>,
         config: Config,
     ) -> io::Result<Actor<Arc<Client<F>>>> {
+        self.spawn_expected(buffers, config, None)
+    }
+
+    /// Open a stream only if the named offer remains current.
+    ///
+    /// Native setup describes the current offer again and names that exact ID
+    /// when opening the stream. A changed offer returns `WouldBlock` without
+    /// registering destinations.
+    pub fn spawn_for_offer(
+        &mut self,
+        buffers: Vec<Buffer>,
+        config: Config,
+        expected_offer: OfferId,
+    ) -> io::Result<Actor<Arc<Client<F>>>> {
+        self.spawn_expected(buffers, config, Some(expected_offer))
+    }
+
+    fn spawn_expected(
+        &mut self,
+        buffers: Vec<Buffer>,
+        config: Config,
+        expected_offer: Option<OfferId>,
+    ) -> io::Result<Actor<Arc<Client<F>>>> {
         config.validate(buffers.len())?;
         // Require a runtime context before opening kernel state. Its timers
         // must also be enabled for completion polling and shutdown deadlines.
@@ -50,7 +73,8 @@ impl<F: AsFd + Send + Sync + 'static> Session<F> {
             .map_err(|_| invalid("capture actor requires a Tokio runtime"))?;
         let registration = self.names.reserve(buffers.len())?;
         let client = Client::from_owner(Arc::clone(&self.client))?;
-        let (backend, layout) = native::Native::open(client, &buffers, config, registration)?;
+        let (backend, layout) =
+            native::Native::open(client, &buffers, config, registration, expected_offer)?;
         Ok(worker::spawn(backend, buffers, layout, config))
     }
 }

@@ -77,10 +77,11 @@ impl Setup {
         &self,
         config: SetupConfig,
         request: MediaStartRequest,
+        expected_offer: Option<drm_capture::OfferId>,
         cancellation: CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
         on_worker(Arc::clone(&self.0), cancellation, move |state, cancel| {
-            state.create_actor(config, request, cancel)
+            state.create_actor(config, request, expected_offer, cancel)
         })
         .await
     }
@@ -110,6 +111,7 @@ impl State {
         &mut self,
         config: SetupConfig,
         request: MediaStartRequest,
+        expected_offer: Option<drm_capture::OfferId>,
         cancellation: &CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
         if self.session.is_none() {
@@ -125,6 +127,11 @@ impl State {
         let offer = session.describe().map_err(|error| {
             MediaPipelineError::new(format!("describe capture output: {error}"))
         })?;
+        if expected_offer.is_some_and(|expected| expected != offer.offer) {
+            return Err(MediaPipelineError::new(
+                "capture offer changed while the generation was starting",
+            ));
+        }
         let layout = Layout {
             width: offer.width,
             height: offer.height,
@@ -135,16 +142,16 @@ impl State {
             .and_then(|heap| heap.allocate(layout, config.pool_size, config.pool_byte_limit))
             .map_err(|error| MediaPipelineError::new(format!("allocate capture pool: {error}")))?;
         check_cancellation(cancellation)?;
-        let actor = session
-            .spawn(
-                buffers,
-                ActorConfig {
-                    capacity: config.request_capacity,
-                    poll_interval: config.poll_interval,
-                    shutdown_timeout: config.shutdown_timeout,
-                },
-            )
-            .map_err(|error| MediaPipelineError::new(format!("start capture actor: {error}")))?;
+        let actor_config = ActorConfig {
+            capacity: config.request_capacity,
+            poll_interval: config.poll_interval,
+            shutdown_timeout: config.shutdown_timeout,
+        };
+        let actor = match expected_offer {
+            Some(offer) => session.spawn_for_offer(buffers, actor_config, offer),
+            None => session.spawn(buffers, actor_config),
+        }
+        .map_err(|error| MediaPipelineError::new(format!("start capture actor: {error}")))?;
         let layout = actor.layout();
         require_route_layout(layout, request).map_err(|_| {
             MediaPipelineError::new("capture layout changed while the generation was starting")

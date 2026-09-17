@@ -28,7 +28,7 @@ pronk-dbus = { path = "../pronk-dbus" }
 pronk-dmabuf = { path = "../pronk-dmabuf" }
 pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
 pronk-pipewire = { path = "../pronk-pipewire" }
-pronk-renderer-pipewire = { path = "../pronk-renderer-pipewire" }
+pronk-renderer-service = { path = "../pronk-renderer-service" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

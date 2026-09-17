@@ -14,8 +14,7 @@ use pronk::kernel_session::KernelSession;
 use pronk::media_pipeline_port::{CaptureEventPort, CapturePipelinePort};
 use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk::renderer_capture_pipeline::{
-    RendererCapturePipeline, RendererCapturePipelineConfig, RendererOutputPoolConfig,
-    RendererPrivatePoolConfig,
+    RendererCapturePipeline, RendererCapturePipelineConfig, RendererPrivatePoolConfig,
 };
 use pronk_capture_broker::{Provider, Target};
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
@@ -104,9 +103,11 @@ async fn run(
     let runtime = socket.parent().context("private socket has no directory")?;
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
+    let capture_access = session.capture_access()?;
     let renderer_access = session.take_renderer_access()?;
     let (mut capture, mut renderer_events) = RendererCapturePipeline::new(
         renderer_access,
+        capture_access,
         remotes,
         RendererCapturePipelineConfig {
             connector_id: target.connector_id,
@@ -122,10 +123,12 @@ async fn run(
                 frame_capacity: NonZeroUsize::new(3).unwrap(),
                 source_capacity: NonZeroUsize::new(3).unwrap(),
             },
-            output_pool: RendererOutputPoolConfig {
-                modifier,
-                capacity: NonZeroUsize::new(4).unwrap(),
-            },
+            capture_pool_size: nz(4),
+            capture_request_capacity: nz(3),
+            capture_pool_byte_limit: nz64(128 * 1024 * 1024),
+            capture_heap_path: "/dev/dma_heap/system".into(),
+            capture_poll_interval: Duration::from_millis(2),
+            capture_shutdown_timeout: Duration::from_secs(5),
         },
     )?;
     let mode = RoutedMode {

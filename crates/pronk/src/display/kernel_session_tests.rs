@@ -208,6 +208,10 @@ async fn independent_provider_uses_the_production_attachment_lifecycle() {
     let attached = attach(session(&state).await, CancellationToken::new())
         .await
         .unwrap();
+    assert!(matches!(
+        &attached.media,
+        DisplayMediaAccess::Renderer { .. }
+    ));
     assert!(state.attached.load(Ordering::SeqCst));
     assert_eq!(attached.kernel.metadata().session_id.get(), 29);
     cleanup_attached_kernel_session(attached).await;

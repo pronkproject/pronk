@@ -1,19 +1,20 @@
-//! Userspace-rendered capture behind the application media port.
+//! Userspace rendering joined to generic final-image capture.
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use castkms_renderer::Renderer;
+use drm_capture::Access as CaptureAccess;
+use pronk_capture::Layout;
+use pronk_capture_pipewire::{State as CaptureVideoState, Video as CaptureVideo};
 use pronk_gpu::vulkan::Device;
-use pronk_pipewire::{
-    ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoFrameRate,
-    VideoPixelFormat, VideoSourceConfig,
-};
-use pronk_renderer_pipewire::{
-    ActiveRendererStream, OutputPoolConfig, PrivatePoolConfig, RendererStream,
-    RendererStreamConfig, RendererStreamError, RendererStreamState,
+use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate, VideoSourceConfig};
+use pronk_renderer_service::{
+    ActiveRendererStream, PrivatePoolConfig, RendererStream, RendererStreamConfig,
+    RendererStreamError, RendererStreamState,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +24,7 @@ use crate::capture_health::{CaptureEvents, CaptureMonitor};
 use crate::device_session_port::{
     DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget, RenderDeviceIdentity,
 };
+use crate::drm_capture_pipeline::{capture_caps, CaptureOwner, CaptureSetup, CaptureSetupConfig};
 use crate::media_pipeline_port::{
     CaptureEvent, CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia,
 };
@@ -41,7 +43,12 @@ pub struct RendererCapturePipelineConfig {
     pub video_bitrate: NonZeroU64,
     pub video_frame_rate: VideoFrameRate,
     pub private_pool: RendererPrivatePoolConfig,
-    pub output_pool: RendererOutputPoolConfig,
+    pub capture_pool_size: NonZeroU32,
+    pub capture_request_capacity: NonZeroU32,
+    pub capture_pool_byte_limit: NonZeroU64,
+    pub capture_heap_path: PathBuf,
+    pub capture_poll_interval: Duration,
+    pub capture_shutdown_timeout: Duration,
 }
 
 /// Allocation policy for renderer-private scene storage.
@@ -52,19 +59,17 @@ pub struct RendererPrivatePoolConfig {
     pub source_capacity: NonZeroUsize,
 }
 
-/// Allocation policy for images exported to the media pipeline.
-#[derive(Debug, Clone, Copy)]
-pub struct RendererOutputPoolConfig {
-    pub modifier: u64,
-    pub capacity: NonZeroUsize,
-}
+type Video = CaptureVideo<CaptureOwner>;
 
 enum Stream {
-    Prepared(RendererStream<OwnedFd>),
+    Prepared {
+        renderer: RendererStream<OwnedFd>,
+        video: Video,
+    },
     Active {
-        // Stop health observation before dropping the stream requests shutdown.
-        monitor: CaptureMonitor,
-        stream: ActiveRendererStream<OwnedFd>,
+        renderer: ActiveRendererStream<OwnedFd>,
+        video: Video,
+        monitors: Monitors,
     },
 }
 
@@ -79,11 +84,17 @@ struct Generation {
     stream: Stream,
 }
 
-/// Sole owner of renderer authority and its per-generation GPU producer.
+struct Monitors {
+    renderer: CaptureMonitor,
+    capture: CaptureMonitor,
+}
+
+/// Sole owner of renderer authority and its generic capture producer.
 pub struct RendererCapturePipeline {
     renderer: Option<Renderer<OwnedFd>>,
     render_node: PathBuf,
     renderer_session: RendererSession,
+    capture_setup: CaptureSetup,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: RendererCapturePipelineConfig,
     generation: Option<Generation>,
@@ -95,6 +106,7 @@ pub struct RendererCapturePipeline {
 impl RendererCapturePipeline {
     pub fn new(
         access: RendererAccess,
+        capture: CaptureAccess,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
     ) -> std::io::Result<(Self, CaptureEvents)> {
@@ -111,6 +123,7 @@ impl RendererCapturePipeline {
                 renderer_lease: Some(lease),
                 render_node,
                 renderer_session: session,
+                capture_setup: CaptureSetup::new(capture),
                 producer_remotes,
                 config,
                 generation: None,
@@ -120,11 +133,18 @@ impl RendererCapturePipeline {
         ))
     }
 
-    async fn stop_generation(
-        &mut self,
-        id: NonZeroU64,
-        _cancellation: CancellationToken,
-    ) -> Result<(), MediaPipelineError> {
+    fn capture_config(&self) -> CaptureSetupConfig {
+        CaptureSetupConfig {
+            pool_size: self.config.capture_pool_size,
+            request_capacity: self.config.capture_request_capacity,
+            pool_byte_limit: self.config.capture_pool_byte_limit,
+            heap_path: self.config.capture_heap_path.clone(),
+            poll_interval: self.config.capture_poll_interval,
+            shutdown_timeout: self.config.capture_shutdown_timeout,
+        }
+    }
+
+    async fn stop_generation(&mut self, id: NonZeroU64) -> Result<(), MediaPipelineError> {
         let Some(generation) = self.generation.take() else {
             return Ok(());
         };
@@ -135,34 +155,30 @@ impl RendererCapturePipeline {
                 "renderer stop requested generation {id}; active generation is {actual}"
             )));
         }
-        match generation.stream {
-            Stream::Prepared(stream) => {
-                let stopped = stream
-                    .shutdown()
-                    .await
-                    .map_err(|error| stream_error("stop prepared renderer", error));
-                let released = self.release_renderer_lease().await;
-                combine_cleanup(stopped, released)?;
-            }
-            Stream::Active { stream, monitor } => {
-                let stopped = shutdown_active(stream, monitor).await;
-                let released = self.release_renderer_lease().await;
-                combine_cleanup(stopped, released)?;
-            }
-        }
-        Ok(())
+        let stopped = match generation.stream {
+            Stream::Prepared { renderer, video } => shutdown_prepared(renderer, video).await,
+            Stream::Active {
+                renderer,
+                video,
+                monitors,
+            } => shutdown_active(renderer, video, monitors).await,
+        };
+        let released = self.release_renderer_lease().await;
+        combine_cleanup(stopped, released)
     }
 
     fn target(
         &self,
-        stream: &RendererStream<OwnedFd>,
+        renderer: &RendererStream<OwnedFd>,
+        video: &Video,
+        layout: Layout,
         generation: NonZeroU64,
-    ) -> Result<DeviceMediaTarget, MediaPipelineError> {
-        let render_node = stream.render_node_identity();
-        Ok(DeviceMediaTarget {
+    ) -> DeviceMediaTarget {
+        let render_node = renderer.render_node_identity();
+        DeviceMediaTarget {
             kind: DeviceMediaKind::Video,
-            node_name: stream.identity().node_name.clone(),
-            object_serial: stream.identity().object_serial,
+            node_name: video.identity().node_name.clone(),
+            object_serial: video.identity().object_serial,
             session_id: self.config.session_id.clone(),
             device_instance: self.config.device_instance.clone(),
             connector_id: self.config.connector_id,
@@ -172,8 +188,8 @@ impl RendererCapturePipeline {
                 major: render_node.major,
                 minor: render_node.minor,
             }),
-            caps: renderer_caps(stream.layout(), self.config.video_frame_rate)?,
-        })
+            caps: capture_caps(layout, self.config.video_frame_rate),
+        }
     }
 
     fn restore_renderer(&mut self, owner: OwnedFd) -> Result<(), MediaPipelineError> {
@@ -236,6 +252,90 @@ impl RendererCapturePipeline {
             .await
             .map_err(|error| MediaPipelineError::new(format!("release renderer endpoint: {error}")))
     }
+
+    async fn finish_prepared_renderer(
+        &mut self,
+        renderer: RendererStream<OwnedFd>,
+        primary: MediaPipelineError,
+    ) -> MediaPipelineError {
+        let stopped = renderer
+            .shutdown()
+            .await
+            .map_err(|error| stream_error("stop prepared renderer", error));
+        let released = self.release_renderer_lease().await;
+        combine_cleanup(combine_cleanup(Err(primary), stopped), released)
+            .expect_err("a renderer setup failure remains an error")
+    }
+
+    async fn wait_for_capture_offer_change(
+        &self,
+        previous: drm_capture::OfferId,
+        mut renderer_state: tokio::sync::watch::Receiver<RendererStreamState>,
+        cancellation: CancellationToken,
+    ) -> Result<drm_capture::Description, MediaPipelineError> {
+        loop {
+            require_running_renderer(&renderer_state)?;
+            let description = self.capture_setup.describe(cancellation.clone()).await?;
+            if description.offer != previous {
+                return Ok(description);
+            }
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    return Err(MediaPipelineError::new("renderer start was cancelled"));
+                }
+                changed = renderer_state.changed() => {
+                    changed.map_err(|_| {
+                        MediaPipelineError::new("renderer health channel closed during setup")
+                    })?;
+                }
+                _ = tokio::time::sleep(self.config.capture_poll_interval) => {}
+            }
+        }
+    }
+
+    async fn ensure_renderer(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<(), MediaPipelineError> {
+        if self.renderer.is_some() {
+            return Ok(());
+        }
+        if let Some(lease) = self.renderer_lease.take() {
+            lease.release().await.map_err(|error| {
+                MediaPipelineError::new(format!("release unavailable renderer endpoint: {error}"))
+            })?;
+        }
+        let access = self
+            .renderer_session
+            .acquire(cancellation)
+            .await
+            .map_err(|error| {
+                MediaPipelineError::new(format!("acquire renderer endpoint: {error}"))
+            })?;
+        let OpenRenderer {
+            renderer,
+            lease,
+            render_node,
+            session,
+        } = access
+            .open()
+            .map_err(|error| MediaPipelineError::new(format!("open renderer endpoint: {error}")))?;
+        if render_node != self.render_node {
+            drop(renderer);
+            let rejected = Err(MediaPipelineError::new(
+                "replacement renderer selected a different GPU",
+            ));
+            let released = lease.release().await.map_err(|error| {
+                MediaPipelineError::new(format!("release mismatched renderer endpoint: {error}"))
+            });
+            return combine_cleanup(rejected, released);
+        }
+        self.renderer = Some(renderer);
+        self.renderer_lease = Some(lease);
+        self.renderer_session = session;
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for RendererCapturePipeline {
@@ -263,51 +363,18 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 "a previous renderer generation still requires cleanup",
             ));
         }
-        if cancellation.is_cancelled() {
-            return Err(MediaPipelineError::new("renderer start was cancelled"));
-        }
+        self.capture_config().validate()?;
+        check_cancellation(&cancellation, "renderer start was cancelled")?;
         let generation = NonZeroU64::new(request.media_generation)
             .ok_or_else(|| MediaPipelineError::new("media generation must be nonzero"))?;
-        if self.renderer.is_none() {
-            if let Some(lease) = self.renderer_lease.take() {
-                lease.release().await.map_err(|error| {
-                    MediaPipelineError::new(format!(
-                        "release unavailable renderer endpoint: {error}"
-                    ))
-                })?;
-            }
-            let access = self
-                .renderer_session
-                .acquire(cancellation.clone())
-                .await
-                .map_err(|error| {
-                    MediaPipelineError::new(format!("acquire renderer endpoint: {error}"))
-                })?;
-            let OpenRenderer {
-                renderer,
-                lease,
-                render_node,
-                session,
-            } = access.open().map_err(|error| {
-                MediaPipelineError::new(format!("open renderer endpoint: {error}"))
+        self.ensure_renderer(cancellation.clone()).await?;
+        let interval = self
+            .config
+            .video_frame_rate
+            .frame_interval()
+            .ok_or_else(|| {
+                MediaPipelineError::new("renderer cadence exceeds the source clock resolution")
             })?;
-            if render_node != self.render_node {
-                drop(renderer);
-                let rejected = Err(MediaPipelineError::new(
-                    "replacement renderer selected a different GPU",
-                ));
-                let released = lease.release().await.map_err(|error| {
-                    MediaPipelineError::new(format!(
-                        "release mismatched renderer endpoint: {error}"
-                    ))
-                });
-                return Err(combine_cleanup(rejected, released)
-                    .expect_err("a rejected renderer endpoint remains an error"));
-            }
-            self.renderer = Some(renderer);
-            self.renderer_lease = Some(lease);
-            self.renderer_session = session;
-        }
         let render_node = self.render_node.clone();
         let mut device_task = tokio::task::spawn_blocking(move || Device::open(render_node));
         let device = tokio::select! {
@@ -320,15 +387,15 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 .map_err(|error| MediaPipelineError::new(format!("join renderer GPU setup: {error}")))?
                 .map_err(|error| MediaPipelineError::new(format!("open renderer GPU: {error}")))?,
         };
-        let remote = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                return Err(MediaPipelineError::new("renderer start was cancelled"));
-            }
-            result = self.producer_remotes.create_producer_remote() => result.map_err(|error| {
-                MediaPipelineError::new(format!("connect renderer PipeWire producer: {error}"))
-            })?,
-        };
+        let previous_offer = self
+            .capture_setup
+            .describe(cancellation.clone())
+            .await?
+            .offer;
+        let output_width = NonZeroU32::new(request.route.mode.width)
+            .ok_or_else(|| MediaPipelineError::new("renderer output width is zero"))?;
+        let output_height = NonZeroU32::new(request.route.mode.height)
+            .ok_or_else(|| MediaPipelineError::new("renderer output height is zero"))?;
         let renderer = self
             .renderer
             .take()
@@ -337,89 +404,115 @@ impl CapturePipelinePort for RendererCapturePipeline {
             renderer,
             device,
             RendererStreamConfig {
-                output_width: NonZeroU32::new(request.route.mode.width)
-                    .ok_or_else(|| MediaPipelineError::new("renderer output width is zero"))?,
-                output_height: NonZeroU32::new(request.route.mode.height)
-                    .ok_or_else(|| MediaPipelineError::new("renderer output height is zero"))?,
-                pipewire: VideoSourceConfig {
-                    node_name: format!("pronk.video.{}.{generation}", self.config.session_id),
-                    node_description: self.config.node_description.clone(),
-                    session_id: self.config.session_id.clone(),
-                    device_instance: self.config.device_instance.clone(),
-                    connector_id: self.config.connector_id,
-                    output_index: self.config.output_index,
-                    media_generation: generation,
-                    frame_rate: self.config.video_frame_rate,
-                },
+                output_width,
+                output_height,
+                source_interval: interval,
                 private_pool: PrivatePoolConfig {
                     modifier: self.config.private_pool.modifier,
                     frame_capacity: self.config.private_pool.frame_capacity,
                     source_capacity: self.config.private_pool.source_capacity,
                 },
-                output_pool: OutputPoolConfig {
-                    modifier: self.config.output_pool.modifier,
-                    capacity: self.config.output_pool.capacity,
-                },
             },
-            remote.into_remote(),
             cancellation.clone(),
         );
-        let stream = match preparation.await {
-            Ok(stream) => stream,
+        let renderer = match preparation.await {
+            Ok(renderer) => renderer,
             Err(error) => {
                 return Err(self
                     .finish_stream_error("prepare renderer stream", error)
-                    .await)
+                    .await);
+            }
+        };
+        let renderer_state = renderer.subscribe();
+        let selected = match self
+            .wait_for_capture_offer_change(previous_offer, renderer_state, cancellation.clone())
+            .await
+        {
+            Ok(selected) => selected,
+            Err(error) => return Err(self.finish_prepared_renderer(renderer, error).await),
+        };
+        let (actor, layout) = match self
+            .capture_setup
+            .create_actor(
+                self.capture_config(),
+                request,
+                Some(selected.offer),
+                cancellation.clone(),
+            )
+            .await
+        {
+            Ok(created) => created,
+            Err(error) => return Err(self.finish_prepared_renderer(renderer, error).await),
+        };
+        if renderer.output().width() != layout.width.get()
+            || renderer.output().height() != layout.height.get()
+        {
+            return Err(self
+                .finish_prepared_renderer(
+                    renderer,
+                    MediaPipelineError::new(
+                        "renderer output does not match its capture destination",
+                    ),
+                )
+                .await);
+        }
+        let remote = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(self.finish_prepared_renderer(
+                    renderer,
+                    MediaPipelineError::new("renderer start was cancelled"),
+                ).await);
+            }
+            result = self.producer_remotes.create_producer_remote() => match result {
+                Ok(remote) => remote,
+                Err(error) => {
+                    return Err(self.finish_prepared_renderer(
+                        renderer,
+                        MediaPipelineError::new(format!("connect capture PipeWire producer: {error}")),
+                    ).await);
+                }
+            },
+        };
+        let video = match CaptureVideo::prepare(
+            actor,
+            VideoSourceConfig {
+                node_name: format!("pronk.video.{}.{generation}", self.config.session_id),
+                node_description: self.config.node_description.clone(),
+                session_id: self.config.session_id.clone(),
+                device_instance: self.config.device_instance.clone(),
+                connector_id: self.config.connector_id,
+                output_index: self.config.output_index,
+                media_generation: generation,
+                frame_rate: self.config.video_frame_rate,
+            },
+            remote.into_remote(),
+        )
+        .await
+        {
+            Ok(video) => video,
+            Err(error) => {
+                return Err(self
+                    .finish_prepared_renderer(
+                        renderer,
+                        MediaPipelineError::new(format!("prepare capture video: {error}")),
+                    )
+                    .await);
             }
         };
         if cancellation.is_cancelled() {
             let cancelled = Err(MediaPipelineError::new("renderer start was cancelled"));
-            let stopped = stream
-                .shutdown()
-                .await
-                .map_err(|error| stream_error("cancel renderer stream", error));
+            let stopped = shutdown_prepared(renderer, video).await;
             let released = self.release_renderer_lease().await;
             return Err(
                 combine_cleanup(combine_cleanup(cancelled, stopped), released)
                     .expect_err("a cancelled renderer start remains an error"),
             );
         }
-        let layout = stream.layout();
-        if layout.width.get() != request.route.mode.width
-            || layout.height.get() != request.route.mode.height
-        {
-            let actual = (layout.width, layout.height);
-            let rejected = Err(MediaPipelineError::new(format!(
-                "renderer output is {}x{}; active route is {}x{}",
-                actual.0, actual.1, request.route.mode.width, request.route.mode.height
-            )));
-            let stopped = stream
-                .shutdown()
-                .await
-                .map_err(|error| stream_error("stop mismatched renderer stream", error));
-            let released = self.release_renderer_lease().await;
-            return Err(
-                combine_cleanup(combine_cleanup(rejected, stopped), released)
-                    .expect_err("a mismatched renderer remains an error"),
-            );
-        }
-        let target = match self.target(&stream, generation) {
-            Ok(target) => target,
-            Err(error) => {
-                let stopped = stream
-                    .shutdown()
-                    .await
-                    .map_err(|shutdown| stream_error("stop rejected renderer stream", shutdown));
-                let released = self.release_renderer_lease().await;
-                return Err(
-                    combine_cleanup(combine_cleanup(Err(error), stopped), released)
-                        .expect_err("a rejected renderer target remains an error"),
-                );
-            }
-        };
+        let target = self.target(&renderer, &video, layout, generation);
         self.generation = Some(Generation {
             id: generation,
-            stream: Stream::Prepared(stream),
+            stream: Stream::Prepared { renderer, video },
         });
         Ok(PreparedCaptureMedia {
             media_generation: generation,
@@ -452,34 +545,71 @@ impl CapturePipelinePort for RendererCapturePipeline {
             )));
         }
         match generation.stream {
-            Stream::Active { stream, monitor } => {
-                let error = match stream.state() {
-                    RendererStreamState::Active => None,
-                    RendererStreamState::Failed(error) => Some(error),
-                    state => Some(format!(
+            Stream::Active {
+                renderer,
+                video,
+                monitors,
+            } => {
+                let result = match renderer.state() {
+                    RendererStreamState::Active => video.activate().await.map_err(|error| {
+                        MediaPipelineError::new(format!("resume capture video: {error}"))
+                    }),
+                    RendererStreamState::Failed(error) => Err(MediaPipelineError::new(error)),
+                    state => Err(MediaPipelineError::new(format!(
                         "renderer generation has invalid active state {state:?}"
-                    )),
+                    ))),
                 };
                 self.generation = Some(Generation {
                     id: generation.id,
-                    stream: Stream::Active { stream, monitor },
+                    stream: Stream::Active {
+                        renderer,
+                        video,
+                        monitors,
+                    },
                 });
-                error.map_or(Ok(()), |error| Err(MediaPipelineError::new(error)))
+                result
             }
-            Stream::Prepared(stream) => {
-                let state = stream.subscribe();
-                let stream = match stream.activate(cancellation).await {
-                    Ok(stream) => stream,
+            Stream::Prepared { renderer, video } => {
+                let renderer_state = renderer.subscribe();
+                let renderer = match renderer.activate(cancellation).await {
+                    Ok(renderer) => renderer,
                     Err(error) => {
-                        return Err(self
+                        let primary = self
                             .finish_stream_error("activate renderer stream", error)
-                            .await);
+                            .await;
+                        let stopped = shutdown_video(video).await;
+                        return Err(combine_cleanup(Err(primary), stopped)
+                            .expect_err("renderer activation failure remains an error"));
                     }
                 };
-                let monitor = monitor_active_renderer(generation.id, state, self.events.clone());
+                if let Err(error) = video.activate().await {
+                    let primary = Err(MediaPipelineError::new(format!(
+                        "activate capture video: {error}"
+                    )));
+                    let stopped = shutdown_active_without_monitors(renderer, video).await;
+                    let released = self.release_renderer_lease().await;
+                    return Err(combine_cleanup(combine_cleanup(primary, stopped), released)
+                        .expect_err("capture activation failure remains an error"));
+                }
+                let monitors = Monitors {
+                    renderer: monitor_active_renderer(
+                        generation.id,
+                        renderer_state,
+                        self.events.clone(),
+                    ),
+                    capture: monitor_capture_video(
+                        generation.id,
+                        video.subscribe(),
+                        self.events.clone(),
+                    ),
+                };
                 self.generation = Some(Generation {
                     id: generation.id,
-                    stream: Stream::Active { stream, monitor },
+                    stream: Stream::Active {
+                        renderer,
+                        video,
+                        monitors,
+                    },
                 });
                 Ok(())
             }
@@ -490,27 +620,42 @@ impl CapturePipelinePort for RendererCapturePipeline {
         &mut self,
         media_generation: NonZeroU64,
         _reason: MediaSuspendReason,
-        cancellation: CancellationToken,
+        _cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        self.stop_generation(media_generation, cancellation).await
+        let generation = self
+            .generation
+            .as_ref()
+            .ok_or_else(|| MediaPipelineError::new("no renderer generation is active"))?;
+        if generation.id != media_generation {
+            return Err(MediaPipelineError::new(format!(
+                "renderer suspension requested generation {media_generation}; active generation is {}",
+                generation.id
+            )));
+        }
+        match &generation.stream {
+            Stream::Prepared { .. } => Ok(()),
+            Stream::Active { video, .. } => video.suspend().await.map_err(|error| {
+                MediaPipelineError::new(format!("suspend capture video: {error}"))
+            }),
+        }
     }
 
     async fn stop(
         &mut self,
         media_generation: NonZeroU64,
         _reason: MediaStopReason,
-        cancellation: CancellationToken,
+        _cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        self.stop_generation(media_generation, cancellation).await
+        self.stop_generation(media_generation).await
     }
 
     async fn shutdown(
         &mut self,
         _reason: MediaStopReason,
-        cancellation: CancellationToken,
+        _cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
         if let Some(generation) = self.generation.as_ref().map(|generation| generation.id) {
-            self.stop_generation(generation, cancellation).await?;
+            self.stop_generation(generation).await?;
         }
         self.renderer.take();
         if let Some(lease) = self.renderer_lease.take() {
@@ -519,6 +664,43 @@ impl CapturePipelinePort for RendererCapturePipeline {
             })?;
         }
         Ok(())
+    }
+}
+
+impl Monitors {
+    fn cancel(&self) {
+        self.renderer.cancel();
+        self.capture.cancel();
+    }
+
+    async fn shutdown(self) -> Result<(), MediaPipelineError> {
+        let (renderer, capture) = tokio::join!(self.renderer.shutdown(), self.capture.shutdown());
+        combine_cleanup(renderer, capture)
+    }
+}
+
+fn check_cancellation(
+    cancellation: &CancellationToken,
+    message: &'static str,
+) -> Result<(), MediaPipelineError> {
+    if cancellation.is_cancelled() {
+        Err(MediaPipelineError::new(message))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_running_renderer(
+    state: &tokio::sync::watch::Receiver<RendererStreamState>,
+) -> Result<(), MediaPipelineError> {
+    match state.borrow().clone() {
+        RendererStreamState::Prepared | RendererStreamState::Active => Ok(()),
+        RendererStreamState::Failed(error) => Err(MediaPipelineError::new(format!(
+            "renderer failed while awaiting constraints selection: {error}"
+        ))),
+        RendererStreamState::Stopped => Err(MediaPipelineError::new(
+            "renderer stopped while awaiting constraints selection",
+        )),
     }
 }
 
@@ -535,20 +717,43 @@ fn combine_cleanup(
     }
 }
 
-async fn shutdown_active(
-    stream: ActiveRendererStream<OwnedFd>,
-    monitor: CaptureMonitor,
+async fn shutdown_video(video: Video) -> Result<(), MediaPipelineError> {
+    video
+        .shutdown()
+        .await
+        .map(drop)
+        .map_err(|error| MediaPipelineError::new(format!("stop capture video: {error}")))
+}
+
+async fn shutdown_prepared(
+    renderer: RendererStream<OwnedFd>,
+    video: Video,
 ) -> Result<(), MediaPipelineError> {
-    monitor.cancel();
-    let (stream, monitor) = tokio::join!(stream.shutdown(), monitor.shutdown());
-    let stream = stream.map_err(|error| stream_error("stop active renderer", error));
-    match (stream, monitor) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(stream), Err(monitor)) => Err(MediaPipelineError::new(format!(
-            "{stream}; active renderer monitor cleanup also failed: {monitor}"
-        ))),
-    }
+    let (renderer, video) = tokio::join!(renderer.shutdown(), shutdown_video(video));
+    let renderer = renderer.map_err(|error| stream_error("stop prepared renderer", error));
+    combine_cleanup(renderer, video)
+}
+
+async fn shutdown_active_without_monitors(
+    renderer: ActiveRendererStream<OwnedFd>,
+    video: Video,
+) -> Result<(), MediaPipelineError> {
+    let (renderer, video) = tokio::join!(renderer.shutdown(), shutdown_video(video));
+    let renderer = renderer.map_err(|error| stream_error("stop active renderer", error));
+    combine_cleanup(renderer, video)
+}
+
+async fn shutdown_active(
+    renderer: ActiveRendererStream<OwnedFd>,
+    video: Video,
+    monitors: Monitors,
+) -> Result<(), MediaPipelineError> {
+    monitors.cancel();
+    let (streams, monitors) = tokio::join!(
+        shutdown_active_without_monitors(renderer, video),
+        monitors.shutdown()
+    );
+    combine_cleanup(streams, monitors)
 }
 
 fn monitor_active_renderer(
@@ -569,31 +774,22 @@ fn monitor_active_renderer(
     )
 }
 
-fn renderer_caps(
-    layout: VideoBufferLayout,
-    frame_rate: VideoFrameRate,
-) -> Result<String, MediaPipelineError> {
-    let fourcc = match layout.format {
-        VideoPixelFormat::Xrgb8888 => "XR24",
-        VideoPixelFormat::Argb8888 => "AR24",
-    };
-    let VideoBufferStorage::DrmModifier { modifier, .. } = layout.storage else {
-        return Err(MediaPipelineError::new(
-            "renderer output does not have a DRM modifier",
-        ));
-    };
-    let drm_format = if modifier == 0 {
-        fourcc.to_string()
-    } else {
-        format!("{fourcc}:0x{modifier:016x}")
-    };
-    Ok(format!(
-        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={},height={},framerate={}/{}",
-        layout.width,
-        layout.height,
-        frame_rate.numerator(),
-        frame_rate.denominator()
-    ))
+fn monitor_capture_video(
+    media_generation: NonZeroU64,
+    state: tokio::sync::watch::Receiver<CaptureVideoState>,
+    events: mpsc::UnboundedSender<CaptureEvent>,
+) -> CaptureMonitor {
+    CaptureMonitor::watch(
+        media_generation,
+        state,
+        events,
+        |state| match state {
+            CaptureVideoState::Active => None,
+            CaptureVideoState::Failed(error) => Some(error.clone()),
+            CaptureVideoState::Stopped => Some("capture video stopped unexpectedly".into()),
+        },
+        "capture video health channel closed",
+    )
 }
 
 fn stream_error<F>(operation: &str, error: RendererStreamError<F>) -> MediaPipelineError {
@@ -606,75 +802,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modifier_caps_describe_the_registered_gpu_layout() {
-        let caps = renderer_caps(
-            VideoBufferLayout {
-                format: VideoPixelFormat::Xrgb8888,
-                width: NonZeroU32::new(1920).unwrap(),
-                height: NonZeroU32::new(1080).unwrap(),
-                pitch: NonZeroU32::new(7680).unwrap(),
-                size: NonZeroU64::new(8_294_400).unwrap(),
-                storage: VideoBufferStorage::DrmModifier {
-                    modifier: 0x100000000000001,
-                    offset: 0,
-                },
-            },
-            VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(
-            caps,
-            "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=XR24:0x0100000000000001,width=1920,height=1080,framerate=30/1"
-        );
-    }
-
-    #[test]
-    fn linear_modifier_caps_use_the_plain_drm_format() {
-        let caps = renderer_caps(
-            VideoBufferLayout {
-                format: VideoPixelFormat::Xrgb8888,
-                width: NonZeroU32::new(64).unwrap(),
-                height: NonZeroU32::new(32).unwrap(),
-                pitch: NonZeroU32::new(256).unwrap(),
-                size: NonZeroU64::new(8192).unwrap(),
-                storage: VideoBufferStorage::DrmModifier {
-                    modifier: 0,
-                    offset: 0,
-                },
-            },
-            VideoFrameRate::integer(NonZeroU32::new(60).unwrap()),
-        )
-        .unwrap();
-        assert!(caps.contains("drm-format=XR24,"));
-        assert!(caps.ends_with("framerate=60/1"));
-    }
-
-    #[test]
-    fn renderer_caps_preserve_a_fractional_frame_rate() {
-        let caps = renderer_caps(
-            VideoBufferLayout {
-                format: VideoPixelFormat::Xrgb8888,
-                width: NonZeroU32::new(1920).unwrap(),
-                height: NonZeroU32::new(1080).unwrap(),
-                pitch: NonZeroU32::new(7680).unwrap(),
-                size: NonZeroU64::new(8_294_400).unwrap(),
-                storage: VideoBufferStorage::DrmModifier {
-                    modifier: 0,
-                    offset: 0,
-                },
-            },
-            VideoFrameRate::new(
-                NonZeroU32::new(30_000).unwrap(),
-                NonZeroU32::new(1_001).unwrap(),
-            ),
-        )
-        .unwrap();
-
-        assert!(caps.ends_with("framerate=30000/1001"));
+    fn selection_wait_rejects_a_renderer_that_already_failed() {
+        let (_, state) =
+            tokio::sync::watch::channel(RendererStreamState::Failed("native device lost".into()));
+        assert!(require_running_renderer(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("native device lost"));
     }
 
     #[tokio::test]
-    async fn active_monitor_reports_the_exact_failed_generation() {
+    async fn active_renderer_monitor_reports_the_exact_generation() {
         let generation = NonZeroU64::new(7).unwrap();
         let (state, receive) = tokio::sync::watch::channel(RendererStreamState::Active);
         let (events, mut event_rx) = mpsc::unbounded_channel();
@@ -691,13 +829,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orderly_monitor_shutdown_does_not_report_failure() {
-        let (state, receive) = tokio::sync::watch::channel(RendererStreamState::Active);
+    async fn capture_monitor_reports_the_exact_generation() {
+        let generation = NonZeroU64::new(8).unwrap();
+        let (state, receive) = tokio::sync::watch::channel(CaptureVideoState::Active);
         let (events, mut event_rx) = mpsc::unbounded_channel();
-        let monitor = monitor_active_renderer(NonZeroU64::new(9).unwrap(), receive, events);
-        monitor.cancel();
-        state.send_replace(RendererStreamState::Stopped);
+        let monitor = monitor_capture_video(generation, receive, events);
+        state.send_replace(CaptureVideoState::Failed("grant revoked".into()));
+        assert_eq!(
+            event_rx.recv().await,
+            Some(CaptureEvent::Failed {
+                media_generation: generation,
+                error: "grant revoked".into(),
+            })
+        );
         monitor.shutdown().await.unwrap();
-        assert_eq!(event_rx.recv().await, None);
     }
 }

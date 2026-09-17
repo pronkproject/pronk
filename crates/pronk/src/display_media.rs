@@ -11,8 +11,7 @@ use crate::capture_health::CaptureEvents;
 use crate::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
 use crate::media_pipeline_port::CapturePipelinePort;
 use crate::renderer_capture_pipeline::{
-    RendererCapturePipeline, RendererCapturePipelineConfig, RendererOutputPoolConfig,
-    RendererPrivatePoolConfig,
+    RendererCapturePipeline, RendererCapturePipelineConfig, RendererPrivatePoolConfig,
 };
 use crate::renderer_session::RendererAccess;
 
@@ -30,7 +29,10 @@ pub enum CaptureSource {
 /// Authority for the selected media path, without the display lifetime.
 #[derive(Debug)]
 pub(crate) enum DisplayMediaAccess {
-    Renderer(RendererAccess),
+    Renderer {
+        renderer: RendererAccess,
+        capture: drm_capture::Access,
+    },
     FinalImage(drm_capture::Access),
 }
 
@@ -48,7 +50,10 @@ pub(crate) struct DisplayMediaConfig {
 impl DisplayMediaAccess {
     pub(crate) async fn release(self) -> io::Result<()> {
         match self {
-            Self::Renderer(renderer) => renderer.release().await,
+            Self::Renderer { renderer, capture } => {
+                drop(capture);
+                renderer.release().await
+            }
             Self::FinalImage(capture) => {
                 drop(capture);
                 Ok(())
@@ -62,9 +67,10 @@ impl DisplayMediaAccess {
         config: DisplayMediaConfig,
     ) -> io::Result<(Box<dyn CapturePipelinePort>, CaptureEvents)> {
         match self {
-            Self::Renderer(renderer) => {
+            Self::Renderer { renderer, capture } => {
                 let (pipeline, events) = RendererCapturePipeline::new(
                     renderer,
+                    capture,
                     remotes,
                     RendererCapturePipelineConfig {
                         connector_id: config.connector_id,
@@ -80,10 +86,12 @@ impl DisplayMediaAccess {
                             frame_capacity: NonZeroUsize::new(3).unwrap(),
                             source_capacity: NonZeroUsize::new(3).unwrap(),
                         },
-                        output_pool: RendererOutputPoolConfig {
-                            modifier: DRM_FORMAT_MOD_LINEAR,
-                            capacity: NonZeroUsize::new(4).unwrap(),
-                        },
+                        capture_pool_size: NonZeroU32::new(4).unwrap(),
+                        capture_request_capacity: NonZeroU32::new(3).unwrap(),
+                        capture_pool_byte_limit: NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                        capture_heap_path: "/dev/dma_heap/system".into(),
+                        capture_poll_interval: Duration::from_millis(2),
+                        capture_shutdown_timeout: Duration::from_secs(5),
                     },
                 )?;
                 Ok((Box::new(pipeline), events))
@@ -161,15 +169,18 @@ mod tests {
     #[tokio::test]
     async fn invalid_renderer_authority_does_not_select_final_image_capture() {
         let (send, receive) = tokio::sync::oneshot::channel();
-        let access = DisplayMediaAccess::Renderer(RendererAccess::new(
-            std::fs::File::open("/dev/null").unwrap().into(),
-            CapabilityLease::new(async move {
-                let _ = send.send(());
-                Ok(())
-            }),
-            "/dev/dri/renderD128".into(),
-            RendererSession::new(Arc::new(NoReplacement)),
-        ));
+        let access = DisplayMediaAccess::Renderer {
+            renderer: RendererAccess::new(
+                std::fs::File::open("/dev/null").unwrap().into(),
+                CapabilityLease::new(async move {
+                    let _ = send.send(());
+                    Ok(())
+                }),
+                "/dev/dri/renderD128".into(),
+                RendererSession::new(Arc::new(NoReplacement)),
+            ),
+            capture: drm_capture::Access::from_fd(std::fs::File::open("/dev/null").unwrap().into()),
+        };
         assert_eq!(
             access
                 .create_pipeline(remotes(), config())

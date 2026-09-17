@@ -1334,7 +1334,7 @@ dependencies = [
  "pronk-dmabuf",
  "pronk-gpu",
  "pronk-pipewire",
- "pronk-renderer-pipewire",
+ "pronk-renderer-service",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
@@ -1594,15 +1594,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "pronk-renderer-pipewire"
+name = "pronk-renderer-service"
 version = "0.1.0"
 dependencies = [
  "castkms-renderer",
- "castkms-sys",
  "drm-display-executor",
  "nix 0.29.0",
  "pronk-gpu",
- "pronk-pipewire",
  "pronk-renderer-worker",
  "tokio",
  "tokio-util",

@@ -1,7 +1,6 @@
 //! CastKMS source execution through portable renderer and native GPU layers.
 
 mod activation;
-mod output;
 mod pool;
 mod reads;
 mod recipient;
@@ -16,10 +15,6 @@ mod scene_transaction;
 mod source;
 
 pub use activation::{PrivateProbe, ProbePreparationError};
-pub use output::{
-    CompletedOutput, CompletedReturn, FinishedOutput, OutputDestination, OutputPool, OutputReturn,
-    OutputScope, PendingOutput, PublishedOutput, ReadyOutput,
-};
 pub use pool::{PrivateBuffer, PrivateFrame, PrivatePool, RejectedBuffer};
 pub use reads::{ReadCollectionError, SubmittedReads};
 pub use recipient::{DeliveryAttempt, DeliveryError};

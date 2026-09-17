@@ -1,5 +1,5 @@
 [package]
-name = "pronk-renderer-pipewire"
+name = "pronk-renderer-service"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,8 @@ publish = false
 
 [dependencies]
 castkms-renderer = { path = "../castkms-renderer" }
-castkms-sys = { path = "../castkms-sys" }
 drm-display-executor = { path = "../drm-display-executor" }
 nix.workspace = true
-pronk-pipewire = { path = "../pronk-pipewire" }
 pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
 pronk-renderer-worker = { path = "../pronk-renderer-worker" }
 tokio.workspace = true

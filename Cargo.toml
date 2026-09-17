@@ -21,7 +21,7 @@ members = [
     "crates/pronk-media",
     "crates/pronk-pipewire",
     "crates/pronk-renderer-worker",
-    "crates/pronk-renderer-pipewire",
+    "crates/pronk-renderer-service",
     "crates/pronk-systemd",
     "crates/pronk-userns",
     "crates/pronkctl",

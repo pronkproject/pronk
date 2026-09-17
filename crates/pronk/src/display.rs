@@ -615,9 +615,11 @@ async fn attach_kernel_session(
         error => DisplaySetupError::KernelAttach(error),
     })?;
     let media = match capture_source {
-        CaptureSource::Renderer => kernel
-            .take_renderer_access()
-            .map(DisplayMediaAccess::Renderer),
+        CaptureSource::Renderer => kernel.capture_access().and_then(|capture| {
+            kernel
+                .take_renderer_access()
+                .map(|renderer| DisplayMediaAccess::Renderer { renderer, capture })
+        }),
         CaptureSource::FinalImage => kernel.capture_access().map(DisplayMediaAccess::FinalImage),
     };
     let media = match media {

@@ -64,19 +64,6 @@ impl SceneImage {
         })
     }
 
-    pub(crate) fn copy_into(self, destination: Image) -> io::Result<CopiedSceneImage> {
-        let copied = destination.copy_from_and_wait(self.image)?;
-        Ok(CopiedSceneImage {
-            scene: SceneImage {
-                pool: self.pool,
-                registration: self.registration,
-                image: copied.source,
-            },
-            destination: copied.destination,
-            completion: copied.completion,
-        })
-    }
-
     pub(crate) fn copy_to_recipient(
         self,
         destination: DestinationImage,
@@ -107,12 +94,6 @@ pub struct RenderedFrame {
 
 pub(crate) struct CompletedSceneImage {
     pub(crate) frame: RenderedFrame,
-    pub(crate) completion: SyncFile,
-}
-
-pub(crate) struct CopiedSceneImage {
-    pub(crate) scene: SceneImage,
-    pub(crate) destination: Image,
     pub(crate) completion: SyncFile,
 }
 

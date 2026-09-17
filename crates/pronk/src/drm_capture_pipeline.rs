@@ -205,6 +205,7 @@ impl CapturePipelinePort for DrmCapturePipeline {
             .create_actor(
                 CaptureSetupConfig::from(&self.config),
                 request,
+                None,
                 cancellation.clone(),
             )
             .await?;
