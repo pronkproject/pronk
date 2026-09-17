@@ -143,6 +143,7 @@ More detail is available in:
 - `crates/castkms-monitor`: monitor-control operations without an issuer;
 - `crates/castkms-renderer`: checked renderer protocol;
 - `crates/pronk-renderer-worker`: scene execution worker;
+- `crates/pronk-renderer-service`: renderer generation and native-thread lifetime;
 - `crates/drm-capture`: generic final-image capture client;
 - `crates/pronk-pipewire`: private media transport;
 - `crates/pronk-chromiacast`: Chromecast backend;

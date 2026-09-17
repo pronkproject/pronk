@@ -115,9 +115,9 @@ snapshot and reports individual failures without skipping the remaining slots.
 Stopped generations never accept new claims or publications. The immutable
 recipient scope and executor-owned graphics resource lifetimes still apply.
 
-The installed renderer capture path instantiates this adapter with private
-composition storage, a shared output pool and a private PipeWire generation.
-It currently requests linear shared output. The opt-in
+The installed renderer path does not instantiate this adapter. Its generic DRM
+capture actor owns the recipient pool and PipeWire publication, while the
+renderer service writes only destinations claimed through CastKMS. The opt-in
 [generated GPU transport harness](../tests/gpu-media/README.md) also exercises
 an explicit tiled tuple with a Vulkan producer and a real source generation on
 a private graph. Its optional VA H.264 profile converts into native NV12
@@ -739,20 +739,21 @@ matching registered packed image. Returning the frame validates both pool
 identities before changing either pool, preventing cross-generation storage
 substitution.
 
-The renderer-to-PipeWire scheduler executes the blocking source-to-private
-transaction on its isolated renderer thread, then copies the completed
-registered image into an independently available recipient image. That second
-copy may wait for recipient reuse without retaining any compositor source.
-Cadence, recipient availability, publication, return and cancellation remain
-separate from kernel source retirement. CastKMS admits one scene job per
-endpoint, so source-to-private work is ordered without a second userspace
-reordering queue.
+The renderer service executes the blocking source-to-private transaction on its
+isolated native-work thread. It then asks CastKMS for a destination already
+queued by the generic capture actor and copies the completed registered image
+into that independently owned recipient. That second copy may wait for
+recipient reuse without retaining any compositor source. Capture cadence,
+publication, return and cancellation remain owned by the generic capture path.
+CastKMS admits one scene job per endpoint, so source-to-private work is ordered
+without a second userspace reordering queue.
 
-Only a frame paired with an available recipient image enters output work. If
-transport backpressure leaves completed private frames unpaired, each newer
-frame retires the older private backlog and becomes the sole queued frame.
-That policy bounds post-stall latency without cancelling work that has already
-claimed a recipient or coupling recipient reuse to compositor-source release.
+The service retains at most one completed private frame. If transport
+backpressure leaves it without a recipient, a newer scene retires and replaces
+that private frame. An unchanged current frame may satisfy later capture
+requests repeatedly. That policy bounds post-stall latency without cancelling
+work that has already claimed a recipient or coupling recipient reuse to
+compositor-source release.
 
 The scene records can be decoded, qualified and executed by the complete-scene
 reader above. `castkms-renderer` owns and validates the complete packet under
@@ -816,8 +817,9 @@ by the separate native-versus-reference tests. The harness retains its private
 PipeWire transport, hardware-encoder and transient-sandbox checks without
 dequeueing CastKMS scenes or claiming delivered frame rate.
 
-The installed renderer path currently selects linear shared output; it does not
-derive that choice from the encoder's import abilities. The generated-image
+The generic capture contract currently supplies linear shared output to the
+installed renderer path; it does not derive that choice from the encoder's
+import abilities. The generated-image
 harness joins a separate producer's source import, private staging, exported
 output reuse and hardware encoding for one explicit tiled tuple. It overwrites
 source and staging before checking the decoded output. Selecting a compatible

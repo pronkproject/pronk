@@ -34,16 +34,16 @@ The binaries cover distinct boundaries:
   Pronk bus name. Unlike the fixture probes, Mutter must already be displaying
   content. Obtain the exact output IDs from that test device.
 - Delegated GPU rendering:
-  `pronk-renderer-pipewire-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
+  `pronk-renderer-capture-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
   WIDTH HEIGHT REFRESH_MILLIHZ MODIFIER
   /path/to/pipewire-0-pronk-backend`
   transfers renderer authority from the Mutter broker into the application
-  capture port, publishes renderer constraints after private GPU and PipeWire
-  setup, and requires twelve increasing DMA-BUF frame sequences while one
-  output remains held. It then withdraws the offer and repeats the complete
-  renderer generation on the same display session. Mutter selects among the
-  published generic KMS constraints independently; supply a supported output
-  modifier, optionally with a `0x` prefix.
+  capture port, publishes renderer constraints after private GPU setup, waits
+  for Mutter to select the new constraints entry, and then starts the generic
+  capture and PipeWire path. It requires twelve increasing DMA-BUF frame
+  sequences while one output remains held, withdraws the offer, and repeats the
+  complete renderer generation on the same display session. Supply a supported
+  private-image modifier, optionally with a `0x` prefix.
   Like the live Mutter media probe, it requires the sibling pattern client,
   the classified core/backend sockets, and the versioned WirePlumber policy.
 - `pronk-capture-pipewire-live-test /dev/dri/cardN /path/to/private/socket`:
@@ -161,8 +161,8 @@ units, not capture descriptors or raw images. The qualification executable
 combines capture and networking only for testing; it is not the installed
 backend's process or sandbox boundary.
 
-The capture probes use reference CPU composition. The renderer PipeWire probe
-qualifies delegated GPU composition through raw DMA-BUF delivery, but not
+The capture probes use reference CPU composition. The renderer capture probe
+qualifies delegated GPU composition through generic final-image delivery, but not
 hardware encoding or the installed service sandbox. The default probes do not
 exercise receiver transport; even the optional receiver probe needs visual
 confirmation to establish television playback.

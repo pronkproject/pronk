@@ -105,8 +105,10 @@ No test claims to revoke previously exported backing allocations.
 Pronk's application owns an issuer-independent display session. Its configured
 Mutter adapter obtains separate monitor-control, final-image capture, and
 renderer capabilities. The display observer retains monitor control and the
-issuer's release obligation. The selected media pipeline receives either
-renderer authority or final-image capture access, never monitor control or the
+issuer's release obligation. The final-image pipeline receives capture access.
+The renderer pipeline receives separate renderer and capture capabilities: the
+former admits complete-scene reads, while the latter owns final-image
+destinations and publication. Neither pipeline receives monitor control or the
 issuer's revocation files. See [display-session ownership](kernel-sessions.md).
 
 `pronkd --capture-source final-image` selects capture without acquiring images
@@ -132,9 +134,10 @@ Both media paths report failures with the owning media generation. A normal
 stop cancels health observation before joining the media owner. Neither a
 stopped observer nor a timed-out cleanup wait establishes ended native access.
 
-The renderer and capture paths remain separate even when the renderer uses the
-GPU. The capture queue does not encode Chromecast's display cadence or transport
-window.
+The renderer path reuses the same generic capture actor, pool, and PipeWire
+publisher as final-image capture. Its additional renderer service only produces
+private completed images and satisfies kernel-issued recipient claims. The
+capture queue does not encode Chromecast's display cadence or transport window.
 
 If upstream chooses V4L2 for buffer transport, it would replace these transport
 operations rather than introduce a second production path. Keeping the client
