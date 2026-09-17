@@ -435,16 +435,19 @@ impl CapturePipelinePort for RendererCapturePipeline {
         };
         if selected.width.get() != request.route.mode.width
             || selected.height.get() != request.route.mode.height
+            || selected.refresh_millihz.get() != request.route.mode.refresh_millihz
         {
             return Err(self
                 .finish_prepared_renderer(
                     renderer,
                     MediaPipelineError::new(format!(
-                        "capture output is {}x{}; active route is {}x{}",
+                        "capture output is {}x{} at {} mHz; active route is {}x{} at {} mHz",
                         selected.width,
                         selected.height,
+                        selected.refresh_millihz,
                         request.route.mode.width,
-                        request.route.mode.height
+                        request.route.mode.height,
+                        request.route.mode.refresh_millihz,
                     )),
                 )
                 .await);
