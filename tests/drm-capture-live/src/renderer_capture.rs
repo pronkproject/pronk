@@ -182,58 +182,67 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
         refresh_millihz,
         flags: 0,
     };
-    if address.is_some() {
-        let media = receiver_media::run(
-            &mut capture,
-            MediaStartRequest {
-                media_generation: generation.get(),
-                route: MediaRoute {
-                    route_generation: generation.get(),
-                    target: RouteTarget::new(target.crtc_id),
-                    mode,
+    let run_result: anyhow::Result<()> = async {
+        if address.is_some() {
+            let media = receiver_media::run(
+                &mut capture,
+                MediaStartRequest {
+                    media_generation: generation.get(),
+                    route: MediaRoute {
+                        route_generation: generation.get(),
+                        target: RouteTarget::new(target.crtc_id),
+                        mode,
+                    },
                 },
-            },
-            &socket,
-            receiver,
-            address,
-        );
-        tokio::pin!(media);
-        tokio::select! {
-            result = &mut media => result?,
-            event = renderer_events.next_event() => {
-                anyhow::bail!("renderer stopped while qualifying receiver output: {event:?}")
+                &socket,
+                receiver,
+                address,
+            );
+            tokio::pin!(media);
+            tokio::select! {
+                result = &mut media => result?,
+                event = renderer_events.next_event() => {
+                    anyhow::bail!("renderer stopped while qualifying receiver output: {event:?}")
+                }
             }
+        } else {
+            run_generation(
+                &mut capture,
+                &mut renderer_events,
+                target,
+                mode,
+                generation,
+                &socket,
+            )
+            .await?;
+            let next_generation = nz64(
+                generation
+                    .get()
+                    .checked_add(1)
+                    .context("generation overflow")?,
+            );
+            run_generation(
+                &mut capture,
+                &mut renderer_events,
+                target,
+                mode,
+                next_generation,
+                &socket,
+            )
+            .await?;
         }
-    } else {
-        run_generation(
-            &mut capture,
-            &mut renderer_events,
-            target,
-            mode,
-            generation,
-            &socket,
-        )
-        .await?;
-        let next_generation = nz64(
-            generation
-                .get()
-                .checked_add(1)
-                .context("generation overflow")?,
-        );
-        run_generation(
-            &mut capture,
-            &mut renderer_events,
-            target,
-            mode,
-            next_generation,
-            &socket,
-        )
-        .await?;
+        Ok(())
     }
-    capture
+    .await;
+    let capture_result = capture
         .shutdown(MediaStopReason::BackendShutdown, CancellationToken::new())
-        .await?;
-    session.release().await?;
+        .await;
+    let release_result = session.release().await;
+    let pattern_result = pattern.kill().await;
+    run_result?;
+    capture_result?;
+    release_result?;
+    pattern_result?;
     Ok(())
 }
 
