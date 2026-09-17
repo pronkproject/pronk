@@ -699,8 +699,9 @@ inseparably paired with its increasing endpoint-local CastKMS registration.
 `DEQUEUE_SCENE` receives that registration, so the kernel job and the native
 destination cannot be accidentally exchanged. The floating-point images used
 for layer color and blending remain non-exportable implementation storage.
-Allocation and native-layout validation finish while takeover remains
-abortable; activation only adds the endpoint-local kernel registrations.
+Allocation and native-layout validation finish before publication. Image
+registration assigns endpoint-local identities while the offer remains a
+draft; the completed private probe then permits publication of its constraints.
 
 The production-facing transaction reserves both the complete floating-point
 `ScenePool` slot and one registered packed image before dequeue. It imports and
@@ -711,8 +712,8 @@ Because the operations execute in order on the same native queue and earlier
 stages have completed, that record closes every source read and the registered
 private-image write. No source job is released after staging alone.
 
-Predictable metadata and profile failures occur before native access and use
-`NO_ACCESS`. A native submission, completion, composition, private-write or
+Predictable metadata and constraints failures occur before native access and
+use `NO_ACCESS`. A native submission, completion, composition, private-write or
 release failure is terminal for the active renderer incarnation. Teardown then
 provides best-effort cleanup without declaring uncertain pixels valid or
 recycling affected storage.
@@ -756,9 +757,10 @@ claimed a recipient or coupling recipient reuse to compositor-source release.
 The scene records can be decoded, qualified and executed by the complete-scene
 reader above. `castkms-renderer` owns and validates the complete packet under
 one kernel job, including all installed descriptors, geometry, stacking and
-color payloads. Renderer startup registers an exact whole-scene capability,
-constructs the matching reusable storage profile and activates only after the
-KMS client has published the registered transition.
+color payloads. Renderer startup declares exact whole-scene constraints,
+constructs the matching reusable storage profile, registers its private
+images, completes the native probe, and publishes the offer. The KMS client
+discovers and selects that entry independently.
 
 Output color also remains an ordered raw operation list: the current record
 gives both degamma and gamma tables the same LUT kind while omitting absent
@@ -768,7 +770,7 @@ arrangement and rejects a lone LUT as unsupported. The UAPI needs stage
 identity before that final valid configuration can be accepted without
 guessing. The current record also lacks explicit layer transform and blend
 fields; its adapter therefore uses identity transforms, premultiplied pixel
-alpha and full plane alpha. The registered capability states the operations
+alpha and full plane alpha. The published constraints state the operations
 accepted by the worker rather than extending those defaults implicitly.
 
 ## Installed hardware encoder
