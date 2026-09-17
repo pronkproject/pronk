@@ -10,8 +10,8 @@ use castkms_renderer::{
 };
 use castkms_sys::{
     DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
-    DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888,
-    DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888, RENDERER_CONSTRAINTS_MAX_FORMATS,
+    DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010,
+    DRM_FORMAT_XRGB8888, RENDERER_CONSTRAINTS_MAX_FORMATS,
 };
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
@@ -87,12 +87,7 @@ fn append_source_layout(
     modifier: u64,
     output: drm_display_executor::scene::geometry::Extent,
 ) -> io::Result<bool> {
-    let records_per_format = if modifier == DRM_FORMAT_MOD_LINEAR {
-        2
-    } else {
-        1
-    };
-    let record_count = fourccs.len().saturating_mul(records_per_format);
+    let record_count = fourccs.len();
     if formats.len().saturating_add(record_count) > RENDERER_CONSTRAINTS_MAX_FORMATS {
         return Ok(false);
     }
@@ -100,27 +95,18 @@ fn append_source_layout(
     records
         .try_reserve_exact(record_count)
         .map_err(io::Error::other)?;
+    let pixel_bytes =
+        NonZeroU32::new(packed.bytes_per_pixel()).expect("packed pixels occupy nonzero storage");
     for &fourcc in fourccs {
         records.push(ConstraintsFormat::new(
             fourcc,
             FormatModifier::Explicit(modifier),
             NonZeroU32::new(1).expect("one source plane is nonzero"),
-            StorageProvenance::new(true, true),
-            NonZeroU32::new(1).expect("unit pitch alignment is nonzero"),
-            NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
+            StorageProvenance::new(false, true),
+            pixel_bytes,
+            pixel_bytes,
             NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
         )?);
-        if modifier == DRM_FORMAT_MOD_LINEAR {
-            records.push(ConstraintsFormat::new(
-                fourcc,
-                FormatModifier::Unspecified,
-                NonZeroU32::new(1).expect("one source plane is nonzero"),
-                StorageProvenance::new(true, true),
-                NonZeroU32::new(1).expect("unit pitch alignment is nonzero"),
-                NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
-                NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
-            )?);
-        }
     }
     formats
         .try_reserve_exact(records.len())
@@ -389,14 +375,14 @@ mod tests {
         }
 
         assert_eq!(formats.len(), RENDERER_CONSTRAINTS_MAX_FORMATS);
-        assert_eq!(sources.len(), 127);
-        assert_eq!(sources.last().unwrap().modifier, 126);
-        assert_eq!(
-            formats
-                .iter()
-                .filter(|format| format.modifier() == FormatModifier::Unspecified)
-                .count(),
-            2
-        );
+        assert_eq!(sources.len(), 128);
+        assert_eq!(sources.last().unwrap().modifier, 127);
+        assert!(formats.iter().all(|format| {
+            matches!(format.modifier(), FormatModifier::Explicit(_))
+                && !format.provenance().native()
+                && format.provenance().imported()
+                && format.pitch_alignment().get() == 4
+                && format.offset_alignment().get() == 4
+        }));
     }
 }
