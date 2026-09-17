@@ -259,6 +259,13 @@ impl OutputPool {
         Ok(Publication(permit.0))
     }
 
+    /// Return a completed write that was never handed to the transport.
+    pub fn discard(&mut self, permit: PublishPermit) -> io::Result<usize> {
+        self.check(&permit.0, State::ReadyToPublish)?;
+        self.slots[permit.0.slot].state = State::Writable;
+        Ok(permit.0.slot)
+    }
+
     /// Called only after transport retention ends; native reads may remain.
     pub fn returned(&mut self, publication: Publication) -> io::Result<PendingAccess> {
         self.check(&publication.0, State::Published)?;

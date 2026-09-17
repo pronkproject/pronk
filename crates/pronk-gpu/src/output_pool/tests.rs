@@ -169,6 +169,18 @@ fn abandoned_permissions_do_not_recycle_storage() {
 }
 
 #[test]
+fn unpublished_completion_can_be_reused_without_transport_handoff() {
+    let mut pool = pool(1);
+    writable(&mut pool, 0);
+    let write = pool.claim(0).unwrap();
+    let ready = produced(&mut pool, write);
+
+    assert_eq!(pool.discard(ready).unwrap(), 0);
+    assert_eq!(pool.state(0), Some(State::Writable));
+    assert!(pool.claim(0).is_ok());
+}
+
+#[test]
 fn serial_exhaustion_never_reuses_an_old_identity() {
     let mut pool = pool(1);
     writable(&mut pool, 0);
