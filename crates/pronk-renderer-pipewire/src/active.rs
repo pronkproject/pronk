@@ -34,8 +34,7 @@ pub async fn run_complete_scenes<F: AsFd>(
     source_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let result = run_until_stopped(&mut reader, video, &mut pipeline, &mut source_tick, stop).await;
-    pipeline.shutdown().await;
-    result
+    combine_shutdown(result, pipeline.shutdown().await)
 }
 
 async fn run_until_stopped<F: AsFd>(
@@ -182,10 +181,11 @@ impl Pipeline {
         Ok(cause)
     }
 
-    async fn shutdown(&mut self) {
-        finish_tasks(&mut self.output_copies).await;
-        finish_tasks(&mut self.producer_waits).await;
-        finish_tasks(&mut self.reader_waits).await;
+    async fn shutdown(&mut self) -> io::Result<()> {
+        let mut failure = finish_fallible_tasks(&mut self.output_copies).await.err();
+        append_shutdown_failure(&mut failure, finish_tasks(&mut self.producer_waits).await);
+        append_shutdown_failure(&mut failure, finish_tasks(&mut self.reader_waits).await);
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -194,8 +194,46 @@ fn return_frame<F: AsFd>(reader: &mut SceneReader<'_, F>, frame: RenderedFrame) 
         .map_err(|_| io::Error::other("scene reader rejected its returned private images"))
 }
 
-async fn finish_tasks<T: 'static>(tasks: &mut JoinSet<T>) {
-    while tasks.join_next().await.is_some() {}
+async fn finish_tasks<T: 'static>(tasks: &mut JoinSet<T>) -> io::Result<()> {
+    let mut failure = None;
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            append_shutdown_failure(&mut failure, Err(join_error(error)));
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+async fn finish_fallible_tasks<T: 'static>(tasks: &mut JoinSet<io::Result<T>>) -> io::Result<()> {
+    let mut failure = None;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(result) => append_shutdown_failure(&mut failure, result.map(drop)),
+            Err(error) => append_shutdown_failure(&mut failure, Err(join_error(error))),
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+fn combine_shutdown(run: io::Result<()>, shutdown: io::Result<()>) -> io::Result<()> {
+    match (run, shutdown) {
+        (Ok(()), shutdown) => shutdown,
+        (run, Ok(())) => run,
+        (Err(primary), Err(shutdown)) => Err(io::Error::new(
+            primary.kind(),
+            format!("{primary}; finish renderer operations: {shutdown}"),
+        )),
+    }
+}
+
+fn append_shutdown_failure(failure: &mut Option<io::Error>, result: io::Result<()>) {
+    let Err(error) = result else {
+        return;
+    };
+    *failure = Some(match failure.take() {
+        Some(primary) => io::Error::new(primary.kind(), format!("{primary}; {error}")),
+        None => error,
+    });
 }
 
 fn take_pair<L, R>(left: &mut VecDeque<L>, right: &mut VecDeque<R>) -> Option<(L, R)> {
@@ -236,9 +274,12 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{finish_tasks, replace_backlog, take_pair};
+    use super::{
+        combine_shutdown, finish_fallible_tasks, finish_tasks, replace_backlog, take_pair,
+    };
     use pronk_renderer_worker::{CompletedOutput, RenderedFrame};
     use std::collections::VecDeque;
+    use std::io;
     use tokio::sync::oneshot;
     use tokio::task::JoinSet;
 
@@ -289,9 +330,7 @@ mod tests {
         });
         entered_rx.await.unwrap();
 
-        let stopping = tokio::spawn(async move {
-            finish_tasks(&mut tasks).await;
-        });
+        let stopping = tokio::spawn(async move { finish_tasks(&mut tasks).await.unwrap() });
         tokio::task::yield_now().await;
         assert!(!stopping.is_finished());
         release.send(()).unwrap();
@@ -309,12 +348,34 @@ mod tests {
         });
         entered_rx.await.unwrap();
 
-        let finishing = tokio::spawn(async move {
-            finish_tasks(&mut tasks).await;
-        });
+        let finishing = tokio::spawn(async move { finish_tasks(&mut tasks).await.unwrap() });
         tokio::task::yield_now().await;
         assert!(!finishing.is_finished());
         release.send(()).unwrap();
         finishing.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn finishing_reports_every_late_task_failure() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { Err::<(), _>(io::Error::other("native copy failed")) });
+        tasks.spawn(async { panic!("native worker panicked") });
+
+        let error = finish_fallible_tasks(&mut tasks).await.unwrap_err();
+        assert!(error.to_string().contains("native copy failed"));
+        assert!(error.to_string().contains("native worker panicked"));
+    }
+
+    #[test]
+    fn shutdown_failure_preserves_the_primary_error_class() {
+        let primary = io::Error::new(io::ErrorKind::BrokenPipe, "renderer failed");
+        let shutdown = io::Error::other("native copy failed");
+
+        let combined = combine_shutdown(Err(primary), Err(shutdown)).unwrap_err();
+        assert_eq!(combined.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(
+            combined.to_string(),
+            "renderer failed; finish renderer operations: native copy failed"
+        );
     }
 }
