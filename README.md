@@ -102,11 +102,12 @@ can wait on downstream reuse. That boundary lets CastKMS retire compositor
 sources without depending on PipeWire or encoder progress.
 
 The capture pipeline registers destination DMA-BUFs with the generic DRM
-capture interface. Final-image capture uses CPU-mappable heap allocations;
-userspace rendering allocates the offered format and modifier on its selected
-Vulkan device. Both transport completed images over a private PipeWire remote;
-the public desktop PipeWire instance is not the authority boundary for raw
-display pixels.
+capture interface. Final-image capture uses CPU-mappable heap allocations.
+Userspace rendering also uses mapped storage for software encoding, or
+allocates the offered format and modifier on its selected Vulkan device when
+the backend selects graphics storage. Both transport completed images over a
+private PipeWire remote; the public desktop PipeWire instance is not the
+authority boundary for raw display pixels.
 
 Backends run as socket-activated user services. Their peer identity and
 protocol version are checked before device inventory is accepted. The
