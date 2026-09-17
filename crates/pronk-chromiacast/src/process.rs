@@ -8,7 +8,7 @@ use anyhow::Context;
 use futures_util::StreamExt;
 use pronk_backend_protocol::{
     backend_peer_builder, require_same_uid, BackendHost1Proxy, BackendInfo, RegistrationReply,
-    RenderDeviceIdentity, Validate, BACKEND_PATH,
+    RenderDeviceIdentity, Validate, BACKEND_PATH, MAX_RAW_VIDEO_LAYOUTS,
 };
 use pronk_systemd::{notify_ready, notify_stopping, BackendPeerPolicy};
 use tokio::sync::watch;
@@ -229,9 +229,25 @@ fn resolve_encoder_policy(selection: VideoEncoderSelection) -> anyhow::Result<Vi
     render_device
         .validate()
         .context("validate selected render-device identity")?;
+    let formats = pronk_media::VideoEncoder::va_h264(render_node.clone())
+        .supported_dma_buf_formats()
+        .context("query selected VA converter DMA-BUF formats")?;
+    if formats.len() > MAX_RAW_VIDEO_LAYOUTS {
+        anyhow::bail!(
+            "selected VA converter exposes {} DMA-BUF formats; the backend protocol permits at most {MAX_RAW_VIDEO_LAYOUTS}",
+            formats.len()
+        );
+    }
+    let raw_layouts = formats
+        .into_iter()
+        .map(|format| {
+            pronk_backend_protocol::RawVideoLayout::dma_buf(format.format, format.modifier)
+        })
+        .collect();
     Ok(VideoEncoderPolicy::VaH264 {
         render_node,
         render_device,
+        raw_layouts,
     })
 }
 
@@ -387,26 +403,15 @@ mod tests {
     }
 
     #[test]
-    fn encoder_device_must_be_accessible_before_registration() {
+    fn encoder_device_and_converter_must_be_usable_before_registration() {
         assert_eq!(
             resolve_encoder_policy(VideoEncoderSelection::Software).unwrap(),
             VideoEncoderPolicy::Software
         );
-        let policy = resolve_encoder_policy(VideoEncoderSelection::VaH264 {
+        assert!(resolve_encoder_policy(VideoEncoderSelection::VaH264 {
             render_node: PathBuf::from("/dev/null"),
         })
-        .unwrap();
-        let metadata = std::fs::metadata("/dev/null").unwrap();
-        let VideoEncoderPolicy::VaH264 { render_device, .. } = policy else {
-            panic!("VA selection did not produce a VA policy");
-        };
-        assert_eq!(
-            render_device,
-            RenderDeviceIdentity {
-                major: u32::try_from(nix::sys::stat::major(metadata.rdev())).unwrap(),
-                minor: u32::try_from(nix::sys::stat::minor(metadata.rdev())).unwrap(),
-            }
-        );
+        .is_err());
         assert!(resolve_encoder_policy(VideoEncoderSelection::VaH264 {
             render_node: std::env::current_exe().unwrap(),
         })

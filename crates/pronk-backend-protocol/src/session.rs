@@ -8,7 +8,7 @@ use super::{
     validate_count, validate_generation, validate_text, validate_token, Validate, ValidationError,
     BACKEND_SESSION_PATH_PREFIX, MAX_AUDIO_PROFILES, MAX_ENDPOINTS, MAX_ERROR_TEXT_BYTES,
     MAX_MANUFACTURER_NAME_BYTES, MAX_MODES, MAX_NODE_NAME_BYTES, MAX_PRODUCT_NAME_BYTES,
-    MAX_VIDEO_PROFILES,
+    MAX_RAW_VIDEO_LAYOUTS, MAX_VIDEO_PROFILES,
 };
 
 pub const SESSION_FEATURE_AUDIO: u64 = 1 << 0;
@@ -25,6 +25,8 @@ pub const ERROR_INVALID_MEDIA_TARGET: &str =
     "io.github.pronkproject.Pronk.Error.InvalidMediaTarget";
 pub const ERROR_STALE_GENERATION: &str = "io.github.pronkproject.Pronk.Error.StaleGeneration";
 pub const ERROR_TRANSPORT_FAILED: &str = "io.github.pronkproject.Pronk.Error.TransportFailed";
+
+const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct SessionOptions {
@@ -80,6 +82,62 @@ pub enum RawVideoStorage {
     DmaBuf = 2,
 }
 
+/// One memory representation accepted as input to an encoded video profile.
+///
+/// The tuple identifies storage, pixel layout, and tiling or compression. It
+/// does not describe a particular allocation's plane offsets or strides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct RawVideoLayout {
+    pub storage: RawVideoStorage,
+    /// DRM fourcc describing the memory byte layout.
+    pub format: u32,
+    /// Explicit DRM format modifier; zero is the linear modifier.
+    pub modifier: u64,
+}
+
+impl RawVideoLayout {
+    pub const fn system_memory(format: u32) -> Self {
+        Self {
+            storage: RawVideoStorage::SystemMemory,
+            format,
+            modifier: 0,
+        }
+    }
+
+    pub const fn dma_buf(format: u32, modifier: u64) -> Self {
+        Self {
+            storage: RawVideoStorage::DmaBuf,
+            format,
+            modifier,
+        }
+    }
+}
+
+impl Validate for RawVideoLayout {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.storage.validate()?;
+        if self.format == 0 {
+            return Err(ValidationError::OutOfRange {
+                field: "raw video format",
+                actual: 0,
+                minimum: 1,
+                maximum: u64::from(u32::MAX),
+            });
+        }
+        if self.storage == RawVideoStorage::SystemMemory && self.modifier != 0 {
+            return Err(ValidationError::InvalidMediaLayout(
+                "system-memory video requires the linear DRM modifier",
+            ));
+        }
+        if self.storage == RawVideoStorage::DmaBuf && self.modifier == DRM_FORMAT_MOD_INVALID {
+            return Err(ValidationError::InvalidMediaLayout(
+                "DMA-BUF video requires an explicit DRM modifier",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Validate for RawVideoStorage {
     fn validate(&self) -> Result<(), ValidationError> {
         Ok(())
@@ -93,8 +151,8 @@ pub struct VideoProfile {
     pub max_width: u32,
     pub max_height: u32,
     pub max_refresh_millihz: u32,
-    /// Raw-frame storage paths that can feed the encoded profile.
-    pub raw_storage: Vec<RawVideoStorage>,
+    /// Raw-frame layouts that can feed the encoded profile.
+    pub raw_layouts: Vec<RawVideoLayout>,
 }
 
 impl Validate for VideoProfile {
@@ -109,13 +167,21 @@ impl Validate for VideoProfile {
             1_000,
             240_000,
         )?;
-        validate_nonempty_bounded("raw video storage", &self.raw_storage, 2)?;
-        let mut storage = HashSet::with_capacity(self.raw_storage.len());
-        for kind in &self.raw_storage {
-            if !storage.insert(*kind as u32) {
+        validate_nonempty_bounded(
+            "raw video layouts",
+            &self.raw_layouts,
+            MAX_RAW_VIDEO_LAYOUTS,
+        )?;
+        let mut layouts = HashSet::with_capacity(self.raw_layouts.len());
+        for layout in &self.raw_layouts {
+            layout.validate()?;
+            if !layouts.insert((layout.storage as u32, layout.format, layout.modifier)) {
                 return Err(ValidationError::DuplicateIdentifier {
-                    field: "raw video storage",
-                    value: (*kind as u32).to_string(),
+                    field: "raw video layout",
+                    value: format!(
+                        "{}:{:#010x}:{:#018x}",
+                        layout.storage as u32, layout.format, layout.modifier
+                    ),
                 });
             }
         }
@@ -753,7 +819,7 @@ mod tests {
             max_width: 3840,
             max_height: 2160,
             max_refresh_millihz: 60_000,
-            raw_storage: vec![RawVideoStorage::SystemMemory],
+            raw_layouts: vec![RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))],
         }
     }
 
@@ -812,19 +878,38 @@ mod tests {
     }
 
     #[test]
-    fn video_profiles_require_distinct_raw_storage_paths() {
+    fn video_profiles_require_distinct_valid_raw_layouts() {
         let mut profile = video_profile();
-        profile.raw_storage.clear();
+        profile.raw_layouts.clear();
         assert!(profile.validate().is_err());
 
-        profile.raw_storage = vec![RawVideoStorage::DmaBuf, RawVideoStorage::SystemMemory];
+        profile.raw_layouts = vec![
+            RawVideoLayout::dma_buf(u32::from_le_bytes(*b"XR24"), 9),
+            RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24")),
+        ];
         profile.validate().unwrap();
 
-        profile.raw_storage = vec![RawVideoStorage::DmaBuf, RawVideoStorage::DmaBuf];
+        profile.raw_layouts = vec![
+            RawVideoLayout::dma_buf(u32::from_le_bytes(*b"XR24"), 9),
+            RawVideoLayout::dma_buf(u32::from_le_bytes(*b"XR24"), 9),
+        ];
         assert!(matches!(
             profile.validate(),
             Err(ValidationError::DuplicateIdentifier { .. })
         ));
+
+        profile.raw_layouts = vec![RawVideoLayout {
+            storage: RawVideoStorage::SystemMemory,
+            format: u32::from_le_bytes(*b"XR24"),
+            modifier: 9,
+        }];
+        assert!(profile.validate().is_err());
+
+        profile.raw_layouts = vec![RawVideoLayout::dma_buf(
+            u32::from_le_bytes(*b"XR24"),
+            DRM_FORMAT_MOD_INVALID,
+        )];
+        assert!(profile.validate().is_err());
     }
 
     #[test]
@@ -990,7 +1075,8 @@ mod tests {
         assert_eq!(SessionOptions::SIGNATURE, "(tttt)");
         assert_eq!(DisplayMode::SIGNATURE, "(uuuu)");
         assert_eq!(RawVideoStorage::SIGNATURE, "u");
-        assert_eq!(VideoProfile::SIGNATURE, "(ssuuuau)");
+        assert_eq!(RawVideoLayout::SIGNATURE, "(uut)");
+        assert_eq!(VideoProfile::SIGNATURE, "(ssuuua(uut))");
         assert_eq!(AudioProfile::SIGNATURE, "(ssyau)");
         assert_eq!(IdentitySource::SIGNATURE, "u");
         assert_eq!(IdentitySource::SetupEndpoint as u32, 1);

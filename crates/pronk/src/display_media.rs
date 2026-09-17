@@ -5,7 +5,7 @@ use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
 use castkms_sys::DRM_FORMAT_MOD_LINEAR;
-use pronk_backend_protocol::RawVideoStorage;
+use pronk_backend_protocol::{RawVideoLayout, RawVideoStorage};
 use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate};
 
 use crate::capture_health::CaptureEvents;
@@ -28,26 +28,30 @@ pub enum CaptureSource {
 }
 
 impl CaptureSource {
-    pub(crate) fn raw_storage(self) -> &'static [RawVideoStorage] {
+    pub(crate) fn raw_layouts(self) -> &'static [RawVideoLayout] {
+        const SYSTEM_XRGB8888: RawVideoLayout =
+            RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
+        const DMA_BUF_XRGB8888: RawVideoLayout =
+            RawVideoLayout::dma_buf(u32::from_le_bytes(*b"XR24"), DRM_FORMAT_MOD_LINEAR);
         match self {
-            Self::Renderer => &[RawVideoStorage::SystemMemory, RawVideoStorage::DmaBuf],
-            Self::FinalImage => &[RawVideoStorage::SystemMemory],
+            Self::Renderer => &[SYSTEM_XRGB8888, DMA_BUF_XRGB8888],
+            Self::FinalImage => &[SYSTEM_XRGB8888],
         }
     }
 
-    pub(crate) fn select_raw_storage(
+    pub(crate) fn select_raw_layout(
         self,
-        offered: &[RawVideoStorage],
-    ) -> io::Result<RawVideoStorage> {
-        self.raw_storage()
+        offered: &[RawVideoLayout],
+    ) -> io::Result<RawVideoLayout> {
+        self.raw_layouts()
             .iter()
             .rev()
             .copied()
-            .find(|storage| offered.contains(storage))
+            .find(|layout| offered.contains(layout))
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "backend video storage is incompatible with the capture source",
+                    "backend raw-video layout is incompatible with the capture source",
                 )
             })
     }
@@ -70,7 +74,7 @@ pub(crate) struct DisplayMediaConfig {
     pub device_instance: String,
     pub node_description: String,
     pub video_profile_id: String,
-    pub raw_storage: RawVideoStorage,
+    pub raw_layout: RawVideoLayout,
     pub video_bitrate: NonZeroU64,
     pub video_frame_rate: VideoFrameRate,
 }
@@ -107,7 +111,7 @@ impl DisplayMediaAccess {
                         device_instance: config.device_instance,
                         node_description: config.node_description,
                         video_profile_id: config.video_profile_id,
-                        raw_storage: config.raw_storage,
+                        raw_layout: config.raw_layout,
                         video_bitrate: config.video_bitrate,
                         video_frame_rate: config.video_frame_rate,
                         private_pool: RendererPrivatePoolConfig {
@@ -126,7 +130,7 @@ impl DisplayMediaAccess {
                 Ok((Box::new(pipeline), events))
             }
             Self::FinalImage(capture) => {
-                if config.raw_storage != RawVideoStorage::SystemMemory {
+                if config.raw_layout.storage != RawVideoStorage::SystemMemory {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "final-image capture requires system-memory video storage",
@@ -177,38 +181,47 @@ mod tests {
             device_instance: "device-test".into(),
             node_description: "test output".into(),
             video_profile_id: "h264".into(),
-            raw_storage: RawVideoStorage::SystemMemory,
+            raw_layout: RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24")),
             video_bitrate: NonZeroU64::new(4_000_000).unwrap(),
             video_frame_rate: VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
         }
     }
 
     #[test]
-    fn renderer_prefers_graphics_storage_without_requiring_it() {
+    fn renderer_prefers_matching_graphics_layout_without_requiring_it() {
+        let system = RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
+        let graphics = RawVideoLayout::dma_buf(u32::from_le_bytes(*b"XR24"), DRM_FORMAT_MOD_LINEAR);
         assert_eq!(
             CaptureSource::Renderer
-                .select_raw_storage(&[RawVideoStorage::SystemMemory, RawVideoStorage::DmaBuf,])
+                .select_raw_layout(&[system, graphics])
                 .unwrap(),
-            RawVideoStorage::DmaBuf
+            graphics
         );
         assert_eq!(
             CaptureSource::Renderer
-                .select_raw_storage(&[RawVideoStorage::SystemMemory])
+                .select_raw_layout(&[system])
                 .unwrap(),
-            RawVideoStorage::SystemMemory
+            system
         );
+        assert!(CaptureSource::Renderer
+            .select_raw_layout(&[RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9,)])
+            .is_err());
     }
 
     #[test]
     fn final_image_capture_requires_mappable_storage() {
+        let system = RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
         assert!(CaptureSource::FinalImage
-            .select_raw_storage(&[RawVideoStorage::DmaBuf])
+            .select_raw_layout(&[RawVideoLayout::dma_buf(
+                u32::from_le_bytes(*b"XR24"),
+                DRM_FORMAT_MOD_LINEAR,
+            )])
             .is_err());
         assert_eq!(
             CaptureSource::FinalImage
-                .select_raw_storage(&[RawVideoStorage::SystemMemory])
+                .select_raw_layout(&[system])
                 .unwrap(),
-            RawVideoStorage::SystemMemory
+            system
         );
     }
 

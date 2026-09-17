@@ -20,7 +20,7 @@ mod session;
 
 pub use session::*;
 
-pub const PROTOCOL_MAJOR: u16 = 3;
+pub const PROTOCOL_MAJOR: u16 = 4;
 pub const PROTOCOL_MINOR: u16 = 0;
 
 pub const CAPABILITY_PIPEWIRE_REMOTE_FDS_V1: u64 = 1 << 0;
@@ -51,6 +51,7 @@ pub const MAX_DEVICES: usize = 128;
 pub const MAX_ERROR_TEXT_BYTES: usize = 512;
 pub const MAX_MODES: usize = 64;
 pub const MAX_VIDEO_PROFILES: usize = 16;
+pub const MAX_RAW_VIDEO_LAYOUTS: usize = 64;
 pub const MAX_AUDIO_PROFILES: usize = 16;
 pub const MAX_ENDPOINTS: usize = 16;
 pub const MAX_NODE_NAME_BYTES: usize = 256;

@@ -116,7 +116,10 @@ async fn run(
             device_instance: "castkms-test".into(),
             node_description: "Live delegated renderer".into(),
             video_profile_id: "raw-dmabuf".into(),
-            raw_storage: pronk_backend_protocol::RawVideoStorage::DmaBuf,
+            raw_layout: pronk_backend_protocol::RawVideoLayout::dma_buf(
+                u32::from_le_bytes(*b"XR24"),
+                modifier,
+            ),
             video_bitrate: nz64(4_000_000),
             video_frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
             private_pool: RendererPrivatePoolConfig {

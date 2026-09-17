@@ -588,7 +588,9 @@ mod tests {
                 max_width: 3840,
                 max_height: 2160,
                 max_refresh_millihz: 60_000,
-                raw_storage: vec![pronk_backend_protocol::RawVideoStorage::SystemMemory],
+                raw_layouts: vec![pronk_backend_protocol::RawVideoLayout::system_memory(
+                    u32::from_le_bytes(*b"XR24"),
+                )],
             }],
             audio_profiles: vec![AudioProfile {
                 profile_id: "opus-stereo".into(),

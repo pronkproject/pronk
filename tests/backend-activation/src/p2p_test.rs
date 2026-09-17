@@ -633,7 +633,9 @@ fn media_gate_preparation_request() -> PreparationRequest {
             max_width: 320,
             max_height: 240,
             max_refresh_millihz: 30_000,
-            raw_storage: vec![pronk_backend_protocol::RawVideoStorage::SystemMemory],
+            raw_layouts: vec![pronk_backend_protocol::RawVideoLayout::system_memory(
+                u32::from_le_bytes(*b"XR24"),
+            )],
         }],
         audio_profiles: Vec::new(),
         requested_features: 0,
@@ -1163,7 +1165,9 @@ fn mock_preparation_request(preparation_generation: u64) -> PreparationRequest {
             max_width: 3840,
             max_height: 2160,
             max_refresh_millihz: 60_000,
-            raw_storage: vec![pronk_backend_protocol::RawVideoStorage::SystemMemory],
+            raw_layouts: vec![pronk_backend_protocol::RawVideoLayout::system_memory(
+                u32::from_le_bytes(*b"XR24"),
+            )],
         }],
         audio_profiles: vec![AudioProfile {
             profile_id: "opus-stereo".into(),
@@ -1251,7 +1255,9 @@ async fn run_valid_connection(path: &Path, connection_generation: u64) -> anyhow
             max_width: 3840,
             max_height: 2160,
             max_refresh_millihz: 60_000,
-            raw_storage: vec![pronk_backend_protocol::RawVideoStorage::SystemMemory],
+            raw_layouts: vec![pronk_backend_protocol::RawVideoLayout::system_memory(
+                u32::from_le_bytes(*b"XR24"),
+            )],
         }],
         audio_profiles: vec![AudioProfile {
             profile_id: "opus-stereo".into(),

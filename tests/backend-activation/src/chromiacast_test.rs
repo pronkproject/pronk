@@ -172,7 +172,9 @@ async fn main() -> anyhow::Result<()> {
     let capabilities = session
         .prepare(pronk::preparation::initial_preparation_offer(
             false,
-            &[pronk_backend_protocol::RawVideoStorage::SystemMemory],
+            &[pronk_backend_protocol::RawVideoLayout::system_memory(
+                u32::from_le_bytes(*b"XR24"),
+            )],
         ))
         .await
         .context("prepare authenticated Chromiacast device")?;

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chromiacast::{AppAvailability, CastApp, CastConnection, SetupInfoOutcome, APP_MIRRORING};
 use pronk_backend_protocol::{
     AudioProfile, ControlKind, ControlOperation, DeviceCapabilities, DisplayIdentity, DisplayMode,
-    IdentitySource, MediaConfiguration, PipeWireTarget, PreparationRequest, RawVideoStorage,
+    IdentitySource, MediaConfiguration, PipeWireTarget, PreparationRequest, RawVideoLayout,
     SessionStatistics, StopReason, SuspendReason, Validate, VideoProfile, MAX_ERROR_TEXT_BYTES,
     MAX_MANUFACTURER_NAME_BYTES, MAX_PRODUCT_NAME_BYTES, SESSION_FEATURE_AUDIO,
     SESSION_FEATURE_CONTROL,
@@ -1077,7 +1077,7 @@ async fn prepare_device(
             return Err(error);
         }
     };
-    let capabilities = match negotiate_capabilities(request, identity, media.raw_video_storage()) {
+    let capabilities = match negotiate_capabilities(request, identity, media.raw_video_layouts()) {
         Ok(capabilities) => capabilities,
         Err(error) => {
             let _ = control.close().await;
@@ -1275,7 +1275,7 @@ fn bounded_identity(
 fn negotiate_capabilities(
     request: PreparationRequest,
     display_identity: DisplayIdentity,
-    raw_storage: RawVideoStorage,
+    raw_layouts: &[RawVideoLayout],
 ) -> Result<DeviceCapabilities, DeviceActorError> {
     let audio_requested = request.requested_features & SESSION_FEATURE_AUDIO != 0;
     let control_requested = request.requested_features & SESSION_FEATURE_CONTROL != 0;
@@ -1290,7 +1290,7 @@ fn negotiate_capabilities(
     let video_profiles: Vec<_> = request
         .video_profiles
         .into_iter()
-        .filter_map(|profile| narrow_h264_profile(profile, raw_storage))
+        .filter_map(|profile| narrow_h264_profile(profile, raw_layouts))
         .take(1)
         .collect();
     if video_profiles.is_empty() {
@@ -1341,15 +1341,18 @@ fn narrow_opus_profile(profile: AudioProfile) -> Option<AudioProfile> {
 
 fn narrow_h264_profile(
     mut profile: VideoProfile,
-    raw_storage: RawVideoStorage,
+    raw_layouts: &[RawVideoLayout],
 ) -> Option<VideoProfile> {
-    if profile.codec != "h264" || !profile.raw_storage.contains(&raw_storage) {
+    if profile.codec != "h264" {
         return None;
     }
+    let raw_layout = raw_layouts
+        .iter()
+        .find(|layout| profile.raw_layouts.contains(layout))?;
     profile.max_width = profile.max_width.min(3_840);
     profile.max_height = profile.max_height.min(2_160);
     profile.max_refresh_millihz = profile.max_refresh_millihz.min(60_000);
-    profile.raw_storage = vec![raw_storage];
+    profile.raw_layouts = vec![*raw_layout];
     Some(profile)
 }
 
@@ -1418,6 +1421,14 @@ mod tests {
 
     use super::*;
     use crate::discovery::FIXTURE_DEVICE_ID;
+
+    fn system_layout() -> RawVideoLayout {
+        RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))
+    }
+
+    fn graphics_layout() -> RawVideoLayout {
+        RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)
+    }
 
     #[derive(Debug)]
     struct ScriptedConnector {
@@ -1527,7 +1538,9 @@ mod tests {
                 max_width: 1_920,
                 max_height: 1_080,
                 max_refresh_millihz: 60_000,
-                raw_storage: vec![pronk_backend_protocol::RawVideoStorage::SystemMemory],
+                raw_layouts: vec![pronk_backend_protocol::RawVideoLayout::system_memory(
+                    u32::from_le_bytes(*b"XR24"),
+                )],
             }],
             audio_profiles: Vec::new(),
             requested_features: 0,
@@ -1902,8 +1915,7 @@ mod tests {
         offer.video_profiles[0].max_refresh_millihz = 240_000;
 
         let capabilities =
-            negotiate_capabilities(offer, display_identity(), RawVideoStorage::SystemMemory)
-                .unwrap();
+            negotiate_capabilities(offer, display_identity(), &[system_layout()]).unwrap();
         assert_eq!(capabilities.modes.len(), 4);
         assert!(capabilities.modes.iter().any(|mode| (
             mode.width,
@@ -1945,12 +1957,9 @@ mod tests {
             max_channels: 6,
             sample_rates: vec![44_100, OPUS_SAMPLE_RATE],
         }];
-        let capabilities = negotiate_capabilities(
-            supported_request,
-            display_identity(),
-            RawVideoStorage::SystemMemory,
-        )
-        .unwrap();
+        let capabilities =
+            negotiate_capabilities(supported_request, display_identity(), &[system_layout()])
+                .unwrap();
         assert_eq!(capabilities.features, SESSION_FEATURE_AUDIO);
         assert_eq!(
             capabilities.audio_profiles,
@@ -1971,30 +1980,25 @@ mod tests {
             sample_rates: vec![44_100],
         }];
         assert_eq!(
-            negotiate_capabilities(
-                unsupported_request,
-                display_identity(),
-                RawVideoStorage::SystemMemory,
-            ),
+            negotiate_capabilities(unsupported_request, display_identity(), &[system_layout()],),
             Err(DeviceActorError::NoSupportedAudioProfile)
         );
     }
 
     #[test]
-    fn video_capability_selects_the_configured_encoder_storage() {
+    fn video_capability_selects_one_exact_encoder_layout() {
         let mut offer = request();
-        offer.video_profiles[0].raw_storage =
-            vec![RawVideoStorage::SystemMemory, RawVideoStorage::DmaBuf];
+        offer.video_profiles[0].raw_layouts = vec![system_layout(), graphics_layout()];
 
-        for storage in [RawVideoStorage::SystemMemory, RawVideoStorage::DmaBuf] {
+        for layout in [system_layout(), graphics_layout()] {
             let capabilities =
-                negotiate_capabilities(offer.clone(), display_identity(), storage).unwrap();
-            assert_eq!(capabilities.video_profiles[0].raw_storage, [storage]);
+                negotiate_capabilities(offer.clone(), display_identity(), &[layout]).unwrap();
+            assert_eq!(capabilities.video_profiles[0].raw_layouts, [layout]);
         }
 
-        offer.video_profiles[0].raw_storage = vec![RawVideoStorage::SystemMemory];
+        offer.video_profiles[0].raw_layouts = vec![system_layout()];
         assert_eq!(
-            negotiate_capabilities(offer, display_identity(), RawVideoStorage::DmaBuf),
+            negotiate_capabilities(offer, display_identity(), &[graphics_layout()]),
             Err(DeviceActorError::NoSupportedVideoProfile)
         );
     }

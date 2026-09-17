@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use pronk_backend_protocol::{
     AudioProfile, DeviceCapabilities, DisplayMode, IdentitySource, PreparationRequest,
-    RawVideoStorage, Validate, VideoProfile, SESSION_FEATURE_AUDIO, SESSION_FEATURE_CONTROL,
+    RawVideoLayout, Validate, VideoProfile, SESSION_FEATURE_AUDIO, SESSION_FEATURE_CONTROL,
 };
 use pronk_core::edid::{
     build_cast_display_edid, CastDisplayEdidError, CastDisplayEdidRequest, EdidMode,
@@ -21,7 +21,7 @@ use thiserror::Error;
 /// performance fallback without inventing modes the backend did not advertise.
 pub fn initial_preparation_offer(
     audio_enabled: bool,
-    raw_storage: &[RawVideoStorage],
+    raw_layouts: &[RawVideoLayout],
 ) -> PreparationRequest {
     PreparationRequest {
         preparation_generation: 1,
@@ -117,7 +117,7 @@ pub fn initial_preparation_offer(
             max_width: 3840,
             max_height: 2160,
             max_refresh_millihz: 60_000,
-            raw_storage: raw_storage.to_vec(),
+            raw_layouts: raw_layouts.to_vec(),
         }],
         audio_profiles: if audio_enabled {
             vec![AudioProfile {
@@ -423,13 +423,19 @@ mod tests {
 
     #[test]
     fn initial_offer_is_bounded_and_audio_is_explicit() {
-        let video = initial_preparation_offer(false, &[RawVideoStorage::SystemMemory]);
+        let video = initial_preparation_offer(
+            false,
+            &[RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))],
+        );
         video.validate().unwrap();
         assert_eq!(video.requested_features, SESSION_FEATURE_CONTROL);
         assert!(video.audio_profiles.is_empty());
         assert_eq!(video.candidate_modes.last().unwrap().width, 640);
 
-        let audiovisual = initial_preparation_offer(true, &[RawVideoStorage::SystemMemory]);
+        let audiovisual = initial_preparation_offer(
+            true,
+            &[RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))],
+        );
         audiovisual.validate().unwrap();
         assert_eq!(
             audiovisual.requested_features,
@@ -487,7 +493,7 @@ mod tests {
                 max_width: 1920,
                 max_height: 1080,
                 max_refresh_millihz: 60_000,
-                raw_storage: vec![pronk_backend_protocol::RawVideoStorage::SystemMemory],
+                raw_layouts: vec![RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))],
             }],
             audio_profiles: vec![AudioProfile {
                 profile_id: "opus-stereo".into(),

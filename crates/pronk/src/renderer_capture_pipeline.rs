@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use castkms_renderer::Renderer;
 use drm_capture::Access as CaptureAccess;
-use pronk_backend_protocol::RawVideoStorage;
+use pronk_backend_protocol::{RawVideoLayout, RawVideoStorage};
 use pronk_capture::Buffer;
 use pronk_capture_pipewire::{State as CaptureVideoState, Video as CaptureVideo};
 use pronk_gpu::vulkan::{Device, PackedFormat};
@@ -41,7 +41,7 @@ pub struct RendererCapturePipelineConfig {
     pub device_instance: String,
     pub node_description: String,
     pub video_profile_id: String,
-    pub raw_storage: RawVideoStorage,
+    pub raw_layout: RawVideoLayout,
     pub video_bitrate: NonZeroU64,
     pub video_frame_rate: VideoFrameRate,
     pub private_pool: RendererPrivatePoolConfig,
@@ -449,7 +449,19 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 )
                 .await);
         }
-        let capture = match self.config.raw_storage {
+        if selected.format != self.config.raw_layout.format
+            || selected.modifier != self.config.raw_layout.modifier
+        {
+            return Err(self
+                .finish_prepared_renderer(
+                    renderer,
+                    MediaPipelineError::new(
+                        "capture output does not match the negotiated raw-video layout",
+                    ),
+                )
+                .await);
+        }
+        let capture = match self.config.raw_layout.storage {
             RawVideoStorage::SystemMemory => {
                 self.capture_setup
                     .create_actor(

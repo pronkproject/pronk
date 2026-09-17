@@ -7,14 +7,15 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use pronk_backend_protocol::{
     validate_media_configuration, DeviceCapabilities, MediaConfiguration, MediaKind,
-    PipeWireTarget, RawVideoStorage, RenderDeviceIdentity, SessionState, SessionStatistics,
+    PipeWireTarget, RawVideoLayout, RenderDeviceIdentity, SessionState, SessionStatistics,
     Validate, SESSION_FEATURE_AUDIO,
 };
 use pronk_media::{
-    EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit, MediaGraphActor,
-    MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics, PipeWireAudioInput,
-    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence, VideoCodec,
-    VideoEncoder, OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
+    DrmVideoFormat, EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit,
+    MediaGraphActor, MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics,
+    PipeWireAudioInput, PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence,
+    VideoCodec, VideoEncoder, VideoInputLayout, OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION,
+    OPUS_SAMPLE_RATE,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -34,6 +35,8 @@ use crate::transport::{
 const ENCODED_OUTPUT_CAPACITY: usize = 8;
 const ENCODED_AUDIO_OUTPUT_CAPACITY: usize = 32;
 const START_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
+const SOFTWARE_RAW_LAYOUTS: [RawVideoLayout; 1] =
+    [RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VideoEncoderPolicy {
@@ -41,14 +44,15 @@ pub(crate) enum VideoEncoderPolicy {
     VaH264 {
         render_node: PathBuf,
         render_device: RenderDeviceIdentity,
+        raw_layouts: Vec<RawVideoLayout>,
     },
 }
 
 impl VideoEncoderPolicy {
-    fn raw_storage(&self) -> RawVideoStorage {
+    fn raw_layouts(&self) -> &[RawVideoLayout] {
         match self {
-            Self::Software => RawVideoStorage::SystemMemory,
-            Self::VaH264 { .. } => RawVideoStorage::DmaBuf,
+            Self::Software => &SOFTWARE_RAW_LAYOUTS,
+            Self::VaH264 { raw_layouts, .. } => raw_layouts,
         }
     }
 
@@ -291,8 +295,8 @@ pub(crate) enum MediaSessionEvent {
 }
 
 impl ChromiacastMediaSession {
-    pub(crate) fn raw_video_storage(&self) -> RawVideoStorage {
-        self.encoder_policy.raw_storage()
+    pub(crate) fn raw_video_layouts(&self) -> &[RawVideoLayout] {
+        self.encoder_policy.raw_layouts()
     }
 
     pub(crate) fn spawn(
@@ -950,6 +954,12 @@ impl ChromiacastMediaSession {
             .validate_video_target(video_target.render_device)
             .map_err(MediaSessionError::InvalidRequest)?;
         let caps = ValidatedVideoCaps::parse(&video_target.caps)?;
+        let raw_layout = raw_layout_from_caps(&caps)?;
+        if !profile.raw_layouts.contains(&raw_layout) {
+            return Err(MediaSessionError::InvalidRequest(
+                "video target does not use a negotiated raw-video layout".into(),
+            ));
+        }
         if caps.width.get() != configuration.mode.width
             || caps.height.get() != configuration.mode.height
         {
@@ -1143,6 +1153,17 @@ impl ChromiacastMediaSession {
             .as_ref()
             .ok_or_else(|| MediaSessionError::Transport("audio sender actor is shut down".into()))
     }
+}
+
+fn raw_layout_from_caps(caps: &ValidatedVideoCaps) -> Result<RawVideoLayout, MediaSessionError> {
+    Ok(match &caps.layout {
+        VideoInputLayout::SystemMemoryBgrx => {
+            RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))
+        }
+        VideoInputLayout::DmaBuf {
+            drm_format: DrmVideoFormat { format, modifier },
+        } => RawVideoLayout::dma_buf(*format, *modifier),
+    })
 }
 
 async fn discard_negotiated_transport(negotiated: NegotiatedVideoTransport) {
@@ -1563,6 +1584,7 @@ mod tests {
         let policy = VideoEncoderPolicy::VaH264 {
             render_node: PathBuf::from("/dev/dri/renderD128"),
             render_device: test_render_device(),
+            raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
         };
         assert_eq!(policy.offer(), VideoOffer::H264);
         assert!(policy.encoder(VideoCodec::Vp8).is_err());
@@ -1579,6 +1601,7 @@ mod tests {
         let policy = VideoEncoderPolicy::VaH264 {
             render_node: PathBuf::from("/dev/dri/renderD128"),
             render_device: test_render_device(),
+            raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
         };
         policy
             .validate_video_target(Some(test_render_device()))
@@ -1604,6 +1627,7 @@ mod tests {
             VideoEncoderPolicy::VaH264 {
                 render_node: PathBuf::from("/dev/dri/renderD128"),
                 render_device: test_render_device(),
+                raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
             },
             Box::new(graph),
             video_receiver,
@@ -1637,6 +1661,7 @@ mod tests {
             VideoEncoderPolicy::VaH264 {
                 render_node: PathBuf::from("/dev/dri/renderD128"),
                 render_device: test_render_device(),
+                raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
             },
             Box::new(graph),
             video_receiver,
@@ -1805,6 +1830,39 @@ mod tests {
                 .await,
             Err(MediaSessionError::InvalidRequest(_))
         ));
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_source_must_supply_the_negotiated_raw_layout() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        let mut transport = FakeTransport::default();
+        media.complete_preparation(capabilities()).unwrap();
+        let mut capture_target = target(session_id, 1);
+        capture_target.caps = concat!(
+            "video/x-raw(memory:DMABuf),format=DMA_DRM,",
+            "drm-format=XR24:0x0000000000000000,",
+            "width=640,height=480,framerate=60/1"
+        )
+        .into();
+
+        assert!(matches!(
+            media
+                .configure(
+                    remote(),
+                    vec![capture_target],
+                    configuration(),
+                    1,
+                    &mut transport,
+                )
+                .await,
+            Err(MediaSessionError::InvalidRequest(_))
+        ));
+        assert!(transport.configuration.is_none());
         media.shutdown().await.unwrap();
     }
 
@@ -2175,7 +2233,9 @@ mod tests {
                 max_width: 640,
                 max_height: 480,
                 max_refresh_millihz: 60_000,
-                raw_storage: vec![pronk_backend_protocol::RawVideoStorage::SystemMemory],
+                raw_layouts: vec![pronk_backend_protocol::RawVideoLayout::system_memory(
+                    u32::from_le_bytes(*b"XR24"),
+                )],
             }],
             audio_profiles: Vec::new(),
             features: 0,

@@ -353,7 +353,7 @@ impl ManagerHandle {
                 self.media_runtime.clone(),
                 initial_preparation_offer(
                     audio_enabled,
-                    self.media_runtime.capture_source().raw_storage(),
+                    self.media_runtime.capture_source().raw_layouts(),
                 ),
                 audio_enabled,
             ),
