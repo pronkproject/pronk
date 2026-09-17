@@ -817,11 +817,19 @@ by the separate native-versus-reference tests. The harness retains its private
 PipeWire transport, hardware-encoder and transient-sandbox checks without
 dequeueing CastKMS scenes or claiming delivered frame rate.
 
-The installed renderer path allocates the generic capture offer's exact XR24
-or AR24 format and modifier on the selected Vulkan device. An explicit linear
-modifier remains graphics storage and is advertised through DMA_DRM rather
-than being inferred to be CPU-mappable. The offer follows the display and
-renderer constraints; it is not selected from the encoder's import abilities.
+The installed renderer path offers both mapped and DMA-BUF raw-frame storage
+to the media backend. A software encoder selects mapped storage, which the
+shared capture actor allocates from the configured DMA heap. A graphics-capable
+encoder may select DMA-BUF storage, which makes the renderer allocate the
+generic capture offer's exact XR24 or AR24 format and modifier on the selected
+Vulkan device. An explicit linear modifier remains graphics storage and is
+advertised through DMA_DRM rather than being inferred to be CPU-mappable.
+
+Raw-frame storage negotiation does not select the capture format or modifier.
+Those still follow the display and renderer constraints rather than the
+encoder's import abilities. Hardware encoding therefore remains unavailable
+when the capture offer has no tuple accepted by the selected encoder, even
+though both sides support DMA-BUF storage in general.
 
 The generated-image harness joins a separate producer's source import, private
 staging, exported output reuse and hardware encoding for one explicit tiled
@@ -838,9 +846,9 @@ render node used to select their Vulkan device. The Chromecast backend records
 the same identity when it validates its selected VA encoder node at startup and
 rejects an absent or different identity before Cast transport negotiation.
 That check prevents an accidental cross-device media route; it does not qualify
-a format, modifier, external handle or device replacement by itself. CPU-backed
-capture targets leave the identity absent and remain available only to encoder
-policies that do not require a particular graphics device.
+a format, modifier, external handle or device replacement by itself.
+Final-image capture targets leave the identity absent and remain available only
+to encoder policies that do not require a particular graphics device.
 
 Run `cargo test -p pronk-pipewire --lib` for layout-boundary, modifier-negotiation,
 native metadata and existing ownership tests. The metadata tests use ordinary
