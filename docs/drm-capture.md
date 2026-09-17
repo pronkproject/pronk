@@ -23,6 +23,13 @@ namespace or an independent permission lifetime.
 without duplicating the descriptor. Display observation uses that operation;
 it does not open streams or allocate names.
 
+For the CastKMS provider, `EACCES` can describe a temporary foreign-master
+interval rather than revocation. Pronk retains `Access`, stops the affected
+media generation from delivering output, and replaces its stream only after
+observation reports that the bound master is current again. `EKEYREVOKED`
+remains terminal. Neither result revives an earlier stream, request, or
+configuration offer.
+
 `Client::from_fd` adopts an inherited descriptor after a successful description
 query. It rejects inactive or revoked grants rather than pretending to validate
 them without an active description. `create_grant` returns a client directly
