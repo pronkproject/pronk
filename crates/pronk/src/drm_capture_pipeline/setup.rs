@@ -1,10 +1,16 @@
 //! Blocking setup with one retained namespace for the issued capture file.
 
-use std::sync::Arc;
+use std::{
+    num::{NonZeroU32, NonZeroU64},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use drm_capture::Access;
 use pronk_capture::allocation::Heap;
 use pronk_capture::{Actor, Config as ActorConfig, Layout, Session};
+use pronk_pipewire::{MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -12,9 +18,47 @@ use super::{require_route_layout, DrmCapturePipelineConfig};
 use crate::media_pipeline_port::MediaPipelineError;
 use crate::media_session::MediaStartRequest;
 
-pub(super) type CaptureOwner = Arc<drm_capture::Client>;
+pub(crate) type CaptureOwner = Arc<drm_capture::Client>;
 
-pub(super) struct Setup(Arc<Mutex<State>>);
+#[derive(Debug, Clone)]
+pub(crate) struct SetupConfig {
+    pub pool_size: NonZeroU32,
+    pub request_capacity: NonZeroU32,
+    pub pool_byte_limit: NonZeroU64,
+    pub heap_path: PathBuf,
+    pub poll_interval: Duration,
+    pub shutdown_timeout: Duration,
+}
+
+impl From<&DrmCapturePipelineConfig> for SetupConfig {
+    fn from(config: &DrmCapturePipelineConfig) -> Self {
+        Self {
+            pool_size: config.pool_size,
+            request_capacity: config.request_capacity,
+            pool_byte_limit: config.pool_byte_limit,
+            heap_path: config.heap_path.clone(),
+            poll_interval: config.poll_interval,
+            shutdown_timeout: config.shutdown_timeout,
+        }
+    }
+}
+
+impl SetupConfig {
+    pub(crate) fn validate(&self) -> Result<(), MediaPipelineError> {
+        if !(MIN_VIDEO_BUFFERS..=MAX_VIDEO_BUFFERS).contains(&(self.pool_size.get() as usize))
+            || self.request_capacity > self.pool_size
+            || self.poll_interval.is_zero()
+            || self.shutdown_timeout.is_zero()
+        {
+            return Err(MediaPipelineError::new(
+                "invalid capture pool, queue, or timing configuration",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct Setup(Arc<Mutex<State>>);
 
 struct State {
     access: Access,
@@ -22,16 +66,16 @@ struct State {
 }
 
 impl Setup {
-    pub(super) fn new(access: Access) -> Self {
+    pub(crate) fn new(access: Access) -> Self {
         Self(Arc::new(Mutex::new(State {
             access,
             session: None,
         })))
     }
 
-    pub(super) async fn create_actor(
+    pub(crate) async fn create_actor(
         &self,
-        config: DrmCapturePipelineConfig,
+        config: SetupConfig,
         request: MediaStartRequest,
         cancellation: CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
@@ -40,12 +84,31 @@ impl Setup {
         })
         .await
     }
+
+    pub(crate) async fn describe(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<drm_capture::Description, MediaPipelineError> {
+        on_worker(Arc::clone(&self.0), cancellation, |state, _| {
+            state.describe().map_err(|error| {
+                MediaPipelineError::new(format!("describe capture output: {error}"))
+            })
+        })
+        .await
+    }
 }
 
 impl State {
+    fn describe(&self) -> std::io::Result<drm_capture::Description> {
+        match &self.session {
+            Some(session) => session.describe(),
+            None => self.access.describe(),
+        }
+    }
+
     fn create_actor(
         &mut self,
-        config: DrmCapturePipelineConfig,
+        config: SetupConfig,
         request: MediaStartRequest,
         cancellation: &CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
@@ -129,6 +192,31 @@ mod tests {
     use std::future::Future;
     use std::time::Duration;
     use tokio::sync::oneshot;
+
+    fn config() -> SetupConfig {
+        SetupConfig {
+            pool_size: NonZeroU32::new(4).unwrap(),
+            request_capacity: NonZeroU32::new(3).unwrap(),
+            pool_byte_limit: NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+            heap_path: "/dev/dma_heap/system".into(),
+            poll_interval: Duration::from_millis(2),
+            shutdown_timeout: Duration::from_secs(5),
+        }
+    }
+
+    #[test]
+    fn shared_setup_policy_rejects_an_oversubscribed_request_queue() {
+        let mut config = config();
+        config.request_capacity = NonZeroU32::new(5).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn shared_setup_policy_rejects_zero_timing() {
+        let mut config = config();
+        config.poll_interval = Duration::ZERO;
+        assert!(config.validate().is_err());
+    }
 
     #[tokio::test]
     async fn blocking_setup_does_not_occupy_the_async_thread() {

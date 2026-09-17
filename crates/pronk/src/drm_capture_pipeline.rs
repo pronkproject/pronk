@@ -10,13 +10,12 @@ use async_trait::async_trait;
 use drm_capture::Access as CaptureAccess;
 use pronk_capture::{Actor, Layout};
 use pronk_capture_pipewire::{State as VideoState, Video};
-use pronk_pipewire::{
-    ClassifiedSocketRemoteProvider, VideoFrameRate, VideoSourceConfig, MAX_VIDEO_BUFFERS,
-    MIN_VIDEO_BUFFERS,
-};
+use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate, VideoSourceConfig};
 use tokio_util::sync::CancellationToken;
 
-use self::setup::{CaptureOwner, Setup};
+pub(crate) use self::setup::{
+    CaptureOwner, Setup as CaptureSetup, SetupConfig as CaptureSetupConfig,
+};
 use crate::capture_health::{CaptureEvents, CaptureMonitor};
 use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
 use crate::media_pipeline_port::{
@@ -52,7 +51,7 @@ struct ActiveCapture {
 
 /// Sole owner of capture access and its per-generation PipeWire producer.
 pub struct DrmCapturePipeline {
-    setup: Setup,
+    setup: CaptureSetup,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: DrmCapturePipelineConfig,
     active: Option<ActiveCapture>,
@@ -81,7 +80,7 @@ impl DrmCapturePipeline {
         let (events, receive) = CaptureEvents::channel();
         (
             Self {
-                setup: Setup::new(capture),
+                setup: CaptureSetup::new(capture),
                 producer_remotes,
                 config,
                 active: None,
@@ -103,17 +102,7 @@ impl DrmCapturePipeline {
     }
 
     fn validate_config(&self) -> Result<(), MediaPipelineError> {
-        if !(MIN_VIDEO_BUFFERS..=MAX_VIDEO_BUFFERS)
-            .contains(&(self.config.pool_size.get() as usize))
-            || self.config.request_capacity > self.config.pool_size
-            || self.config.poll_interval.is_zero()
-            || self.config.shutdown_timeout.is_zero()
-        {
-            return Err(MediaPipelineError::new(
-                "invalid capture pool, queue, or timing configuration",
-            ));
-        }
-        Ok(())
+        CaptureSetupConfig::from(&self.config).validate()
     }
 
     async fn prepare_video(
@@ -213,7 +202,11 @@ impl CapturePipelinePort for DrmCapturePipeline {
             .ok_or_else(|| MediaPipelineError::new("media generation must be nonzero"))?;
         let (actor, layout) = self
             .setup
-            .create_actor(self.config.clone(), request, cancellation.clone())
+            .create_actor(
+                CaptureSetupConfig::from(&self.config),
+                request,
+                cancellation.clone(),
+            )
             .await?;
         let video = self
             .prepare_video(actor, generation, cancellation.clone())
@@ -315,7 +308,7 @@ fn require_route_layout(
     Ok(())
 }
 
-fn capture_caps(layout: Layout, frame_rate: VideoFrameRate) -> String {
+pub(crate) fn capture_caps(layout: Layout, frame_rate: VideoFrameRate) -> String {
     format!(
         "video/x-raw,format=BGRx,width={},height={},framerate={}/{}",
         layout.width,
