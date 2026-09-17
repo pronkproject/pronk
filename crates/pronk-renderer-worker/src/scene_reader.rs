@@ -178,11 +178,29 @@ impl<F: AsFd> SceneReader<F> {
 
     /// Stop new selection and source admission before closing this generation.
     pub fn withdraw(self) -> io::Result<()> {
-        let Self { renderer, .. } = self;
-        renderer
-            .withdraw()
-            .map(drop)
-            .map_err(|error| error.into_error())
+        let Self {
+            renderer,
+            storage,
+            private,
+            images,
+        } = self;
+        let result = match renderer.withdraw() {
+            Ok(renderer) => {
+                drop(renderer);
+                Ok(())
+            }
+            Err(error) => {
+                let (renderer, error) = error.into_parts();
+                drop(renderer);
+                Err(error)
+            }
+        };
+        // Closing the endpoint removes its registrations before their paired
+        // native images and private storage are destroyed.
+        drop(images);
+        drop(private);
+        drop(storage);
+        result
     }
 
     fn restore(&mut self, buffers: crate::SceneBuffers) -> Result<(), SceneAttemptError> {
