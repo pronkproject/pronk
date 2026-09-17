@@ -6,8 +6,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use castkms_renderer::FormatModifier;
 use castkms_sys::{
     DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
-    DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888,
-    DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888,
+    DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010,
+    DRM_FORMAT_XRGB8888,
 };
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{Device, ImageLayout, PackedFormat, SourceImage};
@@ -27,7 +27,7 @@ pub(crate) fn import_image(
     producer: Option<BorrowedFd<'_>>,
 ) -> io::Result<(SourceImage, SourceAlpha)> {
     let format = source_format(source.format())?;
-    let modifier = resolved_modifier(source.modifier());
+    let modifier = explicit_modifier(source.modifier())?;
     let mut planes = source.planes();
     let plane = planes
         .next()
@@ -105,11 +105,11 @@ pub(crate) fn packed_format(fourcc: u32) -> io::Result<PackedFormat> {
     source_format(fourcc).map(|format| format.packed)
 }
 
-/// Resolve the DRM KMS convention for framebuffers created without modifier flags.
-pub(crate) fn resolved_modifier(modifier: FormatModifier) -> u64 {
+/// Require the exact modifier promised by the selected renderer constraints.
+pub(crate) fn explicit_modifier(modifier: FormatModifier) -> io::Result<u64> {
     match modifier {
-        FormatModifier::Explicit(modifier) => modifier,
-        FormatModifier::Unspecified => DRM_FORMAT_MOD_LINEAR,
+        FormatModifier::Explicit(modifier) => Ok(modifier),
+        FormatModifier::Unspecified => Err(invalid("renderer source has an implicit layout")),
     }
 }
 
@@ -221,8 +221,13 @@ mod tests {
     }
 
     #[test]
-    fn omitted_kms_modifiers_resolve_to_linear_storage() {
-        assert_eq!(resolved_modifier(FormatModifier::Unspecified), 0);
-        assert_eq!(resolved_modifier(FormatModifier::Explicit(9)), 9);
+    fn source_import_requires_the_selected_explicit_layout() {
+        assert_eq!(
+            explicit_modifier(FormatModifier::Unspecified)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(explicit_modifier(FormatModifier::Explicit(9)).unwrap(), 9);
     }
 }

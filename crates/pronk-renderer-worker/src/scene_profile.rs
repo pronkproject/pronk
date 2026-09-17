@@ -21,7 +21,7 @@ use drm_display_executor::scene::{
 use pronk_gpu::vulkan::{Device, PackedFormat};
 use pronk_gpu::vulkan::{LayerRequirements, SceneRequirements, SourceRequirements};
 
-use crate::source::{packed_format, resolved_modifier};
+use crate::source::{explicit_modifier, packed_format};
 use crate::{SceneComposer, ScenePool, SceneStorageProfile};
 
 /// One advertised primary-plane contract paired with its private storage policy.
@@ -163,7 +163,7 @@ impl SceneComposer {
         for (layer, color) in job.layers().iter().zip(&colors) {
             let image = layer.image();
             let format = packed_format(image.format())?;
-            let modifier = resolved_modifier(image.modifier());
+            let modifier = explicit_modifier(image.modifier())?;
             layers.push(LayerRequirements {
                 source: SourceRequirements {
                     format,
