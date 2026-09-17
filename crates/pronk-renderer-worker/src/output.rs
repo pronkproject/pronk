@@ -211,6 +211,33 @@ impl OutputPool {
         })
     }
 
+    /// Restore one completed output that was never handed to its transport.
+    pub fn discard(&mut self, output: ReadyOutput) -> io::Result<RenderedFrame> {
+        let ReadyOutput {
+            pool,
+            frame,
+            destination,
+            permit,
+        } = output;
+        if !Arc::ptr_eq(&self.identity, &pool) {
+            return Err(invalid("ready output belongs to another pool"));
+        }
+        let slot = permit.slot();
+        let image = self
+            .images
+            .get_mut(slot)
+            .ok_or_else(|| invalid("discarded output has an invalid image slot"))?;
+        if image.is_some() {
+            return Err(invalid("discarded output has an occupied image slot"));
+        }
+        let restored = self.access.discard(permit)?;
+        if restored != slot {
+            return Err(invalid("discarded output returned another image slot"));
+        }
+        *image = Some(destination);
+        Ok(frame)
+    }
+
     /// Begin waiting for readers after the transport returns an output.
     pub fn begin_return(&mut self, output: PublishedOutput) -> io::Result<OutputReturn> {
         let PublishedOutput {
