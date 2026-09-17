@@ -71,7 +71,7 @@ impl SourceImage {
         extent: Extent,
         background: [u8; 3],
     ) -> io::Result<PendingPrivateRead> {
-        if !Arc::ptr_eq(&self.device, &destination.device) {
+        if !Arc::ptr_eq(&self.external.device, &destination.device) {
             return Err(invalid("private source read needs images on one device"));
         }
         let blit = Blit::new(
@@ -82,12 +82,14 @@ impl SourceImage {
             extent,
         )?;
         self.wait_for_producer()?;
-        require_success(export_dependencies(self.fd.as_fd(), Access::Read)?.wait_blocking()?)?;
-        let mut job = Job::new(Arc::clone(&self.device), (self, destination))?;
+        require_success(
+            export_dependencies(self.external.fd.as_fd(), Access::Read)?.wait_blocking()?,
+        )?;
+        let mut job = Job::new(Arc::clone(&self.external.device), (self, destination))?;
         let (source, destination) = job.resources();
         let range = destination.range();
         let source_barrier = vk::ImageMemoryBarrier::default()
-            .image(source.raw)
+            .image(source.external.raw)
             .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::GENERAL)
             .subresource_range(range);
@@ -154,7 +156,7 @@ impl SourceImage {
             }
             job.device.raw.cmd_blit_image(
                 job.command(),
-                source.raw,
+                source.external.raw,
                 vk::ImageLayout::GENERAL,
                 destination.raw,
                 vk::ImageLayout::GENERAL,
@@ -174,7 +176,7 @@ impl SourceImage {
         job.submit()?;
         let completion = job.export_completion()?;
         if let Some(sync) = &completion {
-            import_completion(job.resources().0.fd.as_fd(), Access::Read, sync)?;
+            import_completion(job.resources().0.external.fd.as_fd(), Access::Read, sync)?;
         }
         Ok(PendingPrivateRead::new(job, completion))
     }

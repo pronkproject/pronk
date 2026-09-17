@@ -29,13 +29,13 @@ pub(super) fn submit(
                 "staging copy needs matching source and destination formats",
             ));
         }
-        if !Arc::ptr_eq(&source.device, &destination.device) {
+        if !Arc::ptr_eq(&source.external.device, &destination.device) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "staging copy needs one Vulkan device",
             ));
         }
-        let src = nix::sys::stat::fstat(source.fd.as_raw_fd())?;
+        let src = nix::sys::stat::fstat(source.external.fd.as_raw_fd())?;
         if !allocations.insert((src.st_dev, src.st_ino)) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -46,7 +46,9 @@ pub(super) fn submit(
     require_available(export_dependencies(output.as_fd(), Access::Write)?.completion()?)?;
     for (source, _) in &sources {
         source.wait_for_producer()?;
-        require_success(export_dependencies(source.fd.as_fd(), Access::Read)?.wait_blocking()?)?;
+        require_success(
+            export_dependencies(source.external.fd.as_fd(), Access::Read)?.wait_blocking()?,
+        )?;
     }
     let mut job = Job::new(Arc::clone(&destination.device), (sources, destination))?;
     let (sources, destination) = job.resources();
@@ -56,7 +58,7 @@ pub(super) fn submit(
     let mut release = vec![destination.release_barrier(vk::AccessFlags::TRANSFER_WRITE)];
     for (source, _) in sources {
         let source_acquire = vk::ImageMemoryBarrier::default()
-            .image(source.raw)
+            .image(source.external.raw)
             .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_FOREIGN_EXT)
@@ -64,7 +66,7 @@ pub(super) fn submit(
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
             .subresource_range(range);
         let source_release = vk::ImageMemoryBarrier::default()
-            .image(source.raw)
+            .image(source.external.raw)
             .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(job.device.queue_family)
@@ -123,7 +125,7 @@ pub(super) fn submit(
             match region {
                 Transfer::Copy(region) => job.device.raw.cmd_copy_image(
                     command,
-                    source.raw,
+                    source.external.raw,
                     vk::ImageLayout::GENERAL,
                     destination.raw,
                     vk::ImageLayout::GENERAL,
@@ -131,7 +133,7 @@ pub(super) fn submit(
                 ),
                 Transfer::Blit(region) => job.device.raw.cmd_blit_image(
                     command,
-                    source.raw,
+                    source.external.raw,
                     vk::ImageLayout::GENERAL,
                     destination.raw,
                     vk::ImageLayout::GENERAL,
@@ -154,7 +156,7 @@ pub(super) fn submit(
     let completion = job.export_completion()?;
     if let Some(sync) = &completion {
         for (source, _) in &job.resources().0 {
-            import_completion(source.fd.as_fd(), Access::Read, sync)?;
+            import_completion(source.external.fd.as_fd(), Access::Read, sync)?;
         }
         import_completion(output.as_fd(), Access::Write, sync)?;
     }

@@ -3,6 +3,7 @@
 mod clear;
 mod copy;
 mod device;
+mod external;
 mod image;
 mod private;
 mod source;
