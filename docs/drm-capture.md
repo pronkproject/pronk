@@ -134,10 +134,13 @@ Both media paths report failures with the owning media generation. A normal
 stop cancels health observation before joining the media owner. Neither a
 stopped observer nor a timed-out cleanup wait establishes ended native access.
 
-The renderer path reuses the same generic capture actor, pool, and PipeWire
-publisher as final-image capture. Its additional renderer service only produces
-private completed images and satisfies kernel-issued recipient claims. The
-capture queue does not encode Chromecast's display cadence or transport window.
+The renderer path reuses the same generic capture actor and PipeWire publisher
+as final-image capture. Final-image capture allocates CPU-mappable destinations
+from the configured DMA heap. The renderer instead allocates the exact capture
+offer on its selected Vulkan device, then transfers those destinations into the
+shared actor. Its additional renderer service only produces private completed
+images and satisfies kernel-issued recipient claims. The capture queue does not
+encode Chromecast's display cadence or transport window.
 
 If upstream chooses V4L2 for buffer transport, it would replace these transport
 operations rather than introduce a second production path. Keeping the client

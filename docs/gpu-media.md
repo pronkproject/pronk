@@ -817,17 +817,21 @@ by the separate native-versus-reference tests. The harness retains its private
 PipeWire transport, hardware-encoder and transient-sandbox checks without
 dequeueing CastKMS scenes or claiming delivered frame rate.
 
-The generic capture contract currently supplies linear shared output to the
-installed renderer path; it does not derive that choice from the encoder's
-import abilities. The generated-image
-harness joins a separate producer's source import, private staging, exported
-output reuse and hardware encoding for one explicit tiled tuple. It overwrites
-source and staging before checking the decoded output. Selecting a compatible
-nonlinear output through KMS constraints remains integration work. Hardware
-encoding also requires the deployment to install the per-instance device
-authorization above; the default software encoder and base service sandbox
-remain available without DRM access. A transport-level modifier test is not
-qualification of the complete private PipeWire, encoder or receiver path.
+The installed renderer path allocates the generic capture offer's exact XR24
+or AR24 format and modifier on the selected Vulkan device. An explicit linear
+modifier remains graphics storage and is advertised through DMA_DRM rather
+than being inferred to be CPU-mappable. The offer follows the display and
+renderer constraints; it is not selected from the encoder's import abilities.
+
+The generated-image harness joins a separate producer's source import, private
+staging, exported output reuse and hardware encoding for one explicit tiled
+tuple. It overwrites source and staging before checking the decoded output.
+Negotiating a display constraint that is also compatible with the selected
+encoder remains integration work. Hardware encoding also requires the
+deployment to install the per-instance device authorization above; the default
+software encoder and base service sandbox remain available without DRM access.
+A transport-level modifier test is not qualification of the complete private
+PipeWire, encoder or receiver path.
 
 Userspace-rendered video targets carry the major and minor number of the exact
 render node used to select their Vulkan device. The Chromecast backend records
