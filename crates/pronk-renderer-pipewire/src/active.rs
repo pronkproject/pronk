@@ -183,9 +183,9 @@ impl Pipeline {
     }
 
     async fn shutdown(&mut self) {
-        stop_tasks(&mut self.output_copies).await;
-        stop_tasks(&mut self.producer_waits).await;
-        stop_tasks(&mut self.reader_waits).await;
+        finish_tasks(&mut self.output_copies).await;
+        finish_tasks(&mut self.producer_waits).await;
+        finish_tasks(&mut self.reader_waits).await;
     }
 }
 
@@ -194,8 +194,8 @@ fn return_frame<F: AsFd>(reader: &mut SceneReader<'_, F>, frame: RenderedFrame) 
         .map_err(|_| io::Error::other("scene reader rejected its returned private images"))
 }
 
-async fn stop_tasks<T: 'static>(tasks: &mut JoinSet<T>) {
-    tasks.shutdown().await;
+async fn finish_tasks<T: 'static>(tasks: &mut JoinSet<T>) {
+    while tasks.join_next().await.is_some() {}
 }
 
 fn take_pair<L, R>(left: &mut VecDeque<L>, right: &mut VecDeque<R>) -> Option<(L, R)> {
@@ -236,7 +236,7 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{replace_backlog, stop_tasks, take_pair};
+    use super::{finish_tasks, replace_backlog, take_pair};
     use pronk_renderer_worker::{CompletedOutput, RenderedFrame};
     use std::collections::VecDeque;
     use tokio::sync::oneshot;
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopping_waits_for_a_running_blocking_operation() {
+    async fn finishing_waits_for_a_running_blocking_operation() {
         let (entered, entered_rx) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();
         let mut tasks = JoinSet::new();
@@ -290,11 +290,31 @@ mod tests {
         entered_rx.await.unwrap();
 
         let stopping = tokio::spawn(async move {
-            stop_tasks(&mut tasks).await;
+            finish_tasks(&mut tasks).await;
         });
         tokio::task::yield_now().await;
         assert!(!stopping.is_finished());
         release.send(()).unwrap();
         stopping.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn finishing_does_not_cancel_an_async_wait() {
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            let _ = entered.send(());
+            let _ = release_rx.await;
+        });
+        entered_rx.await.unwrap();
+
+        let finishing = tokio::spawn(async move {
+            finish_tasks(&mut tasks).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!finishing.is_finished());
+        release.send(()).unwrap();
+        finishing.await.unwrap();
     }
 }
