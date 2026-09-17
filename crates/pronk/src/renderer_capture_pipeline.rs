@@ -624,7 +624,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 monitors,
             } => {
                 let result = match renderer.state() {
-                    RendererStreamState::Active => video.activate().await.map_err(|error| {
+                    RendererStreamState::Running => video.activate().await.map_err(|error| {
                         MediaPipelineError::new(format!("resume capture video: {error}"))
                     }),
                     RendererStreamState::Failed(error) => Err(MediaPipelineError::new(error)),
@@ -827,7 +827,10 @@ fn require_running_renderer(
     state: &tokio::sync::watch::Receiver<RendererStreamState>,
 ) -> Result<(), MediaPipelineError> {
     match state.borrow().clone() {
-        RendererStreamState::Prepared | RendererStreamState::Active => Ok(()),
+        RendererStreamState::Running => Ok(()),
+        RendererStreamState::Starting => Err(MediaPipelineError::new(
+            "renderer worker is still starting after publication",
+        )),
         RendererStreamState::Failed(error) => Err(MediaPipelineError::new(format!(
             "renderer failed while awaiting constraints selection: {error}"
         ))),
@@ -901,7 +904,10 @@ fn monitor_active_renderer(
         |state| match state {
             RendererStreamState::Failed(error) => Some(error.clone()),
             RendererStreamState::Stopped => Some("renderer stream stopped unexpectedly".into()),
-            RendererStreamState::Prepared | RendererStreamState::Active => None,
+            RendererStreamState::Running => None,
+            RendererStreamState::Starting => {
+                Some("renderer worker returned to its starting state".into())
+            }
         },
         "renderer stream health channel closed",
     )
@@ -946,7 +952,10 @@ mod tests {
     }
 
     #[test]
-    fn selection_wait_rejects_a_renderer_that_already_failed() {
+    fn selection_wait_requires_a_running_renderer() {
+        let (_, state) = tokio::sync::watch::channel(RendererStreamState::Starting);
+        assert!(require_running_renderer(&state).is_err());
+
         let (_, state) =
             tokio::sync::watch::channel(RendererStreamState::Failed("native device lost".into()));
         assert!(require_running_renderer(&state)
@@ -958,7 +967,7 @@ mod tests {
     #[tokio::test]
     async fn active_renderer_monitor_reports_the_exact_generation() {
         let generation = NonZeroU64::new(7).unwrap();
-        let (state, receive) = tokio::sync::watch::channel(RendererStreamState::Active);
+        let (state, receive) = tokio::sync::watch::channel(RendererStreamState::Running);
         let (events, mut event_rx) = mpsc::unbounded_channel();
         let monitor = monitor_active_renderer(generation, receive, events);
         state.send_replace(RendererStreamState::Failed("device lost".into()));

@@ -21,8 +21,8 @@ pub struct RendererStreamConfig {
 /// Observable lifetime of one renderer stream task.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RendererStreamState {
-    Prepared,
-    Active,
+    Starting,
+    Running,
     Stopped,
     Failed(String),
 }

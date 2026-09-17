@@ -55,8 +55,18 @@ async fn run_generation<F: AsFd>(
     config: RendererStreamConfig,
     control: GenerationControl<'_>,
 ) -> io::Result<()> {
-    let reader = prepare_generation(renderer, &device, config, control.started)?;
-    control.state.send_replace(RendererStreamState::Active);
+    let (reader, output) = match prepare_generation(renderer, &device, config) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = control.started.send(Started::Failed);
+            return Err(error);
+        }
+    };
+    control.state.send_replace(RendererStreamState::Running);
+    if control.started.send(Started::Ready { output }).is_err() {
+        drop(reader);
+        return Err(io::Error::other("renderer stream setup was abandoned"));
+    }
     active::run_complete_scenes(reader, config.source_interval, control.stop).await
 }
 
@@ -70,27 +80,14 @@ fn prepare_generation<F: AsFd>(
     renderer: Renderer<F>,
     device: &Device,
     config: RendererStreamConfig,
-    started: oneshot::Sender<Started>,
-) -> io::Result<SceneReader<F>> {
+) -> io::Result<(SceneReader<F>, Extent)> {
     let output = Extent::new(config.output_width.get(), config.output_height.get())
         .expect("nonzero renderer dimensions form a valid extent");
-    let profile = match PrimarySceneProfile::discover(device, output) {
-        Ok(profile) => profile,
-        Err(error) => {
-            let _ = started.send(Started::Failed);
-            return Err(error);
-        }
-    };
-    let scene_pool = match profile.create_pool(
+    let profile = PrimarySceneProfile::discover(device, output)?;
+    let scene_pool = profile.create_pool(
         config.private_pool.frame_capacity,
         config.private_pool.source_capacity,
-    ) {
-        Ok(scene_pool) => scene_pool,
-        Err(error) => {
-            let _ = started.send(Started::Failed);
-            return Err(error);
-        }
-    };
+    )?;
     let scene_images = match PreparedSceneImages::new(
         device,
         config.output_width,
@@ -100,7 +97,6 @@ fn prepare_generation<F: AsFd>(
     ) {
         Ok(images) => images,
         Err(error) => {
-            let _ = started.send(Started::Failed);
             drop(scene_pool);
             return Err(error);
         }
@@ -110,52 +106,33 @@ fn prepare_generation<F: AsFd>(
         Ok(draft) => draft,
         Err(failure) => {
             let (_, error) = failure.into_parts();
-            let _ = started.send(Started::Failed);
             return Err(error);
         }
     };
-    let scene_images = match scene_images.register(&mut draft) {
-        Ok(images) => images,
-        Err(error) => {
-            let _ = started.send(Started::Failed);
-            return Err(error);
-        }
-    };
+    let scene_images = scene_images.register(&mut draft)?;
     let probe = match PrivateProbe::prepare(device, draft) {
         Ok(probe) => probe,
         Err(failure) => {
             let (_, error) = failure.into_parts();
-            let _ = started.send(Started::Failed);
             return Err(error);
         }
     };
     let probed = match probe.submit() {
         Ok(probed) => probed,
-        Err(failure) => {
-            let _ = started.send(Started::Failed);
-            return Err(failure.into_error());
-        }
+        Err(failure) => return Err(failure.into_error()),
     };
     let published = match probed.publish() {
         Ok(published) => published,
-        Err(failure) => {
-            let _ = started.send(Started::Failed);
-            return Err(failure.into_error());
-        }
+        Err(failure) => return Err(failure.into_error()),
     };
     let reader = match SceneReader::new(published, storage, scene_pool, scene_images) {
         Ok(reader) => reader,
         Err(failure) => {
             let (_, _, _, error) = failure.into_parts();
-            let _ = started.send(Started::Failed);
             return Err(error);
         }
     };
-    if started.send(Started::Ready { output }).is_err() {
-        drop(reader);
-        return Err(io::Error::other("renderer stream setup was abandoned"));
-    }
-    Ok(reader)
+    Ok((reader, output))
 }
 
 #[cfg(test)]

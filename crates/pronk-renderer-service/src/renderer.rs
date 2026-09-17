@@ -53,7 +53,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         }
         let render_node = device.render_node_identity();
         let stop = CancellationToken::new();
-        let (state, receive) = watch::channel(RendererStreamState::Prepared);
+        let (state, receive) = watch::channel(RendererStreamState::Starting);
         let (started, response) = oneshot::channel();
         let input = (
             renderer,
@@ -439,7 +439,7 @@ mod tests {
     async fn abandoned_stream_handle_signals_worker_cancellation() {
         let stop = CancellationToken::new();
         let task = waiting_start(stop.clone());
-        let (_, state) = watch::channel(RendererStreamState::Prepared);
+        let (_, state) = watch::channel(RendererStreamState::Starting);
         drop(StreamHandle {
             output: output(),
             render_node: RenderNodeIdentity {
@@ -457,7 +457,7 @@ mod tests {
     async fn cancelled_media_activation_stops_the_published_stream() {
         let stop = CancellationToken::new();
         let task = waiting_start(stop.clone());
-        let (_, state) = watch::channel(RendererStreamState::Prepared);
+        let (_, state) = watch::channel(RendererStreamState::Starting);
         let stream = RendererStream {
             handle: Some(StreamHandle {
                 output: output(),
