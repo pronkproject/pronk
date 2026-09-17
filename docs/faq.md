@@ -107,11 +107,16 @@ frames rather than inferring presentation rate from acknowledgements.
 
 ## What happens when the renderer's capabilities change?
 
-The renderer publishes a complete capability profile. CastKMS exposes a
-pending transition, Mutter validates and tags atomic updates against it, and
-activation occurs only at a serialized display-state boundary. If the renderer
-cannot continue, CastKMS performs an orderly handback to its in-kernel renderer;
-GPU capability is never restricted to the fallback renderer's format ceiling.
+The renderer publishes one immutable constraints entry after its private
+storage and native readiness checks complete. CastKMS includes that entry in a
+generic per-CRTC constraints list, and Mutter selects its ID together with a
+compatible atomic update. Each accepted scene remains bound to the exact
+renderer and constraints that accepted it.
+
+Withdrawal prevents new selection without cancelling accepted work. If the
+renderer cannot continue, CastKMS removes its entry and restores the fixed
+in-kernel constraints after outstanding obligations retire. GPU constraints
+are not restricted to the fallback renderer's format ceiling.
 
 ## How is the end-to-end path tested?
 
