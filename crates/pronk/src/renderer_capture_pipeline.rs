@@ -8,7 +8,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use castkms_renderer::Renderer;
 use drm_capture::Access as CaptureAccess;
-use pronk_capture::Layout;
 use pronk_capture_pipewire::{State as CaptureVideoState, Video as CaptureVideo};
 use pronk_gpu::vulkan::Device;
 use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate, VideoSourceConfig};
@@ -171,7 +170,6 @@ impl RendererCapturePipeline {
         &self,
         renderer: &RendererStream<OwnedFd>,
         video: &Video,
-        layout: Layout,
         generation: NonZeroU64,
     ) -> DeviceMediaTarget {
         let render_node = renderer.render_node_identity();
@@ -188,7 +186,7 @@ impl RendererCapturePipeline {
                 major: render_node.major,
                 minor: render_node.minor,
             }),
-            caps: capture_caps(layout, self.config.video_frame_rate),
+            caps: capture_caps(video.layout(), self.config.video_frame_rate),
         }
     }
 
@@ -509,7 +507,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
                     .expect_err("a cancelled renderer start remains an error"),
             );
         }
-        let target = self.target(&renderer, &video, layout, generation);
+        let target = self.target(&renderer, &video, generation);
         self.generation = Some(Generation {
             id: generation,
             stream: Stream::Prepared { renderer, video },

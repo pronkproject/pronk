@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use drm_capture::Access as CaptureAccess;
 use pronk_capture::{Actor, Layout};
 use pronk_capture_pipewire::{State as VideoState, Video};
-use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate, VideoSourceConfig};
+use pronk_pipewire::{
+    ClassifiedSocketRemoteProvider, VideoBufferLayout, VideoBufferStorage, VideoFrameRate,
+    VideoPixelFormat, VideoSourceConfig,
+};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::setup::{
@@ -141,7 +144,6 @@ impl DrmCapturePipeline {
     fn media_target(
         &self,
         video: &Video<CaptureOwner>,
-        layout: Layout,
         generation: NonZeroU64,
     ) -> DeviceMediaTarget {
         DeviceMediaTarget {
@@ -154,7 +156,7 @@ impl DrmCapturePipeline {
             output_index: self.config.output_index,
             media_generation: generation,
             render_device: None,
-            caps: capture_caps(layout, self.config.video_frame_rate),
+            caps: capture_caps(video.layout(), self.config.video_frame_rate),
         }
     }
 
@@ -200,7 +202,7 @@ impl CapturePipelinePort for DrmCapturePipeline {
         self.validate_config()?;
         let generation = NonZeroU64::new(request.media_generation)
             .ok_or_else(|| MediaPipelineError::new("media generation must be nonzero"))?;
-        let (actor, layout) = self
+        let (actor, _layout) = self
             .setup
             .create_actor(
                 CaptureSetupConfig::from(&self.config),
@@ -228,7 +230,7 @@ impl CapturePipelinePort for DrmCapturePipeline {
                 "PipeWire source returned a stale media generation",
             ));
         }
-        let target = self.media_target(&video, layout, generation);
+        let target = self.media_target(&video, generation);
         let monitor = monitor_capture(generation, video.subscribe(), self.events.clone());
         self.active = Some(ActiveCapture {
             monitor,
@@ -309,14 +311,38 @@ fn require_route_layout(
     Ok(())
 }
 
-pub(crate) fn capture_caps(layout: Layout, frame_rate: VideoFrameRate) -> String {
-    format!(
-        "video/x-raw,format=BGRx,width={},height={},framerate={}/{}",
-        layout.width,
-        layout.height,
-        frame_rate.numerator(),
-        frame_rate.denominator()
-    )
+pub(crate) fn capture_caps(layout: VideoBufferLayout, frame_rate: VideoFrameRate) -> String {
+    let fourcc = match layout.format {
+        VideoPixelFormat::Xrgb8888 => "XR24",
+        VideoPixelFormat::Argb8888 => "AR24",
+    };
+    match layout.storage {
+        VideoBufferStorage::MappableLinear => format!(
+            "video/x-raw,format={},width={},height={},framerate={}/{}",
+            match layout.format {
+                VideoPixelFormat::Xrgb8888 => "BGRx",
+                VideoPixelFormat::Argb8888 => "BGRA",
+            },
+            layout.width,
+            layout.height,
+            frame_rate.numerator(),
+            frame_rate.denominator()
+        ),
+        VideoBufferStorage::DrmModifier { modifier, .. } => {
+            let drm_format = if modifier == 0 {
+                fourcc.to_string()
+            } else {
+                format!("{fourcc}:0x{modifier:016x}")
+            };
+            format!(
+                "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={},height={},framerate={}/{}",
+                layout.width,
+                layout.height,
+                frame_rate.numerator(),
+                frame_rate.denominator()
+            )
+        }
+    }
 }
 
 fn monitor_capture(
@@ -346,9 +372,13 @@ mod tests {
     #[test]
     fn capture_caps_preserve_a_fractional_frame_rate() {
         let caps = capture_caps(
-            Layout {
+            VideoBufferLayout {
+                format: VideoPixelFormat::Xrgb8888,
                 width: NonZeroU32::new(1920).unwrap(),
                 height: NonZeroU32::new(1080).unwrap(),
+                pitch: NonZeroU32::new(7680).unwrap(),
+                size: NonZeroU64::new(8_294_400).unwrap(),
+                storage: VideoBufferStorage::MappableLinear,
             },
             VideoFrameRate::new(
                 NonZeroU32::new(30_000).unwrap(),
@@ -357,6 +387,26 @@ mod tests {
         );
 
         assert!(caps.ends_with("framerate=30000/1001"));
+    }
+
+    #[test]
+    fn capture_caps_preserve_an_explicit_modifier() {
+        let caps = capture_caps(
+            VideoBufferLayout {
+                format: VideoPixelFormat::Xrgb8888,
+                width: NonZeroU32::new(1920).unwrap(),
+                height: NonZeroU32::new(1080).unwrap(),
+                pitch: NonZeroU32::new(7680).unwrap(),
+                size: NonZeroU64::new(8_294_400).unwrap(),
+                storage: VideoBufferStorage::DrmModifier {
+                    modifier: 0x100000000000001,
+                    offset: 0,
+                },
+            },
+            VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
+        );
+
+        assert!(caps.contains("drm-format=XR24:0x0100000000000001"));
     }
 
     #[tokio::test]
