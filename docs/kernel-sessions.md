@@ -61,6 +61,15 @@ pipeline receives a checked descriptor, render-node selection, and an opaque
 release obligation. Compositor cooperation grants no additional pixel access,
 and atomic acceptance is not GPU completion.
 
+CastKMS binds renderer authority to the compositor's DRM master identity. A
+temporary transfer to another master makes renderer and capture operations
+return `EACCES`; it does not turn the foreign master's pixels into an ordinary
+stream failure that can be bypassed. Pronk suspends or retires the affected
+media generation and waits for display observation to report active authority
+again. It then reuses the retained capture access and obtains a fresh renderer
+endpoint for a fresh generation. Offers, jobs, and private storage from the
+earlier uninterrupted master interval are never revived.
+
 ## Release and abandoned operations
 
 `CapabilityLease` requests exactly one asynchronous cleanup operation. Explicit
