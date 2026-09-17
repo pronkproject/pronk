@@ -22,27 +22,25 @@ macro_rules! field {
 
 fn main() {
     layout!(DrmCastkmsRendererQuery, "drm_castkms_renderer_query");
-    layout!(DrmCastkmsRendererTakeover, "drm_castkms_renderer_takeover");
     layout!(
-        DrmCastkmsRendererBeginTakeover,
-        "drm_castkms_renderer_begin_takeover"
+        DrmCastkmsRendererPrepareOffer,
+        "drm_castkms_renderer_prepare_offer"
     );
     layout!(
-        DrmCastkmsRendererAbortTakeover,
-        "drm_castkms_renderer_abort_takeover"
+        DrmCastkmsRendererPublishOffer,
+        "drm_castkms_renderer_publish_offer"
     );
-    layout!(DrmCastkmsRendererSnapshot, "drm_castkms_renderer_snapshot");
     layout!(
-        DrmCastkmsRendererGetSnapshot,
-        "drm_castkms_renderer_get_snapshot"
+        DrmCastkmsRendererOfferResult,
+        "drm_castkms_renderer_offer_result"
+    );
+    layout!(
+        DrmCastkmsRendererWithdrawOffer,
+        "drm_castkms_renderer_withdraw_offer"
     );
     layout!(
         DrmCastkmsRendererSubmitProbe,
         "drm_castkms_renderer_submit_probe"
-    );
-    layout!(
-        DrmCastkmsRendererCommitTakeover,
-        "drm_castkms_renderer_commit_takeover"
     );
     layout!(
         DrmCastkmsRendererSourcePlane,
@@ -53,25 +51,12 @@ fn main() {
         "drm_castkms_renderer_release_source"
     );
     layout!(
-        DrmCastkmsCapabilityProfile,
-        "drm_castkms_capability_profile"
-    );
-    layout!(DrmCastkmsCapabilityFormat, "drm_castkms_capability_format");
-    layout!(
-        DrmCastkmsRendererRegisterProfile,
-        "drm_castkms_renderer_register_profile"
+        DrmCastkmsRendererConstraints,
+        "drm_castkms_renderer_constraints"
     );
     layout!(
-        DrmCastkmsRendererProfileResult,
-        "drm_castkms_renderer_profile_result"
-    );
-    layout!(
-        DrmCastkmsRendererCapabilities,
-        "drm_castkms_renderer_capabilities"
-    );
-    layout!(
-        DrmCastkmsRendererQueryCapabilities,
-        "drm_castkms_renderer_query_capabilities"
+        DrmCastkmsRendererConstraintsFormat,
+        "drm_castkms_renderer_constraints_format"
     );
     layout!(
         DrmCastkmsRendererDequeueScene,
@@ -86,24 +71,14 @@ fn main() {
         "drm_castkms_renderer_unregister_image"
     );
     field!(
-        DrmCastkmsRendererTakeover,
-        execution_generation,
-        "drm_castkms_renderer_takeover.execution_generation"
+        DrmCastkmsRendererPrepareOffer,
+        constraints,
+        "drm_castkms_renderer_prepare_offer.constraints"
     );
     field!(
-        DrmCastkmsRendererBeginTakeover,
+        DrmCastkmsRendererPublishOffer,
         result,
-        "drm_castkms_renderer_begin_takeover.result"
-    );
-    field!(
-        DrmCastkmsRendererSnapshot,
-        content_serial,
-        "drm_castkms_renderer_snapshot.content_serial"
-    );
-    field!(
-        DrmCastkmsRendererGetSnapshot,
-        result,
-        "drm_castkms_renderer_get_snapshot.result"
+        "drm_castkms_renderer_publish_offer.result"
     );
     field!(
         DrmCastkmsRendererSubmitProbe,
@@ -114,5 +89,11 @@ fn main() {
         DrmCastkmsRendererDequeueScene,
         image_id,
         "drm_castkms_renderer_dequeue_scene.image_id"
+    );
+    layout!(DrmCastkmsRendererScene, "drm_castkms_renderer_scene");
+    field!(
+        DrmCastkmsRendererScene,
+        constraints_id,
+        "drm_castkms_renderer_scene.constraints_id"
     );
 }

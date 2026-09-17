@@ -101,11 +101,7 @@ pub struct RendererAccess {
     session: RendererSessionAccess,
 }
 
-/// Session-bound authority for renderer replacement and scene transitions.
-///
-/// Cancellation and deadlines bound the local wait. An operation already
-/// delivered to Mutter may still complete, so callers must retire the related
-/// renderer candidate when installation does not return success.
+/// Session-bound authority for renderer endpoint replacement.
 #[derive(Debug, Clone)]
 pub struct RendererSessionAccess {
     connection: zbus::Connection,
@@ -160,35 +156,7 @@ impl RendererAccess {
 }
 
 impl RendererSessionAccess {
-    /// Ask the exact session issuer to bind one registered transition.
-    ///
-    /// An error does not promise remote cancellation after the request has
-    /// reached Mutter.
-    pub async fn install_transition(
-        &self,
-        transition: NonZeroU64,
-        cancellation: CancellationToken,
-    ) -> Result<(), RendererSessionError> {
-        let request = (self.session_id.get(), transition.get());
-        let call = self.connection.call_method(
-            Some(self.owner.as_str()),
-            PATH,
-            Some(SERVICE),
-            "InstallRendererTransition",
-            &request,
-        );
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => Err(RendererSessionError::Cancelled),
-            result = tokio::time::timeout(self.timeout, call) => {
-                result.map_err(|_| RendererSessionError::Timeout)?
-                    .and_then(|message| message.body().deserialize::<()>())
-                    .map_err(RendererSessionError::from)
-            }
-        }
-    }
-
-    /// Obtain a fresh endpoint for renderer replacement or HOST handback.
+    /// Obtain a fresh endpoint for a renderer generation.
     pub async fn acquire_renderer(
         &self,
         cancellation: CancellationToken,

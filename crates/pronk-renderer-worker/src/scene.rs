@@ -128,10 +128,6 @@ impl SceneStorageProfile {
         &self.profile
     }
 
-    pub(crate) fn device(&self) -> &Device {
-        &self.device
-    }
-
     /// Allocate bounded final and source storage reusable across scene jobs.
     pub fn create_pool(
         &self,

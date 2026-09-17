@@ -5,7 +5,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::fd::AsFd;
 use std::sync::Arc;
 
-use castkms_renderer::{ActiveRenderer, RegisteredImage};
+use castkms_renderer::{RegisteredImage, RendererDraft};
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{Device, Image, ImageLayout, PrivateCopy};
 
@@ -94,16 +94,16 @@ pub(crate) struct CopiedSceneImage {
     pub(crate) completion: SyncFile,
 }
 
-/// Bounded private images registered for one active renderer incarnation.
-pub(crate) struct SceneImagePool {
+/// Bounded private images registered for one renderer offer.
+pub struct RegisteredSceneImages {
     identity: Arc<()>,
     images: Vec<SceneImage>,
     layout: ImageLayout,
     capacity: NonZeroUsize,
 }
 
-/// Packed private storage allocated while renderer takeover remains abortable.
-#[must_use = "register the prepared images after activating their renderer"]
+/// Packed private storage allocated while a renderer offer remains unpublished.
+#[must_use = "register the prepared images before publishing their renderer"]
 pub struct PreparedSceneImages {
     images: Vec<Image>,
     layout: ImageLayout,
@@ -145,16 +145,10 @@ impl PreparedSceneImages {
         })
     }
 
-    pub(crate) fn matches(&self, device: &Device, width: NonZeroU32, height: NonZeroU32) -> bool {
-        self.layout.width == width
-            && self.layout.height == height
-            && self.images.iter().all(|image| image.is_owned_by(device))
-    }
-
-    pub(crate) fn register<F: AsFd>(
+    pub fn register<F: AsFd>(
         self,
-        renderer: &mut ActiveRenderer<'_, F>,
-    ) -> io::Result<SceneImagePool> {
+        renderer: &mut RendererDraft<F>,
+    ) -> io::Result<RegisteredSceneImages> {
         let Self {
             images: prepared,
             layout,
@@ -181,7 +175,7 @@ impl PreparedSceneImages {
                 image,
             });
         }
-        Ok(SceneImagePool {
+        Ok(RegisteredSceneImages {
             identity,
             images,
             layout,
@@ -207,7 +201,7 @@ fn account_allocation(total: u64, bytes: u64) -> io::Result<u64> {
     Ok(total)
 }
 
-impl SceneImagePool {
+impl RegisteredSceneImages {
     pub(crate) fn available(&self) -> usize {
         self.images.len()
     }
@@ -236,7 +230,7 @@ impl SceneImagePool {
 }
 
 fn cleanup<F: AsFd>(
-    renderer: &mut ActiveRenderer<'_, F>,
+    renderer: &mut RendererDraft<F>,
     images: Vec<SceneImage>,
     primary: io::Error,
 ) -> io::Error {

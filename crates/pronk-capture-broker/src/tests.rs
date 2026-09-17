@@ -14,7 +14,6 @@ type Request = (u32, u32, u32, u32, String);
 struct State {
     requests: Mutex<Vec<Request>>,
     releases: Mutex<Vec<(u64, String)>>,
-    transitions: Mutex<Vec<(u64, u64, String)>>,
     renderer_acquisitions: Mutex<Vec<(u64, u64, String)>>,
     renderer_releases: Mutex<Vec<(u64, u64, String)>>,
     renderer_peers: Mutex<BTreeMap<u64, std::os::unix::net::UnixStream>>,
@@ -26,12 +25,10 @@ struct State {
     renderer_release_gate: Mutex<Option<Arc<Notify>>>,
     owner: Mutex<String>,
     entered: Notify,
-    transition_entered: Notify,
     released: Notify,
     release_entered: Notify,
     gate: Option<Notify>,
     release_gate: Mutex<Option<Arc<Notify>>>,
-    transition_gate: Mutex<Option<Arc<Notify>>>,
     release_error: bool,
     invalid_renderer: AtomicBool,
 }
@@ -162,25 +159,6 @@ impl Mutter {
         Ok(())
     }
 
-    async fn install_renderer_transition(
-        &self,
-        session_id: u64,
-        transition: u64,
-        #[zbus(header)] header: Header<'_>,
-    ) {
-        let destination = header.destination().unwrap().to_string();
-        let gate = self.state.transition_gate.lock().unwrap().clone();
-        self.state.transition_entered.notify_one();
-        if let Some(gate) = gate {
-            gate.notified().await;
-        }
-        self.state
-            .transitions
-            .lock()
-            .unwrap()
-            .push((session_id, transition, destination));
-    }
-
     async fn release_display_session(
         &self,
         id: u64,
@@ -279,19 +257,6 @@ async fn notified(notify: &Notify) {
         .unwrap();
 }
 
-async fn transition_count_reaches(state: &State, count: usize) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if state.transitions.lock().unwrap().len() >= count {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn release_uses_the_issuing_owner_even_after_service_replacement() {
     let mut fixture = Fixture::new(false, false).await;
@@ -318,15 +283,6 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
         std::path::Path::new("/dev/dri/renderD128")
     );
     *fixture.state.owner.lock().unwrap() = ":1.99".into();
-    renderer_access
-        .session
-        .install_transition(NonZeroU64::new(73).unwrap(), CancellationToken::new())
-        .await
-        .unwrap();
-    assert_eq!(
-        fixture.state.transitions.lock().unwrap().as_slice(),
-        &[(91, 73, ":1.88".into())]
-    );
     let mut renderer = std::os::unix::net::UnixStream::from(renderer_access.renderer);
     renderer
         .set_read_timeout(Some(Duration::from_secs(1)))
@@ -365,68 +321,6 @@ async fn release_uses_the_issuing_owner_even_after_service_replacement() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     assert_eq!(fixture.renderer_peer.read(&mut [0]).unwrap(), 0);
-}
-
-#[tokio::test]
-async fn cancelling_a_stalled_transition_returns_without_changing_owners() {
-    let fixture = Fixture::new(false, false).await;
-    let session = fixture
-        .provider
-        .acquire(target(), CancellationToken::new())
-        .await
-        .unwrap();
-    let transition = session.renderer_access().unwrap().session;
-    let gate = Arc::new(Notify::new());
-    *fixture.state.transition_gate.lock().unwrap() = Some(Arc::clone(&gate));
-    let cancellation = CancellationToken::new();
-    let task = {
-        let cancellation = cancellation.clone();
-        tokio::spawn(async move {
-            transition
-                .install_transition(NonZeroU64::new(74).unwrap(), cancellation)
-                .await
-        })
-    };
-    notified(&fixture.state.transition_entered).await;
-    *fixture.state.owner.lock().unwrap() = ":1.99".into();
-    cancellation.cancel();
-    assert!(matches!(
-        task.await.unwrap(),
-        Err(RendererSessionError::Cancelled)
-    ));
-
-    gate.notify_one();
-    transition_count_reaches(&fixture.state, 1).await;
-    assert_eq!(
-        fixture.state.transitions.lock().unwrap().as_slice(),
-        &[(91, 74, ":1.88".into())]
-    );
-}
-
-#[tokio::test]
-async fn a_stalled_transition_obeys_the_session_deadline() {
-    let mut fixture = Fixture::new(false, false).await;
-    fixture.provider.timeout = Duration::from_millis(20);
-    let session = fixture
-        .provider
-        .acquire(target(), CancellationToken::new())
-        .await
-        .unwrap();
-    let transition = session.renderer_access().unwrap().session;
-    let gate = Arc::new(Notify::new());
-    *fixture.state.transition_gate.lock().unwrap() = Some(Arc::clone(&gate));
-    assert!(matches!(
-        transition
-            .install_transition(NonZeroU64::new(75).unwrap(), CancellationToken::new())
-            .await,
-        Err(RendererSessionError::Timeout)
-    ));
-    gate.notify_one();
-    transition_count_reaches(&fixture.state, 1).await;
-    assert_eq!(
-        fixture.state.transitions.lock().unwrap().as_slice(),
-        &[(91, 75, ":1.88".into())]
-    );
 }
 
 #[tokio::test]

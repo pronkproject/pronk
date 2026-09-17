@@ -7,14 +7,13 @@ use crate::scene_image::{RenderedFrame, SceneImage};
 use crate::scene_reads::{PreparedSceneReads, SubmittedSceneReads};
 use crate::{PrivateBuffer, QualifiedSceneJob, SceneBuffers, SceneCompositionError, SceneInputs};
 
-impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
+impl<'job, F: AsFd> QualifiedSceneJob<'job, F> {
     /// Import sources only after a complete private slot has been reserved.
     pub(crate) fn prepare(
         self,
         buffers: SceneBuffers,
         target: SceneImage,
-    ) -> Result<PreparedSceneJob<'job, 'renderer, F>, Box<PrepareSceneJobError<'job, 'renderer, F>>>
-    {
+    ) -> Result<PreparedSceneJob<'job, F>, Box<PrepareSceneJobError<'job, F>>> {
         let sources = match self.import_sources() {
             Ok(sources) => sources,
             Err(cause) => {
@@ -55,18 +54,18 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
 }
 
 /// Preparation failure retaining the job and the untouched private slot.
-pub(crate) struct PrepareSceneJobError<'job, 'renderer, F: AsFd> {
-    scene: QualifiedSceneJob<'job, 'renderer, F>,
+pub(crate) struct PrepareSceneJobError<'job, F: AsFd> {
+    scene: QualifiedSceneJob<'job, F>,
     buffers: SceneBuffers,
     target: SceneImage,
     cause: io::Error,
 }
 
-impl<'job, 'renderer, F: AsFd> PrepareSceneJobError<'job, 'renderer, F> {
+impl<'job, F: AsFd> PrepareSceneJobError<'job, F> {
     pub(crate) fn into_parts(
         self,
     ) -> (
-        QualifiedSceneJob<'job, 'renderer, F>,
+        QualifiedSceneJob<'job, F>,
         SceneBuffers,
         SceneImage,
         io::Error,
@@ -75,19 +74,19 @@ impl<'job, 'renderer, F: AsFd> PrepareSceneJobError<'job, 'renderer, F> {
     }
 }
 
-impl<F: AsFd> std::fmt::Debug for PrepareSceneJobError<'_, '_, F> {
+impl<F: AsFd> std::fmt::Debug for PrepareSceneJobError<'_, F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         debug_cause("PrepareSceneJobError", &self.cause, formatter)
     }
 }
 
-impl<F: AsFd> std::fmt::Display for PrepareSceneJobError<'_, '_, F> {
+impl<F: AsFd> std::fmt::Display for PrepareSceneJobError<'_, F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "prepare complete scene job: {}", self.cause)
     }
 }
 
-impl<F: AsFd> std::error::Error for PrepareSceneJobError<'_, '_, F> {
+impl<F: AsFd> std::error::Error for PrepareSceneJobError<'_, F> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.cause)
     }
@@ -95,19 +94,18 @@ impl<F: AsFd> std::error::Error for PrepareSceneJobError<'_, '_, F> {
 
 /// A kernel scene paired with an unused private slot and imported sources.
 #[must_use = "submit the scene reads or release the job without source access"]
-pub(crate) struct PreparedSceneJob<'job, 'renderer, F: AsFd> {
-    scene: QualifiedSceneJob<'job, 'renderer, F>,
+pub(crate) struct PreparedSceneJob<'job, F: AsFd> {
+    scene: QualifiedSceneJob<'job, F>,
     destination: PrivateBuffer,
     reads: PreparedSceneReads,
     target: SceneImage,
 }
 
-impl<'job, 'renderer, F: AsFd> PreparedSceneJob<'job, 'renderer, F> {
+impl<'job, F: AsFd> PreparedSceneJob<'job, F> {
     /// Submit all source reads while retaining the reserved final image.
     pub(crate) fn submit(
         self,
-    ) -> Result<SubmittedSceneJob<'job, 'renderer, F>, Box<SubmitSceneJobError<'job, 'renderer, F>>>
-    {
+    ) -> Result<SubmittedSceneJob<'job, F>, Box<SubmitSceneJobError<'job, F>>> {
         match self.reads.submit() {
             Ok(reads) => Ok(SubmittedSceneJob {
                 scene: self.scene,
@@ -126,32 +124,32 @@ impl<'job, 'renderer, F: AsFd> PreparedSceneJob<'job, 'renderer, F> {
 }
 
 /// Terminal native submission failure with the still-unused final image.
-pub(crate) struct SubmitSceneJobError<'job, 'renderer, F: AsFd> {
-    _scene: Box<QualifiedSceneJob<'job, 'renderer, F>>,
+pub(crate) struct SubmitSceneJobError<'job, F: AsFd> {
+    _scene: Box<QualifiedSceneJob<'job, F>>,
     destination: PrivateBuffer,
     target: SceneImage,
     cause: io::Error,
 }
 
-impl<F: AsFd> SubmitSceneJobError<'_, '_, F> {
+impl<F: AsFd> SubmitSceneJobError<'_, F> {
     pub(crate) fn into_parts(self) -> (PrivateBuffer, SceneImage, io::Error) {
         (self.destination, self.target, self.cause)
     }
 }
 
-impl<F: AsFd> std::fmt::Debug for SubmitSceneJobError<'_, '_, F> {
+impl<F: AsFd> std::fmt::Debug for SubmitSceneJobError<'_, F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         debug_cause("SubmitSceneJobError", &self.cause, formatter)
     }
 }
 
-impl<F: AsFd> std::fmt::Display for SubmitSceneJobError<'_, '_, F> {
+impl<F: AsFd> std::fmt::Display for SubmitSceneJobError<'_, F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "submit complete scene job: {}", self.cause)
     }
 }
 
-impl<F: AsFd> std::error::Error for SubmitSceneJobError<'_, '_, F> {
+impl<F: AsFd> std::error::Error for SubmitSceneJobError<'_, F> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.cause)
     }
@@ -159,14 +157,14 @@ impl<F: AsFd> std::error::Error for SubmitSceneJobError<'_, '_, F> {
 
 /// Native scene reads awaiting composition into their bound registered image.
 #[must_use = "finish the scene and release its final completion to CastKMS"]
-pub(crate) struct SubmittedSceneJob<'job, 'renderer, F: AsFd> {
-    scene: QualifiedSceneJob<'job, 'renderer, F>,
+pub(crate) struct SubmittedSceneJob<'job, F: AsFd> {
+    scene: QualifiedSceneJob<'job, F>,
     destination: PrivateBuffer,
     reads: SubmittedSceneReads,
     target: SceneImage,
 }
 
-impl<'job, 'renderer, F: AsFd> SubmittedSceneJob<'job, 'renderer, F> {
+impl<'job, F: AsFd> SubmittedSceneJob<'job, F> {
     /// Finish every source read, compose into registered private storage and
     /// transfer the final native completion before returning any allocation.
     pub(crate) fn render_and_release(self) -> Result<RenderedScene, SceneCompletionError> {

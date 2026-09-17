@@ -1,9 +1,9 @@
-//! Task ownership for one candidate userspace-rendered video generation.
+//! Task ownership for one userspace-rendered video generation.
 
 use std::io;
 use std::os::fd::AsFd;
 
-use castkms_renderer::{ProfileRegistration, Renderer};
+use castkms_renderer::Renderer;
 use pronk_gpu::vulkan::{Device, RenderNodeIdentity};
 use pronk_pipewire::{PipeWireRemote, VideoBufferLayout, VideoNodeIdentity};
 use tokio::sync::{oneshot, watch};
@@ -13,13 +13,12 @@ use tokio_util::sync::CancellationToken;
 use crate::task::{run, Started, TaskControl};
 use crate::types::{RendererStreamConfig, RendererStreamState};
 
-/// Candidate renderer and PipeWire generation owned by one dedicated thread.
+/// Published renderer offer and PipeWire generation owned by one dedicated thread.
 ///
-/// Preparation leaves host execution selected. Explicit shutdown joins the
-/// task, stops PipeWire, and aborts the unpublished takeover candidate.
+/// Publication does not select the offer. Explicit shutdown joins the task and
+/// stops PipeWire before closing the renderer endpoint.
 pub struct RendererStream<F> {
     handle: Option<StreamHandle<F>>,
-    activate: Option<oneshot::Sender<oneshot::Sender<()>>>,
 }
 
 /// Activated renderer generation whose descriptor owner is consumed when the task stops.
@@ -31,14 +30,13 @@ struct StreamHandle<F> {
     identity: VideoNodeIdentity,
     layout: VideoBufferLayout,
     render_node: RenderNodeIdentity,
-    registration: ProfileRegistration,
     state: watch::Receiver<RendererStreamState>,
     stop: CancellationToken,
     task: Option<JoinHandle<(Option<F>, io::Result<()>)>>,
 }
 
 impl<F: AsFd + Send + 'static> RendererStream<F> {
-    /// Prepare private GPU work and output transport without activating takeover.
+    /// Prepare private GPU work, publish an offer and start output transport.
     pub async fn prepare(
         renderer: Renderer<F>,
         device: Device,
@@ -59,7 +57,6 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         let stop = CancellationToken::new();
         let (state, receive) = watch::channel(RendererStreamState::Prepared);
         let (started, response) = oneshot::channel();
-        let (activate, activation) = oneshot::channel();
         let input = (
             renderer,
             device,
@@ -69,7 +66,6 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
                 stop: stop.clone(),
                 started,
                 state,
-                activation,
             },
         );
         let task =
@@ -97,21 +93,15 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             response = response => response,
         };
         match response {
-            Ok(Started::Ready {
-                identity,
-                layout,
-                registration,
-            }) => Ok(Self {
+            Ok(Started::Ready { identity, layout }) => Ok(Self {
                 handle: Some(StreamHandle {
                     identity,
                     layout,
                     render_node,
-                    registration,
                     state: receive,
                     stop,
                     task: Some(starting.take_task()),
                 }),
-                activate: Some(activate),
             }),
             Ok(Started::Failed) => Err(starting.join().await),
             Err(_) => Err(starting.join().await),
@@ -138,49 +128,33 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         self.handle().render_node
     }
 
-    /// Return the transition that the KMS client must install before activation.
-    pub fn profile_registration(&self) -> ProfileRegistration {
-        self.handle().registration
-    }
-
-    /// Activate delegated execution and consume the one-shot candidate handle.
+    /// Enter the surrounding media session's active state.
+    ///
+    /// The renderer offer was already published during preparation; KMS selects
+    /// it independently through the generic constraints interface.
     pub async fn activate(
         mut self,
         cancellation: CancellationToken,
     ) -> Result<ActiveRendererStream<F>, RendererStreamError<F>> {
         if cancellation.is_cancelled() {
             let mut handle = self.take_handle();
-            return Err(cancel_activation(&mut handle).await);
-        }
-        let (acknowledge, acknowledged) = oneshot::channel();
-        let activate = self
-            .activate
-            .take()
-            .expect("prepared renderer stream owns activation command");
-        let mut handle = self.take_handle();
-        if activate.send(acknowledge).is_err() {
-            return Err(join_failure(handle.take_task()).await);
-        }
-        let acknowledged = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                return Err(cancel_activation(&mut handle).await);
-            }
-            acknowledged = acknowledged => acknowledged,
-        };
-        if acknowledged.is_err() {
-            return Err(join_failure(handle.take_task()).await);
+            handle.stop.cancel();
+            return Err(join_cancelled(
+                handle.take_task(),
+                "renderer media activation was cancelled",
+            )
+            .await);
         }
         Ok(ActiveRendererStream {
-            handle: Some(handle),
+            handle: Some(self.take_handle()),
         })
     }
 
-    /// Stop transport, abort the candidate, and return the renderer owner.
-    pub async fn shutdown(mut self) -> Result<F, RendererStreamError<F>> {
+    /// Stop transport and close the published renderer endpoint.
+    pub async fn shutdown(mut self) -> Result<(), RendererStreamError<F>> {
         let mut handle = self.take_handle();
         handle.stop.cancel();
-        join_owner(handle.take_task()).await
+        join_closed(handle.take_task()).await
     }
 
     fn handle(&self) -> &StreamHandle<F> {
@@ -194,15 +168,6 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             .take()
             .expect("live renderer stream owns its handle")
     }
-}
-
-async fn cancel_activation<F>(handle: &mut StreamHandle<F>) -> RendererStreamError<F> {
-    handle.stop.cancel();
-    join_cancelled(
-        handle.take_task(),
-        "renderer stream activation was cancelled",
-    )
-    .await
 }
 
 impl<F> Drop for RendererStream<F> {
@@ -380,37 +345,6 @@ impl<F> Drop for Starting<F> {
     }
 }
 
-async fn join_owner<F>(
-    task: JoinHandle<(Option<F>, io::Result<()>)>,
-) -> Result<F, RendererStreamError<F>> {
-    match task.await {
-        Ok((Some(owner), Ok(()))) => Ok(owner),
-        Ok((owner, Err(error))) => Err(RendererStreamError { owner, error }),
-        Ok((None, Ok(()))) => Err(RendererStreamError {
-            owner: None,
-            error: io::Error::other("candidate renderer closed its descriptor"),
-        }),
-        Err(error) => Err(RendererStreamError {
-            owner: None,
-            error: io::Error::other(format!("join renderer stream: {error}")),
-        }),
-    }
-}
-
-async fn join_failure<F>(task: JoinHandle<(Option<F>, io::Result<()>)>) -> RendererStreamError<F> {
-    match task.await {
-        Ok((owner, Err(error))) => RendererStreamError { owner, error },
-        Ok((owner, Ok(()))) => RendererStreamError {
-            owner,
-            error: io::Error::other("renderer stopped before activation"),
-        },
-        Err(error) => RendererStreamError {
-            owner: None,
-            error: join_error(error),
-        },
-    }
-}
-
 async fn join_cancelled<F>(
     task: JoinHandle<(Option<F>, io::Result<()>)>,
     message: &'static str,
@@ -481,10 +415,6 @@ mod tests {
         }
     }
 
-    fn profile_registration() -> ProfileRegistration {
-        ProfileRegistration::from_values(4, 5, 6).unwrap()
-    }
-
     #[test]
     fn renderer_stream_ownership_can_cross_tasks() {
         assert_send::<RendererStream<std::fs::File>>();
@@ -547,7 +477,6 @@ mod tests {
                 major: 226,
                 minor: 128,
             },
-            registration: profile_registration(),
             state,
             stop: stop.clone(),
             task: Some(task),
@@ -556,11 +485,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_activation_does_not_send_the_takeover_command() {
+    async fn cancelled_media_activation_stops_the_published_stream() {
         let stop = CancellationToken::new();
         let task = waiting_start(stop.clone());
         let (_, state) = watch::channel(RendererStreamState::Prepared);
-        let (activate, activation) = oneshot::channel();
         let stream = RendererStream {
             handle: Some(StreamHandle {
                 identity: identity(),
@@ -576,12 +504,10 @@ mod tests {
                     major: 226,
                     minor: 128,
                 },
-                registration: profile_registration(),
                 state,
                 stop,
                 task: Some(task),
             }),
-            activate: Some(activate),
         };
         let cancellation = CancellationToken::new();
         cancellation.cancel();
@@ -593,7 +519,6 @@ mod tests {
         let (owner, error) = error.into_parts();
         assert!(owner.is_some());
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-        assert!(activation.await.is_err());
     }
 
     #[tokio::test]
@@ -601,17 +526,17 @@ mod tests {
         let task = tokio::spawn(async {
             (
                 Some(7),
-                Err(io::Error::other("renderer candidate abort failed")),
+                Err(io::Error::other("renderer offer cleanup failed")),
             )
         });
 
-        let error = join_cancelled(task, "renderer stream activation was cancelled").await;
+        let error = join_cancelled(task, "renderer media activation was cancelled").await;
         let (owner, error) = error.into_parts();
         assert_eq!(owner, Some(7));
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(
             error.to_string(),
-            "renderer stream activation was cancelled; renderer cleanup failed: renderer candidate abort failed"
+            "renderer media activation was cancelled; renderer cleanup failed: renderer offer cleanup failed"
         );
     }
 
@@ -621,7 +546,7 @@ mod tests {
         let task = tokio::spawn(async {
             (
                 Some(7),
-                Err(io::Error::other("renderer candidate abort failed")),
+                Err(io::Error::other("renderer offer cleanup failed")),
             )
         });
         let starting = Starting {
@@ -637,7 +562,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(
             error.to_string(),
-            "renderer stream preparation was cancelled; renderer cleanup failed: renderer candidate abort failed"
+            "renderer stream preparation was cancelled; renderer cleanup failed: renderer offer cleanup failed"
         );
     }
 }

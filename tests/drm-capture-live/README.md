@@ -38,12 +38,12 @@ The binaries cover distinct boundaries:
   WIDTH HEIGHT REFRESH_MILLIHZ MODIFIER
   /path/to/pipewire-0-pronk-backend`
   transfers renderer authority from the Mutter broker into the application
-  capture port, activates GPU takeover only after a private PipeWire consumer
-  is ready, and requires twelve increasing DMA-BUF frame sequences while one
-  output remains held. It then returns execution to the built-in renderer and
-  repeats the complete GPU generation on the same display session. Mutter
-  selects the Vulkan render node that produced the scene; supply a supported
-  output modifier, optionally with a `0x` prefix.
+  capture port, publishes renderer constraints after private GPU and PipeWire
+  setup, and requires twelve increasing DMA-BUF frame sequences while one
+  output remains held. It then withdraws the offer and repeats the complete
+  renderer generation on the same display session. Mutter selects among the
+  published generic KMS constraints independently; supply a supported output
+  modifier, optionally with a `0x` prefix.
   Like the live Mutter media probe, it requires the sibling pattern client,
   the classified core/backend sockets, and the versioned WirePlumber policy.
 - `pronk-capture-pipewire-live-test /dev/dri/cardN /path/to/private/socket`:

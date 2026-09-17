@@ -18,7 +18,7 @@ use crate::{FramePublishError, Video, VideoEvent};
 
 /// Run complete-scene composition and output delivery until cancellation.
 pub async fn run_complete_scenes<F: AsFd>(
-    reader: SceneReader<'_, F>,
+    reader: SceneReader<F>,
     video: &mut Video,
     available: VecDeque<usize>,
     reader_waits: JoinSet<CompletedReturn>,
@@ -34,11 +34,12 @@ pub async fn run_complete_scenes<F: AsFd>(
     source_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let result = run_until_stopped(&mut reader, video, &mut pipeline, &mut source_tick, stop).await;
-    combine_shutdown(result, pipeline.shutdown().await)
+    let result = combine_shutdown(result, pipeline.shutdown().await);
+    combine_shutdown(result, reader.withdraw())
 }
 
 async fn run_until_stopped<F: AsFd>(
-    reader: &mut SceneReader<'_, F>,
+    reader: &mut SceneReader<F>,
     video: &mut Video,
     pipeline: &mut Pipeline,
     source_tick: &mut time::Interval,
@@ -161,7 +162,7 @@ impl Pipeline {
     fn recover_publication<F: AsFd>(
         &mut self,
         error: FramePublishError,
-        reader: &mut SceneReader<'_, F>,
+        reader: &mut SceneReader<F>,
     ) -> io::Result<io::Error> {
         let cause = io::Error::new(error.error().kind(), error.error().to_string());
         match error {
@@ -189,7 +190,7 @@ impl Pipeline {
     }
 }
 
-fn return_frame<F: AsFd>(reader: &mut SceneReader<'_, F>, frame: RenderedFrame) -> io::Result<()> {
+fn return_frame<F: AsFd>(reader: &mut SceneReader<F>, frame: RenderedFrame) -> io::Result<()> {
     SceneReader::return_frame(reader, frame)
         .map_err(|_| io::Error::other("scene reader rejected its returned private images"))
 }

@@ -1,4 +1,4 @@
-//! Private-image names bound to one active renderer endpoint.
+//! Private-image names bound to one renderer endpoint.
 
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -10,7 +10,7 @@ use castkms_sys::{
     DrmCastkmsRendererRegisterImage, DrmCastkmsRendererUnregisterImage,
 };
 
-use crate::ActiveRenderer;
+use crate::{Endpoint, RendererDraft, WithdrawnRenderer};
 
 /// One endpoint-local name for renderer-private backing storage.
 ///
@@ -34,7 +34,7 @@ impl RegisteredImage {
     }
 }
 
-impl<F: AsFd> ActiveRenderer<'_, F> {
+impl<F: AsFd> RendererDraft<F> {
     /// Retain private backing under a fresh increasing endpoint-local name.
     pub fn register_image(
         &mut self,
@@ -48,7 +48,7 @@ impl<F: AsFd> ActiveRenderer<'_, F> {
                 "private image requires one to four backing buffers",
             ));
         }
-        let id = self.next_image_id.ok_or_else(|| {
+        let id = self.endpoint.next_image_id.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::StorageFull,
                 "private image identity space is exhausted",
@@ -69,39 +69,53 @@ impl<F: AsFd> ActiveRenderer<'_, F> {
         // SAFETY: The fixed request and descriptor array remain live throughout
         // the synchronous ioctl. Every descriptor is borrowed for that call.
         unsafe { drm_ioctl_castkms_renderer_register_image(self.as_fd().as_raw_fd(), &request) }?;
-        self.next_image_id = id.get().checked_add(1).and_then(NonZeroU64::new);
+        self.endpoint.next_image_id = id.get().checked_add(1).and_then(NonZeroU64::new);
         Ok(RegisteredImage {
             id,
-            scope: Arc::clone(&self.image_scope),
+            scope: Arc::clone(&self.endpoint.image_scope),
         })
     }
 
     /// Remove an idle private-image name without claiming native completion.
     pub fn unregister_image(&mut self, image: RegisteredImage) -> Result<(), UnregisterImageError> {
-        if !image.belongs_to(&self.image_scope) {
-            return Err(UnregisterImageError {
-                image,
-                error: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "private image belongs to another renderer",
-                ),
-            });
-        }
-        let request = DrmCastkmsRendererUnregisterImage {
-            image_id: image.id.get(),
-            ..Default::default()
-        };
-        // SAFETY: The initialized fixed-width request remains live throughout
-        // the synchronous ioctl.
-        match unsafe {
-            drm_ioctl_castkms_renderer_unregister_image(self.as_fd().as_raw_fd(), &request)
-        } {
-            Ok(_) => Ok(()),
-            Err(error) => Err(UnregisterImageError {
-                image,
-                error: error.into(),
-            }),
-        }
+        unregister(&self.endpoint, image)
+    }
+}
+
+impl<F: AsFd> WithdrawnRenderer<F> {
+    /// Remove a private-image name after source access and offer use end.
+    pub fn unregister_image(&mut self, image: RegisteredImage) -> Result<(), UnregisterImageError> {
+        unregister(&self.published.draft.endpoint, image)
+    }
+}
+
+fn unregister<F: AsFd>(
+    endpoint: &Endpoint<F>,
+    image: RegisteredImage,
+) -> Result<(), UnregisterImageError> {
+    if !image.belongs_to(&endpoint.image_scope) {
+        return Err(UnregisterImageError {
+            image,
+            error: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private image belongs to another renderer",
+            ),
+        });
+    }
+    let request = DrmCastkmsRendererUnregisterImage {
+        image_id: image.id.get(),
+        ..Default::default()
+    };
+    // SAFETY: The initialized fixed-width request remains live throughout the
+    // synchronous ioctl.
+    match unsafe {
+        drm_ioctl_castkms_renderer_unregister_image(endpoint.as_fd().as_raw_fd(), &request)
+    } {
+        Ok(_) => Ok(()),
+        Err(error) => Err(UnregisterImageError {
+            image,
+            error: error.into(),
+        }),
     }
 }
 

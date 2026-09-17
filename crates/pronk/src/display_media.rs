@@ -159,7 +159,7 @@ mod tests {
                 Ok(())
             }),
             "/dev/dri/renderD128".into(),
-            RendererSession::new(Arc::new(NoReplacement), None),
+            RendererSession::new(Arc::new(NoReplacement)),
         ));
         assert_eq!(
             access

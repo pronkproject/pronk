@@ -268,7 +268,7 @@ mod tests {
                 }
             }),
             "/dev/dri/renderD128".into(),
-            RendererSession::new(Arc::new(NoReplacement), None),
+            RendererSession::new(Arc::new(NoReplacement)),
         )
     }
 

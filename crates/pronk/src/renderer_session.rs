@@ -1,7 +1,6 @@
-//! Application-owned renderer authority and optional compositor cooperation.
+//! Application-owned renderer authority and endpoint acquisition.
 
 use std::io;
-use std::num::NonZeroU64;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,8 +19,6 @@ pub enum RendererSessionError {
     Timeout,
     #[error("renderer issuer is unavailable")]
     Unavailable,
-    #[error("the renderer session does not provide compositor-assisted migration")]
-    MigrationUnavailable,
     #[error("{operation}: {message}")]
     Failed {
         operation: &'static str,
@@ -51,35 +48,15 @@ pub trait RendererProvider: std::fmt::Debug + Send + Sync + 'static {
     ) -> Result<RendererAccess, RendererSessionError>;
 }
 
-/// Optional cooperation with the compositor for a registered kernel transition.
-///
-/// An error does not promise that a request delivered to the compositor was
-/// cancelled. The caller must retire the candidate if installation fails.
-#[async_trait]
-pub trait RendererMigration: std::fmt::Debug + Send + Sync + 'static {
-    async fn install_transition(
-        &self,
-        transition: NonZeroU64,
-        cancellation: CancellationToken,
-    ) -> Result<(), RendererSessionError>;
-}
-
-/// Independent routes to obtain authority and request compositor cooperation.
+/// Route used to obtain fresh renderer authority.
 #[derive(Debug, Clone)]
 pub struct RendererSession {
     provider: Arc<dyn RendererProvider>,
-    migration: Option<Arc<dyn RendererMigration>>,
 }
 
 impl RendererSession {
-    pub fn new(
-        provider: Arc<dyn RendererProvider>,
-        migration: Option<Arc<dyn RendererMigration>>,
-    ) -> Self {
-        Self {
-            provider,
-            migration,
-        }
+    pub fn new(provider: Arc<dyn RendererProvider>) -> Self {
+        Self { provider }
     }
 
     pub async fn acquire(
@@ -95,29 +72,6 @@ impl RendererSession {
             return Err(RendererSessionError::Cancelled);
         }
         Ok(access)
-    }
-
-    /// Install the transition required by the selected renderer protocol.
-    ///
-    /// Missing cooperation is an error, never permission to skip a kernel
-    /// activation requirement. Authority may exist independently of migration.
-    pub async fn install_transition(
-        &self,
-        transition: NonZeroU64,
-        cancellation: CancellationToken,
-    ) -> Result<(), RendererSessionError> {
-        if cancellation.is_cancelled() {
-            return Err(RendererSessionError::Cancelled);
-        }
-        let migration = self
-            .migration
-            .as_ref()
-            .ok_or(RendererSessionError::MigrationUnavailable)?;
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => Err(RendererSessionError::Cancelled),
-            result = migration.install_transition(transition, cancellation.clone()) => result,
-        }
     }
 }
 
@@ -200,29 +154,17 @@ mod tests {
 
     fn session() -> (RendererSession, Arc<RejectingProvider>) {
         let provider = Arc::new(RejectingProvider(AtomicUsize::new(0)));
-        (RendererSession::new(provider.clone(), None), provider)
+        (RendererSession::new(provider.clone()), provider)
     }
 
     #[tokio::test]
-    async fn authority_acquisition_does_not_require_migration() {
+    async fn authority_acquisition_does_not_select_constraints() {
         let (session, provider) = session();
         assert!(matches!(
             session.acquire(CancellationToken::new()).await,
             Err(RendererSessionError::Unavailable)
         ));
         assert_eq!(provider.0.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn missing_migration_does_not_silently_install_a_transition() {
-        let (session, provider) = session();
-        assert!(matches!(
-            session
-                .install_transition(NonZeroU64::new(1).unwrap(), CancellationToken::new())
-                .await,
-            Err(RendererSessionError::MigrationUnavailable)
-        ));
-        assert_eq!(provider.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -277,7 +219,7 @@ mod tests {
                     Ok(())
                 }),
                 PathBuf::from("/dev/dri/renderD128"),
-                RendererSession::new(Arc::new(self.clone()), None),
+                RendererSession::new(Arc::new(self.clone())),
             );
             if self.cancel_before_reply {
                 cancellation.cancel();
@@ -287,15 +229,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_provider_without_migration_can_issue_and_release_authority() {
+    async fn a_provider_can_issue_and_release_authority() {
         let releases = Arc::new(AtomicUsize::new(0));
-        let session = RendererSession::new(
-            Arc::new(ReturningProvider {
-                releases: Arc::clone(&releases),
-                cancel_before_reply: false,
-            }),
-            None,
-        );
+        let session = RendererSession::new(Arc::new(ReturningProvider {
+            releases: Arc::clone(&releases),
+            cancel_before_reply: false,
+        }));
         let access = session.acquire(CancellationToken::new()).await.unwrap();
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         assert_eq!(access.render_node(), Path::new("/dev/dri/renderD128"));
@@ -306,13 +245,10 @@ mod tests {
     #[tokio::test]
     async fn cancellation_racing_a_ready_reply_releases_the_endpoint() {
         let releases = Arc::new(AtomicUsize::new(0));
-        let session = RendererSession::new(
-            Arc::new(ReturningProvider {
-                releases: Arc::clone(&releases),
-                cancel_before_reply: true,
-            }),
-            None,
-        );
+        let session = RendererSession::new(Arc::new(ReturningProvider {
+            releases: Arc::clone(&releases),
+            cancel_before_reply: true,
+        }));
         assert!(matches!(
             session.acquire(CancellationToken::new()).await,
             Err(RendererSessionError::Cancelled)

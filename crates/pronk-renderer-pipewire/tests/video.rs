@@ -7,7 +7,7 @@ use pronk_renderer_worker::OutputPool;
 
 #[tokio::test]
 #[ignore = "requires explicit Vulkan GPU, modifier, and development PipeWire access"]
-async fn generation_starts_and_quiesces_without_publication() {
+async fn video_generation_starts_and_quiesces_without_frames() {
     let node = std::env::var("PRONK_GPU_RENDER_NODE").expect("PRONK_GPU_RENDER_NODE");
     let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("PRONK_GPU_MODIFIER");
     let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16).unwrap();

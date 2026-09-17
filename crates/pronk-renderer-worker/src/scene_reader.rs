@@ -3,38 +3,29 @@
 use std::io;
 use std::os::fd::AsFd;
 
-use castkms_renderer::ActiveRenderer;
+use castkms_renderer::PublishedRenderer;
 
-use crate::scene_image::{PreparedSceneImages, SceneImagePool};
+use crate::scene_image::RegisteredSceneImages;
 use crate::{QualifiedSceneJob, RenderedFrame, ScenePool, SceneStorageProfile};
 
 /// Active scene endpoint and the reusable private pool for its storage profile.
-pub struct SceneReader<'renderer, F: AsFd> {
-    renderer: ActiveRenderer<'renderer, F>,
+pub struct SceneReader<F: AsFd> {
+    renderer: PublishedRenderer<F>,
     storage: SceneStorageProfile,
     private: ScenePool,
-    images: SceneImagePool,
+    images: RegisteredSceneImages,
 }
 
-impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
+impl<F: AsFd> SceneReader<F> {
     /// Bind the active endpoint to an already allocated matching scene pool.
     pub fn new(
-        renderer: ActiveRenderer<'renderer, F>,
+        renderer: PublishedRenderer<F>,
         storage: SceneStorageProfile,
         private: ScenePool,
-        images: PreparedSceneImages,
-    ) -> Result<Self, Box<SceneReaderStartError<'renderer, F>>> {
-        let configuration = renderer.configuration();
+        images: RegisteredSceneImages,
+    ) -> Result<Self, Box<SceneReaderStartError<F>>> {
         let output = storage.output();
-        if !private.belongs_to(storage.profile())
-            || output.width() != configuration.width().get()
-            || output.height() != configuration.height().get()
-            || !images.matches(
-                storage.device(),
-                configuration.width(),
-                configuration.height(),
-            )
-        {
+        if !private.belongs_to(storage.profile()) || output != renderer.output() {
             return Err(Box::new(SceneReaderStartError {
                 renderer,
                 storage,
@@ -42,18 +33,6 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
                 cause: invalid("scene pool does not match the active renderer profile"),
             }));
         }
-        let mut renderer = renderer;
-        let images = match images.register(&mut renderer) {
-            Ok(images) => images,
-            Err(cause) => {
-                return Err(Box::new(SceneReaderStartError {
-                    renderer,
-                    storage,
-                    private: Box::new(private),
-                    cause,
-                }));
-            }
-        };
         Ok(Self {
             renderer,
             storage,
@@ -197,6 +176,15 @@ impl<'renderer, F: AsFd> SceneReader<'renderer, F> {
         Ok(())
     }
 
+    /// Stop new selection and source admission before closing this generation.
+    pub fn withdraw(self) -> io::Result<()> {
+        let Self { renderer, .. } = self;
+        renderer
+            .withdraw()
+            .map(drop)
+            .map_err(|error| error.into_error())
+    }
+
     fn restore(&mut self, buffers: crate::SceneBuffers) -> Result<(), SceneAttemptError> {
         self.private
             .restore(buffers)
@@ -231,14 +219,14 @@ pub enum SceneAttemptError {
 }
 
 /// Failed reader setup retaining the active endpoint and private storage.
-pub struct SceneReaderStartError<'renderer, F: AsFd> {
-    renderer: ActiveRenderer<'renderer, F>,
+pub struct SceneReaderStartError<F: AsFd> {
+    renderer: PublishedRenderer<F>,
     storage: SceneStorageProfile,
     private: Box<ScenePool>,
     cause: io::Error,
 }
 
-impl<'renderer, F: AsFd> SceneReaderStartError<'renderer, F> {
+impl<F: AsFd> SceneReaderStartError<F> {
     pub fn cause(&self) -> &io::Error {
         &self.cause
     }
@@ -246,7 +234,7 @@ impl<'renderer, F: AsFd> SceneReaderStartError<'renderer, F> {
     pub fn into_parts(
         self,
     ) -> (
-        ActiveRenderer<'renderer, F>,
+        PublishedRenderer<F>,
         SceneStorageProfile,
         ScenePool,
         io::Error,
@@ -267,8 +255,8 @@ mod tests {
     fn complete_scene_work_can_move_to_a_blocking_thread() {
         fn assert_send<T: Send>() {}
 
-        assert_send::<SceneReader<'static, std::fs::File>>();
+        assert_send::<SceneReader<std::fs::File>>();
         assert_send::<SceneAttempt>();
-        assert_send::<SceneReaderStartError<'static, std::fs::File>>();
+        assert_send::<SceneReaderStartError<std::fs::File>>();
     }
 }

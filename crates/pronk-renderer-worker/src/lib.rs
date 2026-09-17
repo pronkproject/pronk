@@ -25,7 +25,7 @@ pub use scene::{
     ComposedFrame, RejectedScene, RejectedSceneFrames, SceneComposer, SceneCompositionError,
     SceneFrames, SceneInputs, SceneStorageProfile,
 };
-pub use scene_image::{PreparedSceneImages, RenderedFrame};
+pub use scene_image::{PreparedSceneImages, RegisteredSceneImages, RenderedFrame};
 pub use scene_job::{QualifiedSceneJob, QualifySceneJobError};
 pub use scene_pool::{
     RejectedComposedFrame, RejectedSceneBuffers, RejectedSceneSources, SceneBuffers, ScenePool,

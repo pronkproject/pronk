@@ -8,8 +8,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
-use castkms_renderer::{CapabilityProfile, RendererCapability};
-use drm_display_executor::scene::geometry::Extent;
 use pronk_capture::{allocation::Heap, Config, Layout, Session};
 use pronk_capture_broker::{Provider, Target};
 use tokio_util::sync::CancellationToken;
@@ -59,7 +57,7 @@ async fn run(target: Target) -> anyhow::Result<()> {
     for pass in 0..2 {
         let session = provider.acquire(target, CancellationToken::new()).await?;
         session.attach_monitor(None)?;
-        let (client, mut renderer) = wait_for_output(&session).await?;
+        let (client, renderer) = wait_for_output(&session).await?;
         let witness = client.as_fd().try_clone_to_owned()?;
         let renderer_witness = renderer.as_fd().try_clone_to_owned()?;
         let offer = client.describe()?;
@@ -81,40 +79,6 @@ async fn run(target: Target) -> anyhow::Result<()> {
         )?;
         let frame = actor.capture().await?;
         ensure!(!frame.timestamp().is_zero(), "missing capture timestamp");
-        let description = renderer.describe()?;
-        let candidate = renderer.begin_takeover(description)?;
-        let configuration = candidate.configuration();
-        ensure!(
-            configuration.width() == offer.width && configuration.height() == offer.height,
-            "renderer and capture output geometry differs"
-        );
-        let profile = CapabilityProfile::Renderer(RendererCapability::linear_xrgb8888_primary(
-            Extent::new(configuration.width().get(), configuration.height().get())?,
-        ));
-        let startup = candidate
-            .register_profile(&profile)
-            .map_err(|failure| failure.into_parts().1)?
-            .startup_image()?;
-        let image = startup.image();
-        ensure!(
-            image.width() == offer.width && image.height() == offer.height,
-            "startup image geometry differs"
-        );
-        ensure!(
-            image.pitch().get()
-                >= offer
-                    .width
-                    .get()
-                    .checked_mul(4)
-                    .context("capture width exceeds the startup image pitch domain")?,
-            "startup image pitch is too small"
-        );
-        ensure!(
-            image.content_serial().is_some(),
-            "captured HOST content has no identity"
-        );
-        let startup_serial = image.content_serial().unwrap();
-        startup.submit_probe(None)?.abort()?;
         if let Some(old) = &held {
             ensure!(
                 actor
@@ -125,11 +89,10 @@ async fn run(target: Target) -> anyhow::Result<()> {
             );
         }
         eprintln!(
-            "broker pass={pass} capture={}x{} request={} startup_serial={}",
+            "broker pass={pass} capture={}x{} request={}",
             frame.layout().width,
             frame.layout().height,
-            frame.request().get(),
-            startup_serial
+            frame.request().get()
         );
         drop(renderer);
         drop(actor.shutdown().await?);

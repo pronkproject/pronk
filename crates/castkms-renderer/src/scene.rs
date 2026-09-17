@@ -17,7 +17,8 @@ use drm_display_executor::scene::geometry::{DestinationRect, Extent, SourceRect}
 
 use crate::source::{has_close_on_exec, release_source};
 use crate::{
-    ActiveRenderer, FormatModifier, RegisteredImage, SourceImage, SourcePlane, SourceReleaseError,
+    FormatModifier, PublishedRenderer, RegisteredImage, SourceImage, SourcePlane,
+    SourceReleaseError,
 };
 
 /// KMS plane role retained by one scene layer.
@@ -103,8 +104,8 @@ impl SceneLayer {
 /// One complete scene claim requiring exactly one terminal release.
 #[must_use = "release the scene job after every source access ends"]
 #[derive(Debug)]
-pub struct SceneJob<'job, 'renderer, F: AsFd> {
-    renderer: &'job mut ActiveRenderer<'renderer, F>,
+pub struct SceneJob<'job, F: AsFd> {
+    renderer: &'job mut PublishedRenderer<F>,
     id: NonZeroU64,
     content_serial: NonZeroU64,
     output: Extent,
@@ -113,7 +114,7 @@ pub struct SceneJob<'job, 'renderer, F: AsFd> {
     producer: Option<OwnedFd>,
 }
 
-impl<F: AsFd> SceneJob<'_, '_, F> {
+impl<F: AsFd> SceneJob<'_, F> {
     pub fn content_serial(&self) -> NonZeroU64 {
         self.content_serial
     }
@@ -162,19 +163,19 @@ impl<F: AsFd> SceneJob<'_, '_, F> {
     }
 }
 
-impl<'renderer, F: AsFd> ActiveRenderer<'renderer, F> {
+impl<F: AsFd> PublishedRenderer<F> {
     /// Claim the next changed complete scene as one source-read transaction.
     ///
     /// `None` means the current scene is blank or unchanged. The exclusive
     /// borrow prevents another source or scene job on this renderer endpoint.
     ///
     /// ```compile_fail
-    /// use castkms_renderer::{ActiveRenderer, RegisteredImage};
+    /// use castkms_renderer::{PublishedRenderer, RegisteredImage};
     /// use std::fmt::Debug;
     /// use std::os::fd::AsFd;
     ///
     /// fn claim_twice<F: AsFd + Debug>(
-    ///     renderer: &mut ActiveRenderer<'_, F>,
+    ///     renderer: &mut PublishedRenderer<F>,
     ///     image: &RegisteredImage,
     /// ) {
     ///     let first = renderer.try_dequeue_scene(image).unwrap().unwrap();
@@ -185,8 +186,8 @@ impl<'renderer, F: AsFd> ActiveRenderer<'renderer, F> {
     pub fn try_dequeue_scene<'job>(
         &'job mut self,
         image: &RegisteredImage,
-    ) -> io::Result<Option<SceneJob<'job, 'renderer, F>>> {
-        if !image.belongs_to(&self.image_scope) {
+    ) -> io::Result<Option<SceneJob<'job, F>>> {
+        if !image.belongs_to(&self.draft.endpoint.image_scope) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "private image belongs to another renderer",
@@ -238,6 +239,17 @@ impl<'renderer, F: AsFd> ActiveRenderer<'renderer, F> {
                 return Err(error);
             }
         };
+        if decoded.constraints_id != self.constraints_id {
+            let _ = release_source(
+                self.as_fd(),
+                decoded.id,
+                castkms_sys::RENDERER_RELEASE_NO_ACCESS,
+                None,
+            );
+            return Err(invalid(
+                "CastKMS returned a scene for another constraints entry",
+            ));
+        }
         Ok(Some(SceneJob {
             renderer: self,
             id: decoded.id,
@@ -252,6 +264,7 @@ impl<'renderer, F: AsFd> ActiveRenderer<'renderer, F> {
 
 pub(super) struct DecodedScene {
     id: NonZeroU64,
+    constraints_id: NonZeroU64,
     content_serial: NonZeroU64,
     output: Extent,
     layers: Vec<SceneLayer>,
@@ -273,6 +286,8 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
     }
     let id = NonZeroU64::new(header.job_id)
         .ok_or_else(|| invalid("CastKMS returned a zero scene job ID"))?;
+    let constraints_id = NonZeroU64::new(header.constraints_id)
+        .ok_or_else(|| invalid("CastKMS returned a zero scene constraints ID"))?;
     let content_serial = NonZeroU64::new(header.content_serial)
         .ok_or_else(|| invalid("CastKMS returned a zero scene content serial"))?;
     let output = Extent::new(header.width, header.height)
@@ -345,6 +360,7 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
     }
     Ok(DecodedScene {
         id,
+        constraints_id,
         content_serial,
         output,
         layers,
@@ -606,6 +622,7 @@ mod tests {
         word(&mut bytes, RENDERER_SCENE_VERSION);
         word(&mut bytes, 0);
         wide(&mut bytes, 7);
+        wide(&mut bytes, 9);
         wide(&mut bytes, 11);
         word(&mut bytes, 1920);
         word(&mut bytes, 1080);
@@ -670,6 +687,7 @@ mod tests {
         let (bytes, _raw_fd, mut peer) = scene_packet();
         let scene = decode_scene(&bytes).unwrap();
         assert_eq!(scene.id.get(), 7);
+        assert_eq!(scene.constraints_id.get(), 9);
         assert_eq!(scene.content_serial.get(), 11);
         assert_eq!(scene.output, Extent::new(1920, 1080).unwrap());
         assert!(scene.producer.is_none());

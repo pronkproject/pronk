@@ -9,16 +9,16 @@ use castkms_renderer::{SceneJob, SourceReleaseError};
 
 /// A complete-scene job and the only composer qualified from its metadata.
 #[must_use = "release the scene without access or submit its bound native reads"]
-pub struct QualifiedSceneJob<'job, 'renderer, F: AsFd> {
-    job: SceneJob<'job, 'renderer, F>,
+pub struct QualifiedSceneJob<'job, F: AsFd> {
+    job: SceneJob<'job, F>,
     composer: SceneComposer,
 }
 
-impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
+impl<'job, F: AsFd> QualifiedSceneJob<'job, F> {
     pub fn new(
         storage: &SceneStorageProfile,
-        job: SceneJob<'job, 'renderer, F>,
-    ) -> Result<Self, QualifySceneJobError<SceneJob<'job, 'renderer, F>>> {
+        job: SceneJob<'job, F>,
+    ) -> Result<Self, QualifySceneJobError<SceneJob<'job, F>>> {
         match SceneComposer::from_scene_job(storage, &job) {
             Ok(composer) => Ok(Self { job, composer }),
             Err(cause) => Err(QualifySceneJobError { job, cause }),
@@ -29,7 +29,7 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
         &self.composer
     }
 
-    pub(crate) fn into_parts(self) -> (SceneJob<'job, 'renderer, F>, SceneComposer) {
+    pub(crate) fn into_parts(self) -> (SceneJob<'job, F>, SceneComposer) {
         (self.job, self.composer)
     }
 
@@ -50,9 +50,7 @@ impl<'job, 'renderer, F: AsFd> QualifiedSceneJob<'job, 'renderer, F> {
         Ok(sources)
     }
 
-    pub fn release_without_access(
-        self,
-    ) -> Result<(), SourceReleaseError<SceneJob<'job, 'renderer, F>>> {
+    pub fn release_without_access(self) -> Result<(), SourceReleaseError<SceneJob<'job, F>>> {
         self.job.release_without_access()
     }
 }

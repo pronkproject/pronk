@@ -1,7 +1,6 @@
 //! Translate Mutter's display broker into application-owned capabilities.
 
 use std::io;
-use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,7 +14,7 @@ use crate::kernel_session::{
 };
 use crate::kernel_session_provider::KernelSessionProvider;
 use crate::renderer_session::{
-    RendererAccess, RendererMigration, RendererProvider, RendererSession, RendererSessionError,
+    RendererAccess, RendererProvider, RendererSession, RendererSessionError,
 };
 
 #[async_trait]
@@ -147,12 +146,7 @@ fn renderer_access(access: pronk_capture_broker::RendererAccess) -> RendererAcce
             .map_err(io::Error::other)
     });
     let issuer = Arc::new(MutterRenderer(session));
-    RendererAccess::new(
-        fd,
-        lease,
-        render_node,
-        RendererSession::new(issuer.clone(), Some(issuer)),
-    )
+    RendererAccess::new(fd, lease, render_node, RendererSession::new(issuer))
 }
 
 #[async_trait]
@@ -165,20 +159,6 @@ impl RendererProvider for MutterRenderer {
             .acquire_renderer(cancellation)
             .await
             .map(renderer_access)
-            .map_err(renderer_error)
-    }
-}
-
-#[async_trait]
-impl RendererMigration for MutterRenderer {
-    async fn install_transition(
-        &self,
-        transition: NonZeroU64,
-        cancellation: CancellationToken,
-    ) -> Result<(), RendererSessionError> {
-        self.0
-            .install_transition(transition, cancellation)
-            .await
             .map_err(renderer_error)
     }
 }

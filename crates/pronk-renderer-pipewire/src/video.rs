@@ -122,7 +122,7 @@ impl Video {
                 Ok(VideoEvent::Failed { cause, returns })
             }
             _ => Err(io::Error::other(
-                "PipeWire event produced an inconsistent renderer transition",
+                "PipeWire event produced an inconsistent renderer state change",
             )),
         }
     }
@@ -145,7 +145,7 @@ impl Video {
                 Ok(_) => {
                     cause.get_or_insert_with(|| {
                         io::Error::other(
-                            "PipeWire stop produced an inconsistent renderer transition",
+                            "PipeWire stop produced an inconsistent renderer state change",
                         )
                     });
                     Box::new([])

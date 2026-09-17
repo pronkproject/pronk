@@ -5,14 +5,13 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::fd::AsFd;
 
 use castkms_renderer::{
-    CapabilityFormat, CapabilityProfile, ColorOperation as WireColor, FormatModifier,
-    ProfileRegistrationError, RegisteredCandidate, RendererCapability, SceneJob, StorageProvenance,
-    TakeoverCandidate,
+    ColorOperation as WireColor, ConstraintsFormat, FormatModifier, RendererConstraints, SceneJob,
+    StorageProvenance,
 };
 use castkms_sys::{
-    CAPABILITY_MAX_FORMATS, DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010,
-    DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010,
-    DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888,
+    DRM_FORMAT_ABGR2101010, DRM_FORMAT_ABGR8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ARGB8888,
+    DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_RGB565, DRM_FORMAT_XBGR2101010, DRM_FORMAT_XBGR8888,
+    DRM_FORMAT_XRGB2101010, DRM_FORMAT_XRGB8888, RENDERER_CONSTRAINTS_MAX_FORMATS,
 };
 use drm_display_executor::scene::{
     blend::{Blend, PixelBlend},
@@ -27,7 +26,7 @@ use crate::{SceneComposer, ScenePool, SceneStorageProfile};
 
 /// One advertised primary-plane contract paired with its private storage policy.
 pub struct PrimarySceneProfile {
-    capability: RendererCapability,
+    constraints: RendererConstraints,
     storage: SceneStorageProfile,
 }
 
@@ -55,13 +54,13 @@ impl PrimarySceneProfile {
                 }
             }
         }
-        let capability =
-            RendererCapability::single_primary_formats(output, formats.into_boxed_slice())?
+        let constraints =
+            RendererConstraints::single_primary_formats(output, formats.into_boxed_slice())?
                 .with_output_color(256, true)?;
         let storage =
             SceneStorageProfile::single_primary(device, output, sources.into_boxed_slice())?;
         Ok(Self {
-            capability,
+            constraints,
             storage,
         })
     }
@@ -74,20 +73,14 @@ impl PrimarySceneProfile {
         self.storage.create_pool(final_capacity, source_capacity)
     }
 
-    /// Register the advertised contract and release its matching storage policy.
-    pub fn register<F: AsFd>(
-        self,
-        candidate: TakeoverCandidate<'_, F>,
-    ) -> Result<(RegisteredCandidate<'_, F>, SceneStorageProfile), ProfileRegistrationError<'_, F>>
-    {
-        candidate
-            .register_profile(&CapabilityProfile::Renderer(self.capability))
-            .map(|candidate| (candidate, self.storage))
+    /// Release the kernel declaration and matching private-storage policy.
+    pub fn into_parts(self) -> (RendererConstraints, SceneStorageProfile) {
+        (self.constraints, self.storage)
     }
 }
 
 fn append_source_layout(
-    formats: &mut Vec<CapabilityFormat>,
+    formats: &mut Vec<ConstraintsFormat>,
     sources: &mut Vec<SourceRequirements>,
     packed: PackedFormat,
     fourccs: &[u32],
@@ -100,7 +93,7 @@ fn append_source_layout(
         1
     };
     let record_count = fourccs.len().saturating_mul(records_per_format);
-    if formats.len().saturating_add(record_count) > CAPABILITY_MAX_FORMATS {
+    if formats.len().saturating_add(record_count) > RENDERER_CONSTRAINTS_MAX_FORMATS {
         return Ok(false);
     }
     let mut records = Vec::new();
@@ -108,7 +101,7 @@ fn append_source_layout(
         .try_reserve_exact(record_count)
         .map_err(io::Error::other)?;
     for &fourcc in fourccs {
-        records.push(CapabilityFormat::new(
+        records.push(ConstraintsFormat::new(
             fourcc,
             FormatModifier::Explicit(modifier),
             NonZeroU32::new(1).expect("one source plane is nonzero"),
@@ -118,7 +111,7 @@ fn append_source_layout(
             NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
         )?);
         if modifier == DRM_FORMAT_MOD_LINEAR {
-            records.push(CapabilityFormat::new(
+            records.push(ConstraintsFormat::new(
                 fourcc,
                 FormatModifier::Unspecified,
                 NonZeroU32::new(1).expect("one source plane is nonzero"),
@@ -168,7 +161,7 @@ impl SceneComposer {
     /// Qualify one checked complete-scene job for native execution.
     pub(crate) fn from_scene_job<F: AsFd>(
         storage: &SceneStorageProfile,
-        job: &SceneJob<'_, '_, F>,
+        job: &SceneJob<'_, F>,
     ) -> io::Result<Self> {
         let mut colors = Vec::new();
         colors
@@ -365,7 +358,7 @@ mod tests {
 
         assert!(!options.is_empty());
         assert!(options.iter().all(|source| {
-            profile.capability.formats().iter().any(|format| {
+            profile.constraints.formats().iter().any(|format| {
                 source_formats()
                     .into_iter()
                     .find(|(packed, _)| *packed == source.format)
@@ -380,7 +373,7 @@ mod tests {
         let output = drm_display_executor::scene::geometry::Extent::new(1920, 1080).unwrap();
         let mut formats = Vec::new();
         let mut sources = Vec::new();
-        for modifier in 0..=CAPABILITY_MAX_FORMATS as u64 {
+        for modifier in 0..=RENDERER_CONSTRAINTS_MAX_FORMATS as u64 {
             if !append_source_layout(
                 &mut formats,
                 &mut sources,
@@ -395,7 +388,7 @@ mod tests {
             }
         }
 
-        assert_eq!(formats.len(), CAPABILITY_MAX_FORMATS);
+        assert_eq!(formats.len(), RENDERER_CONSTRAINTS_MAX_FORMATS);
         assert_eq!(sources.len(), 127);
         assert_eq!(sources.last().unwrap().modifier, 126);
         assert_eq!(
