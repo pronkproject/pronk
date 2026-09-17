@@ -5,7 +5,7 @@ use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
 use castkms_sys::DRM_FORMAT_MOD_LINEAR;
-use pronk_pipewire::ClassifiedSocketRemoteProvider;
+use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate};
 
 use crate::capture_health::CaptureEvents;
 use crate::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
@@ -39,7 +39,7 @@ pub(crate) struct DisplayMediaConfig {
     pub node_description: String,
     pub video_profile_id: String,
     pub video_bitrate: NonZeroU64,
-    pub capture_rate_hz: NonZeroU32,
+    pub video_frame_rate: VideoFrameRate,
 }
 
 impl DisplayMediaAccess {
@@ -71,7 +71,7 @@ impl DisplayMediaAccess {
                         node_description: config.node_description,
                         video_profile_id: config.video_profile_id,
                         video_bitrate: config.video_bitrate,
-                        capture_rate_hz: config.capture_rate_hz,
+                        video_frame_rate: config.video_frame_rate,
                         output_modifier: DRM_FORMAT_MOD_LINEAR,
                         private_capacity: NonZeroUsize::new(3).unwrap(),
                         output_capacity: NonZeroUsize::new(4).unwrap(),
@@ -91,7 +91,7 @@ impl DisplayMediaAccess {
                         node_description: config.node_description,
                         video_profile_id: config.video_profile_id,
                         video_bitrate: config.video_bitrate,
-                        capture_rate_hz: config.capture_rate_hz,
+                        video_frame_rate: config.video_frame_rate,
                         pool_size: NonZeroU32::new(4).unwrap(),
                         request_capacity: NonZeroU32::new(3).unwrap(),
                         pool_byte_limit: NonZeroU64::new(128 * 1024 * 1024).unwrap(),
@@ -126,7 +126,7 @@ mod tests {
             node_description: "test output".into(),
             video_profile_id: "h264".into(),
             video_bitrate: NonZeroU64::new(4_000_000).unwrap(),
-            capture_rate_hz: NonZeroU32::new(30).unwrap(),
+            video_frame_rate: VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
         }
     }
 

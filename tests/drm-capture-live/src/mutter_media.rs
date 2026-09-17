@@ -129,7 +129,7 @@ async fn run(
             node_description: "Live Mutter capture".into(),
             video_profile_id: "h264".into(),
             video_bitrate: nz64(4_000_000),
-            capture_rate_hz: nz(30),
+            video_frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
             pool_size: nz(4),
             request_capacity: nz(3),
             pool_byte_limit: nz64(128 * 1024 * 1024),

@@ -57,7 +57,7 @@ async fn run(device: &Path, socket: &Path) -> anyhow::Result<()> {
         node_description: "Application capture test".into(),
         video_profile_id: "h264".into(),
         video_bitrate: nz64(2_000_000),
-        capture_rate_hz: nz(30),
+        video_frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
         pool_size: nz(4),
         request_capacity: nz(3),
         pool_byte_limit: nz64(16 * 1024 * 1024),

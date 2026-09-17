@@ -39,7 +39,7 @@ pub struct RendererCapturePipelineConfig {
     pub node_description: String,
     pub video_profile_id: String,
     pub video_bitrate: NonZeroU64,
-    pub capture_rate_hz: NonZeroU32,
+    pub video_frame_rate: VideoFrameRate,
     pub output_modifier: u64,
     pub private_capacity: NonZeroUsize,
     pub output_capacity: NonZeroUsize,
@@ -170,7 +170,7 @@ impl RendererCapturePipeline {
                 major: render_node.major,
                 minor: render_node.minor,
             }),
-            caps: renderer_caps(stream.layout(), self.config.capture_rate_hz)?,
+            caps: renderer_caps(stream.layout(), self.config.video_frame_rate)?,
         })
     }
 
@@ -309,7 +309,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
                     connector_id: self.config.connector_id,
                     output_index: self.config.output_index,
                     media_generation: generation,
-                    frame_rate: VideoFrameRate::integer(self.config.capture_rate_hz),
+                    frame_rate: self.config.video_frame_rate,
                 },
                 output_modifier: self.config.output_modifier,
                 private_capacity: self.config.private_capacity,
@@ -653,7 +653,7 @@ fn monitor_active_renderer(
 
 fn renderer_caps(
     layout: VideoBufferLayout,
-    rate: NonZeroU32,
+    frame_rate: VideoFrameRate,
 ) -> Result<String, MediaPipelineError> {
     let fourcc = match layout.format {
         VideoPixelFormat::Xrgb8888 => "XR24",
@@ -670,8 +670,11 @@ fn renderer_caps(
         format!("{fourcc}:0x{modifier:016x}")
     };
     Ok(format!(
-        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={},height={},framerate={rate}/1",
-        layout.width, layout.height
+        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={},height={},framerate={}/{}",
+        layout.width,
+        layout.height,
+        frame_rate.numerator(),
+        frame_rate.denominator()
     ))
 }
 
@@ -698,7 +701,7 @@ mod tests {
                     offset: 0,
                 },
             },
-            NonZeroU32::new(30).unwrap(),
+            VideoFrameRate::integer(NonZeroU32::new(30).unwrap()),
         )
         .unwrap();
         assert_eq!(
@@ -721,11 +724,35 @@ mod tests {
                     offset: 0,
                 },
             },
-            NonZeroU32::new(60).unwrap(),
+            VideoFrameRate::integer(NonZeroU32::new(60).unwrap()),
         )
         .unwrap();
         assert!(caps.contains("drm-format=XR24,"));
         assert!(caps.ends_with("framerate=60/1"));
+    }
+
+    #[test]
+    fn renderer_caps_preserve_a_fractional_frame_rate() {
+        let caps = renderer_caps(
+            VideoBufferLayout {
+                format: VideoPixelFormat::Xrgb8888,
+                width: NonZeroU32::new(1920).unwrap(),
+                height: NonZeroU32::new(1080).unwrap(),
+                pitch: NonZeroU32::new(7680).unwrap(),
+                size: NonZeroU64::new(8_294_400).unwrap(),
+                storage: VideoBufferStorage::DrmModifier {
+                    modifier: 0,
+                    offset: 0,
+                },
+            },
+            VideoFrameRate::new(
+                NonZeroU32::new(30_000).unwrap(),
+                NonZeroU32::new(1_001).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        assert!(caps.ends_with("framerate=30000/1001"));
     }
 
     #[tokio::test]

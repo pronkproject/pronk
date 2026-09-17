@@ -113,7 +113,7 @@ async fn run(
             node_description: "Live delegated renderer".into(),
             video_profile_id: "raw-dmabuf".into(),
             video_bitrate: nz64(4_000_000),
-            capture_rate_hz: nz(30),
+            video_frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
             output_modifier: modifier,
             private_capacity: NonZeroUsize::new(3).unwrap(),
             output_capacity: NonZeroUsize::new(4).unwrap(),

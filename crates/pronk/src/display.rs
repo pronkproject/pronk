@@ -17,7 +17,7 @@ use pronk_core::identity::PnpIdResolver;
 use pronk_core::output::CastKmsOutputId;
 use pronk_core::session::PinnedCallerProcess;
 use pronk_dbus::{DeviceInfo, DeviceSelection, OperationErrorCode};
-use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
+use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider, VideoFrameRate};
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -53,7 +53,8 @@ use crate::slot::OutputReservationError;
 
 const INITIAL_SESSION_GENERATION: u64 = 1;
 const MAX_OPERATION_ERROR_BYTES: usize = 512;
-const CAPTURE_RATE_HZ: u32 = 30;
+const VIDEO_FRAME_RATE_NUMERATOR: u32 = 30;
+const VIDEO_FRAME_RATE_DENOMINATOR: u32 = 1;
 
 /// Capture selection and PipeWire runtime for the account running media services.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -926,8 +927,12 @@ async fn run_display_setup_inner(
             node_description: device.display_name.clone(),
             video_profile_id: video_profile_id.clone(),
             video_bitrate,
-            capture_rate_hz: NonZeroU32::new(CAPTURE_RATE_HZ)
-                .expect("fixed capture rate is nonzero"),
+            video_frame_rate: VideoFrameRate::new(
+                NonZeroU32::new(VIDEO_FRAME_RATE_NUMERATOR)
+                    .expect("fixed frame-rate numerator is nonzero"),
+                NonZeroU32::new(VIDEO_FRAME_RATE_DENOMINATOR)
+                    .expect("fixed frame-rate denominator is nonzero"),
+            ),
         },
     );
     let (capture, capture_events) = match pipeline {

@@ -35,7 +35,7 @@ pub struct DrmCapturePipelineConfig {
     pub video_profile_id: String,
     pub video_bitrate: NonZeroU64,
     /// Media cadence, independent of the display mode's refresh rate.
-    pub capture_rate_hz: NonZeroU32,
+    pub video_frame_rate: VideoFrameRate,
     pub pool_size: NonZeroU32,
     pub request_capacity: NonZeroU32,
     pub pool_byte_limit: NonZeroU64,
@@ -141,7 +141,7 @@ impl DrmCapturePipeline {
                 connector_id: self.config.connector_id,
                 output_index: self.config.output_index,
                 media_generation: generation,
-                frame_rate: VideoFrameRate::integer(self.config.capture_rate_hz),
+                frame_rate: self.config.video_frame_rate,
             },
             remote.into_remote(),
         )
@@ -165,10 +165,7 @@ impl DrmCapturePipeline {
             output_index: self.config.output_index,
             media_generation: generation,
             render_device: None,
-            caps: format!(
-                "video/x-raw,format=BGRx,width={},height={},framerate={}/1",
-                layout.width, layout.height, self.config.capture_rate_hz
-            ),
+            caps: capture_caps(layout, self.config.video_frame_rate),
         }
     }
 
@@ -318,6 +315,16 @@ fn require_route_layout(
     Ok(())
 }
 
+fn capture_caps(layout: Layout, frame_rate: VideoFrameRate) -> String {
+    format!(
+        "video/x-raw,format=BGRx,width={},height={},framerate={}/{}",
+        layout.width,
+        layout.height,
+        frame_rate.numerator(),
+        frame_rate.denominator()
+    )
+}
+
 fn monitor_capture(
     media_generation: NonZeroU64,
     state: tokio::sync::watch::Receiver<VideoState>,
@@ -341,6 +348,22 @@ mod tests {
     use super::*;
     use crate::media_pipeline_port::CaptureEventPort;
     use tokio::sync::watch;
+
+    #[test]
+    fn capture_caps_preserve_a_fractional_frame_rate() {
+        let caps = capture_caps(
+            Layout {
+                width: NonZeroU32::new(1920).unwrap(),
+                height: NonZeroU32::new(1080).unwrap(),
+            },
+            VideoFrameRate::new(
+                NonZeroU32::new(30_000).unwrap(),
+                NonZeroU32::new(1_001).unwrap(),
+            ),
+        );
+
+        assert!(caps.ends_with("framerate=30000/1001"));
+    }
 
     #[tokio::test]
     async fn capture_failure_reports_the_exact_media_generation() {
