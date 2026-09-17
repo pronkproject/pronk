@@ -162,8 +162,8 @@ combines capture and networking only for testing; it is not the installed
 backend's process or sandbox boundary.
 
 The capture probes use reference CPU composition. The renderer capture probe
-qualifies delegated GPU composition into a Vulkan-allocated destination through
-generic final-image delivery, but not hardware encoding or the installed
-service sandbox. The default probes do not exercise receiver transport; even
-the optional receiver probe needs visual confirmation to establish television
-playback.
+explicitly selects DMA-BUF storage and qualifies delegated GPU composition into
+a Vulkan-allocated destination through generic final-image delivery. It does
+not qualify hardware encoding or the installed service sandbox. The default
+probes do not exercise receiver transport; even the optional receiver probe
+needs visual confirmation to establish television playback.
