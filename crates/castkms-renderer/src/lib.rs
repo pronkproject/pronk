@@ -34,10 +34,7 @@ use castkms_sys::{
 use drm_display_executor::scene::geometry::Extent;
 
 fn acquisition_is_idle(error: nix::errno::Errno) -> bool {
-    matches!(
-        error,
-        nix::errno::Errno::ENODATA | nix::errno::Errno::ESTALE
-    )
+    error == nix::errno::Errno::ENODATA
 }
 
 /// Advisory state returned by the renderer endpoint.
@@ -430,9 +427,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unselected_live_backend_is_idle() {
-        assert!(acquisition_is_idle(nix::errno::Errno::ESTALE));
+    fn only_an_empty_acquisition_is_idle() {
         assert!(acquisition_is_idle(nix::errno::Errno::ENODATA));
+        assert!(!acquisition_is_idle(nix::errno::Errno::ESTALE));
         assert!(!acquisition_is_idle(nix::errno::Errno::EKEYREVOKED));
         assert!(!acquisition_is_idle(nix::errno::Errno::EBUSY));
     }
