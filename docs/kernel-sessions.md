@@ -46,12 +46,12 @@ not wait for it or promise successful recovery after a process crash.
 ## Authority is not constraints selection
 
 `RendererSession` uses `RendererProvider` to issue a renderer endpoint for one
-display lifetime. Acquiring that endpoint neither publishes an offer nor
+display lifetime. Acquiring that endpoint neither publishes a backend nor
 selects display constraints.
 
 The renderer pipeline validates the endpoint and render node, prepares private
 storage, completes its native readiness check, and publishes an immutable
-offer. The compositor discovers that offer through the generic KMS constraints
+configuration. The compositor discovers it through the generic KMS constraints
 list and selects its ID with an ordinary atomic update. No private broker
 request acknowledges or completes that selection.
 
@@ -67,8 +67,8 @@ return `EACCES`; it does not turn the foreign master's pixels into an ordinary
 stream failure that can be bypassed. Pronk suspends or retires the affected
 media generation and waits for display observation to report active authority
 again. It then reuses the retained capture access and obtains a fresh renderer
-endpoint for a fresh generation. Offers, jobs, and private storage from the
-earlier uninterrupted master interval are never revived.
+endpoint for a fresh generation. Configurations, jobs, and private storage from
+the earlier uninterrupted master interval are never revived.
 
 ## Release and abandoned operations
 
