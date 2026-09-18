@@ -2,6 +2,7 @@
 //! Requires a disposable compositor and isolated session bus; no DRM master fd.
 
 mod decoder;
+mod monitor;
 mod receiver_media;
 use pronk_capture_receiver_test as receiver;
 
@@ -108,7 +109,7 @@ async fn run(
         Duration::from_secs(5),
     )?;
     let session = provider.acquire(target, CancellationToken::new()).await?;
-    session.attach_monitor(None)?;
+    session.attach_monitor(Some(&monitor::edid(width, height, 60_000)?))?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let generation = nz64(u64::from(std::process::id()));
     let runtime = socket.parent().context("private socket has no directory")?;
