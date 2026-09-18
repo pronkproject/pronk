@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{ensure, Context};
 use pronk::display_state::{RouteTarget, RoutedMode};
 use pronk::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
-use pronk::media_pipeline_port::CapturePipelinePort;
+use pronk::media_pipeline_port::{CaptureEventPort, CapturePipelinePort};
 use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk_capture_broker::{Provider, Target};
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
@@ -115,7 +115,7 @@ async fn run(
     let runtime = socket.parent().context("private socket has no directory")?;
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
-    let (mut capture, _capture_events) = DrmCapturePipeline::new(
+    let (mut capture, mut capture_events) = DrmCapturePipeline::new(
         session.capture_access()?,
         remotes,
         DrmCapturePipelineConfig {
@@ -148,7 +148,12 @@ async fn run(
             },
         },
     };
-    let media_result = receiver_media::run(&mut capture, request, socket, receiver, address).await;
+    let media_result = tokio::select! {
+        result = receiver_media::run(&mut capture, request, socket, receiver, address) => result,
+        event = capture_events.next_event() => {
+            Err(anyhow::anyhow!("capture stopped while qualifying media: {event:?}"))
+        }
+    };
     let capture_result = capture
         .shutdown(MediaStopReason::BackendShutdown, CancellationToken::new())
         .await;
