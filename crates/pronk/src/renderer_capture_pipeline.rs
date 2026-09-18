@@ -270,15 +270,20 @@ impl RendererCapturePipeline {
 
     async fn wait_for_capture_offer_change(
         &self,
-        previous: drm_capture::OfferId,
+        previous: Option<drm_capture::OfferId>,
         mut renderer_state: tokio::sync::watch::Receiver<RendererStreamState>,
         cancellation: CancellationToken,
     ) -> Result<drm_capture::Description, MediaPipelineError> {
         loop {
             require_running_renderer(&renderer_state)?;
-            let description = self.capture_setup.describe(cancellation.clone()).await?;
-            if description.offer != previous {
-                return Ok(description);
+            if let Some(description) = self
+                .capture_setup
+                .describe_if_active(cancellation.clone())
+                .await?
+            {
+                if previous.is_none_or(|previous| description.offer != previous) {
+                    return Ok(description);
+                }
             }
             tokio::select! {
                 biased;
@@ -391,9 +396,9 @@ impl CapturePipelinePort for RendererCapturePipeline {
         let capture_device = device.clone();
         let previous_offer = self
             .capture_setup
-            .describe(cancellation.clone())
+            .describe_if_active(cancellation.clone())
             .await?
-            .offer;
+            .map(|description| description.offer);
         let output_width = NonZeroU32::new(request.route.mode.width)
             .ok_or_else(|| MediaPipelineError::new("renderer output width is zero"))?;
         let output_height = NonZeroU32::new(request.route.mode.height)

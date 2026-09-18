@@ -100,18 +100,6 @@ impl Setup {
         .await
     }
 
-    pub(crate) async fn describe(
-        &self,
-        cancellation: CancellationToken,
-    ) -> Result<drm_capture::Description, MediaPipelineError> {
-        on_worker(Arc::clone(&self.0), cancellation, |state, _| {
-            state.describe().map_err(|error| {
-                MediaPipelineError::new(format!("describe capture output: {error}"))
-            })
-        })
-        .await
-    }
-
     pub(crate) async fn describe_if_active(
         &self,
         cancellation: CancellationToken,
