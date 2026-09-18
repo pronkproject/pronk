@@ -84,14 +84,6 @@ async fn run(
     receiver: &mut receiver::Receiver,
     address: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
-    let mut pattern = tokio::process::Command::new(
-        std::env::current_exe()?.with_file_name("pronk-capture-pattern-client"),
-    )
-    .kill_on_drop(true)
-    .spawn()
-    .context("start Wayland pattern")?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    ensure!(pattern.try_wait()?.is_none(), "Wayland pattern exited");
     let connection = zbus::Connection::session().await?;
     let acquired = connection
         .request_name_with_flags(
@@ -111,6 +103,14 @@ async fn run(
     let session = provider.acquire(target, CancellationToken::new()).await?;
     session.attach_monitor(Some(&monitor::edid(width, height, 60_000)?))?;
     tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut pattern = tokio::process::Command::new(
+        std::env::current_exe()?.with_file_name("pronk-capture-pattern-client"),
+    )
+    .kill_on_drop(true)
+    .spawn()
+    .context("start Wayland pattern")?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    ensure!(pattern.try_wait()?.is_none(), "Wayland pattern exited");
     let generation = nz64(u64::from(std::process::id()));
     let runtime = socket.parent().context("private socket has no directory")?;
     let remotes =
