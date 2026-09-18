@@ -15,8 +15,30 @@ macro_rules! layout {
 }
 
 macro_rules! field {
-    ($rust:ty, $field:ident, $c:literal) => {
+    ($rust:ty, $field:ident, $c:expr) => {
         println!("field {} {}", $c, offset_of!($rust, $field));
+    };
+}
+
+macro_rules! fields {
+    ($rust:ty, $c:literal, $($field:ident),+ $(,)?) => {
+        $(field!($rust, $field, concat!($c, ".", stringify!($field)));)+
+    };
+}
+
+macro_rules! value {
+    ($rust:expr, $c:literal) => {
+        println!("value {} {}", $c, $rust);
+    };
+}
+
+macro_rules! ioctl {
+    ($name:literal, $direction:ident, $number:literal, $request:ty) => {
+        println!(
+            "ioctl {} {}",
+            $name,
+            nix::$direction!(b'd', $number, size_of::<$request>()) as u64
+        );
     };
 }
 
@@ -69,52 +91,431 @@ fn main() {
         DrmCastkmsRendererUnregisterImage,
         "drm_castkms_renderer_unregister_image"
     );
-    field!(
+    fields!(
+        DrmCastkmsRendererQuery,
+        "drm_castkms_renderer_query",
+        version,
+        state,
+        constraints_id,
+        reserved,
+    );
+    fields!(
         DrmCastkmsRendererConfigure,
+        "drm_castkms_renderer_configure",
         constraints,
-        "drm_castkms_renderer_configure.constraints"
+        constraints_size,
+        flags,
+        width,
+        height,
+        reserved,
     );
-    field!(
+    fields!(
         DrmCastkmsRendererPublish,
+        "drm_castkms_renderer_publish",
         result,
-        "drm_castkms_renderer_publish.result"
-    );
-    field!(
-        DrmCastkmsRendererPublish,
         ready_fence_fd,
-        "drm_castkms_renderer_publish.ready_fence_fd"
+        flags,
+        reserved,
     );
-    field!(
-        DrmCastkmsRendererAcquireJob,
-        target_image_id,
-        "drm_castkms_renderer_acquire_job.target_image_id"
+    fields!(
+        DrmCastkmsRendererPublishResult,
+        "drm_castkms_renderer_publish_result",
+        constraints_id,
+        reserved,
     );
-    field!(
-        DrmCastkmsRendererAcquireOutput,
-        image_id,
-        "drm_castkms_renderer_acquire_output.image_id"
+    fields!(
+        DrmCastkmsRendererWithdraw,
+        "drm_castkms_renderer_withdraw",
+        flags,
+        reserved,
     );
-    field!(
-        DrmCastkmsRendererOutput,
+    fields!(
+        DrmCastkmsRendererMemoryPlane,
+        "drm_castkms_renderer_memory_plane",
         dma_buf_fd,
-        "drm_castkms_renderer_output.dma_buf_fd"
-    );
-    field!(
-        DrmCastkmsRendererOutput,
+        pitch,
         offset,
-        "drm_castkms_renderer_output.offset"
+        reserved,
+    );
+    fields!(
+        DrmCastkmsRendererReleaseJob,
+        "drm_castkms_renderer_release_job",
+        job_id,
+        release_fence_fd,
+        kind,
+        flags,
+        reserved,
+    );
+    fields!(
+        DrmCastkmsRendererAcquireOutput,
+        "drm_castkms_renderer_acquire_output",
+        result,
+        image_id,
+        flags,
+        reserved,
+        padding,
+    );
+    fields!(
+        DrmCastkmsRendererOutput,
+        "drm_castkms_renderer_output",
+        job_id,
+        image_id,
+        width,
+        height,
+        format,
+        memory_plane_count,
+        modifier,
+        dma_buf_fd,
+        pitch,
+        offset,
+        reserved,
+    );
+    fields!(
+        DrmCastkmsRendererReleaseOutput,
+        "drm_castkms_renderer_release_output",
+        job_id,
+        release_fence_fd,
+        kind,
+        flags,
+        reserved,
+    );
+    fields!(
+        DrmCastkmsRendererConstraints,
+        "drm_castkms_renderer_constraints",
+        version,
+        kind,
+        flags,
+        format_count,
+        max_output,
+        max_source,
+        min_scale,
+        max_scale,
+        max_planes,
+        max_roles,
+        max_color_operations,
+        max_lut_entries,
+        yuv_encodings,
+        yuv_ranges,
+        min_output,
+        min_source,
+        reserved,
+    );
+    fields!(
+        DrmCastkmsRendererConstraintsFormat,
+        "drm_castkms_renderer_constraints_format",
+        fourcc,
+        memory_plane_count,
+        modifier,
+        flags,
+        roles,
+        width_alignment,
+        height_alignment,
+        pitch_alignment,
+        offset_alignment,
+        min_pitch,
+        max_pitch,
+        reserved,
+    );
+    fields!(
+        DrmCastkmsRendererAcquireJob,
+        "drm_castkms_renderer_acquire_job",
+        result,
+        target_image_id,
+        capacity,
+        flags,
+        reserved,
+    );
+    fields!(
+        DrmCastkmsRendererRegisterImage,
+        "drm_castkms_renderer_register_image",
+        image_id,
+        buffers,
+        width,
+        height,
+        num_buffers,
+        flags,
+        reserved,
+    );
+    fields!(
+        DrmCastkmsRendererUnregisterImage,
+        "drm_castkms_renderer_unregister_image",
+        image_id,
+        flags,
+        reserved,
     );
     layout!(DrmCastkmsRendererJob, "drm_castkms_renderer_job");
-    field!(
+    fields!(
         DrmCastkmsRendererJob,
+        "drm_castkms_renderer_job",
+        version,
+        bytes,
+        job_id,
         constraints_id,
-        "drm_castkms_renderer_job.constraints_id"
+        content_serial,
+        width,
+        height,
+        plane_count,
+        acquire_fence_fd,
+        output_color_op_count,
+        reserved,
     );
     layout!(DrmCastkmsRendererPlane, "drm_castkms_renderer_plane");
-    field!(
+    fields!(
         DrmCastkmsRendererPlane,
+        "drm_castkms_renderer_plane",
+        bytes,
+        role,
+        zpos,
+        format,
+        modifier,
+        width,
+        height,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+        crtc_x,
+        crtc_y,
+        crtc_w,
+        crtc_h,
+        color_encoding,
+        color_range,
+        memory_plane_count,
+        color_op_count,
         memory_planes,
-        "drm_castkms_renderer_plane.memory_planes"
     );
     layout!(DrmCastkmsRendererColorOp, "drm_castkms_renderer_color_op");
+    fields!(
+        DrmCastkmsRendererColorOp,
+        "drm_castkms_renderer_color_op",
+        kind,
+        payload_bytes,
+    );
+
+    value!(RENDERER_VERSION, "DRM_CASTKMS_RENDERER_VERSION");
+    value!(
+        RENDERER_CONSTRAINTS_VERSION,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_VERSION"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_KIND,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_KIND"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_MAX_FORMATS,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_MAX_FORMATS"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_HEADER_BYTES,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_HEADER_BYTES"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_FORMAT_BYTES,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_FORMAT_BYTES"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_MAX_BYTES,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_MAX_BYTES"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_CROP,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_CROP"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_FRACTIONAL,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_FRACTIONAL"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_POSITION,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_POSITION"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_SCALE,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_SCALE"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_SRGB,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_SRGB"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_PLANE_MATRIX,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_PLANE_MATRIX"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_OUTPUT_MATRIX,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_OUTPUT_MATRIX"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_FORMAT_NATIVE,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_FORMAT_NATIVE"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_FORMAT_IMPORTED,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_FORMAT_IMPORTED"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_FORMAT_EXPLICIT_MODIFIER,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_FORMAT_EXPLICIT_MODIFIER"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_ROLE_PRIMARY,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_ROLE_PRIMARY"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_ROLE_OVERLAY,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_ROLE_OVERLAY"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_ROLE_CURSOR,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_ROLE_CURSOR"
+    );
+    value!(YUV_ENCODING_BT601, "DRM_CASTKMS_YUV_ENCODING_BT601");
+    value!(YUV_ENCODING_BT709, "DRM_CASTKMS_YUV_ENCODING_BT709");
+    value!(YUV_ENCODING_BT2020, "DRM_CASTKMS_YUV_ENCODING_BT2020");
+    value!(YUV_RANGE_LIMITED, "DRM_CASTKMS_YUV_RANGE_LIMITED");
+    value!(YUV_RANGE_FULL, "DRM_CASTKMS_YUV_RANGE_FULL");
+    value!(
+        RENDERER_CONSTRAINTS_YUV_ENCODING_BT601,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_YUV_ENCODING_BT601"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_YUV_ENCODING_BT709,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_YUV_ENCODING_BT709"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_YUV_ENCODING_BT2020,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_YUV_ENCODING_BT2020"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_YUV_RANGE_LIMITED,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_YUV_RANGE_LIMITED"
+    );
+    value!(
+        RENDERER_CONSTRAINTS_YUV_RANGE_FULL,
+        "DRM_CASTKMS_RENDERER_CONSTRAINTS_YUV_RANGE_FULL"
+    );
+    value!(
+        RENDERER_RELEASE_NO_ACCESS,
+        "DRM_CASTKMS_RENDERER_RELEASE_NO_ACCESS"
+    );
+    value!(
+        RENDERER_RELEASE_CPU_DONE,
+        "DRM_CASTKMS_RENDERER_RELEASE_CPU_DONE"
+    );
+    value!(
+        RENDERER_RELEASE_SUBMITTED,
+        "DRM_CASTKMS_RENDERER_RELEASE_SUBMITTED"
+    );
+    value!(
+        RENDERER_MAX_MEMORY_PLANES,
+        "DRM_CASTKMS_RENDERER_MAX_MEMORY_PLANES"
+    );
+    value!(RENDERER_STATE_EMPTY, "DRM_CASTKMS_RENDERER_STATE_EMPTY");
+    value!(
+        RENDERER_STATE_CONFIGURED,
+        "DRM_CASTKMS_RENDERER_STATE_CONFIGURED"
+    );
+    value!(
+        RENDERER_STATE_PUBLISHING,
+        "DRM_CASTKMS_RENDERER_STATE_PUBLISHING"
+    );
+    value!(
+        RENDERER_STATE_PUBLISHED,
+        "DRM_CASTKMS_RENDERER_STATE_PUBLISHED"
+    );
+    value!(
+        RENDERER_STATE_WITHDRAWN,
+        "DRM_CASTKMS_RENDERER_STATE_WITHDRAWN"
+    );
+    value!(RENDERER_JOB_VERSION, "DRM_CASTKMS_RENDERER_JOB_VERSION");
+    value!(RENDERER_JOB_MAX_BYTES, "DRM_CASTKMS_RENDERER_JOB_MAX_BYTES");
+    value!(
+        RENDERER_JOB_MAX_PLANES,
+        "DRM_CASTKMS_RENDERER_JOB_MAX_PLANES"
+    );
+    value!(
+        RENDERER_JOB_MAX_COLOR_OPS,
+        "DRM_CASTKMS_RENDERER_JOB_MAX_COLOR_OPS"
+    );
+    value!(RENDERER_PLANE_PRIMARY, "DRM_CASTKMS_RENDERER_PLANE_PRIMARY");
+    value!(RENDERER_PLANE_OVERLAY, "DRM_CASTKMS_RENDERER_PLANE_OVERLAY");
+    value!(RENDERER_PLANE_CURSOR, "DRM_CASTKMS_RENDERER_PLANE_CURSOR");
+    value!(
+        RENDERER_COLOR_OP_BYPASS,
+        "DRM_CASTKMS_RENDERER_COLOR_OP_BYPASS"
+    );
+    value!(
+        RENDERER_COLOR_OP_SRGB_EOTF,
+        "DRM_CASTKMS_RENDERER_COLOR_OP_SRGB_EOTF"
+    );
+    value!(
+        RENDERER_COLOR_OP_SRGB_INVERSE_EOTF,
+        "DRM_CASTKMS_RENDERER_COLOR_OP_SRGB_INVERSE_EOTF"
+    );
+    value!(
+        RENDERER_COLOR_OP_MATRIX,
+        "DRM_CASTKMS_RENDERER_COLOR_OP_MATRIX"
+    );
+    value!(RENDERER_COLOR_OP_LUT, "DRM_CASTKMS_RENDERER_COLOR_OP_LUT");
+
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_QUERY",
+        request_code_read,
+        0x40,
+        DrmCastkmsRendererQuery
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_CONFIGURE",
+        request_code_write,
+        0x41,
+        DrmCastkmsRendererConfigure
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_PUBLISH",
+        request_code_write,
+        0x42,
+        DrmCastkmsRendererPublish
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_WITHDRAW",
+        request_code_write,
+        0x43,
+        DrmCastkmsRendererWithdraw
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_REGISTER_IMAGE",
+        request_code_write,
+        0x44,
+        DrmCastkmsRendererRegisterImage
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_UNREGISTER_IMAGE",
+        request_code_write,
+        0x45,
+        DrmCastkmsRendererUnregisterImage
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_ACQUIRE_JOB",
+        request_code_write,
+        0x46,
+        DrmCastkmsRendererAcquireJob
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_RELEASE_JOB",
+        request_code_write,
+        0x47,
+        DrmCastkmsRendererReleaseJob
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_ACQUIRE_OUTPUT",
+        request_code_write,
+        0x48,
+        DrmCastkmsRendererAcquireOutput
+    );
+    ioctl!(
+        "DRM_IOCTL_CASTKMS_RENDERER_RELEASE_OUTPUT",
+        request_code_write,
+        0x49,
+        DrmCastkmsRendererReleaseOutput
+    );
 }
