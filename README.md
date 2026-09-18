@@ -70,7 +70,7 @@ The current session bundle is video-only, so display creation must include
 
 `pronkd --capture-source final-image` selects the generic final-image capture
 pipeline instead of the userspace renderer. It does not publish a renderer
-offer or select its display constraints. That pipeline uses CPU-mappable linear
+backend or select its display constraints. That pipeline uses CPU-mappable linear
 destinations from `/dev/dma_heap/system`, which must be accessible to the
 service account.
 The installed service keeps the `renderer` default; selecting either source

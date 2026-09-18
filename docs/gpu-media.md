@@ -713,18 +713,19 @@ sources or submitted reads.
 An active renderer additionally owns a bounded pool of packed, exportable
 images that never cross into PipeWire or the encoder. Each Vulkan image is
 inseparably paired with its increasing endpoint-local CastKMS registration.
-`DEQUEUE_SCENE` receives that registration, so the kernel job and the native
-destination cannot be accidentally exchanged. The floating-point images used
-for layer color and blending remain non-exportable implementation storage.
+`ACQUIRE_JOB` names that registration as its target, so the kernel job and the
+native destination cannot be accidentally exchanged. The floating-point images
+used for layer color and blending remain non-exportable implementation storage.
 Allocation and native-layout validation finish before publication. Image
-registration assigns endpoint-local identities while the offer remains a
-draft; the completed private probe then permits publication of its constraints.
+registration assigns endpoint-local identities while the renderer remains
+configured but unpublished; completion of private preparation then permits
+publication of its constraints.
 
 The production-facing transaction reserves both the complete floating-point
-`ScenePool` slot and one registered packed image before dequeue. It imports and
+`ScenePool` slot and one registered packed image before job acquisition. It imports and
 stages every source, waits for valid private source pixels, performs complete
 scene composition, then converts the result into the registered packed image.
-Only the completion from that final write is supplied to `RELEASE_SOURCE`.
+Only the completion from that final write is supplied to `RELEASE_JOB`.
 Because the operations execute in order on the same native queue and earlier
 stages have completed, that record closes every source read and the registered
 private-image write. No source job is released after staging alone.
@@ -744,7 +745,7 @@ access to the raw job descriptors and the per-job composer.
 
 `SceneReader` owns the active renderer endpoint, qualified storage profile,
 floating-point pool, and registered packed-image pool. Every attempt reserves
-both kinds of storage before it dequeues a source-bearing job. Idle dequeue and
+both kinds of storage before it acquires a source-bearing job. An idle acquisition and
 metadata rejection release without access and restore the whole reservation.
 If a registered image is still retained by a kernel output read, the reader
 tries another pool entry; exhausting the pool defers admission without holding
@@ -777,7 +778,7 @@ reader above. `castkms-renderer` owns and validates the complete packet under
 one kernel job, including all installed descriptors, geometry, stacking and
 color payloads. Renderer startup declares exact whole-scene constraints,
 constructs the matching reusable storage profile, registers its private
-images, completes the native probe, and publishes the offer. The KMS client
+images, completes private preparation, and publishes the renderer. The KMS client
 discovers and selects that entry independently.
 
 Output color also remains an ordered raw operation list: the current record

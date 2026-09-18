@@ -44,7 +44,7 @@ impl<'job, F: AsFd> QualifiedSceneJob<'job, F> {
                 self.composer.profile(),
                 self.composer.device(),
                 layer,
-                self.job.producer_completion(),
+                self.job.acquire_fence(),
             )?);
         }
         Ok(sources)

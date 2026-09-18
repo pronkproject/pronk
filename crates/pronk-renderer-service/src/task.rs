@@ -6,7 +6,9 @@ use std::os::fd::AsFd;
 use castkms_renderer::Renderer;
 use drm_display_executor::scene::geometry::Extent;
 use pronk_gpu::vulkan::Device;
-use pronk_renderer_worker::{PreparedSceneImages, PrimarySceneProfile, PrivateProbe, SceneReader};
+use pronk_renderer_worker::{
+    PreparedSceneImages, PrimarySceneProfile, PrivatePreparation, SceneReader,
+};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -102,26 +104,23 @@ fn prepare_generation<F: AsFd>(
         }
     };
     let (constraints, storage) = profile.into_parts();
-    let mut draft = match renderer.prepare(&constraints, output) {
-        Ok(draft) => draft,
+    let mut configuration = match renderer.configure(&constraints, output) {
+        Ok(configuration) => configuration,
         Err(failure) => {
             let (_, error) = failure.into_parts();
             return Err(error);
         }
     };
-    let scene_images = scene_images.register(&mut draft)?;
-    let probe = match PrivateProbe::prepare(device, draft) {
-        Ok(probe) => probe,
+    let scene_images = scene_images.register(&mut configuration)?;
+    let preparation = match PrivatePreparation::prepare(device, configuration) {
+        Ok(preparation) => preparation,
         Err(failure) => {
             let (_, error) = failure.into_parts();
             return Err(error);
         }
     };
-    let probed = match probe.submit() {
-        Ok(probed) => probed,
-        Err(failure) => return Err(failure.into_error()),
-    };
-    let published = match probed.publish() {
+    let configuration = preparation.complete();
+    let published = match configuration.publish(None) {
         Ok(published) => published,
         Err(failure) => return Err(failure.into_error()),
     };

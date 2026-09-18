@@ -5,7 +5,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::fd::AsFd;
 use std::sync::Arc;
 
-use castkms_renderer::{RegisteredImage, RendererDraft};
+use castkms_renderer::{RegisteredImage, RendererConfiguration};
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{
     DestinationCopy, DestinationImage, Device, Image, ImageLayout, PrivateCopy,
@@ -103,7 +103,7 @@ pub(crate) struct CopiedRecipientImage {
     pub(crate) completion: SyncFile,
 }
 
-/// Bounded private images registered for one renderer offer.
+/// Bounded private images registered for one renderer configuration.
 pub struct RegisteredSceneImages {
     identity: Arc<()>,
     images: Vec<SceneImage>,
@@ -111,7 +111,7 @@ pub struct RegisteredSceneImages {
     capacity: NonZeroUsize,
 }
 
-/// Packed private storage allocated while a renderer offer remains unpublished.
+/// Packed private storage allocated while a renderer configuration remains unpublished.
 #[must_use = "register the prepared images before publishing their renderer"]
 pub struct PreparedSceneImages {
     images: Vec<Image>,
@@ -156,7 +156,7 @@ impl PreparedSceneImages {
 
     pub fn register<F: AsFd>(
         self,
-        renderer: &mut RendererDraft<F>,
+        renderer: &mut RendererConfiguration<F>,
     ) -> io::Result<RegisteredSceneImages> {
         let Self {
             images: prepared,
@@ -239,7 +239,7 @@ impl RegisteredSceneImages {
 }
 
 fn cleanup<F: AsFd>(
-    renderer: &mut RendererDraft<F>,
+    renderer: &mut RendererConfiguration<F>,
     images: Vec<SceneImage>,
     primary: io::Error,
 ) -> io::Error {

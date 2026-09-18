@@ -1,8 +1,8 @@
-//! Renderer offers through an anonymous CastKMS capability.
+//! Renderer backends through an anonymous CastKMS capability.
 //!
 //! A renderer descriptor grants no modesetting or final-image capture access.
-//! It prepares one immutable whole-scene offer, names renderer-private storage,
-//! reports submitted source reads after KMS selects that offer, and transfers
+//! It configures one immutable whole-scene backend, names renderer-private storage,
+//! reports submitted source reads after KMS selects that backend, and transfers
 //! completed private images into separately authorized recipient storage.
 
 mod constraints;
@@ -24,17 +24,16 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 
 use castkms_sys::{
-    drm_ioctl_castkms_renderer_prepare_offer, drm_ioctl_castkms_renderer_publish_offer,
-    drm_ioctl_castkms_renderer_query, drm_ioctl_castkms_renderer_submit_probe,
-    drm_ioctl_castkms_renderer_withdraw_offer, DrmCastkmsRendererOfferResult,
-    DrmCastkmsRendererPrepareOffer, DrmCastkmsRendererPublishOffer, DrmCastkmsRendererQuery,
-    DrmCastkmsRendererSubmitProbe, DrmCastkmsRendererWithdrawOffer, RENDERER_STATE_DRAFT,
+    drm_ioctl_castkms_renderer_configure, drm_ioctl_castkms_renderer_publish,
+    drm_ioctl_castkms_renderer_query, drm_ioctl_castkms_renderer_withdraw,
+    DrmCastkmsRendererConfigure, DrmCastkmsRendererPublish, DrmCastkmsRendererPublishResult,
+    DrmCastkmsRendererQuery, DrmCastkmsRendererWithdraw, RENDERER_STATE_CONFIGURED,
     RENDERER_STATE_EMPTY, RENDERER_STATE_PUBLISHED, RENDERER_STATE_PUBLISHING,
     RENDERER_STATE_WITHDRAWN, RENDERER_VERSION,
 };
 use drm_display_executor::scene::geometry::Extent;
 
-fn dequeue_is_idle(error: nix::errno::Errno) -> bool {
+fn acquisition_is_idle(error: nix::errno::Errno) -> bool {
     matches!(
         error,
         nix::errno::Errno::ENODATA | nix::errno::Errno::ESTALE
@@ -45,7 +44,7 @@ fn dequeue_is_idle(error: nix::errno::Errno) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointState {
     Empty,
-    Draft,
+    Configured,
     Publishing,
     Published,
     Withdrawn,
@@ -93,11 +92,11 @@ impl<F: AsFd> Renderer<F> {
     }
 
     /// Declare immutable whole-scene constraints and private-pool dimensions.
-    pub fn prepare(
+    pub fn configure(
         self,
         constraints: &RendererConstraints,
         output: Extent,
-    ) -> Result<RendererDraft<F>, OperationError<Self>> {
+    ) -> Result<RendererConfiguration<F>, OperationError<Self>> {
         if !constraints.contains_output(output) {
             return Err(OperationError::new(
                 self,
@@ -108,7 +107,7 @@ impl<F: AsFd> Renderer<F> {
             ));
         }
         let bytes = constraints.encode();
-        let request = DrmCastkmsRendererPrepareOffer {
+        let request = DrmCastkmsRendererConfigure {
             constraints: bytes.as_ptr() as u64,
             constraints_size: bytes
                 .len()
@@ -121,11 +120,11 @@ impl<F: AsFd> Renderer<F> {
         // SAFETY: The initialized request and immutable encoded constraints
         // remain live throughout the synchronous ioctl.
         if let Err(error) =
-            unsafe { drm_ioctl_castkms_renderer_prepare_offer(self.as_fd().as_raw_fd(), &request) }
+            unsafe { drm_ioctl_castkms_renderer_configure(self.as_fd().as_raw_fd(), &request) }
         {
             return Err(OperationError::new(self, error.into()));
         }
-        Ok(RendererDraft {
+        Ok(RendererConfiguration {
             endpoint: self.endpoint,
             output,
         })
@@ -143,68 +142,34 @@ impl<F: AsFd> AsFd for Renderer<F> {
     }
 }
 
-/// One declared renderer offer whose private resources remain unpublished.
-#[must_use = "publish the renderer offer or close its endpoint"]
+/// One configured renderer whose private resources remain unpublished.
+#[must_use = "publish the renderer configuration or close its endpoint"]
 #[derive(Debug)]
-pub struct RendererDraft<F: AsFd> {
+pub struct RendererConfiguration<F: AsFd> {
     endpoint: Endpoint<F>,
     output: Extent,
 }
 
-impl<F: AsFd> RendererDraft<F> {
+impl<F: AsFd> RendererConfiguration<F> {
     pub fn output(&self) -> Extent {
         self.output
     }
 
-    /// Submit the one private operation that proves the native path is usable.
-    pub fn submit_probe(
+    /// Publish a selectable constraints entry after private preparation completes.
+    pub fn publish(
         self,
-        completion: Option<BorrowedFd<'_>>,
-    ) -> Result<ProbedRenderer<F>, OperationError<Self>> {
-        let request = DrmCastkmsRendererSubmitProbe {
-            completion_fd: completion.map_or(-1, |fd| fd.as_raw_fd()),
+        ready_fence: Option<BorrowedFd<'_>>,
+    ) -> Result<PublishedRenderer<F>, PublicationError<F>> {
+        let mut result = DrmCastkmsRendererPublishResult::default();
+        let request = DrmCastkmsRendererPublish {
+            result: (&mut result as *mut DrmCastkmsRendererPublishResult) as u64,
+            ready_fence_fd: ready_fence.map_or(-1, |fd| fd.as_raw_fd()),
             ..Default::default()
         };
-        // SAFETY: The initialized request and any borrowed completion descriptor
-        // remain live throughout the synchronous ioctl.
+        // SAFETY: The request, result, and optional borrowed readiness fence remain
+        // live throughout the synchronous ioctl.
         if let Err(error) =
-            unsafe { drm_ioctl_castkms_renderer_submit_probe(self.as_fd().as_raw_fd(), &request) }
-        {
-            return Err(OperationError::new(self, error.into()));
-        }
-        Ok(ProbedRenderer { draft: self })
-    }
-}
-
-impl<F: AsFd> AsFd for RendererDraft<F> {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.endpoint.as_fd()
-    }
-}
-
-/// A renderer draft with one materialized private probe.
-#[must_use = "publish the renderer offer or close its endpoint"]
-#[derive(Debug)]
-pub struct ProbedRenderer<F: AsFd> {
-    draft: RendererDraft<F>,
-}
-
-impl<F: AsFd> ProbedRenderer<F> {
-    pub fn output(&self) -> Extent {
-        self.draft.output
-    }
-
-    /// Publish a selectable constraints entry after the probe completes.
-    pub fn publish(self) -> Result<PublishedRenderer<F>, PublicationError<F>> {
-        let mut result = DrmCastkmsRendererOfferResult::default();
-        let request = DrmCastkmsRendererPublishOffer {
-            result: (&mut result as *mut DrmCastkmsRendererOfferResult) as u64,
-            ..Default::default()
-        };
-        // SAFETY: The initialized request and writable result remain live
-        // throughout the synchronous ioctl.
-        if let Err(error) =
-            unsafe { drm_ioctl_castkms_renderer_publish_offer(self.as_fd().as_raw_fd(), &request) }
+            unsafe { drm_ioctl_castkms_renderer_publish(self.as_fd().as_raw_fd(), &request) }
         {
             return Err(PublicationError::retryable(self, error.into()));
         }
@@ -215,35 +180,35 @@ impl<F: AsFd> ProbedRenderer<F> {
         };
         if result.reserved != [0; 3] {
             return Err(PublicationError::terminal(invalid_data(
-                "CastKMS returned reserved offer data",
+                "CastKMS returned reserved publication data",
             )));
         }
         Ok(PublishedRenderer {
-            draft: self.draft,
+            configuration: self,
             constraints_id,
             withdrawn: false,
         })
     }
 }
 
-impl<F: AsFd> AsFd for ProbedRenderer<F> {
+impl<F: AsFd> AsFd for RendererConfiguration<F> {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.draft.as_fd()
+        self.endpoint.as_fd()
     }
 }
 
-/// A selectable renderer offer and its source-job channel.
-#[must_use = "retain the renderer while its offer or source jobs remain in use"]
+/// A selectable renderer backend and its source-job channel.
+#[must_use = "retain the renderer while its backend or source jobs remain in use"]
 #[derive(Debug)]
 pub struct PublishedRenderer<F: AsFd> {
-    draft: RendererDraft<F>,
+    configuration: RendererConfiguration<F>,
     constraints_id: NonZeroU64,
     withdrawn: bool,
 }
 
 impl<F: AsFd> PublishedRenderer<F> {
     pub fn output(&self) -> Extent {
-        self.draft.output
+        self.configuration.output
     }
 
     pub fn constraints_id(&self) -> NonZeroU64 {
@@ -252,7 +217,7 @@ impl<F: AsFd> PublishedRenderer<F> {
 
     /// Stop new selection and source admission without ending cleanup access.
     pub fn withdraw(mut self) -> Result<WithdrawnRenderer<F>, OperationError<Self>> {
-        if let Err(error) = withdraw_offer(self.as_fd()) {
+        if let Err(error) = withdraw(self.as_fd()) {
             return Err(OperationError::new(self, error));
         }
         self.withdrawn = true;
@@ -263,18 +228,18 @@ impl<F: AsFd> PublishedRenderer<F> {
 impl<F: AsFd> Drop for PublishedRenderer<F> {
     fn drop(&mut self) {
         if !self.withdrawn {
-            let _ = withdraw_offer(self.as_fd());
+            let _ = withdraw(self.as_fd());
         }
     }
 }
 
 impl<F: AsFd> AsFd for PublishedRenderer<F> {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.draft.as_fd()
+        self.configuration.as_fd()
     }
 }
 
-/// A withdrawn offer retained for source release and image cleanup.
+/// A withdrawn backend retained for source release and image cleanup.
 #[must_use = "retain the endpoint until its outstanding work is resolved"]
 #[derive(Debug)]
 pub struct WithdrawnRenderer<F: AsFd> {
@@ -293,11 +258,11 @@ impl<F: AsFd> AsFd for WithdrawnRenderer<F> {
     }
 }
 
-fn withdraw_offer(fd: BorrowedFd<'_>) -> io::Result<()> {
-    let request = DrmCastkmsRendererWithdrawOffer::default();
+fn withdraw(fd: BorrowedFd<'_>) -> io::Result<()> {
+    let request = DrmCastkmsRendererWithdraw::default();
     // SAFETY: The initialized request remains live throughout the synchronous
     // ioctl.
-    unsafe { drm_ioctl_castkms_renderer_withdraw_offer(fd.as_raw_fd(), &request) }?;
+    unsafe { drm_ioctl_castkms_renderer_withdraw(fd.as_raw_fd(), &request) }?;
     Ok(())
 }
 
@@ -344,12 +309,12 @@ impl<T: fmt::Debug> std::error::Error for OperationError<T> {}
 
 /// Failed publication, with retry ownership only when nothing was published.
 pub struct PublicationError<F: AsFd> {
-    retry: Option<ProbedRenderer<F>>,
+    retry: Option<RendererConfiguration<F>>,
     error: io::Error,
 }
 
 impl<F: AsFd> PublicationError<F> {
-    fn retryable(retry: ProbedRenderer<F>, error: io::Error) -> Self {
+    fn retryable(retry: RendererConfiguration<F>, error: io::Error) -> Self {
         Self {
             retry: Some(retry),
             error,
@@ -364,11 +329,11 @@ impl<F: AsFd> PublicationError<F> {
         &self.error
     }
 
-    /// Return the unpublished draft when the kernel rejected the ioctl.
+    /// Return the unpublished configuration when the kernel rejected the ioctl.
     ///
     /// A malformed successful reply closes the endpoint instead, because its
     /// kernel state may already be published and cannot safely be retried.
-    pub fn into_retry(self) -> Option<ProbedRenderer<F>> {
+    pub fn into_retry(self) -> Option<RendererConfiguration<F>> {
         self.retry
     }
 
@@ -434,7 +399,7 @@ fn validate_description(query: DrmCastkmsRendererQuery) -> io::Result<EndpointDe
     }
     let state = match query.state {
         RENDERER_STATE_EMPTY => EndpointState::Empty,
-        RENDERER_STATE_DRAFT => EndpointState::Draft,
+        RENDERER_STATE_CONFIGURED => EndpointState::Configured,
         RENDERER_STATE_PUBLISHING => EndpointState::Publishing,
         RENDERER_STATE_PUBLISHED => EndpointState::Published,
         RENDERER_STATE_WITHDRAWN => EndpointState::Withdrawn,
@@ -465,18 +430,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unselected_live_offer_is_idle() {
-        assert!(dequeue_is_idle(nix::errno::Errno::ESTALE));
-        assert!(dequeue_is_idle(nix::errno::Errno::ENODATA));
-        assert!(!dequeue_is_idle(nix::errno::Errno::EKEYREVOKED));
-        assert!(!dequeue_is_idle(nix::errno::Errno::EBUSY));
+    fn an_unselected_live_backend_is_idle() {
+        assert!(acquisition_is_idle(nix::errno::Errno::ESTALE));
+        assert!(acquisition_is_idle(nix::errno::Errno::ENODATA));
+        assert!(!acquisition_is_idle(nix::errno::Errno::EKEYREVOKED));
+        assert!(!acquisition_is_idle(nix::errno::Errno::EBUSY));
     }
 
     #[test]
     fn endpoint_description_binds_identity_to_published_states() {
         for (state, id) in [
             (RENDERER_STATE_EMPTY, 0),
-            (RENDERER_STATE_DRAFT, 0),
+            (RENDERER_STATE_CONFIGURED, 0),
             (RENDERER_STATE_PUBLISHING, 0),
             (RENDERER_STATE_PUBLISHED, 7),
             (RENDERER_STATE_WITHDRAWN, 7),

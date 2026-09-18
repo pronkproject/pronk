@@ -5,7 +5,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 use castkms_sys::{
-    drm_ioctl_castkms_renderer_release_source, DrmCastkmsRendererReleaseSource, RENDERER_MAX_PLANES,
+    drm_ioctl_castkms_renderer_release_job, DrmCastkmsRendererReleaseJob,
+    RENDERER_MAX_MEMORY_PLANES,
 };
 use drm_display_executor::scene::geometry::Extent;
 use nix::fcntl::{fcntl, FcntlArg};
@@ -55,7 +56,7 @@ pub struct SourceImage {
     format: u32,
     modifier: FormatModifier,
     extent: Extent,
-    planes: [Option<SourcePlane>; RENDERER_MAX_PLANES],
+    planes: [Option<SourcePlane>; RENDERER_MAX_MEMORY_PLANES],
     plane_count: usize,
 }
 
@@ -64,10 +65,10 @@ impl SourceImage {
         format: u32,
         modifier: FormatModifier,
         extent: Extent,
-        planes: [Option<SourcePlane>; RENDERER_MAX_PLANES],
+        planes: [Option<SourcePlane>; RENDERER_MAX_MEMORY_PLANES],
         plane_count: usize,
     ) -> Self {
-        debug_assert!((1..=RENDERER_MAX_PLANES).contains(&plane_count));
+        debug_assert!((1..=RENDERER_MAX_MEMORY_PLANES).contains(&plane_count));
         debug_assert!(planes[..plane_count].iter().all(Option::is_some));
         debug_assert!(planes[plane_count..].iter().all(Option::is_none));
         Self {
@@ -132,20 +133,20 @@ pub(super) fn has_close_on_exec(fd: &OwnedFd) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn release_source(
+pub(super) fn release_job(
     fd: BorrowedFd<'_>,
     id: NonZeroU64,
     kind: u32,
     completion: Option<BorrowedFd<'_>>,
 ) -> io::Result<()> {
-    let request = DrmCastkmsRendererReleaseSource {
+    let request = DrmCastkmsRendererReleaseJob {
         job_id: id.get(),
         kind,
-        completion_fd: completion.map_or(-1, |fd| fd.as_raw_fd()),
+        release_fence_fd: completion.map_or(-1, |fd| fd.as_raw_fd()),
         ..Default::default()
     };
     // SAFETY: The fixed-width request remains live throughout the synchronous
     // ioctl, and any completion descriptor is borrowed for that duration.
-    unsafe { drm_ioctl_castkms_renderer_release_source(fd.as_raw_fd(), &request) }?;
+    unsafe { drm_ioctl_castkms_renderer_release_job(fd.as_raw_fd(), &request) }?;
     Ok(())
 }

@@ -22,31 +22,31 @@ pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 pub const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 pub const RENDERER_VERSION: u32 = 1;
 pub const RENDERER_STATE_EMPTY: u32 = 0;
-pub const RENDERER_STATE_DRAFT: u32 = 1;
+pub const RENDERER_STATE_CONFIGURED: u32 = 1;
 pub const RENDERER_STATE_PUBLISHING: u32 = 2;
 pub const RENDERER_STATE_PUBLISHED: u32 = 3;
 pub const RENDERER_STATE_WITHDRAWN: u32 = 4;
 pub const RENDERER_RELEASE_NO_ACCESS: u32 = 1;
 pub const RENDERER_RELEASE_CPU_DONE: u32 = 2;
 pub const RENDERER_RELEASE_SUBMITTED: u32 = 3;
-pub const RENDERER_MAX_PLANES: usize = 4;
-pub const RENDERER_SCENE_VERSION: u32 = 1;
-pub const RENDERER_SCENE_MAX_BYTES: usize = 65_536;
-pub const RENDERER_SCENE_MAX_LAYERS: usize = 24;
-pub const RENDERER_SCENE_MAX_COLOR_OPS: usize = 16;
-pub const RENDERER_LAYER_PRIMARY: u32 = 0;
-pub const RENDERER_LAYER_OVERLAY: u32 = 1;
-pub const RENDERER_LAYER_CURSOR: u32 = 2;
-pub const RENDERER_COLOR_BYPASS: u32 = 0;
-pub const RENDERER_COLOR_SRGB_EOTF: u32 = 1;
-pub const RENDERER_COLOR_SRGB_INVERSE_EOTF: u32 = 2;
-pub const RENDERER_COLOR_MATRIX: u32 = 3;
-pub const RENDERER_COLOR_LUT: u32 = 4;
+pub const RENDERER_MAX_MEMORY_PLANES: usize = 4;
+pub const RENDERER_JOB_VERSION: u32 = 1;
+pub const RENDERER_JOB_MAX_BYTES: usize = 65_536;
+pub const RENDERER_JOB_MAX_PLANES: usize = 24;
+pub const RENDERER_JOB_MAX_COLOR_OPS: usize = 16;
+pub const RENDERER_PLANE_PRIMARY: u32 = 0;
+pub const RENDERER_PLANE_OVERLAY: u32 = 1;
+pub const RENDERER_PLANE_CURSOR: u32 = 2;
+pub const RENDERER_COLOR_OP_BYPASS: u32 = 0;
+pub const RENDERER_COLOR_OP_SRGB_EOTF: u32 = 1;
+pub const RENDERER_COLOR_OP_SRGB_INVERSE_EOTF: u32 = 2;
+pub const RENDERER_COLOR_OP_MATRIX: u32 = 3;
+pub const RENDERER_COLOR_OP_LUT: u32 = 4;
 pub const RENDERER_CONSTRAINTS_VERSION: u32 = 1;
 pub const RENDERER_CONSTRAINTS_KIND: u32 = 1;
 pub const RENDERER_CONSTRAINTS_MAX_FORMATS: usize = 256;
 pub const RENDERER_CONSTRAINTS_HEADER_BYTES: usize = 128;
-pub const RENDERER_CONSTRAINTS_FORMAT_BYTES: usize = 32;
+pub const RENDERER_CONSTRAINTS_FORMAT_BYTES: usize = 56;
 pub const RENDERER_CONSTRAINTS_MAX_BYTES: usize = RENDERER_CONSTRAINTS_HEADER_BYTES
     + RENDERER_CONSTRAINTS_FORMAT_BYTES * RENDERER_CONSTRAINTS_MAX_FORMATS;
 pub const RENDERER_CONSTRAINTS_CROP: u32 = 1 << 0;
@@ -59,6 +59,9 @@ pub const RENDERER_CONSTRAINTS_OUTPUT_MATRIX: u32 = 1 << 6;
 pub const RENDERER_CONSTRAINTS_FORMAT_NATIVE: u32 = 1 << 0;
 pub const RENDERER_CONSTRAINTS_FORMAT_IMPORTED: u32 = 1 << 1;
 pub const RENDERER_CONSTRAINTS_FORMAT_EXPLICIT_MODIFIER: u32 = 1 << 2;
+pub const RENDERER_CONSTRAINTS_ROLE_PRIMARY: u32 = 1 << 0;
+pub const RENDERER_CONSTRAINTS_ROLE_OVERLAY: u32 = 1 << 1;
+pub const RENDERER_CONSTRAINTS_ROLE_CURSOR: u32 = 1 << 2;
 pub const YUV_ENCODING_BT601: u32 = 0;
 pub const YUV_ENCODING_BT709: u32 = 1;
 pub const YUV_ENCODING_BT2020: u32 = 2;
@@ -183,7 +186,7 @@ pub struct DrmCastkmsRendererQuery {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererPrepareOffer {
+pub struct DrmCastkmsRendererConfigure {
     pub constraints: u64,
     pub constraints_size: u32,
     pub flags: u32,
@@ -194,33 +197,25 @@ pub struct DrmCastkmsRendererPrepareOffer {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererPublishOffer {
+pub struct DrmCastkmsRendererPublish {
     pub result: u64,
+    pub ready_fence_fd: i32,
     pub flags: u32,
-    pub reserved: u32,
-    pub padding: [u64; 2],
+    pub reserved: [u64; 2],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererOfferResult {
+pub struct DrmCastkmsRendererPublishResult {
     pub constraints_id: u64,
     pub reserved: [u64; 3],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererWithdrawOffer {
+pub struct DrmCastkmsRendererWithdraw {
     pub flags: u32,
     pub reserved: [u32; 3],
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[repr(C)]
-pub struct DrmCastkmsRendererSubmitProbe {
-    pub completion_fd: i32,
-    pub flags: u32,
-    pub reserved: [u64; 3],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -234,7 +229,7 @@ pub struct DrmCastkmsRendererConstraints {
     pub max_source: [u32; 2],
     pub min_scale: u32,
     pub max_scale: u32,
-    pub max_layers: u32,
+    pub max_planes: u32,
     pub max_roles: [u32; 3],
     pub max_color_operations: u32,
     pub max_lut_entries: u32,
@@ -249,17 +244,22 @@ pub struct DrmCastkmsRendererConstraints {
 #[repr(C)]
 pub struct DrmCastkmsRendererConstraintsFormat {
     pub fourcc: u32,
-    pub plane_count: u32,
+    pub memory_plane_count: u32,
     pub modifier: u64,
     pub flags: u32,
+    pub roles: u32,
+    pub width_alignment: u32,
+    pub height_alignment: u32,
     pub pitch_alignment: u32,
     pub offset_alignment: u32,
+    pub min_pitch: u32,
     pub max_pitch: u32,
+    pub reserved: [u32; 2],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererSourcePlane {
+pub struct DrmCastkmsRendererMemoryPlane {
     pub dma_buf_fd: i32,
     pub pitch: u32,
     pub offset: u32,
@@ -268,9 +268,9 @@ pub struct DrmCastkmsRendererSourcePlane {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererReleaseSource {
+pub struct DrmCastkmsRendererReleaseJob {
     pub job_id: u64,
-    pub completion_fd: i32,
+    pub release_fence_fd: i32,
     pub kind: u32,
     pub flags: u32,
     pub reserved: [u32; 3],
@@ -278,7 +278,7 @@ pub struct DrmCastkmsRendererReleaseSource {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererDequeueOutput {
+pub struct DrmCastkmsRendererAcquireOutput {
     pub result: u64,
     pub image_id: u64,
     pub flags: u32,
@@ -294,7 +294,7 @@ pub struct DrmCastkmsRendererOutput {
     pub width: u32,
     pub height: u32,
     pub format: u32,
-    pub plane_count: u32,
+    pub memory_plane_count: u32,
     pub modifier: u64,
     pub dma_buf_fd: i32,
     pub pitch: u32,
@@ -306,7 +306,7 @@ pub struct DrmCastkmsRendererOutput {
 #[repr(C)]
 pub struct DrmCastkmsRendererReleaseOutput {
     pub job_id: u64,
-    pub completion_fd: i32,
+    pub release_fence_fd: i32,
     pub kind: u32,
     pub flags: u32,
     pub reserved: [u32; 3],
@@ -314,9 +314,9 @@ pub struct DrmCastkmsRendererReleaseOutput {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererDequeueScene {
+pub struct DrmCastkmsRendererAcquireJob {
     pub result: u64,
-    pub image_id: u64,
+    pub target_image_id: u64,
     pub capacity: u32,
     pub flags: u32,
     pub reserved: u64,
@@ -344,7 +344,7 @@ pub struct DrmCastkmsRendererUnregisterImage {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererScene {
+pub struct DrmCastkmsRendererJob {
     pub version: u32,
     pub bytes: u32,
     pub job_id: u64,
@@ -352,35 +352,40 @@ pub struct DrmCastkmsRendererScene {
     pub content_serial: u64,
     pub width: u32,
     pub height: u32,
-    pub layer_count: u32,
-    pub producer_fd: i32,
-    pub output_color_count: u32,
+    pub plane_count: u32,
+    pub acquire_fence_fd: i32,
+    pub output_color_op_count: u32,
     pub reserved: u32,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererLayer {
+pub struct DrmCastkmsRendererPlane {
     pub bytes: u32,
-    pub kind: u32,
+    pub role: u32,
     pub zpos: u32,
     pub format: u32,
     pub modifier: u64,
     pub width: u32,
     pub height: u32,
-    pub source: [u32; 4],
-    pub position: [i32; 2],
-    pub destination: [u32; 2],
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub crtc_x: i32,
+    pub crtc_y: i32,
+    pub crtc_w: u32,
+    pub crtc_h: u32,
     pub color_encoding: u32,
     pub color_range: u32,
-    pub plane_count: u32,
-    pub color_count: u32,
-    pub planes: [DrmCastkmsRendererSourcePlane; RENDERER_MAX_PLANES],
+    pub memory_plane_count: u32,
+    pub color_op_count: u32,
+    pub memory_planes: [DrmCastkmsRendererMemoryPlane; RENDERER_MAX_MEMORY_PLANES],
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-pub struct DrmCastkmsRendererColor {
+pub struct DrmCastkmsRendererColorOp {
     pub kind: u32,
     pub payload_bytes: u32,
 }
@@ -397,63 +402,57 @@ nix::ioctl_read!(
     DrmCastkmsRendererQuery
 );
 nix::ioctl_write_ptr!(
-    drm_ioctl_castkms_renderer_prepare_offer,
+    drm_ioctl_castkms_renderer_configure,
     b'd',
     0x41,
-    DrmCastkmsRendererPrepareOffer
+    DrmCastkmsRendererConfigure
 );
 nix::ioctl_write_ptr!(
-    drm_ioctl_castkms_renderer_withdraw_offer,
-    b'd',
-    0x44,
-    DrmCastkmsRendererWithdrawOffer
-);
-nix::ioctl_write_ptr!(
-    drm_ioctl_castkms_renderer_submit_probe,
+    drm_ioctl_castkms_renderer_publish,
     b'd',
     0x42,
-    DrmCastkmsRendererSubmitProbe
+    DrmCastkmsRendererPublish
 );
 nix::ioctl_write_ptr!(
-    drm_ioctl_castkms_renderer_publish_offer,
+    drm_ioctl_castkms_renderer_withdraw,
     b'd',
     0x43,
-    DrmCastkmsRendererPublishOffer
+    DrmCastkmsRendererWithdraw
 );
 nix::ioctl_write_ptr!(
-    drm_ioctl_castkms_renderer_release_source,
+    drm_ioctl_castkms_renderer_release_job,
+    b'd',
+    0x47,
+    DrmCastkmsRendererReleaseJob
+);
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_renderer_acquire_output,
     b'd',
     0x48,
-    DrmCastkmsRendererReleaseSource
-);
-nix::ioctl_write_ptr!(
-    drm_ioctl_castkms_renderer_dequeue_output,
-    b'd',
-    0x49,
-    DrmCastkmsRendererDequeueOutput
+    DrmCastkmsRendererAcquireOutput
 );
 nix::ioctl_write_ptr!(
     drm_ioctl_castkms_renderer_release_output,
     b'd',
-    0x4a,
+    0x49,
     DrmCastkmsRendererReleaseOutput
 );
 nix::ioctl_write_ptr!(
-    drm_ioctl_castkms_renderer_dequeue_scene,
+    drm_ioctl_castkms_renderer_acquire_job,
     b'd',
-    0x47,
-    DrmCastkmsRendererDequeueScene
+    0x46,
+    DrmCastkmsRendererAcquireJob
 );
 nix::ioctl_write_ptr!(
     drm_ioctl_castkms_renderer_register_image,
     b'd',
-    0x45,
+    0x44,
     DrmCastkmsRendererRegisterImage
 );
 nix::ioctl_write_ptr!(
     drm_ioctl_castkms_renderer_unregister_image,
     b'd',
-    0x46,
+    0x45,
     DrmCastkmsRendererUnregisterImage
 );
 
@@ -465,45 +464,41 @@ mod tests {
     fn renderer_operations_match_the_uapi_layouts() {
         assert_eq!(RENDERER_VERSION, 1);
         assert_eq!(RENDERER_STATE_EMPTY, 0);
-        assert_eq!(RENDERER_STATE_DRAFT, 1);
+        assert_eq!(RENDERER_STATE_CONFIGURED, 1);
         assert_eq!(RENDERER_STATE_PUBLISHING, 2);
         assert_eq!(RENDERER_STATE_PUBLISHED, 3);
         assert_eq!(RENDERER_STATE_WITHDRAWN, 4);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererQuery>(), 32);
         assert_eq!(std::mem::align_of::<DrmCastkmsRendererQuery>(), 8);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererPrepareOffer>(), 48);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererConfigure>(), 48);
         assert_eq!(
-            std::mem::offset_of!(DrmCastkmsRendererPrepareOffer, constraints),
+            std::mem::offset_of!(DrmCastkmsRendererConfigure, constraints),
             0
         );
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererPublishOffer>(), 32);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererPublish>(), 32);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererPublish, result), 0);
         assert_eq!(
-            std::mem::offset_of!(DrmCastkmsRendererPublishOffer, result),
-            0
+            std::mem::offset_of!(DrmCastkmsRendererPublish, ready_fence_fd),
+            8
         );
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererOfferResult>(), 32);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererWithdrawOffer>(), 16);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererSubmitProbe>(), 32);
-        assert_eq!(
-            std::mem::offset_of!(DrmCastkmsRendererSubmitProbe, completion_fd),
-            0
-        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererPublishResult>(), 32);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererWithdraw>(), 16);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererConstraints>(), 128);
         assert_eq!(std::mem::align_of::<DrmCastkmsRendererConstraints>(), 4);
         assert_eq!(
             std::mem::size_of::<DrmCastkmsRendererConstraintsFormat>(),
-            32
+            56
         );
         assert_eq!(
             std::mem::align_of::<DrmCastkmsRendererConstraintsFormat>(),
             8
         );
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererSourcePlane>(), 16);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererReleaseSource>(), 32);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererDequeueOutput>(), 32);
-        assert_eq!(std::mem::align_of::<DrmCastkmsRendererDequeueOutput>(), 8);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererMemoryPlane>(), 16);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererReleaseJob>(), 32);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererAcquireOutput>(), 32);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererAcquireOutput>(), 8);
         assert_eq!(
-            std::mem::offset_of!(DrmCastkmsRendererDequeueOutput, image_id),
+            std::mem::offset_of!(DrmCastkmsRendererAcquireOutput, image_id),
             8
         );
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererOutput>(), 72);
@@ -514,35 +509,38 @@ mod tests {
         );
         assert_eq!(std::mem::offset_of!(DrmCastkmsRendererOutput, offset), 48);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererReleaseOutput>(), 32);
-        assert_eq!(RENDERER_SCENE_VERSION, 1);
-        assert_eq!(RENDERER_SCENE_MAX_BYTES, 65_536);
-        assert_eq!(RENDERER_SCENE_MAX_LAYERS, 24);
-        assert_eq!(RENDERER_SCENE_MAX_COLOR_OPS, 16);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererDequeueScene>(), 32);
-        assert_eq!(std::mem::align_of::<DrmCastkmsRendererDequeueScene>(), 8);
+        assert_eq!(RENDERER_JOB_VERSION, 1);
+        assert_eq!(RENDERER_JOB_MAX_BYTES, 65_536);
+        assert_eq!(RENDERER_JOB_MAX_PLANES, 24);
+        assert_eq!(RENDERER_JOB_MAX_COLOR_OPS, 16);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererAcquireJob>(), 32);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererAcquireJob>(), 8);
         assert_eq!(
-            std::mem::offset_of!(DrmCastkmsRendererDequeueScene, image_id),
+            std::mem::offset_of!(DrmCastkmsRendererAcquireJob, target_image_id),
             8
         );
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererRegisterImage>(), 48);
         assert_eq!(std::mem::align_of::<DrmCastkmsRendererRegisterImage>(), 8);
         assert_eq!(std::mem::size_of::<DrmCastkmsRendererUnregisterImage>(), 16);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererScene>(), 56);
-        assert_eq!(std::mem::align_of::<DrmCastkmsRendererScene>(), 8);
-        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererScene, job_id), 8);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererJob>(), 56);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererJob>(), 8);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererJob, job_id), 8);
         assert_eq!(
-            std::mem::offset_of!(DrmCastkmsRendererScene, constraints_id),
+            std::mem::offset_of!(DrmCastkmsRendererJob, constraints_id),
             16
         );
         assert_eq!(
-            std::mem::offset_of!(DrmCastkmsRendererScene, producer_fd),
+            std::mem::offset_of!(DrmCastkmsRendererJob, acquire_fence_fd),
             44
         );
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererLayer>(), 144);
-        assert_eq!(std::mem::align_of::<DrmCastkmsRendererLayer>(), 8);
-        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererLayer, modifier), 16);
-        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererLayer, planes), 80);
-        assert_eq!(std::mem::size_of::<DrmCastkmsRendererColor>(), 8);
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererPlane>(), 144);
+        assert_eq!(std::mem::align_of::<DrmCastkmsRendererPlane>(), 8);
+        assert_eq!(std::mem::offset_of!(DrmCastkmsRendererPlane, modifier), 16);
+        assert_eq!(
+            std::mem::offset_of!(DrmCastkmsRendererPlane, memory_planes),
+            80
+        );
+        assert_eq!(std::mem::size_of::<DrmCastkmsRendererColorOp>(), 8);
     }
 
     #[test]

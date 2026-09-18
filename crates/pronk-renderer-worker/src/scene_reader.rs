@@ -84,7 +84,7 @@ impl<F: AsFd> SceneReader<F> {
                 self.restore(buffers)?;
                 return Ok(SceneAttempt::NoSlot);
             };
-            match self.renderer.try_dequeue_scene(target.registration()) {
+            match self.renderer.try_acquire_job(target.registration()) {
                 Ok(Some(job)) => {
                     for image in deferred {
                         self.images
@@ -123,7 +123,7 @@ impl<F: AsFd> SceneReader<F> {
                             .map_err(|_| SceneAttemptError::ReturnSlot)?;
                     }
                     self.restore(buffers)?;
-                    return Err(SceneAttemptError::Dequeue(cause));
+                    return Err(SceneAttemptError::Acquire(cause));
                 }
             }
         };
@@ -243,8 +243,8 @@ pub enum SceneAttempt {
 pub enum SceneAttemptError {
     #[error("reserve a complete private scene slot: {0}")]
     Reserve(#[source] io::Error),
-    #[error("dequeue a complete CastKMS scene: {0}")]
-    Dequeue(#[source] io::Error),
+    #[error("acquire a complete CastKMS job: {0}")]
+    Acquire(#[source] io::Error),
     #[error("release an unused complete CastKMS scene: {0}")]
     ReleaseUnused(#[source] io::Error),
     #[error("return an unused complete private scene slot")]

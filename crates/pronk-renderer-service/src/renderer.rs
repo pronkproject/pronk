@@ -13,9 +13,9 @@ use tokio_util::sync::CancellationToken;
 use crate::task::{run, Started, TaskControl};
 use crate::types::{RendererStreamConfig, RendererStreamState};
 
-/// Published renderer offer owned by one dedicated native-work thread.
+/// Published renderer backend owned by one dedicated native-work thread.
 ///
-/// Publication does not select the offer. Explicit shutdown joins the task and
+/// Publication does not select the backend. Explicit shutdown joins the task and
 /// closes the renderer endpoint after its native work ends.
 pub struct RendererStream<F> {
     handle: Option<StreamHandle<F>>,
@@ -35,7 +35,7 @@ struct StreamHandle<F> {
 }
 
 impl<F: AsFd + Send + 'static> RendererStream<F> {
-    /// Prepare private GPU work and publish a selectable renderer offer.
+    /// Prepare private GPU work and publish a selectable renderer backend.
     pub async fn prepare(
         renderer: Renderer<F>,
         device: Device,
@@ -121,7 +121,7 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
 
     /// Enter the surrounding media session's active state.
     ///
-    /// The renderer offer was already published during preparation; KMS selects
+    /// The renderer backend was already published during preparation; KMS selects
     /// it independently through the generic constraints interface.
     pub async fn activate(
         mut self,
@@ -487,7 +487,7 @@ mod tests {
         let task = tokio::spawn(async {
             (
                 Some(7),
-                Err(io::Error::other("renderer offer cleanup failed")),
+                Err(io::Error::other("renderer backend cleanup failed")),
             )
         });
 
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(
             error.to_string(),
-            "renderer media activation was cancelled; renderer cleanup failed: renderer offer cleanup failed"
+            "renderer media activation was cancelled; renderer cleanup failed: renderer backend cleanup failed"
         );
     }
 
@@ -507,7 +507,7 @@ mod tests {
         let task = tokio::spawn(async {
             (
                 Some(7),
-                Err(io::Error::other("renderer offer cleanup failed")),
+                Err(io::Error::other("renderer backend cleanup failed")),
             )
         });
         let starting = Starting {
@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(
             error.to_string(),
-            "renderer stream preparation was cancelled; renderer cleanup failed: renderer offer cleanup failed"
+            "renderer stream preparation was cancelled; renderer cleanup failed: renderer backend cleanup failed"
         );
     }
 }

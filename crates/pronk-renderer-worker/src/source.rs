@@ -24,7 +24,7 @@ pub enum SourceAlpha {
 pub(crate) fn import_image(
     device: &Device,
     source: &castkms_renderer::SourceImage,
-    producer: Option<BorrowedFd<'_>>,
+    acquire_fence: Option<BorrowedFd<'_>>,
 ) -> io::Result<(SourceImage, SourceAlpha)> {
     let format = source_format(source.format())?;
     let modifier = explicit_modifier(source.modifier())?;
@@ -52,21 +52,21 @@ pub(crate) fn import_image(
         allocation_size,
     };
     let fd = plane.as_fd().try_clone_to_owned()?;
-    let producer = producer
-        .map(|producer| SyncFile::from_fd(producer.try_clone_to_owned()?))
+    let acquire_fence = acquire_fence
+        .map(|fence| SyncFile::from_fd(fence.try_clone_to_owned()?))
         .transpose()?;
     // The kernel-issued job retains source-read authority and reports the
     // framebuffer's actual layout. Vulkan validates device compatibility, and
-    // the captured producer record remains owned by the imported image.
-    let image = match producer {
-        Some(producer) => {
-            // SAFETY: The retained job, checked layout and captured producer
-            // record establish the external-source contract for this import.
-            unsafe { device.import_source(fd, layout, producer) }
+    // the captured acquire fence remains owned by the imported image.
+    let image = match acquire_fence {
+        Some(acquire_fence) => {
+            // SAFETY: The retained job, checked layout and captured acquire
+            // fence establish the external-source contract for this import.
+            unsafe { device.import_source(fd, layout, acquire_fence) }
         }
         None => {
-            // SAFETY: A missing producer descriptor from a successfully
-            // validated source job means its captured producer work completed.
+            // SAFETY: A missing acquire fence from a successfully validated
+            // source job means its captured producer work completed.
             unsafe { device.import_ready_source(fd, layout) }
         }
     }?;

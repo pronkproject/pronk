@@ -10,7 +10,7 @@ use castkms_sys::{
     DrmCastkmsRendererRegisterImage, DrmCastkmsRendererUnregisterImage,
 };
 
-use crate::{Endpoint, RendererDraft, WithdrawnRenderer};
+use crate::{Endpoint, RendererConfiguration, WithdrawnRenderer};
 
 /// One endpoint-local name for renderer-private backing storage.
 ///
@@ -18,7 +18,7 @@ use crate::{Endpoint, RendererDraft, WithdrawnRenderer};
 /// renderer's native image objects. Its caller must keep those objects paired
 /// with the name until every bound scene job is released and registration is
 /// removed. Dropping the value leaves cleanup to final endpoint close.
-#[must_use = "retain the private-image name for scene dequeue and explicit removal"]
+#[must_use = "retain the private-image name for job acquisition and explicit removal"]
 pub struct RegisteredImage {
     id: NonZeroU64,
     scope: Arc<()>,
@@ -34,7 +34,7 @@ impl RegisteredImage {
     }
 }
 
-impl<F: AsFd> RendererDraft<F> {
+impl<F: AsFd> RendererConfiguration<F> {
     /// Retain private backing under a fresh increasing endpoint-local name.
     pub fn register_image(
         &mut self,
@@ -83,9 +83,9 @@ impl<F: AsFd> RendererDraft<F> {
 }
 
 impl<F: AsFd> WithdrawnRenderer<F> {
-    /// Remove a private-image name after source access and offer use end.
+    /// Remove a private-image name after source access and backend use end.
     pub fn unregister_image(&mut self, image: RegisteredImage) -> Result<(), UnregisterImageError> {
-        unregister(&self.published.draft.endpoint, image)
+        unregister(&self.published.configuration.endpoint, image)
     }
 }
 

@@ -23,36 +23,26 @@ macro_rules! field {
 fn main() {
     layout!(DrmCastkmsRendererQuery, "drm_castkms_renderer_query");
     layout!(
-        DrmCastkmsRendererPrepareOffer,
-        "drm_castkms_renderer_prepare_offer"
+        DrmCastkmsRendererConfigure,
+        "drm_castkms_renderer_configure"
+    );
+    layout!(DrmCastkmsRendererPublish, "drm_castkms_renderer_publish");
+    layout!(
+        DrmCastkmsRendererPublishResult,
+        "drm_castkms_renderer_publish_result"
+    );
+    layout!(DrmCastkmsRendererWithdraw, "drm_castkms_renderer_withdraw");
+    layout!(
+        DrmCastkmsRendererMemoryPlane,
+        "drm_castkms_renderer_memory_plane"
     );
     layout!(
-        DrmCastkmsRendererPublishOffer,
-        "drm_castkms_renderer_publish_offer"
+        DrmCastkmsRendererReleaseJob,
+        "drm_castkms_renderer_release_job"
     );
     layout!(
-        DrmCastkmsRendererOfferResult,
-        "drm_castkms_renderer_offer_result"
-    );
-    layout!(
-        DrmCastkmsRendererWithdrawOffer,
-        "drm_castkms_renderer_withdraw_offer"
-    );
-    layout!(
-        DrmCastkmsRendererSubmitProbe,
-        "drm_castkms_renderer_submit_probe"
-    );
-    layout!(
-        DrmCastkmsRendererSourcePlane,
-        "drm_castkms_renderer_source_plane"
-    );
-    layout!(
-        DrmCastkmsRendererReleaseSource,
-        "drm_castkms_renderer_release_source"
-    );
-    layout!(
-        DrmCastkmsRendererDequeueOutput,
-        "drm_castkms_renderer_dequeue_output"
+        DrmCastkmsRendererAcquireOutput,
+        "drm_castkms_renderer_acquire_output"
     );
     layout!(DrmCastkmsRendererOutput, "drm_castkms_renderer_output");
     layout!(
@@ -68,8 +58,8 @@ fn main() {
         "drm_castkms_renderer_constraints_format"
     );
     layout!(
-        DrmCastkmsRendererDequeueScene,
-        "drm_castkms_renderer_dequeue_scene"
+        DrmCastkmsRendererAcquireJob,
+        "drm_castkms_renderer_acquire_job"
     );
     layout!(
         DrmCastkmsRendererRegisterImage,
@@ -80,29 +70,29 @@ fn main() {
         "drm_castkms_renderer_unregister_image"
     );
     field!(
-        DrmCastkmsRendererPrepareOffer,
+        DrmCastkmsRendererConfigure,
         constraints,
-        "drm_castkms_renderer_prepare_offer.constraints"
+        "drm_castkms_renderer_configure.constraints"
     );
     field!(
-        DrmCastkmsRendererPublishOffer,
+        DrmCastkmsRendererPublish,
         result,
-        "drm_castkms_renderer_publish_offer.result"
+        "drm_castkms_renderer_publish.result"
     );
     field!(
-        DrmCastkmsRendererSubmitProbe,
-        completion_fd,
-        "drm_castkms_renderer_submit_probe.completion_fd"
+        DrmCastkmsRendererPublish,
+        ready_fence_fd,
+        "drm_castkms_renderer_publish.ready_fence_fd"
     );
     field!(
-        DrmCastkmsRendererDequeueScene,
+        DrmCastkmsRendererAcquireJob,
+        target_image_id,
+        "drm_castkms_renderer_acquire_job.target_image_id"
+    );
+    field!(
+        DrmCastkmsRendererAcquireOutput,
         image_id,
-        "drm_castkms_renderer_dequeue_scene.image_id"
-    );
-    field!(
-        DrmCastkmsRendererDequeueOutput,
-        image_id,
-        "drm_castkms_renderer_dequeue_output.image_id"
+        "drm_castkms_renderer_acquire_output.image_id"
     );
     field!(
         DrmCastkmsRendererOutput,
@@ -114,10 +104,17 @@ fn main() {
         offset,
         "drm_castkms_renderer_output.offset"
     );
-    layout!(DrmCastkmsRendererScene, "drm_castkms_renderer_scene");
+    layout!(DrmCastkmsRendererJob, "drm_castkms_renderer_job");
     field!(
-        DrmCastkmsRendererScene,
+        DrmCastkmsRendererJob,
         constraints_id,
-        "drm_castkms_renderer_scene.constraints_id"
+        "drm_castkms_renderer_job.constraints_id"
     );
+    layout!(DrmCastkmsRendererPlane, "drm_castkms_renderer_plane");
+    field!(
+        DrmCastkmsRendererPlane,
+        memory_planes,
+        "drm_castkms_renderer_plane.memory_planes"
+    );
+    layout!(DrmCastkmsRendererColorOp, "drm_castkms_renderer_color_op");
 }

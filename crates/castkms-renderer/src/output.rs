@@ -6,8 +6,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use castkms_sys::{
-    drm_ioctl_castkms_renderer_dequeue_output, drm_ioctl_castkms_renderer_release_output,
-    DrmCastkmsRendererDequeueOutput, DrmCastkmsRendererOutput, DrmCastkmsRendererReleaseOutput,
+    drm_ioctl_castkms_renderer_acquire_output, drm_ioctl_castkms_renderer_release_output,
+    DrmCastkmsRendererAcquireOutput, DrmCastkmsRendererOutput, DrmCastkmsRendererReleaseOutput,
 };
 use drm_display_executor::scene::geometry::Extent;
 
@@ -156,17 +156,17 @@ impl<J: std::fmt::Debug> std::error::Error for OutputReleaseError<J> {}
 impl<F: AsFd> PublishedRenderer<F> {
     /// Open the endpoint's one independently owned recipient-output channel.
     pub fn open_output_channel(&mut self) -> io::Result<OutputChannel> {
-        if self.draft.endpoint.output_channel_issued {
+        if self.configuration.endpoint.output_channel_issued {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "renderer output channel is already open",
             ));
         }
         let fd = self.as_fd().try_clone_to_owned()?;
-        self.draft.endpoint.output_channel_issued = true;
+        self.configuration.endpoint.output_channel_issued = true;
         Ok(OutputChannel {
             fd,
-            image_scope: Arc::clone(&self.draft.endpoint.image_scope),
+            image_scope: Arc::clone(&self.configuration.endpoint.image_scope),
         })
     }
 }
@@ -181,12 +181,12 @@ impl OutputChannel {
     /// use castkms_renderer::{OutputChannel, RegisteredImage};
     ///
     /// fn claim_twice(channel: &mut OutputChannel, image: &RegisteredImage) {
-    ///     let first = channel.try_dequeue(image).unwrap().unwrap();
-    ///     let second = channel.try_dequeue(image).unwrap();
+    ///     let first = channel.try_acquire(image).unwrap().unwrap();
+    ///     let second = channel.try_acquire(image).unwrap();
     ///     drop((first, second));
     /// }
     /// ```
-    pub fn try_dequeue<'job>(
+    pub fn try_acquire<'job>(
         &'job mut self,
         image: &RegisteredImage,
     ) -> io::Result<Option<OutputJob<'job>>> {
@@ -200,7 +200,7 @@ impl OutputChannel {
             dma_buf_fd: -1,
             ..Default::default()
         };
-        let request = DrmCastkmsRendererDequeueOutput {
+        let request = DrmCastkmsRendererAcquireOutput {
             result: (&mut result as *mut DrmCastkmsRendererOutput) as u64,
             image_id: image.id().get(),
             ..Default::default()
@@ -209,9 +209,9 @@ impl OutputChannel {
         // throughout the synchronous ioctl. Success installs one fresh
         // close-on-exec descriptor in the result record.
         if let Err(error) =
-            unsafe { drm_ioctl_castkms_renderer_dequeue_output(self.as_fd().as_raw_fd(), &request) }
+            unsafe { drm_ioctl_castkms_renderer_acquire_output(self.as_fd().as_raw_fd(), &request) }
         {
-            if crate::dequeue_is_idle(error) {
+            if crate::acquisition_is_idle(error) {
                 return Ok(None);
             }
             return Err(error.into());
@@ -245,7 +245,7 @@ fn decode_output(
     expected_image: NonZeroU64,
 ) -> io::Result<(NonZeroU64, RecipientImage)> {
     let dma_buf = if raw.dma_buf_fd >= 0 {
-        // SAFETY: A successful dequeue installs one fresh descriptor. The
+        // SAFETY: A successful acquisition installs one fresh descriptor. The
         // integer is adopted exactly once before validating the other fields.
         Some(unsafe { OwnedFd::from_raw_fd(raw.dma_buf_fd) })
     } else {
@@ -256,7 +256,7 @@ fn decode_output(
     if raw.image_id != expected_image.get() {
         return Err(invalid("CastKMS returned output for another private image"));
     }
-    if raw.plane_count != 1 || raw.format == 0 || raw.reserved != [0; 2] {
+    if raw.memory_plane_count != 1 || raw.format == 0 || raw.reserved != [0; 2] {
         return Err(invalid("CastKMS returned invalid output metadata"));
     }
     let extent = Extent::new(raw.width, raw.height)
@@ -304,7 +304,7 @@ fn release_output(
 ) -> io::Result<()> {
     let request = DrmCastkmsRendererReleaseOutput {
         job_id: id.get(),
-        completion_fd: completion.map_or(-1, |fd| fd.as_raw_fd()),
+        release_fence_fd: completion.map_or(-1, |fd| fd.as_raw_fd()),
         kind,
         ..Default::default()
     };
@@ -337,7 +337,7 @@ mod tests {
             width: 64,
             height: 32,
             format: castkms_sys::DRM_FORMAT_XRGB8888,
-            plane_count: 1,
+            memory_plane_count: 1,
             modifier: castkms_sys::DRM_FORMAT_MOD_LINEAR,
             dma_buf_fd: fd.into_raw_fd(),
             pitch: 256,

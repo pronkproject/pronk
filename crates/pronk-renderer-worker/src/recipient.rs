@@ -73,7 +73,7 @@ impl<F: AsFd> SceneReader<F> {
     /// on the renderer's blocking graphics worker.
     pub fn try_deliver(&mut self, frame: RenderedFrame) -> Result<DeliveryAttempt, DeliveryError> {
         let device = self.device().clone();
-        let job = match self.output.try_dequeue(frame.scene.registration()) {
+        let job = match self.output.try_acquire(frame.scene.registration()) {
             Ok(Some(job)) => job,
             Ok(None) => return Ok(DeliveryAttempt::NoRecipient(frame)),
             Err(cause) => return Err(DeliveryError::before_access(cause, frame)),

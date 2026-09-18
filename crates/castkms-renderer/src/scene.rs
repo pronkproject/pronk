@@ -5,17 +5,18 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use castkms_sys::{
-    drm_ioctl_castkms_renderer_dequeue_scene, DrmCastkmsRendererColor,
-    DrmCastkmsRendererDequeueScene, DrmCastkmsRendererLayer, DrmCastkmsRendererScene,
-    DRM_FORMAT_MOD_INVALID, RENDERER_COLOR_BYPASS, RENDERER_COLOR_LUT, RENDERER_COLOR_MATRIX,
-    RENDERER_COLOR_SRGB_EOTF, RENDERER_COLOR_SRGB_INVERSE_EOTF, RENDERER_LAYER_CURSOR,
-    RENDERER_LAYER_OVERLAY, RENDERER_LAYER_PRIMARY, RENDERER_MAX_PLANES, RENDERER_SCENE_MAX_BYTES,
-    RENDERER_SCENE_MAX_COLOR_OPS, RENDERER_SCENE_MAX_LAYERS, RENDERER_SCENE_VERSION,
-    YUV_ENCODING_BT2020, YUV_ENCODING_BT601, YUV_ENCODING_BT709, YUV_RANGE_FULL, YUV_RANGE_LIMITED,
+    drm_ioctl_castkms_renderer_acquire_job, DrmCastkmsRendererAcquireJob,
+    DrmCastkmsRendererColorOp, DrmCastkmsRendererJob, DrmCastkmsRendererPlane,
+    DRM_FORMAT_MOD_INVALID, RENDERER_COLOR_OP_BYPASS, RENDERER_COLOR_OP_LUT,
+    RENDERER_COLOR_OP_MATRIX, RENDERER_COLOR_OP_SRGB_EOTF, RENDERER_COLOR_OP_SRGB_INVERSE_EOTF,
+    RENDERER_JOB_MAX_BYTES, RENDERER_JOB_MAX_COLOR_OPS, RENDERER_JOB_MAX_PLANES,
+    RENDERER_JOB_VERSION, RENDERER_MAX_MEMORY_PLANES, RENDERER_PLANE_CURSOR,
+    RENDERER_PLANE_OVERLAY, RENDERER_PLANE_PRIMARY, YUV_ENCODING_BT2020, YUV_ENCODING_BT601,
+    YUV_ENCODING_BT709, YUV_RANGE_FULL, YUV_RANGE_LIMITED,
 };
 use drm_display_executor::scene::geometry::{DestinationRect, Extent, SourceRect};
 
-use crate::source::{has_close_on_exec, release_source};
+use crate::source::{has_close_on_exec, release_job};
 use crate::{
     FormatModifier, PublishedRenderer, RegisteredImage, SourceImage, SourcePlane,
     SourceReleaseError,
@@ -111,7 +112,7 @@ pub struct SceneJob<'job, F: AsFd> {
     output: Extent,
     layers: Vec<SceneLayer>,
     color: Box<[ColorOperation]>,
-    producer: Option<OwnedFd>,
+    acquire_fence: Option<OwnedFd>,
 }
 
 impl<F: AsFd> SceneJob<'_, F> {
@@ -131,8 +132,8 @@ impl<F: AsFd> SceneJob<'_, F> {
         &self.color
     }
 
-    pub fn producer_completion(&self) -> Option<BorrowedFd<'_>> {
-        self.producer.as_ref().map(AsFd::as_fd)
+    pub fn acquire_fence(&self) -> Option<BorrowedFd<'_>> {
+        self.acquire_fence.as_ref().map(AsFd::as_fd)
     }
 
     pub fn release_without_access(self) -> Result<(), SourceReleaseError<Self>> {
@@ -156,7 +157,7 @@ impl<F: AsFd> SceneJob<'_, F> {
         kind: u32,
         completion: Option<BorrowedFd<'_>>,
     ) -> Result<(), SourceReleaseError<Self>> {
-        if let Err(error) = release_source(self.renderer.as_fd(), self.id, kind, completion) {
+        if let Err(error) = release_job(self.renderer.as_fd(), self.id, kind, completion) {
             return Err(SourceReleaseError::new(self, error));
         }
         Ok(())
@@ -178,38 +179,38 @@ impl<F: AsFd> PublishedRenderer<F> {
     ///     renderer: &mut PublishedRenderer<F>,
     ///     image: &RegisteredImage,
     /// ) {
-    ///     let first = renderer.try_dequeue_scene(image).unwrap().unwrap();
-    ///     let second = renderer.try_dequeue_scene(image).unwrap();
+    ///     let first = renderer.try_acquire_job(image).unwrap().unwrap();
+    ///     let second = renderer.try_acquire_job(image).unwrap();
     ///     drop((first, second));
     /// }
     /// ```
-    pub fn try_dequeue_scene<'job>(
+    pub fn try_acquire_job<'job>(
         &'job mut self,
         image: &RegisteredImage,
     ) -> io::Result<Option<SceneJob<'job, F>>> {
-        if !image.belongs_to(&self.draft.endpoint.image_scope) {
+        if !image.belongs_to(&self.configuration.endpoint.image_scope) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "private image belongs to another renderer",
             ));
         }
-        let words = RENDERER_SCENE_MAX_BYTES / size_of::<u64>();
+        let words = RENDERER_JOB_MAX_BYTES / size_of::<u64>();
         let mut storage = Vec::new();
         storage.try_reserve_exact(words).map_err(io::Error::other)?;
         storage.resize(words, u64::MAX);
-        let request = DrmCastkmsRendererDequeueScene {
+        let request = DrmCastkmsRendererAcquireJob {
             result: storage.as_mut_ptr() as u64,
-            image_id: image.id().get(),
-            capacity: RENDERER_SCENE_MAX_BYTES as u32,
+            target_image_id: image.id().get(),
+            capacity: RENDERER_JOB_MAX_BYTES as u32,
             ..Default::default()
         };
         // SAFETY: The fixed request and aligned writable maximum-size storage
         // remain live throughout the synchronous ioctl. Success installs fresh
         // descriptors only in the returned scene records.
         if let Err(error) =
-            unsafe { drm_ioctl_castkms_renderer_dequeue_scene(self.as_fd().as_raw_fd(), &request) }
+            unsafe { drm_ioctl_castkms_renderer_acquire_job(self.as_fd().as_raw_fd(), &request) }
         {
-            if crate::dequeue_is_idle(error) {
+            if crate::acquisition_is_idle(error) {
                 return Ok(None);
             }
             return Err(error.into());
@@ -222,14 +223,14 @@ impl<F: AsFd> PublishedRenderer<F> {
                 storage.len() * size_of::<u64>(),
             )
         };
-        let job_id = read::<DrmCastkmsRendererScene>(bytes, 0)
+        let job_id = read::<DrmCastkmsRendererJob>(bytes, 0)
             .ok()
             .and_then(|header| NonZeroU64::new(header.job_id));
         let decoded = match decode_scene(bytes) {
             Ok(decoded) => decoded,
             Err(error) => {
                 if let Some(id) = job_id {
-                    let _ = release_source(
+                    let _ = release_job(
                         self.as_fd(),
                         id,
                         castkms_sys::RENDERER_RELEASE_NO_ACCESS,
@@ -240,7 +241,7 @@ impl<F: AsFd> PublishedRenderer<F> {
             }
         };
         if decoded.constraints_id != self.constraints_id {
-            let _ = release_source(
+            let _ = release_job(
                 self.as_fd(),
                 decoded.id,
                 castkms_sys::RENDERER_RELEASE_NO_ACCESS,
@@ -257,7 +258,7 @@ impl<F: AsFd> PublishedRenderer<F> {
             output: decoded.output,
             layers: decoded.layers,
             color: decoded.color,
-            producer: decoded.producer,
+            acquire_fence: decoded.acquire_fence,
         }))
     }
 }
@@ -269,16 +270,16 @@ pub(super) struct DecodedScene {
     output: Extent,
     layers: Vec<SceneLayer>,
     color: Box<[ColorOperation]>,
-    producer: Option<OwnedFd>,
+    acquire_fence: Option<OwnedFd>,
 }
 
 pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
-    let header: DrmCastkmsRendererScene = read(bytes, 0)?;
+    let header: DrmCastkmsRendererJob = read(bytes, 0)?;
     let total = usize::try_from(header.bytes).map_err(|_| invalid("scene size overflowed"))?;
-    if header.version != RENDERER_SCENE_VERSION
-        || total < size_of::<DrmCastkmsRendererScene>()
+    if header.version != RENDERER_JOB_VERSION
+        || total < size_of::<DrmCastkmsRendererJob>()
         || total > bytes.len()
-        || total > RENDERER_SCENE_MAX_BYTES
+        || total > RENDERER_JOB_MAX_BYTES
         || total % 8 != 0
         || header.reserved != 0
     {
@@ -292,44 +293,45 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
         .ok_or_else(|| invalid("CastKMS returned a zero scene content serial"))?;
     let output = Extent::new(header.width, header.height)
         .map_err(|_| invalid("CastKMS returned empty scene dimensions"))?;
-    let layer_count = usize::try_from(header.layer_count)
+    let layer_count = usize::try_from(header.plane_count)
         .ok()
-        .filter(|count| (1..=RENDERER_SCENE_MAX_LAYERS).contains(count))
+        .filter(|count| (1..=RENDERER_JOB_MAX_PLANES).contains(count))
         .ok_or_else(|| invalid("CastKMS returned an invalid scene layer count"))?;
-    let output_color_count = usize::try_from(header.output_color_count)
+    let output_color_count = usize::try_from(header.output_color_op_count)
         .ok()
         .filter(|count| *count <= 3)
         .ok_or_else(|| invalid("CastKMS returned an invalid output color count"))?;
 
-    const MAX_FDS: usize = 1 + RENDERER_SCENE_MAX_LAYERS * RENDERER_MAX_PLANES;
+    const MAX_FDS: usize = 1 + RENDERER_JOB_MAX_PLANES * RENDERER_MAX_MEMORY_PLANES;
     let mut adopted = [-1; MAX_FDS];
     let mut adopted_count = 0;
-    let producer = adopt_fd(header.producer_fd, &mut adopted, &mut adopted_count)?;
+    let acquire_fence = adopt_fd(header.acquire_fence_fd, &mut adopted, &mut adopted_count)?;
 
-    let mut cursor = size_of::<DrmCastkmsRendererScene>();
+    let mut cursor = size_of::<DrmCastkmsRendererJob>();
     let mut raw_layers = Vec::new();
     raw_layers
         .try_reserve_exact(layer_count)
         .map_err(io::Error::other)?;
     for _ in 0..layer_count {
         let start = cursor;
-        let layer: DrmCastkmsRendererLayer = read(bytes, start)?;
-        let mut plane_fds: [Option<OwnedFd>; RENDERER_MAX_PLANES] = std::array::from_fn(|_| None);
-        for (owner, plane) in plane_fds.iter_mut().zip(layer.planes) {
+        let layer: DrmCastkmsRendererPlane = read(bytes, start)?;
+        let mut plane_fds: [Option<OwnedFd>; RENDERER_MAX_MEMORY_PLANES] =
+            std::array::from_fn(|_| None);
+        for (owner, plane) in plane_fds.iter_mut().zip(layer.memory_planes) {
             *owner = adopt_fd(plane.dma_buf_fd, &mut adopted, &mut adopted_count)?;
         }
         let layer_bytes = usize::try_from(layer.bytes)
             .ok()
-            .filter(|length| *length >= size_of::<DrmCastkmsRendererLayer>() && *length % 8 == 0)
+            .filter(|length| *length >= size_of::<DrmCastkmsRendererPlane>() && *length % 8 == 0)
             .ok_or_else(|| invalid("CastKMS returned an invalid scene layer size"))?;
         let end = start
             .checked_add(layer_bytes)
             .filter(|end| *end <= total)
             .ok_or_else(|| invalid("CastKMS returned a truncated scene layer"))?;
-        cursor = start + size_of::<DrmCastkmsRendererLayer>();
-        let color_count = usize::try_from(layer.color_count)
+        cursor = start + size_of::<DrmCastkmsRendererPlane>();
+        let color_count = usize::try_from(layer.color_op_count)
             .ok()
-            .filter(|count| *count <= RENDERER_SCENE_MAX_COLOR_OPS)
+            .filter(|count| *count <= RENDERER_JOB_MAX_COLOR_OPS)
             .ok_or_else(|| invalid("CastKMS returned too many layer color operations"))?;
         let color = decode_colors(bytes, &mut cursor, color_count, end)?;
         if cursor != end {
@@ -341,8 +343,13 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
     if cursor != total {
         return Err(invalid("CastKMS returned trailing scene metadata"));
     }
-    if producer.as_ref().is_some_and(|fd| !has_close_on_exec(fd)) {
-        return Err(invalid("CastKMS returned a producer without close-on-exec"));
+    if acquire_fence
+        .as_ref()
+        .is_some_and(|fd| !has_close_on_exec(fd))
+    {
+        return Err(invalid(
+            "CastKMS returned an acquire fence without close-on-exec",
+        ));
     }
 
     let mut layers = Vec::new();
@@ -365,7 +372,7 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
         output,
         layers,
         color: color.into_boxed_slice(),
-        producer,
+        acquire_fence,
     })
 }
 
@@ -394,14 +401,14 @@ fn adopt_fd<const N: usize>(
 }
 
 fn decode_layer(
-    raw: DrmCastkmsRendererLayer,
+    raw: DrmCastkmsRendererPlane,
     color: Vec<ColorOperation>,
-    plane_fds: [Option<OwnedFd>; RENDERER_MAX_PLANES],
+    plane_fds: [Option<OwnedFd>; RENDERER_MAX_MEMORY_PLANES],
 ) -> io::Result<SceneLayer> {
-    let kind = match raw.kind {
-        RENDERER_LAYER_PRIMARY => LayerKind::Primary,
-        RENDERER_LAYER_OVERLAY => LayerKind::Overlay,
-        RENDERER_LAYER_CURSOR => LayerKind::Cursor,
+    let kind = match raw.role {
+        RENDERER_PLANE_PRIMARY => LayerKind::Primary,
+        RENDERER_PLANE_OVERLAY => LayerKind::Overlay,
+        RENDERER_PLANE_CURSOR => LayerKind::Cursor,
         _ => return Err(invalid("CastKMS returned an unknown scene layer role")),
     };
     let encoding = match raw.color_encoding {
@@ -417,21 +424,22 @@ fn decode_layer(
     };
     let extent = Extent::new(raw.width, raw.height)
         .map_err(|_| invalid("CastKMS returned empty layer dimensions"))?;
-    let source = SourceRect::from_fixed_16_16(extent, raw.source)
+    let source = SourceRect::from_fixed_16_16(extent, [raw.src_x, raw.src_y, raw.src_w, raw.src_h])
         .map_err(|_| invalid("CastKMS returned invalid layer source coordinates"))?;
-    let destination_extent = Extent::new(raw.destination[0], raw.destination[1])
+    let destination_extent = Extent::new(raw.crtc_w, raw.crtc_h)
         .map_err(|_| invalid("CastKMS returned empty layer destination dimensions"))?;
     let destination = DestinationRect {
-        position: raw.position,
+        position: [raw.crtc_x, raw.crtc_y],
         extent: destination_extent,
     };
-    let plane_count = usize::try_from(raw.plane_count)
+    let plane_count = usize::try_from(raw.memory_plane_count)
         .ok()
-        .filter(|count| (1..=RENDERER_MAX_PLANES).contains(count))
+        .filter(|count| (1..=RENDERER_MAX_MEMORY_PLANES).contains(count))
         .ok_or_else(|| invalid("CastKMS returned an invalid layer plane count"))?;
-    let mut planes: [Option<SourcePlane>; RENDERER_MAX_PLANES] = std::array::from_fn(|_| None);
+    let mut planes: [Option<SourcePlane>; RENDERER_MAX_MEMORY_PLANES] =
+        std::array::from_fn(|_| None);
     for (index, ((metadata, fd), destination)) in raw
-        .planes
+        .memory_planes
         .into_iter()
         .zip(plane_fds)
         .zip(planes.iter_mut())
@@ -489,9 +497,9 @@ fn decode_colors(
         .try_reserve_exact(count)
         .map_err(io::Error::other)?;
     for _ in 0..count {
-        let header: DrmCastkmsRendererColor = read_bounded(bytes, *cursor, end)?;
+        let header: DrmCastkmsRendererColorOp = read_bounded(bytes, *cursor, end)?;
         *cursor = cursor
-            .checked_add(size_of::<DrmCastkmsRendererColor>())
+            .checked_add(size_of::<DrmCastkmsRendererColorOp>())
             .ok_or_else(|| invalid("color record offset overflowed"))?;
         let payload = usize::try_from(header.payload_bytes)
             .ok()
@@ -502,10 +510,10 @@ fn decode_colors(
             .filter(|payload_end| *payload_end <= end)
             .ok_or_else(|| invalid("CastKMS returned a truncated color payload"))?;
         let operation = match header.kind {
-            RENDERER_COLOR_BYPASS if payload == 0 => ColorOperation::Bypass,
-            RENDERER_COLOR_SRGB_EOTF if payload == 0 => ColorOperation::SrgbEotf,
-            RENDERER_COLOR_SRGB_INVERSE_EOTF if payload == 0 => ColorOperation::SrgbInverseEotf,
-            RENDERER_COLOR_MATRIX if payload == 12 * size_of::<u64>() => {
+            RENDERER_COLOR_OP_BYPASS if payload == 0 => ColorOperation::Bypass,
+            RENDERER_COLOR_OP_SRGB_EOTF if payload == 0 => ColorOperation::SrgbEotf,
+            RENDERER_COLOR_OP_SRGB_INVERSE_EOTF if payload == 0 => ColorOperation::SrgbInverseEotf,
+            RENDERER_COLOR_OP_MATRIX if payload == 12 * size_of::<u64>() => {
                 let mut matrix = [0; 12];
                 for value in &mut matrix {
                     *value = read_bounded(bytes, *cursor, payload_end)?;
@@ -513,7 +521,7 @@ fn decode_colors(
                 }
                 ColorOperation::Matrix(matrix)
             }
-            RENDERER_COLOR_LUT if (8..=256 * 8).contains(&payload) => {
+            RENDERER_COLOR_OP_LUT if (8..=256 * 8).contains(&payload) => {
                 let mut entries = Vec::new();
                 entries
                     .try_reserve_exact(payload / 8)
@@ -555,9 +563,9 @@ unsafe trait WireValue: Copy {}
 // pattern is valid and an unaligned byte copy can construct a value.
 unsafe impl WireValue for u16 {}
 unsafe impl WireValue for u64 {}
-unsafe impl WireValue for DrmCastkmsRendererScene {}
-unsafe impl WireValue for DrmCastkmsRendererLayer {}
-unsafe impl WireValue for DrmCastkmsRendererColor {}
+unsafe impl WireValue for DrmCastkmsRendererJob {}
+unsafe impl WireValue for DrmCastkmsRendererPlane {}
+unsafe impl WireValue for DrmCastkmsRendererColorOp {}
 
 fn read_bounded<T: WireValue>(bytes: &[u8], offset: usize, end: usize) -> io::Result<T> {
     let record_end = offset
@@ -619,7 +627,7 @@ mod tests {
     fn scene_packet() -> (Vec<u8>, i32, UnixStream) {
         let (dma_buf, peer) = tracked_descriptor();
         let mut bytes = Vec::new();
-        word(&mut bytes, RENDERER_SCENE_VERSION);
+        word(&mut bytes, RENDERER_JOB_VERSION);
         word(&mut bytes, 0);
         wide(&mut bytes, 7);
         wide(&mut bytes, 9);
@@ -633,7 +641,7 @@ mod tests {
 
         let layer = bytes.len();
         word(&mut bytes, 0);
-        word(&mut bytes, RENDERER_LAYER_PRIMARY);
+        word(&mut bytes, RENDERER_PLANE_PRIMARY);
         word(&mut bytes, 3);
         word(&mut bytes, castkms_sys::DRM_FORMAT_ARGB8888);
         wide(&mut bytes, 9);
@@ -650,7 +658,7 @@ mod tests {
         word(&mut bytes, 1);
         word(&mut bytes, 1);
         word(&mut bytes, 2);
-        for index in 0..RENDERER_MAX_PLANES {
+        for index in 0..RENDERER_MAX_MEMORY_PLANES {
             word(
                 &mut bytes,
                 if index == 0 { dma_buf as u32 } else { u32::MAX },
@@ -659,9 +667,9 @@ mod tests {
             word(&mut bytes, 0);
             word(&mut bytes, 0);
         }
-        word(&mut bytes, RENDERER_COLOR_BYPASS);
+        word(&mut bytes, RENDERER_COLOR_OP_BYPASS);
         word(&mut bytes, 0);
-        word(&mut bytes, RENDERER_COLOR_MATRIX);
+        word(&mut bytes, RENDERER_COLOR_OP_MATRIX);
         word(&mut bytes, 96);
         for value in 0..12 {
             wide(&mut bytes, value);
@@ -669,7 +677,7 @@ mod tests {
         let layer_bytes = (bytes.len() - layer) as u32;
         patch(&mut bytes, layer, layer_bytes);
 
-        word(&mut bytes, RENDERER_COLOR_LUT);
+        word(&mut bytes, RENDERER_COLOR_OP_LUT);
         word(&mut bytes, 16);
         for entry in [[1_u16, 2, 3], [4, 5, 6]] {
             for channel in entry {
@@ -690,7 +698,7 @@ mod tests {
         assert_eq!(scene.constraints_id.get(), 9);
         assert_eq!(scene.content_serial.get(), 11);
         assert_eq!(scene.output, Extent::new(1920, 1080).unwrap());
-        assert!(scene.producer.is_none());
+        assert!(scene.acquire_fence.is_none());
         assert_eq!(scene.layers.len(), 1);
         let layer = &scene.layers[0];
         assert_eq!(layer.kind(), LayerKind::Primary);
@@ -718,7 +726,7 @@ mod tests {
     #[test]
     fn color_records_reject_invalid_payloads_and_reserved_lut_channels() {
         let mut truncated = Vec::new();
-        word(&mut truncated, RENDERER_COLOR_MATRIX);
+        word(&mut truncated, RENDERER_COLOR_OP_MATRIX);
         word(&mut truncated, 96);
         let mut cursor = 0;
         assert_eq!(
@@ -729,7 +737,7 @@ mod tests {
         );
 
         let mut lut = Vec::new();
-        word(&mut lut, RENDERER_COLOR_LUT);
+        word(&mut lut, RENDERER_COLOR_OP_LUT);
         word(&mut lut, 8);
         for value in [1_u16, 2, 3, 4] {
             lut.extend_from_slice(&value.to_ne_bytes());
@@ -746,7 +754,7 @@ mod tests {
     #[test]
     fn duplicate_scene_descriptors_are_closed_once() {
         let (mut bytes, raw_fd, mut peer) = scene_packet();
-        let layer = size_of::<DrmCastkmsRendererScene>();
+        let layer = size_of::<DrmCastkmsRendererJob>();
         patch(&mut bytes, layer + 72, 2);
         patch(&mut bytes, layer + 80 + 16, raw_fd as u32);
         patch(&mut bytes, layer + 80 + 16 + 4, 2560);
@@ -771,21 +779,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_producer_flags_do_not_leak_layer_descriptors() {
+    fn invalid_acquire_fence_flags_do_not_leak_plane_descriptors() {
         let (mut bytes, _layer_fd, mut layer_peer) = scene_packet();
-        let (producer_fd, mut producer_peer) = tracked_descriptor();
-        fcntl(producer_fd, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
+        let (acquire_fence_fd, mut acquire_fence_peer) = tracked_descriptor();
+        fcntl(acquire_fence_fd, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
         patch(
             &mut bytes,
-            std::mem::offset_of!(DrmCastkmsRendererScene, producer_fd),
-            producer_fd as u32,
+            std::mem::offset_of!(DrmCastkmsRendererJob, acquire_fence_fd),
+            acquire_fence_fd as u32,
         );
 
         assert_eq!(
             decode_scene(&bytes).err().unwrap().kind(),
             io::ErrorKind::InvalidData
         );
-        assert_descriptor_closed(&mut producer_peer);
+        assert_descriptor_closed(&mut acquire_fence_peer);
         assert_descriptor_closed(&mut layer_peer);
     }
 }

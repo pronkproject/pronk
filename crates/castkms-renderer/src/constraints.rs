@@ -8,7 +8,8 @@ use castkms_sys::{
     RENDERER_CONSTRAINTS_FORMAT_BYTES, RENDERER_CONSTRAINTS_FORMAT_EXPLICIT_MODIFIER,
     RENDERER_CONSTRAINTS_FORMAT_IMPORTED, RENDERER_CONSTRAINTS_FORMAT_NATIVE,
     RENDERER_CONSTRAINTS_HEADER_BYTES, RENDERER_CONSTRAINTS_KIND, RENDERER_CONSTRAINTS_MAX_FORMATS,
-    RENDERER_CONSTRAINTS_OUTPUT_MATRIX, RENDERER_CONSTRAINTS_VERSION,
+    RENDERER_CONSTRAINTS_OUTPUT_MATRIX, RENDERER_CONSTRAINTS_ROLE_PRIMARY,
+    RENDERER_CONSTRAINTS_VERSION,
 };
 use drm_display_executor::scene::geometry::Extent;
 
@@ -42,10 +43,14 @@ impl StorageProvenance {
 pub struct ConstraintsFormat {
     fourcc: u32,
     modifier: FormatModifier,
-    plane_count: NonZeroU32,
+    memory_plane_count: NonZeroU32,
     provenance: StorageProvenance,
+    roles: u32,
+    width_alignment: NonZeroU32,
+    height_alignment: NonZeroU32,
     pitch_alignment: NonZeroU32,
     offset_alignment: NonZeroU32,
+    min_pitch: NonZeroU32,
     max_pitch: NonZeroU32,
 }
 
@@ -53,14 +58,14 @@ impl ConstraintsFormat {
     pub fn new(
         fourcc: u32,
         modifier: FormatModifier,
-        plane_count: NonZeroU32,
+        memory_plane_count: NonZeroU32,
         provenance: StorageProvenance,
         pitch_alignment: NonZeroU32,
         offset_alignment: NonZeroU32,
         max_pitch: NonZeroU32,
     ) -> io::Result<Self> {
         if fourcc == 0
-            || plane_count.get() > 4
+            || memory_plane_count.get() > 4
             || (!provenance.native && !provenance.imported)
             || !pitch_alignment.get().is_power_of_two()
             || !offset_alignment.get().is_power_of_two()
@@ -72,10 +77,14 @@ impl ConstraintsFormat {
         Ok(Self {
             fourcc,
             modifier,
-            plane_count,
+            memory_plane_count,
             provenance,
+            roles: RENDERER_CONSTRAINTS_ROLE_PRIMARY,
+            width_alignment: NonZeroU32::MIN,
+            height_alignment: NonZeroU32::MIN,
             pitch_alignment,
             offset_alignment,
+            min_pitch: pitch_alignment,
             max_pitch,
         })
     }
@@ -88,8 +97,8 @@ impl ConstraintsFormat {
         self.modifier
     }
 
-    pub fn plane_count(self) -> NonZeroU32 {
-        self.plane_count
+    pub fn memory_plane_count(self) -> NonZeroU32 {
+        self.memory_plane_count
     }
 
     pub fn provenance(self) -> StorageProvenance {
@@ -109,7 +118,7 @@ impl ConstraintsFormat {
     }
 }
 
-/// Immutable whole-scene constraints offered by a delegated renderer.
+/// Immutable whole-scene constraints declared by a delegated renderer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RendererConstraints {
     flags: u32,
@@ -119,7 +128,7 @@ pub struct RendererConstraints {
     max_source: Extent,
     min_scale: NonZeroU32,
     max_scale: NonZeroU32,
-    max_layers: NonZeroU32,
+    max_planes: NonZeroU32,
     max_roles: [u32; 3],
     max_color_operations: u32,
     max_lut_entries: u32,
@@ -144,13 +153,13 @@ impl RendererConstraints {
         Self::single_primary(output, format)
     }
 
-    /// Limit an offer to one unscaled full-output primary plane.
+    /// Limit a backend to one unscaled full-output primary plane.
     pub fn single_primary(output: Extent, format: ConstraintsFormat) -> Self {
         Self::single_primary_formats(output, vec![format].into_boxed_slice())
             .expect("one valid format is valid primary constraints")
     }
 
-    /// Limit an offer to one full-output primary plane with alternatives.
+    /// Limit a backend to one full-output primary plane with alternatives.
     pub fn single_primary_formats(
         output: Extent,
         formats: Box<[ConstraintsFormat]>,
@@ -161,7 +170,7 @@ impl RendererConstraints {
                 formats[..index].iter().any(|previous| {
                     previous.fourcc == format.fourcc
                         && previous.modifier == format.modifier
-                        && previous.plane_count == format.plane_count
+                        && previous.memory_plane_count == format.memory_plane_count
                 })
             })
         {
@@ -175,7 +184,7 @@ impl RendererConstraints {
             max_source: output,
             min_scale: NonZeroU32::new(FIXED_SCALE).expect("fixed scale is nonzero"),
             max_scale: NonZeroU32::new(FIXED_SCALE).expect("fixed scale is nonzero"),
-            max_layers: NonZeroU32::new(1).expect("one layer is nonzero"),
+            max_planes: NonZeroU32::new(1).expect("one plane is nonzero"),
             max_roles: [1, 0, 0],
             max_color_operations: 0,
             max_lut_entries: 0,
@@ -243,7 +252,7 @@ impl RendererConstraints {
             self.max_source.height(),
             self.min_scale.get(),
             self.max_scale.get(),
-            self.max_layers.get(),
+            self.max_planes.get(),
             self.max_roles[0],
             self.max_roles[1],
             self.max_roles[2],
@@ -268,7 +277,7 @@ impl RendererConstraints {
 
 fn put_format(bytes: &mut Vec<u8>, format: ConstraintsFormat) {
     put_u32(bytes, format.fourcc);
-    put_u32(bytes, format.plane_count.get());
+    put_u32(bytes, format.memory_plane_count.get());
     let (modifier, explicit) = match format.modifier {
         FormatModifier::Unspecified => (0, false),
         FormatModifier::Explicit(modifier) => (modifier, true),
@@ -278,9 +287,15 @@ fn put_format(bytes: &mut Vec<u8>, format: ConstraintsFormat) {
         | (u32::from(format.provenance.imported) * RENDERER_CONSTRAINTS_FORMAT_IMPORTED)
         | (u32::from(explicit) * RENDERER_CONSTRAINTS_FORMAT_EXPLICIT_MODIFIER);
     put_u32(bytes, flags);
+    put_u32(bytes, format.roles);
+    put_u32(bytes, format.width_alignment.get());
+    put_u32(bytes, format.height_alignment.get());
     put_u32(bytes, format.pitch_alignment.get());
     put_u32(bytes, format.offset_alignment.get());
+    put_u32(bytes, format.min_pitch.get());
     put_u32(bytes, format.max_pitch.get());
+    put_u32(bytes, 0);
+    put_u32(bytes, 0);
 }
 
 fn put_u32(bytes: &mut Vec<u8>, value: u32) {
@@ -335,6 +350,13 @@ mod tests {
         assert!(bytes[88..RENDERER_CONSTRAINTS_HEADER_BYTES]
             .iter()
             .all(|byte| *byte == 0));
+        let format = &bytes[RENDERER_CONSTRAINTS_HEADER_BYTES..];
+        assert_eq!(u32::from_ne_bytes(format[20..24].try_into().unwrap()), 1);
+        assert_eq!(u32::from_ne_bytes(format[24..28].try_into().unwrap()), 1);
+        assert_eq!(u32::from_ne_bytes(format[28..32].try_into().unwrap()), 1);
+        assert_eq!(u32::from_ne_bytes(format[32..36].try_into().unwrap()), 4);
+        assert_eq!(u32::from_ne_bytes(format[40..44].try_into().unwrap()), 4);
+        assert!(format[48..56].iter().all(|byte| *byte == 0));
     }
 
     #[test]

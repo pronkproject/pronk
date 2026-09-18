@@ -26,12 +26,14 @@ impl SceneSource {
         profile: &Arc<()>,
         device: &pronk_gpu::vulkan::Device,
         layer: &castkms_renderer::SceneLayer,
-        producer: Option<BorrowedFd<'_>>,
+        acquire_fence: Option<BorrowedFd<'_>>,
     ) -> io::Result<Self> {
-        crate::source::import_image(device, layer.image(), producer).map(|(image, alpha)| Self {
-            profile: Arc::clone(profile),
-            image,
-            alpha,
+        crate::source::import_image(device, layer.image(), acquire_fence).map(|(image, alpha)| {
+            Self {
+                profile: Arc::clone(profile),
+                image,
+                alpha,
+            }
         })
     }
 

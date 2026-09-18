@@ -93,7 +93,7 @@ reported failure, not confirmation that kernel or native work has ended.
 clone of capture access into the GPU pipeline. Renderer access supplies
 complete scenes; capture access supplies only recipient-owned final-image
 destinations. `CaptureSource::FinalImage` instead clones capture access without
-taking renderer access. It neither publishes a userspace renderer offer nor
+taking renderer access. It neither publishes a userspace renderer backend nor
 changes display constraints. Unused renderer access stays session-owned.
 
 The final-image path can operate with a provider that has no renderer endpoint.

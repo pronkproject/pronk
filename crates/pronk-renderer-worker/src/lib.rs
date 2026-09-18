@@ -14,7 +14,7 @@ mod scene_reads;
 mod scene_transaction;
 mod source;
 
-pub use activation::{PrivateProbe, ProbePreparationError};
+pub use activation::{PreparationError, PrivatePreparation};
 pub use pool::{PrivateBuffer, PrivateFrame, PrivatePool, RejectedBuffer};
 pub use reads::{ReadCollectionError, SubmittedReads};
 pub use recipient::{DeliveryAttempt, DeliveryError};
