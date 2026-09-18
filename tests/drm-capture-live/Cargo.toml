@@ -66,6 +66,7 @@ pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
 pronk-capture = { path = "../../crates/pronk-capture" }
 pronk-capture-broker = { path = "../../crates/pronk-capture-broker" }
 pronk-capture-pipewire = { path = "../../crates/pronk-capture-pipewire" }
+pronk-core = { path = "../../crates/pronk-core" }
 pronk-pipewire = { path = "../../crates/pronk-pipewire" }
 pronk-media = { path = "../../crates/pronk-media" }
 tokio.workspace = true

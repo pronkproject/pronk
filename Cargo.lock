@@ -1529,6 +1529,7 @@ dependencies = [
  "pronk-capture-broker",
  "pronk-capture-pipewire",
  "pronk-capture-receiver-test",
+ "pronk-core",
  "pronk-dmabuf",
  "pronk-media",
  "pronk-pipewire",
