@@ -39,6 +39,7 @@ impl KernelSessionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorCapabilities {
     pub max_edid_size: usize,
+    pub cec_transport: bool,
 }
 
 /// Monitor control and the obligation to release its authorization lifetime.
@@ -155,7 +156,10 @@ mod tests {
     #[async_trait]
     impl KernelSessionControl for Control {
         fn monitor_capabilities(&self) -> io::Result<MonitorCapabilities> {
-            Ok(MonitorCapabilities { max_edid_size: 512 })
+            Ok(MonitorCapabilities {
+                max_edid_size: 512,
+                cec_transport: true,
+            })
         }
 
         fn attach_monitor(&self, _: Option<&[u8]>) -> io::Result<()> {
@@ -202,6 +206,7 @@ mod tests {
         let (mut session, events) = session();
         assert_eq!(session.id().get(), 1);
         assert_eq!(session.monitor_capabilities().unwrap().max_edid_size, 512);
+        assert!(session.monitor_capabilities().unwrap().cec_transport);
         assert_eq!(
             session.take_renderer_access().unwrap_err().kind(),
             io::ErrorKind::NotFound

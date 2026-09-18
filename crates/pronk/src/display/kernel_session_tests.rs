@@ -46,7 +46,10 @@ struct Control {
 #[async_trait::async_trait]
 impl KernelSessionControl for Control {
     fn monitor_capabilities(&self) -> io::Result<MonitorCapabilities> {
-        Ok(MonitorCapabilities { max_edid_size: 512 })
+        Ok(MonitorCapabilities {
+            max_edid_size: 512,
+            cec_transport: false,
+        })
     }
 
     fn attach_monitor(&self, edid: Option<&[u8]>) -> io::Result<()> {

@@ -117,6 +117,7 @@ impl KernelSessionControl for MutterSession {
             .monitor_capabilities()
             .map(|capabilities| MonitorCapabilities {
                 max_edid_size: capabilities.max_edid_size,
+                cec_transport: capabilities.cec_transport,
             })
     }
 

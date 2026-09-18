@@ -8,10 +8,13 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 
 const VERSION: u32 = 1;
 const EDID_BLOCK_SIZE: usize = 128;
+const CAP_CEC: u32 = 1 << 0;
+const KNOWN_CAPABILITIES: u32 = CAP_CEC;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub max_edid_size: usize,
+    pub cec_transport: bool,
 }
 
 #[repr(C)]
@@ -46,19 +49,33 @@ pub fn query_capabilities(fd: BorrowedFd<'_>) -> io::Result<Capabilities> {
     // SAFETY: The writable response has the exact fixed-width UAPI layout and
     // remains live for the synchronous ioctl.
     unsafe { query(fd.as_raw_fd(), &mut response) }?;
-    let max_edid_size = response.max_edid_size as usize;
-    if response.version != VERSION
-        || response.flags != 0
-        || response.reserved != 0
-        || max_edid_size < EDID_BLOCK_SIZE
-        || max_edid_size % EDID_BLOCK_SIZE != 0
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "unsupported CastKMS monitor-control contract",
-        ));
+    Capabilities::try_from(response)
+}
+
+impl TryFrom<Query> for Capabilities {
+    type Error = io::Error;
+
+    fn try_from(response: Query) -> Result<Self, Self::Error> {
+        let max_edid_size = response.max_edid_size as usize;
+        if response.version != VERSION
+            || response.flags & !KNOWN_CAPABILITIES != 0
+            || response.reserved != 0
+            || max_edid_size < EDID_BLOCK_SIZE
+            || max_edid_size % EDID_BLOCK_SIZE != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "unsupported CastKMS monitor-control contract: version {}, flags {:#x}, maximum EDID size {}, reserved {:#x}",
+                    response.version, response.flags, response.max_edid_size, response.reserved
+                ),
+            ));
+        }
+        Ok(Self {
+            max_edid_size,
+            cec_transport: response.flags & CAP_CEC != 0,
+        })
     }
-    Ok(Capabilities { max_edid_size })
 }
 
 pub fn attach_monitor(fd: BorrowedFd<'_>, edid: Option<&[u8]>) -> io::Result<()> {
@@ -114,6 +131,35 @@ mod tests {
         assert_eq!(nix::request_code_read!(b'd', 0x41, 16), 0x8010_6441);
         assert_eq!(nix::request_code_write!(b'd', 0x42, 16), 0x4010_6442);
         assert_eq!(nix::request_code_write!(b'd', 0x43, 8), 0x4008_6443);
+    }
+
+    #[test]
+    fn accepts_known_optional_capabilities() {
+        assert_eq!(
+            Capabilities::try_from(Query {
+                version: VERSION,
+                flags: CAP_CEC,
+                max_edid_size: 256,
+                reserved: 0,
+            })
+            .unwrap(),
+            Capabilities {
+                max_edid_size: 256,
+                cec_transport: true,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_capabilities() {
+        let error = Capabilities::try_from(Query {
+            version: VERSION,
+            flags: CAP_CEC << 1,
+            max_edid_size: 256,
+            reserved: 0,
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
 
     #[test]
