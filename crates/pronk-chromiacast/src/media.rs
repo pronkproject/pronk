@@ -100,6 +100,8 @@ impl VideoEncoderPolicy {
 }
 
 fn chromecast_video_cadence() -> VideoCadence {
+    // Receiver acknowledgements and advertised rates do not establish visible
+    // playback above 30 fps. Keep the encoded cadence independent of KMS refresh.
     VideoCadence::new(
         NonZeroU32::new(30).expect("Chromecast video cadence is nonzero"),
         NonZeroU32::new(1).expect("Chromecast video cadence denominator is nonzero"),
@@ -1800,7 +1802,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .framerate_numerator,
-            chromecast_video_cadence().numerator.get()
+            30
         );
         media.stop_media(1, &mut transport).await.unwrap();
         media.shutdown().await.unwrap();
