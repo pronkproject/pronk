@@ -111,6 +111,22 @@ impl Setup {
         })
         .await
     }
+
+    pub(crate) async fn describe_if_active(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<Option<drm_capture::Description>, MediaPipelineError> {
+        on_worker(Arc::clone(&self.0), cancellation, |state, _| {
+            match state.describe() {
+                Ok(description) => Ok(Some(description)),
+                Err(error) if error.raw_os_error() == Some(nix::libc::ENODEV) => Ok(None),
+                Err(error) => Err(MediaPipelineError::new(format!(
+                    "describe capture output: {error}"
+                ))),
+            }
+        })
+        .await
+    }
 }
 
 impl State {
