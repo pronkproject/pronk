@@ -182,7 +182,7 @@ impl<'job, F: AsFd> SubmittedSceneJob<'job, F> {
             .target
             .write(frame)
             .map_err(SceneCompletionError::PrivateImage)?;
-        job.release_submitted(Some(completed.completion.as_fd()))
+        job.release_submitted(completed.completion.as_fd())
             .map_err(|error| {
                 SceneCompletionError::Release(io::Error::new(
                     error.error().kind(),

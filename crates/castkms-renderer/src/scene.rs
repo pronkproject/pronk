@@ -147,9 +147,9 @@ impl<F: AsFd> SceneJob<'_, F> {
 
     pub fn release_submitted(
         self,
-        completion: Option<BorrowedFd<'_>>,
+        completion: BorrowedFd<'_>,
     ) -> Result<(), SourceReleaseError<Self>> {
-        self.release(castkms_sys::RENDERER_RELEASE_SUBMITTED, completion)
+        self.release(castkms_sys::RENDERER_RELEASE_SUBMITTED, Some(completion))
     }
 
     fn release(
