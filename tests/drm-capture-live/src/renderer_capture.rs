@@ -2,6 +2,7 @@
 //! Requires a disposable compositor and isolated session bus; no DRM master fd.
 
 mod decoder;
+mod monitor;
 mod receiver_media;
 mod renderer_consumer;
 
@@ -137,7 +138,7 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
         .acquire(target, CancellationToken::new())
         .await?
         .try_into()?;
-    session.attach_monitor(None)?;
+    session.attach_monitor(Some(&monitor::edid(width, height, refresh_millihz)?))?;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let generation = nz64(u64::from(std::process::id()));
