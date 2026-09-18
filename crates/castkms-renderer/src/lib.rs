@@ -37,6 +37,16 @@ fn acquisition_is_idle(error: nix::errno::Errno) -> bool {
     error == nix::errno::Errno::ENODATA
 }
 
+fn source_acquisition_is_idle(error: nix::errno::Errno) -> bool {
+    matches!(
+        error,
+        nix::errno::Errno::ESTALE
+            | nix::errno::Errno::EAGAIN
+            | nix::errno::Errno::ENODATA
+            | nix::errno::Errno::ENODEV
+    )
+}
+
 /// Advisory state returned by the renderer endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointState {
@@ -432,6 +442,21 @@ mod tests {
         assert!(!acquisition_is_idle(nix::errno::Errno::ESTALE));
         assert!(!acquisition_is_idle(nix::errno::Errno::EKEYREVOKED));
         assert!(!acquisition_is_idle(nix::errno::Errno::EBUSY));
+    }
+
+    #[test]
+    fn unavailable_sources_are_idle() {
+        for error in [
+            nix::errno::Errno::ESTALE,
+            nix::errno::Errno::EAGAIN,
+            nix::errno::Errno::ENODATA,
+            nix::errno::Errno::ENODEV,
+        ] {
+            assert!(source_acquisition_is_idle(error));
+        }
+        for error in [nix::errno::Errno::EKEYREVOKED, nix::errno::Errno::EBUSY] {
+            assert!(!source_acquisition_is_idle(error));
+        }
     }
 
     #[test]

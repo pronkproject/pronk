@@ -167,8 +167,9 @@ impl<F: AsFd> SceneJob<'_, F> {
 impl<F: AsFd> PublishedRenderer<F> {
     /// Claim the next changed complete scene as one source-read transaction.
     ///
-    /// `None` means the current scene is blank or unchanged. The exclusive
-    /// borrow prevents another source or scene job on this renderer endpoint.
+    /// `None` means the current scene is blank or unchanged, or that this
+    /// constraints entry is not selected. The exclusive borrow prevents
+    /// another source or scene job on this renderer endpoint.
     ///
     /// ```compile_fail
     /// use castkms_renderer::{PublishedRenderer, RegisteredImage};
@@ -210,7 +211,7 @@ impl<F: AsFd> PublishedRenderer<F> {
         if let Err(error) =
             unsafe { drm_ioctl_castkms_renderer_acquire_job(self.as_fd().as_raw_fd(), &request) }
         {
-            if crate::acquisition_is_idle(error) {
+            if crate::source_acquisition_is_idle(error) {
                 return Ok(None);
             }
             return Err(error.into());
