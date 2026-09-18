@@ -17,7 +17,7 @@ use crate::{PrivateBuffer, PrivateFrame};
 /// One packed image kept private to the renderer and named by CastKMS.
 ///
 /// The name and native image remain inseparable so a scene can only be
-/// dequeued into the allocation that userspace subsequently writes.
+/// acquired into the allocation that userspace subsequently writes.
 pub(crate) struct SceneImage {
     pool: Arc<()>,
     registration: RegisteredImage,
