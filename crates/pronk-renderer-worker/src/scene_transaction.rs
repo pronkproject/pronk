@@ -164,7 +164,7 @@ pub(crate) struct SubmittedSceneJob<'job, F: AsFd> {
     target: SceneImage,
 }
 
-impl<'job, F: AsFd> SubmittedSceneJob<'job, F> {
+impl<F: AsFd> SubmittedSceneJob<'_, F> {
     /// Finish every source read, compose into registered private storage and
     /// transfer the final native completion before returning any allocation.
     pub(crate) fn render_and_release(self) -> Result<RenderedScene, SceneCompletionError> {
