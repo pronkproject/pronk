@@ -1299,22 +1299,31 @@ fn negotiate_capabilities(
     if candidate_modes.is_empty() {
         return Err(DeviceActorError::NoSupportedMode);
     }
-    let video_profiles: Vec<_> = request
+    let video_profile = request
         .video_profiles
         .iter()
-        .cloned()
-        .filter_map(|profile| narrow_h264_profile(profile, raw_layouts, &candidate_modes, &request))
-        .take(1)
-        .collect();
-    if video_profiles.is_empty() {
-        return Err(DeviceActorError::NoSupportedVideoProfile);
-    }
-    let selected_layout = video_profiles[0].raw_layouts[0];
-    let selected_profile = &video_profiles[0];
+        .enumerate()
+        .filter_map(|(index, profile)| {
+            narrow_h264_profile(profile.clone(), raw_layouts, &candidate_modes, &request)
+                .map(|profile| (index, profile))
+        })
+        .max_by_key(|(index, profile)| {
+            let layout = profile.raw_layouts[0];
+            let modes = candidate_modes
+                .iter()
+                .filter(|mode| {
+                    profile.supports_mode(mode) && request.supports_layout(mode, &layout)
+                })
+                .count();
+            (modes, std::cmp::Reverse(*index))
+        })
+        .map(|(_, profile)| profile)
+        .ok_or(DeviceActorError::NoSupportedVideoProfile)?;
+    let selected_layout = video_profile.raw_layouts[0];
     let modes = candidate_modes
         .into_iter()
         .filter(|mode| {
-            selected_profile.supports_mode(mode) && request.supports_layout(mode, &selected_layout)
+            video_profile.supports_mode(mode) && request.supports_layout(mode, &selected_layout)
         })
         .collect();
     let audio_profiles: Vec<_> = if audio_requested {
@@ -1335,7 +1344,7 @@ fn negotiate_capabilities(
         preparation_generation: request.preparation_generation,
         display_identity,
         modes,
-        video_profiles,
+        video_profiles: vec![video_profile],
         audio_profiles,
         features: (u64::from(audio_requested) * SESSION_FEATURE_AUDIO)
             | (u64::from(control_requested) * SESSION_FEATURE_CONTROL),
@@ -2108,6 +2117,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(capabilities.video_profiles[0].raw_layouts, [broad_layout]);
+        assert_eq!(capabilities.modes, [large, small]);
+    }
+
+    #[test]
+    fn encoder_profile_selection_preserves_the_most_modes() {
+        let mut offer = request();
+        let large = DisplayMode {
+            width: 3_840,
+            height: 2_160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        };
+        let small = offer.candidate_modes[0];
+        offer.candidate_modes.insert(0, large);
+        let mut broad = offer.video_profiles[0].clone();
+        broad.profile_id = "h264-large".into();
+        broad.max_width = large.width;
+        broad.max_height = large.height;
+        offer.video_profiles.push(broad);
+        offer.validate().unwrap();
+
+        let capabilities =
+            negotiate_capabilities(offer, display_identity(), &[system_layout()]).unwrap();
+        assert_eq!(capabilities.video_profiles[0].profile_id, "h264-large");
         assert_eq!(capabilities.modes, [large, small]);
     }
 
