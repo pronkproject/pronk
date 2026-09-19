@@ -61,17 +61,19 @@ impl VideoCodec {
 }
 
 impl VideoEncoder {
-    /// Minimum rate accepted by the selected hardware encoder, in bit/s.
-    pub fn minimum_bitrate(&self, cadence: VideoCadence) -> Result<u64, MediaGraphError> {
+    /// Inclusive rate limits accepted by the selected VA H.264 encoder, in bit/s.
+    pub fn bitrate_limits(&self, cadence: VideoCadence) -> Result<(u64, u64), MediaGraphError> {
         let Self::VaH264 { render_node } = self else {
-            return Ok(0);
+            return Err(MediaGraphError::new(
+                "bitrate limits require a selected VA H.264 encoder",
+            ));
         };
         let encoder = build_va_h264(render_node, None, cadence)?;
         let property = encoder
             .find_property("bitrate")
             .and_then(|property| property.downcast::<gst::glib::ParamSpecUInt>().ok())
             .ok_or_else(|| MediaGraphError::new("VA H.264 bitrate control is not unsigned"))?;
-        Ok(u64::from(property.minimum()).saturating_mul(1_000))
+        va_h264_bitrate_limits(&property)
     }
 
     /// Check the selected encoder path against concrete picture sizes.
@@ -336,6 +338,19 @@ impl VideoEncoder {
             }
         }
     }
+}
+
+fn va_h264_bitrate_limits(
+    property: &gst::glib::ParamSpecUInt,
+) -> Result<(u64, u64), MediaGraphError> {
+    let minimum = u64::from(property.minimum()).max(1) * 1_000;
+    let maximum = u64::from(property.maximum()).min(h264::MAX_H264_BITRATE_KBITS) * 1_000;
+    if maximum == 0 || minimum > maximum {
+        return Err(MediaGraphError::new(
+            "VA H.264 bitrate range has no value supported by the media graph",
+        ));
+    }
+    Ok((minimum, maximum))
 }
 
 fn build_va_h264(
@@ -850,6 +865,59 @@ mod tests {
             &property,
             VaPropertyValue::PlayingUnsigned(8_000)
         ));
+    }
+
+    #[test]
+    fn va_bitrate_limits_include_the_plugin_ceiling_and_media_limit() {
+        assert!(VideoEncoder::software(VideoCodec::H264)
+            .bitrate_limits(cadence())
+            .is_err());
+        let property = gst::glib::ParamSpecUInt::builder("bitrate")
+            .minimum(3_000)
+            .maximum(20_000)
+            .default_value(3_000)
+            .build()
+            .downcast::<gst::glib::ParamSpecUInt>()
+            .unwrap();
+        let (minimum, maximum) = va_h264_bitrate_limits(&property).unwrap();
+        assert_eq!((minimum, maximum), (3_000_000, 20_000_000));
+        assert_eq!(h264::bitrate_kbits(minimum).unwrap(), property.minimum());
+        assert_eq!(
+            h264::bitrate_kbits(minimum - 1).unwrap(),
+            property.minimum()
+        );
+        assert_eq!(h264::bitrate_kbits(maximum).unwrap(), property.maximum());
+        assert!(h264::bitrate_kbits(maximum + 1).unwrap() > property.maximum());
+
+        let above_media_limit = gst::glib::ParamSpecUInt::builder("bitrate")
+            .minimum(3_000)
+            .maximum(3_000_000)
+            .default_value(3_000)
+            .build()
+            .downcast::<gst::glib::ParamSpecUInt>()
+            .unwrap();
+        assert_eq!(
+            va_h264_bitrate_limits(&above_media_limit).unwrap(),
+            (3_000_000, 2_048_000_000)
+        );
+
+        let no_usable_rate = gst::glib::ParamSpecUInt::builder("bitrate")
+            .minimum(2_048_001)
+            .maximum(3_000_000)
+            .default_value(2_048_001)
+            .build()
+            .downcast::<gst::glib::ParamSpecUInt>()
+            .unwrap();
+        assert!(va_h264_bitrate_limits(&no_usable_rate).is_err());
+
+        let zero_only = gst::glib::ParamSpecUInt::builder("bitrate")
+            .minimum(0)
+            .maximum(0)
+            .default_value(0)
+            .build()
+            .downcast::<gst::glib::ParamSpecUInt>()
+            .unwrap();
+        assert!(va_h264_bitrate_limits(&zero_only).is_err());
     }
 
     #[test]

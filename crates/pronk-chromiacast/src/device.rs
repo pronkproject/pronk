@@ -2348,6 +2348,7 @@ mod tests {
                 render_device,
                 raw_layouts,
                 minimum_bitrate: 0,
+                maximum_bitrate: u64::MAX,
             },
         )
         .unwrap();

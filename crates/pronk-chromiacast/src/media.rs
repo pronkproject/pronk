@@ -46,6 +46,7 @@ pub(crate) enum VideoEncoderPolicy {
         render_device: RenderDeviceIdentity,
         raw_layouts: Vec<RawVideoLayout>,
         minimum_bitrate: u64,
+        maximum_bitrate: u64,
     },
 }
 
@@ -67,10 +68,22 @@ impl VideoEncoderPolicy {
     }
 
     fn validate_bitrate(&self, bitrate: u64) -> Result<(), String> {
-        let minimum = self.minimum_bitrate();
-        if bitrate < minimum {
+        let Self::VaH264 {
+            minimum_bitrate: minimum,
+            maximum_bitrate: maximum,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        if bitrate < *minimum {
             return Err(format!(
                 "video bitrate {bitrate} bit/s is below the selected encoder minimum of {minimum} bit/s"
+            ));
+        }
+        if bitrate > *maximum {
+            return Err(format!(
+                "video bitrate {bitrate} bit/s exceeds the selected encoder maximum of {maximum} bit/s"
             ));
         }
         Ok(())
@@ -1640,6 +1653,7 @@ mod tests {
             render_device: test_render_device(),
             raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
             minimum_bitrate: 0,
+            maximum_bitrate: u64::MAX,
         };
         assert_eq!(policy.offer(), VideoOffer::H264Only);
         assert!(policy.encoder(VideoCodec::Vp8).is_err());
@@ -1658,6 +1672,7 @@ mod tests {
             render_device: test_render_device(),
             raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
             minimum_bitrate: 0,
+            maximum_bitrate: u64::MAX,
         };
         policy
             .validate_video_target(Some(test_render_device()))
@@ -1685,6 +1700,7 @@ mod tests {
                 render_device: test_render_device(),
                 raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
                 minimum_bitrate: 0,
+                maximum_bitrate: u64::MAX,
             },
             Box::new(graph),
             video_receiver,
@@ -1707,43 +1723,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_va_bitrate_is_rejected_before_transport() {
+    async fn unsupported_va_bitrates_are_rejected_before_transport() {
         let session_id = "12345678-1234-1234-1234-123456789abc";
-        let (video_output, video_receiver) = mpsc::channel(4);
-        let (_audio_output, audio_receiver) = mpsc::channel(1);
-        let mut media = ChromiacastMediaSession::with_graph_outputs(
-            session_id.into(),
-            7,
-            VideoEncoderPolicy::VaH264 {
-                render_node: PathBuf::from("/dev/dri/renderD128"),
-                render_device: test_render_device(),
-                raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
-                minimum_bitrate: 3_000_000,
-            },
-            Box::new(FakeGraph::video(video_output)),
-            video_receiver,
-            audio_receiver,
-        );
-        media.complete_preparation(capabilities()).unwrap();
-        let mut transport = FakeTransport::default();
+        for (minimum_bitrate, maximum_bitrate, rejected_limit) in
+            [(3_000_000, u64::MAX, "3000000"), (0, 1_000_000, "1000000")]
+        {
+            let (video_output, video_receiver) = mpsc::channel(4);
+            let (_audio_output, audio_receiver) = mpsc::channel(1);
+            let mut media = ChromiacastMediaSession::with_graph_outputs(
+                session_id.into(),
+                7,
+                VideoEncoderPolicy::VaH264 {
+                    render_node: PathBuf::from("/dev/dri/renderD128"),
+                    render_device: test_render_device(),
+                    raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
+                    minimum_bitrate,
+                    maximum_bitrate,
+                },
+                Box::new(FakeGraph::video(video_output)),
+                video_receiver,
+                audio_receiver,
+            );
+            media.complete_preparation(capabilities()).unwrap();
+            let mut transport = FakeTransport::default();
 
-        let error = media
-            .configure(
-                remote(),
-                vec![target_on_render_device(session_id, 1)],
-                configuration(),
-                1,
-                &mut transport,
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            MediaSessionError::InvalidRequest(message) if message.contains("3000000")
-        ));
-        assert!(transport.configuration.is_none());
-        assert_eq!(media.state, SessionState::Prepared);
-        media.shutdown().await.unwrap();
+            let error = media
+                .configure(
+                    remote(),
+                    vec![target_on_render_device(session_id, 1)],
+                    configuration(),
+                    1,
+                    &mut transport,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                MediaSessionError::InvalidRequest(message) if message.contains(rejected_limit)
+            ));
+            assert!(transport.configuration.is_none());
+            assert_eq!(media.state, SessionState::Prepared);
+            media.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1760,6 +1781,7 @@ mod tests {
                 render_device: test_render_device(),
                 raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
                 minimum_bitrate: 0,
+                maximum_bitrate: u64::MAX,
             },
             Box::new(graph),
             video_receiver,

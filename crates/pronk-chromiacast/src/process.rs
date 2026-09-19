@@ -233,9 +233,9 @@ fn resolve_encoder_policy(selection: VideoEncoderSelection) -> anyhow::Result<Vi
     let formats = encoder
         .supported_dma_buf_formats(chromecast_video_cadence())
         .context("qualify selected VA H.264 encoder and DMA-BUF input formats")?;
-    let minimum_bitrate = encoder
-        .minimum_bitrate(chromecast_video_cadence())
-        .context("query selected VA H.264 minimum bitrate")?;
+    let (minimum_bitrate, maximum_bitrate) = encoder
+        .bitrate_limits(chromecast_video_cadence())
+        .context("query selected VA H.264 bitrate limits")?;
     let raw_layouts = formats
         .into_iter()
         .map(|format| {
@@ -247,6 +247,7 @@ fn resolve_encoder_policy(selection: VideoEncoderSelection) -> anyhow::Result<Vi
         render_device,
         raw_layouts,
         minimum_bitrate,
+        maximum_bitrate,
     })
 }
 
@@ -423,7 +424,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires PRONK_GPU_RENDER_NODE and a matching VA encoder"]
-    fn selected_va_policy_reads_the_encoder_minimum() {
+    fn selected_va_policy_reads_the_encoder_bitrate_limits() {
         let render_node = PathBuf::from(
             std::env::var_os("PRONK_GPU_RENDER_NODE")
                 .expect("PRONK_GPU_RENDER_NODE names the selected VA render node"),
@@ -431,6 +432,7 @@ mod tests {
         let policy = resolve_encoder_policy(VideoEncoderSelection::VaH264 { render_node }).unwrap();
         let VideoEncoderPolicy::VaH264 {
             minimum_bitrate,
+            maximum_bitrate,
             raw_layouts,
             ..
         } = policy
@@ -438,6 +440,9 @@ mod tests {
             unreachable!("requested a VA encoder")
         };
         assert!(!raw_layouts.is_empty());
-        eprintln!("selected VA encoder minimum bitrate: {minimum_bitrate} bit/s");
+        assert!(minimum_bitrate <= maximum_bitrate);
+        eprintln!(
+            "selected VA encoder bitrate limits: {minimum_bitrate}..={maximum_bitrate} bit/s"
+        );
     }
 }

@@ -5,6 +5,7 @@ use crate::model::{
 };
 
 pub(crate) const ENCODER_NAME: &str = "x264enc";
+pub(crate) const MAX_H264_BITRATE_KBITS: u64 = 2_048_000;
 const KEY_FRAME_INTERVAL_SECONDS: u64 = 2;
 
 pub(crate) fn encoder_input_caps(cadence: VideoCadence) -> Result<gst::Caps, MediaGraphError> {
@@ -23,8 +24,6 @@ pub(crate) fn encoder_output_caps() -> Result<gst::Caps, MediaGraphError> {
 }
 
 pub(crate) fn bitrate_kbits(bits_per_second: u64) -> Result<u32, MediaGraphError> {
-    const MAX_H264_BITRATE_KBITS: u64 = 2_048_000;
-
     let kbits = bits_per_second.div_ceil(1_000);
     if !(1..=MAX_H264_BITRATE_KBITS).contains(&kbits) {
         return Err(MediaGraphError::new(format!(

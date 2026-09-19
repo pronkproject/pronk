@@ -861,8 +861,8 @@ that needs explicit VA driver selection may add its qualified
 
 The opt-in backend preparation test checks that the selected VA node returns
 only display modes with an accepted format at that size, without connecting to
-a receiver. A companion startup test reads the selected encoder's minimum
-bitrate. The mode test uses the complete seven-mode Cast offer and requires the
+a receiver. A companion startup test reads the selected encoder's bitrate
+limits. The mode test uses the complete seven-mode Cast offer and requires the
 640×480 compatibility timing needed by the generated EDID:
 
 ```sh
@@ -879,8 +879,10 @@ limits. An unsupported control rejects the selected hardware profile instead
 of crashing graph construction. The bitrate control must also be mutable while
 playing, because receiver feedback changes it during a session. Later bitrate
 changes are checked against the active encoder's limits before the reported
-rate changes. The selected encoder's minimum rate also bounds feedback-driven
-decreases, so network pressure cannot request a rate below its supported range.
+rate changes. The initial rate is checked against the selected encoder's
+minimum and maximum before making a Cast offer. The minimum also bounds
+feedback-driven decreases, so network pressure cannot request an unsupported
+rate.
 
 To run both tests under the backend unit's device, memory-execution and
 syscall restrictions, build them outside the sandbox and launch them in a
