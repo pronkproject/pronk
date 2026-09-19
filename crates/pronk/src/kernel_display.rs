@@ -196,7 +196,9 @@ fn classify_capture_error(
             topology: current.topology,
             grant_state: DisplayGrantState::SuspendedForeignContent,
         })),
-        Some(libc::EKEYREVOKED) | Some(libc::ECANCELED) => Ok(Observation::Revoked),
+        Some(libc::EKEYREVOKED) | Some(libc::ECANCELED) | Some(libc::ESTALE) => {
+            Ok(Observation::Revoked)
+        }
         _ => Err(KernelDisplayError::new(
             "observe capture output",
             error.to_string(),
@@ -329,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn active_output_uses_the_advertised_timing() {
+    fn active_output_preserves_the_realized_timing() {
         let observation =
             active_observation(&modes(), NonZeroU32::new(17).unwrap(), 1280, 720, 59_940, 5)
                 .unwrap();
@@ -375,6 +377,16 @@ mod tests {
         assert!(matches!(
             classify_capture_error(
                 io::Error::from_raw_os_error(libc::EKEYREVOKED),
+                unavailable_observation()
+            )
+            .unwrap(),
+            Observation::Revoked
+        ));
+        // An administrative capture grant cannot resume after its bound
+        // master interval ends, even if that master later returns.
+        assert!(matches!(
+            classify_capture_error(
+                io::Error::from_raw_os_error(libc::ESTALE),
                 unavailable_observation()
             )
             .unwrap(),
