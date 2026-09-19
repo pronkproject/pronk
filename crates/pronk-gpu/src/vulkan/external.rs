@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ash::vk;
 use pronk_dmabuf::{export_dependencies, Access};
 
-use super::device::{native, unsupported, DeviceInner};
+use super::device::{external_memory_type, native, unsupported, DeviceInner};
 use super::image::ImageUse;
 use super::{Device, ImageLayout};
 
@@ -106,17 +106,8 @@ impl Device {
                 .get_physical_device_memory_properties(self.inner.physical)
         };
         let compatible = requirements.memory_type_bits & fd_properties.memory_type_bits;
-        let index = properties.memory_types[..properties.memory_type_count as usize]
-            .iter()
-            .enumerate()
-            .find(|(index, ty)| {
-                compatible & (1 << index) != 0
-                    && ty
-                        .property_flags
-                        .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            })
-            .map(|(index, _)| index as u32)
-            .ok_or_else(|| unsupported("no compatible device-local external memory"))?;
+        let index = external_memory_type(&properties, compatible)
+            .ok_or_else(|| unsupported("no compatible external memory type"))?;
         let imported = image.fd.try_clone()?;
         let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(raw);
         let mut import = vk::ImportMemoryFdInfoKHR::default()
@@ -192,6 +183,21 @@ mod tests {
 
     use super::*;
     use crate::vulkan::PackedFormat;
+
+    #[test]
+    fn imported_memory_prefers_local_but_accepts_other_compatible_types() {
+        let mut properties = vk::PhysicalDeviceMemoryProperties {
+            memory_type_count: 3,
+            ..Default::default()
+        };
+        properties.memory_types[0].property_flags = vk::MemoryPropertyFlags::HOST_VISIBLE;
+        properties.memory_types[1].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        properties.memory_types[2].property_flags = vk::MemoryPropertyFlags::HOST_COHERENT;
+        assert_eq!(external_memory_type(&properties, 0b011), Some(1));
+        assert_eq!(external_memory_type(&properties, 0b101), Some(0));
+        assert_eq!(external_memory_type(&properties, 0b100), Some(2));
+        assert_eq!(external_memory_type(&properties, 0), None);
+    }
 
     #[test]
     fn backing_may_include_native_allocation_rounding() {

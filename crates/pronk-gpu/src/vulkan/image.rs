@@ -4,8 +4,9 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use ash::vk;
+use pronk_dmabuf::Access;
 
-use super::device::{native, unsupported, Device, DeviceInner};
+use super::device::{external_memory_type, native, unsupported, Device, DeviceInner};
 
 mod format;
 pub use format::PackedFormat;
@@ -77,7 +78,85 @@ impl Device {
         width: NonZeroU32,
         height: NonZeroU32,
     ) -> io::Result<Vec<u64>> {
-        let usage = ImageUse::ImportedSource;
+        self.modifiers_for_uses(format, width, height, &[ImageUse::ImportedSource])
+    }
+
+    /// Enumerate exportable single-plane storage for private scene images.
+    ///
+    /// These images are written and read by this device. Their DMA-BUFs are
+    /// registered with the renderer but never imported by a media recipient.
+    pub fn private_storage_modifiers(
+        &self,
+        format: PackedFormat,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> io::Result<Vec<u64>> {
+        self.modifiers_for_uses(format, width, height, &[ImageUse::OwnedStorage])
+    }
+
+    /// Verify layouts that can be exported and imported for final-image delivery.
+    ///
+    /// The producer needs an owned image supporting private-image blits, while the
+    /// delivery stage needs to import the same allocation as a write destination.
+    /// Each candidate is allocated, exported and reimported without submitting
+    /// work. A downstream consumer must independently accept the exact DRM layout.
+    pub fn output_modifiers(
+        &self,
+        format: PackedFormat,
+        width: NonZeroU32,
+        height: NonZeroU32,
+    ) -> io::Result<Vec<u64>> {
+        let mut modifiers = self.modifiers_for_uses(
+            format,
+            width,
+            height,
+            &[ImageUse::OwnedStorage, ImageUse::ImportedDestination],
+        )?;
+        let mut first_error = None;
+        modifiers.retain(|modifier| {
+            match self.probe_output_image(format, width, height, *modifier) {
+                Ok(()) => true,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    false
+                }
+            }
+        });
+        if modifiers.is_empty() {
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+        Ok(modifiers)
+    }
+
+    fn probe_output_image(
+        &self,
+        format: PackedFormat,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        modifier: u64,
+    ) -> io::Result<()> {
+        let image = self.allocate_with_format(format, width, height, modifier)?;
+        let layout = image.layout();
+        let fd = image.export()?;
+        // SAFETY: The newly allocated image and descriptor belong exclusively to
+        // this probe. Neither has been published or submitted for access.
+        let imported = unsafe {
+            self.import_external_image(fd, layout, ImageUse::ImportedDestination, Access::Write)
+        }?;
+        drop(imported);
+        drop(image);
+        Ok(())
+    }
+
+    fn modifiers_for_uses(
+        &self,
+        format: PackedFormat,
+        width: NonZeroU32,
+        height: NonZeroU32,
+        uses: &[ImageUse],
+    ) -> io::Result<Vec<u64>> {
         let properties = self.modifier_properties(format)?;
         let mut modifiers = Vec::new();
         modifiers
@@ -85,15 +164,22 @@ impl Device {
             .map_err(io::Error::other)?;
         for property in properties {
             let modifier = property.drm_format_modifier;
-            if usage.supports_modifier(&property, modifier)
-                && self.supports_external_image(
-                    format,
-                    width.get(),
-                    height.get(),
-                    modifier,
-                    usage,
-                )?
-            {
+            let mut supported = true;
+            for &usage in uses {
+                if !usage.supports_modifier(&property, modifier)
+                    || !self.supports_external_image(
+                        format,
+                        width.get(),
+                        height.get(),
+                        modifier,
+                        usage,
+                    )?
+                {
+                    supported = false;
+                    break;
+                }
+            }
+            if supported {
                 modifiers.push(modifier);
             }
         }
@@ -181,17 +267,8 @@ impl Device {
                 .instance()
                 .get_physical_device_memory_properties(self.inner.physical)
         };
-        let memory_type = properties.memory_types[..properties.memory_type_count as usize]
-            .iter()
-            .enumerate()
-            .find(|(index, ty)| {
-                requirements.memory_type_bits & (1 << index) != 0
-                    && ty
-                        .property_flags
-                        .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            })
-            .map(|(index, _)| index as u32)
-            .ok_or_else(|| unsupported("no device-local memory for the image"))?;
+        let memory_type = external_memory_type(&properties, requirements.memory_type_bits)
+            .ok_or_else(|| unsupported("no compatible memory for the exportable image"))?;
         let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(raw);
         let mut export = vk::ExportMemoryAllocateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);

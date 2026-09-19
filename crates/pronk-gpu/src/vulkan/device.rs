@@ -51,6 +51,26 @@ pub(super) struct DeviceInner {
     _render_node: File,
 }
 
+/// Prefer local storage for an external image, but accept any memory type
+/// allowed by both the image requirements and the external-memory handle.
+pub(super) fn external_memory_type(
+    properties: &vk::PhysicalDeviceMemoryProperties,
+    compatible: u32,
+) -> Option<u32> {
+    let types = &properties.memory_types[..properties.memory_type_count as usize];
+    let eligible = |(index, _): &(usize, &vk::MemoryType)| compatible & (1 << index) != 0;
+    types
+        .iter()
+        .enumerate()
+        .filter(eligible)
+        .find(|(_, ty)| {
+            ty.property_flags
+                .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        })
+        .or_else(|| types.iter().enumerate().find(eligible))
+        .map(|(index, _)| index as u32)
+}
+
 impl Device {
     /// Whether this logical device enabled exact 64-bit shader arithmetic.
     pub fn supports_shader_int64(&self) -> bool {
