@@ -207,7 +207,7 @@ impl VideoEncoder {
                     MediaGraphError::new(format!("construct video converter: {error}"))
                 }),
             Self::VaH264 { render_node } => {
-                let factory = selected_va_factory("postproc", render_node)?;
+                let factory = selected_va_factory("postproc", render_node, &[], &[])?;
                 let converter = gst::ElementFactory::make(&factory)
                     .name("pronk-va-video-convert")
                     .property("disable-passthrough", true)
@@ -277,7 +277,20 @@ impl VideoEncoder {
                         "VA H.264 key-frame interval exceeds the encoder limit",
                     ));
                 }
-                let factory = selected_va_factory("h264enc", render_node)?;
+                let factory = selected_va_factory(
+                    "h264enc",
+                    render_node,
+                    &[
+                        "bitrate",
+                        "key-int-max",
+                        "b-frames",
+                        "cabac",
+                        "dct8x8",
+                        "aud",
+                        "rate-control",
+                    ],
+                    &[("rate-control", "cbr")],
+                )?;
                 let encoder = gst::ElementFactory::make(&factory)
                     .name("pronk-va-h264-encoder")
                     .property("bitrate", h264::bitrate_kbits(bitrate.get())?)
@@ -471,7 +484,12 @@ fn supports_va_baseline_caps(output: &gst::CapsRef) -> Result<bool, MediaGraphEr
     Ok(output.can_intersect(&baseline))
 }
 
-fn selected_va_factory(suffix: &str, render_node: &Path) -> Result<String, MediaGraphError> {
+fn selected_va_factory(
+    suffix: &str,
+    render_node: &Path,
+    required_properties: &[&str],
+    required_values: &[(&str, &str)],
+) -> Result<String, MediaGraphError> {
     let metadata = render_node.metadata().map_err(|error| {
         MediaGraphError::new(format!(
             "inspect selected render device {}: {error}",
@@ -504,17 +522,48 @@ fn selected_va_factory(suffix: &str, render_node: &Path) -> Result<String, Media
         let Ok(element) = gst::ElementFactory::make(&factory).build() else {
             continue;
         };
-        if validate_va_device(&element, render_node).is_ok() {
-            return Ok(factory);
+        match validate_va_device(&element, render_node)
+            .and_then(|()| validate_va_properties(&element, required_properties, required_values))
+        {
+            Ok(()) => return Ok(factory),
+            Err(error) => available.push(format!("{factory}: {error}")),
         }
-        let path = va_device_path(&element).unwrap_or_else(|_| "<unknown>".into());
-        available.push(format!("{factory}: {path}"));
     }
     Err(MediaGraphError::new(format!(
         "the selected render device {} has no VA {suffix} element (available: {})",
         render_node.display(),
         available.join(", ")
     )))
+}
+
+fn validate_va_properties(
+    element: &gst::Element,
+    names: &[&str],
+    values: &[(&str, &str)],
+) -> Result<(), MediaGraphError> {
+    for name in names {
+        let property = element.find_property(name).ok_or_else(|| {
+            MediaGraphError::new(format!("{} has no {name} property", element.name()))
+        })?;
+        if !property.flags().contains(gst::glib::ParamFlags::WRITABLE) {
+            return Err(MediaGraphError::new(format!(
+                "{} cannot set its {name} property",
+                element.name(),
+            )));
+        }
+    }
+    for &(name, value) in values {
+        let property = element.find_property(name).ok_or_else(|| {
+            MediaGraphError::new(format!("{} has no {name} property", element.name()))
+        })?;
+        gst::glib::Value::deserialize_with_pspec(value, &property).map_err(|_| {
+            MediaGraphError::new(format!(
+                "{} does not accept {name}={value}",
+                element.name()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn validate_va_device(element: &gst::Element, requested: &Path) -> Result<(), MediaGraphError> {
@@ -622,8 +671,21 @@ mod tests {
     #[test]
     fn va_element_selection_rejects_a_regular_file_as_a_render_device() {
         let executable = std::env::current_exe().unwrap();
-        let error = selected_va_factory("h264enc", &executable).unwrap_err();
+        let error = selected_va_factory("h264enc", &executable, &[], &[]).unwrap_err();
         assert!(error.to_string().contains("not a character device"));
+    }
+
+    #[test]
+    fn va_property_preflight_reports_unsupported_encoder_controls() {
+        gst::init().unwrap();
+        let element = gst::ElementFactory::make("fakesink").build().unwrap();
+        let missing = validate_va_properties(&element, &["rate-control"], &[]).unwrap_err();
+        assert!(missing.to_string().contains("rate-control property"));
+        let readonly = validate_va_properties(&element, &["last-sample"], &[]).unwrap_err();
+        assert!(readonly.to_string().contains("cannot set its last-sample property"));
+        let unsupported =
+            validate_va_properties(&element, &[], &[("state-error", "cbr")]).unwrap_err();
+        assert!(unsupported.to_string().contains("state-error=cbr"));
     }
 
     #[test]
