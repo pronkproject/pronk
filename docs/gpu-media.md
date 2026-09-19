@@ -60,6 +60,12 @@ requests that same layout from the capture provider before allocating its
 output pool. If no intersection exists,
 preparation fails without silently changing either layout.
 
+The VA format probe does not impose a sample bitrate. It checks that the
+encoder exposes a playing-mutable bitrate control, then inspects pad caps
+without encoding. The real session bitrate is validated when its graph is
+configured; a converter's supported layouts do not imply that every bitrate
+is accepted by the encoder.
+
 An empty per-mode list in the protocol means every offered profile layout
 works at every candidate mode. Otherwise, each candidate mode has exactly
 one entry, and every listed layout also belongs to an offered video profile.
