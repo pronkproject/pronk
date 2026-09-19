@@ -33,7 +33,7 @@ pub struct PrivateStorage {
 }
 
 impl PrivateStorage {
-    pub fn allocate(worker: &Device) -> Result<Self> {
+    pub fn allocate(worker: &Device, output_size: crate::OutputSize) -> Result<Self> {
         let nz = |value| NonZeroU32::new(value).unwrap();
         let inputs = pattern::scene(0)
             .into_iter()
@@ -44,7 +44,7 @@ impl PrivateStorage {
                 )
             })
             .collect::<std::io::Result<Vec<_>>>()?;
-        let output = worker.allocate_private(nz(pattern::WIDTH), nz(pattern::HEIGHT))?;
+        let output = worker.allocate_private(nz(output_size.width), nz(output_size.height))?;
         let blender = worker.create_blender()?;
         let gamma = worker.create_gamma(&pattern::GAMMA)?;
         Ok(Self {

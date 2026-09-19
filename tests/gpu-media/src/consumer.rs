@@ -8,7 +8,7 @@ use gst::prelude::*;
 use gstreamer as gst;
 use tokio::sync::mpsc;
 
-use crate::pattern::{HEIGHT, WIDTH};
+use crate::OutputSize;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -22,6 +22,12 @@ pub enum Event {
     Error(String),
 }
 
+pub struct InputLayout {
+    pub modifier: u64,
+    pub fourcc: &'static str,
+    pub size: OutputSize,
+}
+
 pub struct Consumer {
     pipeline: gst::Pipeline,
     // pipewiresrc duplicates this connection when entering READY.
@@ -33,21 +39,21 @@ impl Consumer {
     pub fn start(
         socket: &Path,
         node: &str,
-        modifier: u64,
-        fourcc: &str,
+        input: InputLayout,
         frames: u32,
         render_node: &Path,
         mode: Mode,
     ) -> Result<Self> {
         gst::init()?;
         let socket = UnixStream::connect(socket)?;
-        let drm_format = if modifier == 0 {
-            fourcc.into()
+        let drm_format = if input.modifier == 0 {
+            input.fourcc.into()
         } else {
-            format!("{fourcc}:0x{modifier:016x}")
+            format!("{}:0x{:016x}", input.fourcc, input.modifier)
         };
         let caps = format!(
-            "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={WIDTH},height={HEIGHT},framerate=30/1"
+            "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={},height={},framerate=30/1",
+            input.size.width, input.size.height
         );
         let encoding = match mode {
             Mode::Raw => "",

@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-[ "$#" -le 5 ] || { echo "expected render node, modifier, optional profile, execution and format" >&2; exit 2; }
+[ "$#" -le 6 ] || { echo "expected render node, modifier, optional profile, execution, format and size" >&2; exit 2; }
 render_node=${1:?render node required}
 modifier=${2:?hexadecimal DRM modifier required}
 profile=${3:-raw}
@@ -10,6 +10,9 @@ case "$execution" in host|sandbox|sandbox-denied) ;; *) echo "execution must be 
 case "$profile" in raw) default_format=XR24 ;; *) default_format=AR24 ;; esac
 pixel_format=${5:-$default_format}
 case "$pixel_format" in XR24|AR24|XB24|AB24) ;; *) echo "format must be XR24, AR24, XB24 or AB24" >&2; exit 2 ;; esac
+output_size=${6:-1920x1080}
+case "$output_size" in 1920x1080|2560x1440|3840x2160) ;; *) echo "size must be 1920x1080, 2560x1440 or 3840x2160" >&2; exit 2 ;; esac
+case "$output_size" in 1920x1080) runtime_limit=45 ;; *) runtime_limit=100 ;; esac
 test_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_dir=$(CDPATH= cd -- "$test_dir/../.." && pwd)
 gpu_runtime_dir=$(mktemp -d /var/tmp/pronk-gpu-media.XXXXXXXX)
@@ -33,13 +36,13 @@ while [ ! -S "$gpu_runtime_dir/pronk-gpu-test" ]; do
     sleep 0.05
 done
 echo "Private graph: $gpu_runtime_dir"
-set -- "$binary" "$gpu_runtime_dir/pronk-gpu-test" "$render_node" "$modifier" "$profile" "$pixel_format"
+set -- "$binary" "$gpu_runtime_dir/pronk-gpu-test" "$render_node" "$modifier" "$profile" "$pixel_format" "$output_size"
 case "$execution" in
 sandbox) set -- sh "$test_dir/run-sandbox.sh" "$@" allowed ;;
 sandbox-denied) set -- sh "$test_dir/run-sandbox.sh" "$@" denied ;;
 esac
 if PIPEWIRE_REMOTE="$gpu_runtime_dir/pronk-gpu-test" GST_REGISTRY="$gpu_runtime_dir/gst-registry.bin" \
-timeout --signal=TERM --kill-after=5 45 "$@" \
+timeout --signal=TERM --kill-after=5 "$runtime_limit" "$@" \
     > "$gpu_runtime_dir/client.log" 2>&1; then
     cat "$gpu_runtime_dir/client.log"
 else

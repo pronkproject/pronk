@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::pattern::FRAMES;
+use crate::OutputSize;
 
 pub const MINIMUM_ENCODED_FRAMES: usize = 12;
 
@@ -37,12 +38,14 @@ impl Consumer {
         caps: String,
         render_node: &Path,
         generation: NonZeroU64,
+        output_size: OutputSize,
     ) -> Result<Self> {
         let remote = UnixStream::connect(socket)?;
         let encoder = VideoEncoder::va_h264(render_node);
         let cadence = VideoCadence::new(nz(30), nz(1));
         ensure!(
-            encoder.supported_dimensions(&[(1920, 1080)], cadence)? == [true],
+            encoder.supported_dimensions(&[(output_size.width, output_size.height)], cadence)?
+                == [true],
             "selected VA converter and encoder do not accept the fixture picture size"
         );
         let (actor, output) = MediaGraphActor::spawn_with_output(FRAMES as usize)?;

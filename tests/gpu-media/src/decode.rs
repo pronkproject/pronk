@@ -7,7 +7,8 @@ use anyhow::{ensure, Context, Result};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_video::{self as video, prelude::*};
 
-use crate::pattern::{self, EDGE_TOLERANCE, FRAMES, HEIGHT, TOLERANCE, WIDTH};
+use crate::pattern::{self, EDGE_TOLERANCE, FRAMES, TOLERANCE};
+use crate::OutputSize;
 
 struct Pipeline(gst::Pipeline);
 
@@ -17,7 +18,11 @@ impl Drop for Pipeline {
     }
 }
 
-pub fn verify(frames: Vec<crate::encoded::Frame>, render_node: &Path) -> Result<()> {
+pub fn verify(
+    frames: Vec<crate::encoded::Frame>,
+    render_node: &Path,
+    output_size: OutputSize,
+) -> Result<()> {
     ensure!(
         !frames.is_empty() && frames.len() <= FRAMES as usize,
         "unexpected fixture frame count"
@@ -77,8 +82,8 @@ pub fn verify(frames: Vec<crate::encoded::Frame>, render_node: &Path) -> Result<
             .context("missing decoded image")?;
         let info = video::VideoInfo::from_caps(sample.caps().context("decoded caps")?)?;
         ensure!(
-            info.width() == WIDTH
-                && info.height() == HEIGHT
+            info.width() == output_size.width
+                && info.height() == output_size.height
                 && info.format() == video::VideoFormat::Bgra,
             "unexpected decoded layout"
         );
@@ -98,9 +103,9 @@ pub fn verify(frames: Vec<crate::encoded::Frame>, render_node: &Path) -> Result<
             )
         });
         let background = pattern::output_color(pattern::BACKGROUND);
-        for y in 0..HEIGHT as usize {
+        for y in 0..output_size.height as usize {
             let row = pixels
-                .get(y * stride..y * stride + WIDTH as usize * 4)
+                .get(y * stride..y * stride + output_size.width as usize * 4)
                 .context("short decoded plane")?;
             for (x, pixel) in row.chunks_exact(4).enumerate() {
                 let expected = regions

@@ -18,9 +18,10 @@ use pronk_pipewire::{
 
 use crate::consumer::{self, Consumer, Event, Mode as FixtureMode};
 use crate::encoded::Encoded;
-use crate::pattern::{self, FRAMES, HEIGHT, WIDTH};
+use crate::pattern::{self, FRAMES};
 use crate::production;
 use crate::render;
+use crate::OutputSize;
 
 const SLOTS: usize = 4;
 
@@ -147,6 +148,7 @@ pub async fn run(
     modifier: u64,
     mode: Mode,
     output_format: OutputFormat,
+    output_size: OutputSize,
 ) -> Result<()> {
     ensure!(
         std::env::var_os("PIPEWIRE_REMOTE").as_deref() == Some(socket.as_os_str()),
@@ -174,15 +176,15 @@ pub async fn run(
                     output_worker
                         .allocate_with_format(
                             output_format.packed(),
-                            nz(WIDTH),
-                            nz(HEIGHT),
+                            nz(output_size.width),
+                            nz(output_size.height),
                             modifier,
                         )
                         .map(Some)
                         .map_err(Into::into)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let staging = render::PrivateStorage::allocate(&device)?;
+            let staging = render::PrivateStorage::allocate(&device, output_size)?;
             let incoming = pattern::scene(0)
                 .into_iter()
                 .map(|plane| {
@@ -264,9 +266,10 @@ pub async fn run(
             socket,
             identity.node_name.clone(),
             identity.object_serial,
-            input_caps(modifier, output_format),
+            input_caps(modifier, output_format, output_size),
             &render_node,
             generation,
+            output_size,
         )?)
     } else {
         let consumer_socket = socket.to_owned();
@@ -280,8 +283,11 @@ pub async fn run(
                 Consumer::start(
                     &consumer_socket,
                     &consumer_name,
-                    modifier,
-                    output_format.fourcc(),
+                    consumer::InputLayout {
+                        modifier,
+                        fourcc: output_format.fourcc(),
+                        size: output_size,
+                    },
                     FRAMES,
                     &consumer_render_node,
                     fixture_mode,
@@ -400,8 +406,8 @@ pub async fn run(
                         damage: VideoDamage {
                             x: 0,
                             y: 0,
-                            width: nz(WIDTH),
-                            height: nz(HEIGHT),
+                            width: nz(output_size.width),
+                            height: nz(output_size.height),
                         },
                         discontinuity: published == 0,
                         acquire_point: None,
@@ -490,7 +496,7 @@ pub async fn run(
     timing.print();
     if mode.is_encoded() {
         tokio::task::spawn_blocking(move || {
-            crate::decode::verify(encoded.into_frames(), &render_node)
+            crate::decode::verify(encoded.into_frames(), &render_node, output_size)
         })
         .await??;
     }
@@ -501,7 +507,7 @@ fn nz(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
 }
 
-fn input_caps(modifier: u64, output_format: OutputFormat) -> String {
+fn input_caps(modifier: u64, output_format: OutputFormat, output_size: OutputSize) -> String {
     let fourcc = output_format.fourcc();
     let drm_format = if modifier == 0 {
         fourcc.into()
@@ -509,6 +515,7 @@ fn input_caps(modifier: u64, output_format: OutputFormat) -> String {
         format!("{fourcc}:0x{modifier:016x}")
     };
     format!(
-        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={WIDTH},height={HEIGHT},framerate=30/1"
+        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm_format},width={},height={},framerate=30/1",
+        output_size.width, output_size.height
     )
 }

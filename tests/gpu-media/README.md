@@ -217,6 +217,18 @@ LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
 
 The same production and sandbox checks also pass with `XB24` on this device.
 
+The optional sixth argument chooses the output size: `1920x1080` (the
+default), `2560x1440` or `3840x2160`. Source layers retain their fixed
+geometry, so larger runs also check the uncovered background. Their longer
+bounded runtime covers the full decoded-pixel oracle rather than relaxing its
+checks. For example:
+
+```sh
+LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
+    sh tests/gpu-media/run-private.sh /dev/dri/renderD128 \
+    0100000000000009 production-va-h264 sandbox AR24 3840x2160
+```
+
 The encoder disables B-frames, requests constrained-baseline byte-stream access
 units, and supplies parameter sets with keyframes. Validation checks the caps,
 decode timestamps no later than presentation, exact fixture presentation

@@ -14,6 +14,32 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+#[derive(Clone, Copy)]
+struct OutputSize {
+    width: u32,
+    height: u32,
+}
+
+impl OutputSize {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "1920x1080" => Ok(Self {
+                width: 1920,
+                height: 1080,
+            }),
+            "2560x1440" => Ok(Self {
+                width: 2560,
+                height: 1440,
+            }),
+            "3840x2160" => Ok(Self {
+                width: 3840,
+                height: 2160,
+            }),
+            _ => anyhow::bail!("output size must be 1920x1080, 2560x1440 or 3840x2160"),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
     let socket = PathBuf::from(
@@ -42,6 +68,21 @@ fn main() -> Result<()> {
         Some(value) if value == "AB24" => source::OutputFormat::Abgr,
         _ => anyhow::bail!("output format must be XR24, AR24, XB24 or AB24"),
     };
+    let output_size = args
+        .next()
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("output size is not UTF-8"))
+        })
+        .transpose()?
+        .as_deref()
+        .map(OutputSize::parse)
+        .transpose()?
+        .unwrap_or(OutputSize {
+            width: 1920,
+            height: 1080,
+        });
     anyhow::ensure!(args.next().is_none(), "unexpected argument");
     let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16)?;
     if sandbox::verify(&node)? {
@@ -50,10 +91,11 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    let timeout = if output_size.width > 1920 { 80 } else { 30 };
     let result = runtime.block_on(async {
         tokio::time::timeout(
-            Duration::from_secs(30),
-            source::run(&socket, &node, modifier, mode, output_format),
+            Duration::from_secs(timeout),
+            source::run(&socket, &node, modifier, mode, output_format, output_size),
         )
         .await
         .context("GPU transport test timed out")?
