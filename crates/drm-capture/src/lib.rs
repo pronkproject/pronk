@@ -19,7 +19,7 @@ pub use access::Access;
 pub use completion::Completion;
 pub use description::{Description, OfferId, RequestedLayout};
 pub use destination::{Destination, DestinationId, Plane};
-pub use grant::{create_grant, Control};
+pub use grant::{create_administrative_grant, create_grant, Control};
 pub use queue::RequestId;
 pub use stream::StreamId;
 

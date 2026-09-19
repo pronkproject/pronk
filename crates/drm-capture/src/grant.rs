@@ -35,6 +35,8 @@ struct CreateGrant {
 
 nix::ioctl_write_ptr!(create, b'd', 0xd4, CreateGrant);
 
+const CREATE_ADMIN: u32 = 1 << 0;
+
 /// Issue a creator-bound grant for an exact output on the current DRM master.
 ///
 /// The kernel validates the target and provider support. Both returned files
@@ -45,6 +47,29 @@ pub fn create_grant(
     crtc: NonZeroU32,
     connector: NonZeroU32,
 ) -> io::Result<(Client, Control)> {
+    create_grant_with_flags(master, crtc, connector, 0)
+}
+
+/// Issue a grant through a privileged, non-master DRM file.
+///
+/// The kernel requires `CAP_SYS_ADMIN` in the initial user namespace, provider
+/// opt-in and a distinct current DRM master. The grant is bound to that owner's
+/// current interval and becomes stale when the interval ends. This function
+/// does not acquire DRM master or confer any modesetting authority.
+pub fn create_administrative_grant(
+    issuer: BorrowedFd<'_>,
+    crtc: NonZeroU32,
+    connector: NonZeroU32,
+) -> io::Result<(Client, Control)> {
+    create_grant_with_flags(issuer, crtc, connector, CREATE_ADMIN)
+}
+
+fn create_grant_with_flags(
+    issuer: BorrowedFd<'_>,
+    crtc: NonZeroU32,
+    connector: NonZeroU32,
+    flags: u32,
+) -> io::Result<(Client, Control)> {
     let mut files = GrantFiles {
         capture: -1,
         control: -1,
@@ -53,22 +78,27 @@ pub fn create_grant(
         crtc: crtc.get(),
         connector: connector.get(),
         files: (&mut files as *mut GrantFiles) as u64,
+        flags,
         ..Default::default()
     };
     // SAFETY: Input and separate writable output remain live through the ioctl.
     // Failure installs neither file, even if output memory was partially copied.
-    unsafe { create(master.as_raw_fd(), &input) }?;
-    if files.capture < 0 || files.control < 0 || files.capture == files.control {
+    unsafe { create(issuer.as_raw_fd(), &input) }?;
+    adopt_grant_files(files)
+}
+
+fn adopt_grant_files(files: GrantFiles) -> io::Result<(Client, Control)> {
+    // SAFETY: Successful publication installs fresh owned descriptors. Adopt
+    // each nonnegative number once so malformed success still closes it.
+    let capture = (files.capture >= 0).then(|| unsafe { OwnedFd::from_raw_fd(files.capture) });
+    let control = (files.control >= 0 && files.control != files.capture)
+        .then(|| unsafe { OwnedFd::from_raw_fd(files.control) });
+    let (Some(capture), Some(control)) = (capture, control) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid capture grant descriptors",
         ));
-    }
-    // SAFETY: Successful grant creation installs two fresh, distinct owned files.
-    // Only this function receives those descriptors, and each is adopted once.
-    let capture = unsafe { OwnedFd::from_raw_fd(files.capture) };
-    // SAFETY: The second independently installed descriptor is also owned here.
-    let control = unsafe { OwnedFd::from_raw_fd(files.control) };
+    };
     Ok((Client { fd: capture }, Control(control)))
 }
 
@@ -76,9 +106,11 @@ pub fn create_grant(
 mod tests {
     use super::*;
     use std::mem::{offset_of, size_of};
+    use std::os::fd::IntoRawFd;
 
     #[test]
     fn grant_matches_the_kernel_layout() {
+        assert_eq!(CREATE_ADMIN, 1);
         assert_eq!(size_of::<GrantFiles>(), 8);
         assert_eq!(size_of::<CreateGrant>(), 32);
         assert_eq!(offset_of!(CreateGrant, files), 8);
@@ -97,5 +129,36 @@ mod tests {
             Some(nix::libc::ENOTTY)
         );
         assert!(file.metadata().is_ok());
+        assert_eq!(
+            create_administrative_grant(file.as_fd(), id, id)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(nix::libc::ENOTTY)
+        );
+    }
+
+    #[test]
+    fn malformed_success_closes_each_installed_descriptor_once() {
+        let (first, second) = nix::unistd::pipe().unwrap();
+        let first = first.into_raw_fd();
+        let second = second.into_raw_fd();
+        assert!(adopt_grant_files(GrantFiles {
+            capture: first,
+            control: first,
+        })
+        .is_err());
+        assert_eq!(
+            nix::fcntl::fcntl(first, nix::fcntl::FcntlArg::F_GETFD),
+            Err(nix::errno::Errno::EBADF)
+        );
+        assert!(adopt_grant_files(GrantFiles {
+            capture: -1,
+            control: second,
+        })
+        .is_err());
+        assert_eq!(
+            nix::fcntl::fcntl(second, nix::fcntl::FcntlArg::F_GETFD),
+            Err(nix::errno::Errno::EBADF)
+        );
     }
 }
