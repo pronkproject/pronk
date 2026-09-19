@@ -287,7 +287,7 @@ impl VideoEncoder {
                         ("cabac", VaPropertyValue::Boolean),
                         ("dct8x8", VaPropertyValue::Boolean),
                         ("aud", VaPropertyValue::Boolean),
-                        ("rate-control", VaPropertyValue::Text("cbr")),
+                        ("rate-control", VaPropertyValue::Enum("cbr")),
                     ],
                 )?;
                 let encoder = gst::ElementFactory::make(&factory)
@@ -343,7 +343,10 @@ impl VideoEncoder {
             }
             Self::VaH264 { .. } => {
                 let bitrate = h264::bitrate_kbits(bitrate.get())?;
-                validate_va_properties(encoder, &[("bitrate", VaPropertyValue::Unsigned(bitrate))])?;
+                validate_va_properties(
+                    encoder,
+                    &[("bitrate", VaPropertyValue::Unsigned(bitrate))],
+                )?;
                 encoder.set_property("bitrate", bitrate);
                 Ok(u64::from(bitrate).saturating_mul(1_000))
             }
@@ -484,11 +487,11 @@ fn supports_va_baseline_caps(output: &gst::CapsRef) -> Result<bool, MediaGraphEr
     Ok(output.can_intersect(&baseline))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum VaPropertyValue<'a> {
     Boolean,
     Unsigned(u32),
-    Text(&'a str),
+    Enum(&'a str),
 }
 
 fn selected_va_factory(
@@ -558,8 +561,8 @@ fn validate_va_properties(
         }
         if !va_property_accepts(&property, value) {
             return Err(MediaGraphError::new(format!(
-                "{} does not accept {name}",
-                element.name()
+                "{} does not accept {name}={value:?}",
+                element.name(),
             )));
         }
     }
@@ -572,8 +575,9 @@ fn va_property_accepts(property: &gst::glib::ParamSpec, value: VaPropertyValue<'
         VaPropertyValue::Unsigned(value) => property
             .downcast_ref::<gst::glib::ParamSpecUInt>()
             .is_some_and(|spec| (spec.minimum()..=spec.maximum()).contains(&value)),
-        VaPropertyValue::Text(value) => {
-            gst::glib::Value::deserialize_with_pspec(value, property).is_ok()
+        VaPropertyValue::Enum(value) => {
+            property.is::<gst::glib::ParamSpecEnum>()
+                && gst::glib::Value::deserialize_with_pspec(value, property).is_ok()
         }
     }
 }
@@ -691,30 +695,37 @@ mod tests {
     fn va_property_preflight_reports_unsupported_encoder_controls() {
         gst::init().unwrap();
         let element = gst::ElementFactory::make("fakesink").build().unwrap();
-        let missing = validate_va_properties(
-            &element,
-            &[("rate-control", VaPropertyValue::Text("cbr"))],
-        )
-        .unwrap_err();
+        let missing =
+            validate_va_properties(&element, &[("rate-control", VaPropertyValue::Enum("cbr"))])
+                .unwrap_err();
         assert!(missing.to_string().contains("rate-control property"));
-        let readonly = validate_va_properties(
+        let readonly =
+            validate_va_properties(&element, &[("last-sample", VaPropertyValue::Boolean)])
+                .unwrap_err();
+        assert!(readonly
+            .to_string()
+            .contains("cannot set its last-sample property"));
+        let unsupported =
+            validate_va_properties(&element, &[("state-error", VaPropertyValue::Enum("cbr"))])
+                .unwrap_err();
+        assert!(unsupported
+            .to_string()
+            .contains("does not accept state-error"));
+        assert!(validate_va_properties(
             &element,
-            &[("last-sample", VaPropertyValue::Boolean)],
+            &[("state-error", VaPropertyValue::Enum("none"))],
         )
-        .unwrap_err();
-        assert!(readonly.to_string().contains("cannot set its last-sample property"));
-        let unsupported = validate_va_properties(
-            &element,
-            &[("state-error", VaPropertyValue::Text("cbr"))],
-        )
-        .unwrap_err();
-        assert!(unsupported.to_string().contains("does not accept state-error"));
-        let wrong_type = validate_va_properties(
-            &element,
-            &[("num-buffers", VaPropertyValue::Unsigned(0))],
-        )
-        .unwrap_err();
-        assert!(wrong_type.to_string().contains("does not accept num-buffers"));
+        .is_ok());
+        let wrong_kind =
+            validate_va_properties(&element, &[("name", VaPropertyValue::Enum("cbr"))])
+                .unwrap_err();
+        assert!(wrong_kind.to_string().contains("does not accept name"));
+        let wrong_type =
+            validate_va_properties(&element, &[("num-buffers", VaPropertyValue::Unsigned(0))])
+                .unwrap_err();
+        assert!(wrong_type
+            .to_string()
+            .contains("does not accept num-buffers"));
         assert!(validate_va_properties(
             &element,
             &[("enable-last-sample", VaPropertyValue::Boolean)],
@@ -729,9 +740,18 @@ mod tests {
             .maximum(100)
             .default_value(1)
             .build();
-        assert!(!va_property_accepts(&property, VaPropertyValue::Unsigned(0)));
-        assert!(va_property_accepts(&property, VaPropertyValue::Unsigned(100)));
-        assert!(!va_property_accepts(&property, VaPropertyValue::Unsigned(101)));
+        assert!(!va_property_accepts(
+            &property,
+            VaPropertyValue::Unsigned(0)
+        ));
+        assert!(va_property_accepts(
+            &property,
+            VaPropertyValue::Unsigned(100)
+        ));
+        assert!(!va_property_accepts(
+            &property,
+            VaPropertyValue::Unsigned(101)
+        ));
     }
 
     #[test]
