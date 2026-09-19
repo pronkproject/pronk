@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use pronk_backend_protocol::{
-    validate_media_configuration, DeviceCapabilities, MediaConfiguration, MediaKind,
+    validate_media_configuration, DeviceCapabilities, DisplayMode, MediaConfiguration, MediaKind,
     PipeWireTarget, RawVideoLayout, RenderDeviceIdentity, SessionState, SessionStatistics,
     Validate, SESSION_FEATURE_AUDIO,
 };
@@ -58,8 +58,8 @@ impl VideoEncoderPolicy {
 
     fn offer(&self) -> VideoOffer {
         match self {
-            Self::Software => VideoOffer::SoftwareCompatibility,
-            Self::VaH264 { .. } => VideoOffer::H264,
+            Self::Software => VideoOffer::H264Preferred,
+            Self::VaH264 { .. } => VideoOffer::H264Only,
         }
     }
 
@@ -99,7 +99,7 @@ impl VideoEncoderPolicy {
     }
 }
 
-fn chromecast_video_cadence() -> VideoCadence {
+pub(crate) fn chromecast_video_cadence() -> VideoCadence {
     // Receiver acknowledgements and advertised rates do not establish visible
     // playback above 30 fps. Keep the encoded cadence independent of KMS refresh.
     VideoCadence::new(
@@ -299,6 +299,28 @@ pub(crate) enum MediaSessionEvent {
 impl ChromiacastMediaSession {
     pub(crate) fn raw_video_layouts(&self) -> &[RawVideoLayout] {
         self.encoder_policy.raw_layouts()
+    }
+
+    pub(crate) fn supported_video_modes(
+        &self,
+        modes: Vec<DisplayMode>,
+    ) -> Result<Vec<DisplayMode>, MediaSessionError> {
+        let supported = self
+            .encoder_policy
+            .encoder(VideoCodec::H264)?
+            .supported_dimensions(
+                &modes
+                    .iter()
+                    .map(|mode| (mode.width, mode.height))
+                    .collect::<Vec<_>>(),
+                chromecast_video_cadence(),
+            )
+            .map_err(MediaSessionError::from)?;
+        Ok(modes
+            .into_iter()
+            .zip(supported)
+            .filter_map(|(mode, supported)| supported.then_some(mode))
+            .collect())
     }
 
     pub(crate) fn spawn(
@@ -912,11 +934,15 @@ impl ChromiacastMediaSession {
             }
             None => None,
         };
-        if !capabilities.modes.contains(&configuration.mode) {
-            return Err(MediaSessionError::InvalidRequest(
-                "configured mode was not negotiated by Prepare".into(),
-            ));
-        }
+        let negotiated_mode = capabilities
+            .modes
+            .iter()
+            .find(|mode| mode.matches_realized(&configuration.mode))
+            .ok_or_else(|| {
+                MediaSessionError::InvalidRequest(
+                    "configured mode was not negotiated by Prepare".into(),
+                )
+            })?;
         let profile = capabilities
             .video_profiles
             .iter()
@@ -926,9 +952,9 @@ impl ChromiacastMediaSession {
                     "configured video profile was not negotiated by Prepare".into(),
                 )
             })?;
-        if configuration.mode.width > profile.max_width
-            || configuration.mode.height > profile.max_height
-            || configuration.mode.refresh_millihz > profile.max_refresh_millihz
+        if negotiated_mode.width > profile.max_width
+            || negotiated_mode.height > profile.max_height
+            || negotiated_mode.refresh_millihz > profile.max_refresh_millihz
         {
             return Err(MediaSessionError::InvalidRequest(
                 "configured mode exceeds the negotiated video profile".into(),
@@ -1588,7 +1614,7 @@ mod tests {
             render_device: test_render_device(),
             raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
         };
-        assert_eq!(policy.offer(), VideoOffer::H264);
+        assert_eq!(policy.offer(), VideoOffer::H264Only);
         assert!(policy.encoder(VideoCodec::Vp8).is_err());
         let encoder = policy.encoder(VideoCodec::H264).unwrap();
         assert_eq!(encoder.codec(), VideoCodec::H264);
@@ -1738,7 +1764,7 @@ mod tests {
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
                 target_playout_delay: INITIAL_PLAYOUT_DELAY,
-                offer: VideoOffer::SoftwareCompatibility,
+                offer: VideoOffer::H264Preferred,
                 audio: None,
             })
         );
@@ -1769,6 +1795,67 @@ mod tests {
                 .await,
             Err(MediaSessionError::InvalidRequest(_))
         ));
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn configured_mode_accepts_the_realized_kms_refresh() {
+        for refresh in [59_951, 60_049] {
+            let session_id = "12345678-1234-1234-1234-123456789abc";
+            let (output, receiver) = mpsc::channel(4);
+            let graph = FakeGraph::video(output);
+            let mut media = ChromiacastMediaSession::with_graph(
+                session_id.into(),
+                7,
+                Box::new(graph),
+                receiver,
+            );
+            let mut transport = FakeTransport::default();
+            media.complete_preparation(capabilities()).unwrap();
+            let mut realized = configuration();
+            realized.mode.refresh_millihz = refresh;
+
+            media
+                .configure(
+                    remote(),
+                    vec![target(session_id, 1)],
+                    realized,
+                    1,
+                    &mut transport,
+                )
+                .await
+                .unwrap();
+
+            media.stop_media(1, &mut transport).await.unwrap();
+            media.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_mode_rejects_a_distinct_refresh() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        let mut transport = FakeTransport::default();
+        media.complete_preparation(capabilities()).unwrap();
+        let mut distinct = configuration();
+        distinct.mode.refresh_millihz = 59_000;
+
+        assert!(matches!(
+            media
+                .configure(
+                    remote(),
+                    vec![target(session_id, 1)],
+                    distinct,
+                    1,
+                    &mut transport,
+                )
+                .await,
+            Err(MediaSessionError::InvalidRequest(_))
+        ));
+
         media.shutdown().await.unwrap();
     }
 
@@ -1869,7 +1956,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receiver_selected_h264_configures_the_fallback_encoder() {
+    async fn receiver_selected_h264_configures_the_software_encoder() {
         let session_id = "12345678-1234-1234-1234-123456789abc";
         let (output, receiver) = mpsc::channel(4);
         let graph = FakeGraph::video(output);
@@ -1955,7 +2042,7 @@ mod tests {
                 framerate_denominator: 1,
                 bitrate: 2_000_000,
                 target_playout_delay: INITIAL_PLAYOUT_DELAY,
-                offer: VideoOffer::SoftwareCompatibility,
+                offer: VideoOffer::H264Preferred,
                 audio: Some(AudioTransportConfiguration {
                     sample_rate: OPUS_SAMPLE_RATE,
                     channels: 2,

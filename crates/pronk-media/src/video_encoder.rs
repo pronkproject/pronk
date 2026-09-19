@@ -61,8 +61,41 @@ impl VideoCodec {
 }
 
 impl VideoEncoder {
+    /// Check the selected encoder path against concrete picture sizes.
+    ///
+    /// A converter accepting a DMA-BUF layout does not imply that its VA
+    /// output and the encoder accept every display mode in the offer.
+    pub fn supported_dimensions(
+        &self,
+        dimensions: &[(u32, u32)],
+        cadence: VideoCadence,
+    ) -> Result<Vec<bool>, MediaGraphError> {
+        let Self::VaH264 { .. } = self else {
+            return Ok(vec![true; dimensions.len()]);
+        };
+        gst::init().map_err(|error| {
+            MediaGraphError::new(format!(
+                "initialize GStreamer while probing encoder sizes: {error}"
+            ))
+        })?;
+        let converter = self.build_converter()?;
+        let encoder = self.build(NonZeroU64::new(2_000_000).unwrap(), cadence)?;
+        require_va_baseline_output(&encoder)?;
+        let converter_output = converter
+            .pad_template("src")
+            .ok_or_else(|| MediaGraphError::new("VA converter has no source pad template"))?;
+        let encoder_input = encoder
+            .pad_template("sink")
+            .ok_or_else(|| MediaGraphError::new("VA encoder has no sink pad template"))?;
+        let compatible = converter_output.caps().intersect(encoder_input.caps());
+        supported_va_dimensions(&compatible, dimensions, cadence)
+    }
+
     /// Query concrete DMA-BUF layouts accepted by the selected converter.
-    pub fn supported_dma_buf_formats(&self) -> Result<Vec<DrmVideoFormat>, MediaGraphError> {
+    pub fn supported_dma_buf_formats(
+        &self,
+        cadence: VideoCadence,
+    ) -> Result<Vec<DrmVideoFormat>, MediaGraphError> {
         let Self::VaH264 { .. } = self else {
             return Ok(Vec::new());
         };
@@ -72,11 +105,15 @@ impl VideoEncoder {
             ))
         })?;
         let converter = self.build_converter()?;
+        let encoder = self.build(NonZeroU64::new(2_000_000).unwrap(), cadence)?;
+        require_va_baseline_output(&encoder)?;
         let template = converter
             .pad_template("sink")
             .ok_or_else(|| MediaGraphError::new("VA converter has no sink pad template"))?;
         let mut formats = Vec::new();
         for (structure, features) in template.caps().iter_with_features() {
+            // The PipeWire source supplies DMA-BUF memory without additional
+            // caps features; a branch requiring metadata cannot negotiate it.
             if features.size() != 1
                 || !features.contains("memory:DMABuf")
                 || structure.get::<&str>("format").ok() != Some("DMA_DRM")
@@ -156,12 +193,15 @@ impl VideoEncoder {
                     MediaGraphError::new(format!("construct video converter: {error}"))
                 }),
             Self::VaH264 { render_node } => {
-                let converter = gst::ElementFactory::make("vapostproc")
+                let factory = selected_va_factory("postproc", render_node)?;
+                let converter = gst::ElementFactory::make(&factory)
                     .name("pronk-va-video-convert")
                     .property("disable-passthrough", true)
                     .build()
                     .map_err(|error| {
-                        MediaGraphError::new(format!("construct VA video converter: {error}"))
+                        MediaGraphError::new(format!(
+                            "construct selected VA video converter {factory}: {error}"
+                        ))
                     })?;
                 validate_va_device(&converter, render_node)?;
                 Ok(converter)
@@ -223,7 +263,8 @@ impl VideoEncoder {
                         "VA H.264 key-frame interval exceeds the encoder limit",
                     ));
                 }
-                let encoder = gst::ElementFactory::make("vah264enc")
+                let factory = selected_va_factory("h264enc", render_node)?;
+                let encoder = gst::ElementFactory::make(&factory)
                     .name("pronk-va-h264-encoder")
                     .property("bitrate", h264::bitrate_kbits(bitrate.get())?)
                     .property("key-int-max", key_frame_interval)
@@ -234,7 +275,9 @@ impl VideoEncoder {
                     .property_from_str("rate-control", "cbr")
                     .build()
                     .map_err(|error| {
-                        MediaGraphError::new(format!("construct vah264enc: {error}"))
+                        MediaGraphError::new(format!(
+                            "construct selected VA H.264 encoder {factory}: {error}"
+                        ))
                     })?;
                 validate_va_device(&encoder, render_node)?;
                 Ok(encoder)
@@ -281,8 +324,96 @@ impl VideoEncoder {
     }
 }
 
+fn supported_va_dimensions(
+    compatible: &gst::CapsRef,
+    dimensions: &[(u32, u32)],
+    cadence: VideoCadence,
+) -> Result<Vec<bool>, MediaGraphError> {
+    dimensions
+        .iter()
+        .map(|&(width, height)| {
+            let requested = format!(
+                "video/x-raw(memory:VAMemory),format=(string)NV12,width=(int){width},height=(int){height},framerate=(fraction){}",
+                cadence.caps_fraction()
+            )
+            .parse::<gst::Caps>()
+            .map_err(|error| {
+                MediaGraphError::new(format!("construct VA picture-size caps: {error}"))
+            })?;
+            Ok(compatible.can_intersect(&requested))
+        })
+        .collect()
+}
+
+fn require_va_baseline_output(encoder: &gst::Element) -> Result<(), MediaGraphError> {
+    let output = encoder
+        .pad_template("src")
+        .ok_or_else(|| MediaGraphError::new("VA H.264 encoder has no source pad template"))?;
+    if !supports_va_baseline_caps(output.caps())? {
+        return Err(MediaGraphError::new(
+            "selected VA H.264 encoder does not advertise constrained-baseline output",
+        ));
+    }
+    Ok(())
+}
+
+fn supports_va_baseline_caps(output: &gst::CapsRef) -> Result<bool, MediaGraphError> {
+    let baseline: gst::Caps = "video/x-h264,profile=(string)constrained-baseline"
+        .parse()
+        .map_err(|error| {
+            MediaGraphError::new(format!("construct constrained-baseline caps: {error}"))
+        })?;
+    Ok(output.can_intersect(&baseline))
+}
+
+fn selected_va_factory(suffix: &str, render_node: &Path) -> Result<String, MediaGraphError> {
+    let metadata = render_node.metadata().map_err(|error| {
+        MediaGraphError::new(format!(
+            "inspect selected render device {}: {error}",
+            render_node.display()
+        ))
+    })?;
+    if !metadata.file_type().is_char_device() {
+        return Err(MediaGraphError::new(format!(
+            "selected render device {} is not a character device",
+            render_node.display()
+        )));
+    }
+    gst::init().map_err(|error| {
+        MediaGraphError::new(format!(
+            "initialize GStreamer while selecting a VA device: {error}"
+        ))
+    })?;
+    let mut factories: Vec<String> = gst::Registry::get()
+        .features_by_plugin("va")
+        .into_iter()
+        .filter_map(|feature| feature.downcast::<gst::ElementFactory>().ok())
+        .map(|factory| factory.name().to_string())
+        .filter(|name| name.starts_with("va") && name.ends_with(suffix))
+        .collect();
+    let default_factory = format!("va{suffix}");
+    factories.sort();
+    factories.sort_by_key(|name| name != &default_factory);
+    let mut available = Vec::new();
+    for factory in factories {
+        let Ok(element) = gst::ElementFactory::make(&factory).build() else {
+            continue;
+        };
+        if validate_va_device(&element, render_node).is_ok() {
+            return Ok(factory);
+        }
+        let path = va_device_path(&element).unwrap_or_else(|_| "<unknown>".into());
+        available.push(format!("{factory}: {path}"));
+    }
+    Err(MediaGraphError::new(format!(
+        "the selected render device {} has no VA {suffix} element (available: {})",
+        render_node.display(),
+        available.join(", ")
+    )))
+}
+
 fn validate_va_device(element: &gst::Element, requested: &Path) -> Result<(), MediaGraphError> {
-    let actual = element.property::<String>("device-path");
+    let actual = va_device_path(element)?;
     let requested_metadata = requested.metadata().map_err(|error| {
         MediaGraphError::new(format!(
             "inspect selected render device {}: {error}",
@@ -313,9 +444,33 @@ fn validate_va_device(element: &gst::Element, requested: &Path) -> Result<(), Me
     Ok(())
 }
 
+fn va_device_path(element: &gst::Element) -> Result<String, MediaGraphError> {
+    if element.find_property("device-path").is_none() {
+        return Err(MediaGraphError::new(format!(
+            "{} does not identify a VA render device",
+            element.name()
+        )));
+    }
+    element
+        .property::<Option<String>>("device-path")
+        .ok_or_else(|| {
+            MediaGraphError::new(format!(
+                "{} has no selected VA render device",
+                element.name()
+            ))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cadence() -> VideoCadence {
+        VideoCadence::new(
+            std::num::NonZeroU32::new(30).unwrap(),
+            std::num::NonZeroU32::new(1).unwrap(),
+        )
+    }
 
     #[test]
     fn software_encoding_requires_its_system_memory_layout() {
@@ -360,14 +515,115 @@ mod tests {
     }
 
     #[test]
+    fn va_element_selection_rejects_a_regular_file_as_a_render_device() {
+        let executable = std::env::current_exe().unwrap();
+        let error = selected_va_factory("h264enc", &executable).unwrap_err();
+        assert!(error.to_string().contains("not a character device"));
+    }
+
+    #[test]
+    fn va_device_validation_rejects_an_element_without_a_device_property() {
+        gst::init().unwrap();
+        let converter = gst::ElementFactory::make("videoconvert").build().unwrap();
+        assert!(validate_va_device(&converter, Path::new("/dev/null")).is_err());
+    }
+
+    #[test]
+    fn va_size_probe_respects_the_encoder_and_converter_intersection() {
+        gst::init().unwrap();
+        let converter: gst::Caps = "video/x-raw(memory:VAMemory),format=(string)NV12,width=(int)[32,4096],height=(int)[32,4096]"
+            .parse()
+            .unwrap();
+        let encoder: gst::Caps = "video/x-raw(memory:VAMemory),format=(string)NV12,width=(int)[64,1920],height=(int)[64,1080]"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            supported_va_dimensions(
+                &converter.intersect(&encoder),
+                &[(1920, 1080), (2560, 1440), (320, 240)],
+                cadence(),
+            )
+            .unwrap(),
+            [true, false, true]
+        );
+    }
+
+    #[test]
+    fn va_size_probe_does_not_combine_disjoint_size_ranges() {
+        gst::init().unwrap();
+        let compatible: gst::Caps = concat!(
+            "video/x-raw(memory:VAMemory),format=(string)NV12,width=(int)[32,1920],height=(int)[32,1080];",
+            "video/x-raw(memory:VAMemory),format=(string)NV12,width=(int)[2560,4096],height=(int)[32,720]"
+        )
+        .parse()
+        .unwrap();
+        assert_eq!(
+            supported_va_dimensions(
+                &compatible,
+                &[(1920, 1080), (3840, 720), (3840, 2160)],
+                cadence(),
+            )
+            .unwrap(),
+            [true, true, false]
+        );
+    }
+
+    #[test]
+    fn va_size_probe_uses_the_requested_encoder_cadence() {
+        gst::init().unwrap();
+        let compatible: gst::Caps = "video/x-raw(memory:VAMemory),format=(string)NV12,width=(int)1920,height=(int)1080,framerate=(fraction)[1/1,30/1]"
+            .parse()
+            .unwrap();
+        let sixty = VideoCadence::new(
+            std::num::NonZeroU32::new(60).unwrap(),
+            std::num::NonZeroU32::new(1).unwrap(),
+        );
+        assert_eq!(
+            supported_va_dimensions(&compatible, &[(1920, 1080)], cadence()).unwrap(),
+            [true]
+        );
+        assert_eq!(
+            supported_va_dimensions(&compatible, &[(1920, 1080)], sixty).unwrap(),
+            [false]
+        );
+    }
+
+    #[test]
+    fn additional_caps_features_are_not_supplied_by_the_pipewire_source() {
+        gst::init().unwrap();
+        let requested: gst::Caps = "video/x-raw(memory:DMABuf),format=(string)DMA_DRM,drm-format=(string)AR24:0x0100000000000009"
+            .parse()
+            .unwrap();
+        let requires_metadata: gst::Caps = "video/x-raw(memory:DMABuf,meta:Extra),format=(string)DMA_DRM,drm-format=(string)AR24:0x0100000000000009"
+            .parse()
+            .unwrap();
+        assert!(!requested.can_intersect(&requires_metadata));
+    }
+
+    #[test]
+    fn va_probe_requires_the_receiver_compatible_h264_profile() {
+        gst::init().unwrap();
+        let baseline: gst::Caps = "video/x-h264,profile=(string)constrained-baseline"
+            .parse()
+            .unwrap();
+        let main: gst::Caps = "video/x-h264,profile=(string)main".parse().unwrap();
+        assert!(supports_va_baseline_caps(&baseline).unwrap());
+        assert!(!supports_va_baseline_caps(&main).unwrap());
+    }
+
+    #[test]
     #[ignore = "requires PRONK_GPU_RENDER_NODE and a matching VA converter"]
     fn selected_va_converter_reports_concrete_dma_buf_formats() {
         let render_node = std::env::var_os("PRONK_GPU_RENDER_NODE")
             .expect("PRONK_GPU_RENDER_NODE names the selected VA render node");
-        let formats = VideoEncoder::va_h264(render_node)
-            .supported_dma_buf_formats()
-            .unwrap();
+        let encoder = VideoEncoder::va_h264(render_node);
+        let formats = encoder.supported_dma_buf_formats(cadence()).unwrap();
         assert!(!formats.is_empty());
         assert!(formats.iter().all(|format| format.format != 0));
+        let dimensions = encoder
+            .supported_dimensions(&[(1920, 1080), (2560, 1440), (3840, 2160)], cadence())
+            .unwrap();
+        eprintln!("selected VA encoder supports offered sizes: {dimensions:?}");
+        assert!(dimensions[0]);
     }
 }

@@ -321,7 +321,10 @@ impl GStreamerGraph {
         let has_audio = audio.is_some();
 
         let effective_bitrate = video_encoder.effective_bitrate(configuration.video_bitrate)?;
-        let encoder_name = video_encoder.name().into();
+        let encoder_name = encoder
+            .factory()
+            .map(|factory| factory.name().to_string())
+            .unwrap_or_else(|| video_encoder.name().into());
         let encoder_input_caps = converted_caps.to_string();
         let video_memory_path = video_encoder.memory_path().into();
         let render_device = video_encoder

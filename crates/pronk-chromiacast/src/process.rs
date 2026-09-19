@@ -8,7 +8,7 @@ use anyhow::Context;
 use futures_util::StreamExt;
 use pronk_backend_protocol::{
     backend_peer_builder, require_same_uid, BackendHost1Proxy, BackendInfo, RegistrationReply,
-    RenderDeviceIdentity, Validate, BACKEND_PATH, MAX_RAW_VIDEO_LAYOUTS,
+    RenderDeviceIdentity, Validate, BACKEND_PATH,
 };
 use pronk_systemd::{notify_ready, notify_stopping, BackendPeerPolicy};
 use tokio::sync::watch;
@@ -21,7 +21,7 @@ use crate::discovery::{
     ChromiacastDiscoverySource, DiscoveryActor, DiscoveryConfiguration, DiscoverySource,
     EmptyTestDiscoverySource, FixtureTestDiscoverySource, CHROMIACAST_BACKEND_ID,
 };
-use crate::media::VideoEncoderPolicy;
+use crate::media::{chromecast_video_cadence, VideoEncoderPolicy};
 
 const TEST_MODE_ENV: &str = "PRONK_CHROMIACAST_TEST_MODE";
 const VIDEO_ENCODER_ENV: &str = "PRONK_CHROMIACAST_VIDEO_ENCODER";
@@ -230,14 +230,8 @@ fn resolve_encoder_policy(selection: VideoEncoderSelection) -> anyhow::Result<Vi
         .validate()
         .context("validate selected render-device identity")?;
     let formats = pronk_media::VideoEncoder::va_h264(render_node.clone())
-        .supported_dma_buf_formats()
-        .context("query selected VA converter DMA-BUF formats")?;
-    if formats.len() > MAX_RAW_VIDEO_LAYOUTS {
-        anyhow::bail!(
-            "selected VA converter exposes {} DMA-BUF formats; the backend protocol permits at most {MAX_RAW_VIDEO_LAYOUTS}",
-            formats.len()
-        );
-    }
+        .supported_dma_buf_formats(chromecast_video_cadence())
+        .context("qualify selected VA H.264 encoder and DMA-BUF input formats")?;
     let raw_layouts = formats
         .into_iter()
         .map(|format| {

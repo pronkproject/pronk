@@ -23,8 +23,8 @@ pub(crate) struct VideoTransportConfiguration {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VideoOffer {
-    SoftwareCompatibility,
-    H264,
+    H264Preferred,
+    H264Only,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

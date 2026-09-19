@@ -75,6 +75,25 @@ impl Validate for DisplayMode {
     }
 }
 
+impl DisplayMode {
+    /// Whether `realized` is the same mode after KMS timing quantization.
+    ///
+    /// Mode negotiation uses the nominal refresh rate advertised to the
+    /// compositor, while KMS reports the refresh rate realized from the mode
+    /// clock and totals.  Those rates may differ slightly without identifying
+    /// different modes.
+    pub fn matches_realized(&self, realized: &Self) -> bool {
+        const PARTS_PER_REFRESH_TOLERANCE: u64 = 1_000;
+
+        self.width == realized.width
+            && self.height == realized.height
+            && self.flags == realized.flags
+            && u64::from(self.refresh_millihz.abs_diff(realized.refresh_millihz))
+                * PARTS_PER_REFRESH_TOLERANCE
+                <= u64::from(self.refresh_millihz)
+    }
+}
+
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr, Type)]
 pub enum RawVideoStorage {
@@ -810,6 +829,47 @@ mod tests {
             refresh_millihz: 60_000,
             flags: 0,
         }
+    }
+
+    #[test]
+    fn nominal_mode_accepts_equivalent_realized_timings() {
+        let nominal = mode();
+
+        assert!(nominal.matches_realized(&nominal));
+        assert!(nominal.matches_realized(&DisplayMode {
+            refresh_millihz: 59_951,
+            ..nominal
+        }));
+        assert!(nominal.matches_realized(&DisplayMode {
+            refresh_millihz: 59_940,
+            ..nominal
+        }));
+        assert!(nominal.matches_realized(&DisplayMode {
+            refresh_millihz: 60_049,
+            ..nominal
+        }));
+        assert!(!nominal.matches_realized(&DisplayMode {
+            refresh_millihz: 59_939,
+            ..nominal
+        }));
+    }
+
+    #[test]
+    fn realized_mode_must_preserve_geometry_and_flags() {
+        let nominal = mode();
+
+        assert!(!nominal.matches_realized(&DisplayMode {
+            width: nominal.width + 1,
+            ..nominal
+        }));
+        assert!(!nominal.matches_realized(&DisplayMode {
+            height: nominal.height + 1,
+            ..nominal
+        }));
+        assert!(!nominal.matches_realized(&DisplayMode {
+            flags: nominal.flags + 1,
+            ..nominal
+        }));
     }
 
     fn video_profile() -> VideoProfile {

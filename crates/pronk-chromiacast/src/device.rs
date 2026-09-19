@@ -1054,7 +1054,7 @@ async fn prepare_device(
     connector: &dyn DeviceConnector,
     control_slot: &mut Option<Box<dyn DeviceControl>>,
     media: &mut ChromiacastMediaSession,
-    request: PreparationRequest,
+    mut request: PreparationRequest,
 ) -> Result<DeviceCapabilities, DeviceActorError> {
     request
         .validate()
@@ -1067,7 +1067,10 @@ async fn prepare_device(
     if media.is_prepared() {
         return Err(DeviceActorError::AlreadyPrepared);
     }
-
+    request.candidate_modes = media.supported_video_modes(request.candidate_modes)?;
+    if request.candidate_modes.is_empty() {
+        return Err(DeviceActorError::NoSupportedMode);
+    }
     let control = connect(device, connector).await?;
     let query = query_identity(device, control.as_ref()).await;
     let identity = match query {
@@ -1346,9 +1349,10 @@ fn narrow_h264_profile(
     if profile.codec != "h264" {
         return None;
     }
-    let raw_layout = raw_layouts
+    let raw_layout = profile
+        .raw_layouts
         .iter()
-        .find(|layout| profile.raw_layouts.contains(layout))?;
+        .find(|layout| raw_layouts.contains(layout))?;
     profile.max_width = profile.max_width.min(3_840);
     profile.max_height = profile.max_height.min(2_160);
     profile.max_refresh_millihz = profile.max_refresh_millihz.min(60_000);
@@ -2001,6 +2005,17 @@ mod tests {
             negotiate_capabilities(offer, display_identity(), &[graphics_layout()]),
             Err(DeviceActorError::NoSupportedVideoProfile)
         );
+    }
+
+    #[test]
+    fn video_capability_respects_the_source_layout_order() {
+        let mut offer = request();
+        let argb = RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9);
+        let abgr = RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AB24"), 9);
+        offer.video_profiles[0].raw_layouts = vec![argb, abgr];
+        let capabilities =
+            negotiate_capabilities(offer, display_identity(), &[abgr, argb]).unwrap();
+        assert_eq!(capabilities.video_profiles[0].raw_layouts, [argb]);
     }
 
     fn display_identity() -> DisplayIdentity {

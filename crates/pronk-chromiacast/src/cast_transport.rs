@@ -133,16 +133,14 @@ fn build_offer(configuration: VideoTransportConfiguration) -> Result<Offer, Vide
         target_delay: configuration.target_playout_delay,
     };
     let offer_builder = match configuration.offer {
-        VideoOffer::SoftwareCompatibility => offer_builder
-            .video(VideoStreamConfig {
-                codec: CastVideoCodec::Vp8,
-                max_bit_rate: configuration.bitrate,
-                max_frame_rate,
-                resolutions: vec![resolution],
-                target_delay: configuration.target_playout_delay,
-            })
-            .video(h264),
-        VideoOffer::H264 => offer_builder.video(h264),
+        VideoOffer::H264Preferred => offer_builder.video(h264).video(VideoStreamConfig {
+            codec: CastVideoCodec::Vp8,
+            max_bit_rate: configuration.bitrate,
+            max_frame_rate,
+            resolutions: vec![resolution],
+            target_delay: configuration.target_playout_delay,
+        }),
+        VideoOffer::H264Only => offer_builder.video(h264),
     };
     offer_builder
         .build()
@@ -158,10 +156,8 @@ fn selected_video_codec(
     let mut selected = answer.send_indexes.iter().filter_map(|index| {
         let relative = index.checked_sub(first_video_index)?;
         match (offer, relative) {
-            (VideoOffer::SoftwareCompatibility, 0) => Some(VideoCodec::Vp8),
-            (VideoOffer::SoftwareCompatibility, 1) | (VideoOffer::H264, 0) => {
-                Some(VideoCodec::H264)
-            }
+            (VideoOffer::H264Preferred, 0) | (VideoOffer::H264Only, 0) => Some(VideoCodec::H264),
+            (VideoOffer::H264Preferred, 1) => Some(VideoCodec::Vp8),
             _ => None,
         }
     });
@@ -677,7 +673,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 2_000_000,
             target_playout_delay: Duration::from_millis(33),
-            offer: VideoOffer::SoftwareCompatibility,
+            offer: VideoOffer::H264Preferred,
             audio: None,
         };
         assert!(validate_answer_constraints(&answer, configuration).is_err());
@@ -709,7 +705,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 8_000_000,
             target_playout_delay: Duration::from_millis(33),
-            offer: VideoOffer::SoftwareCompatibility,
+            offer: VideoOffer::H264Preferred,
             audio: None,
         };
         assert!(validate_answer_constraints(&answer, configuration).is_err());
@@ -727,7 +723,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 2_000_000,
             target_playout_delay: Duration::from_millis(33),
-            offer: VideoOffer::SoftwareCompatibility,
+            offer: VideoOffer::H264Preferred,
             audio: Some(AudioTransportConfiguration {
                 sample_rate: 48_000,
                 channels: 2,
@@ -740,12 +736,12 @@ mod tests {
         assert_eq!(streams.len(), 3);
         assert!(streams.iter().all(|stream| stream["targetDelay"] == 33));
         assert_eq!(streams[0]["codecName"], "opus");
-        assert_eq!(streams[1]["codecName"], "vp8");
-        assert_eq!(streams[2]["codecName"], "h264");
+        assert_eq!(streams[1]["codecName"], "h264");
+        assert_eq!(streams[2]["codecName"], "vp8");
 
         let hardware_offer = serde_json::to_value(
             build_offer(VideoTransportConfiguration {
-                offer: VideoOffer::H264,
+                offer: VideoOffer::H264Only,
                 ..configuration
             })
             .unwrap(),
@@ -758,40 +754,38 @@ mod tests {
     }
 
     #[test]
-    fn receiver_selection_uses_vp8_first_and_h264_as_fallback() {
-        let vp8: Answer =
+    fn receiver_selection_uses_h264_first_and_vp8_as_fallback() {
+        let h264: Answer =
             serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0],"ssrcs":[123]}"#).unwrap();
         assert_eq!(
-            selected_video_codec(&vp8, false, VideoOffer::SoftwareCompatibility).unwrap(),
+            selected_video_codec(&h264, false, VideoOffer::H264Preferred).unwrap(),
+            VideoCodec::H264
+        );
+
+        let vp8: Answer =
+            serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[1],"ssrcs":[123]}"#).unwrap();
+        assert_eq!(
+            selected_video_codec(&vp8, false, VideoOffer::H264Preferred).unwrap(),
             VideoCodec::Vp8
         );
 
-        let h264: Answer =
-            serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[1],"ssrcs":[123]}"#).unwrap();
-        assert_eq!(
-            selected_video_codec(&h264, false, VideoOffer::SoftwareCompatibility).unwrap(),
-            VideoCodec::H264
-        );
-
-        let audio_and_h264: Answer =
+        let audio_and_vp8: Answer =
             serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0,2],"ssrcs":[123,456]}"#)
                 .unwrap();
         assert_eq!(
-            selected_video_codec(&audio_and_h264, true, VideoOffer::SoftwareCompatibility,)
-                .unwrap(),
-            VideoCodec::H264
+            selected_video_codec(&audio_and_vp8, true, VideoOffer::H264Preferred,).unwrap(),
+            VideoCodec::Vp8
         );
 
         let both_video_codecs: Answer =
             serde_json::from_str(r#"{"udpPort":2344,"sendIndexes":[0,1],"ssrcs":[123,456]}"#)
                 .unwrap();
         assert!(
-            selected_video_codec(&both_video_codecs, false, VideoOffer::SoftwareCompatibility,)
-                .is_err()
+            selected_video_codec(&both_video_codecs, false, VideoOffer::H264Preferred,).is_err()
         );
 
         assert_eq!(
-            selected_video_codec(&vp8, false, VideoOffer::H264).unwrap(),
+            selected_video_codec(&h264, false, VideoOffer::H264Only).unwrap(),
             VideoCodec::H264
         );
     }
@@ -805,7 +799,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 2_000_000,
             target_playout_delay: Duration::from_millis(33),
-            offer: VideoOffer::SoftwareCompatibility,
+            offer: VideoOffer::H264Preferred,
             audio: None,
         };
 
@@ -872,7 +866,7 @@ mod tests {
             framerate_denominator: 1,
             bitrate: 2_000_000,
             target_playout_delay: Duration::from_millis(33),
-            offer: VideoOffer::SoftwareCompatibility,
+            offer: VideoOffer::H264Preferred,
             audio: Some(AudioTransportConfiguration {
                 sample_rate: 48_000,
                 channels: 2,
