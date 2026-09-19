@@ -792,13 +792,20 @@ where
     F: std::future::Future<Output = Result<(), MediaDriverError>>,
 {
     match timeout(policy.phase_timeout, future).await {
-        Ok(result) => result.map_err(|source| MediaSessionActorError::Driver { phase, source }),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(source)) => {
+            let error = MediaSessionActorError::Driver { phase, source };
+            tracing::warn!(phase, %error, "media phase failed");
+            Err(error)
+        }
         Err(_) => {
             cancellation.cancel();
-            Err(MediaSessionActorError::PhaseTimeout {
+            let error = MediaSessionActorError::PhaseTimeout {
                 phase,
                 timeout: policy.phase_timeout,
-            })
+            };
+            tracing::warn!(phase, %error, "media phase timed out");
+            Err(error)
         }
     }
 }

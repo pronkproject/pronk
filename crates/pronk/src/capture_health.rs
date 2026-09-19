@@ -55,6 +55,7 @@ impl CaptureMonitor {
                 }
                 let error = failure(&state.borrow_and_update());
                 if let Some(error) = error {
+                    tracing::warn!(%media_generation, %error, "capture pipeline failed");
                     let _ = events.send(CaptureEvent::Failed {
                         media_generation,
                         error,
@@ -66,6 +67,8 @@ impl CaptureMonitor {
                     _ = cancellation.cancelled() => return,
                     changed = state.changed() => {
                         if changed.is_err() {
+                            tracing::warn!(%media_generation, error = closed,
+                                           "capture pipeline health stream ended");
                             let _ = events.send(CaptureEvent::Failed {
                                 media_generation,
                                 error: closed.into(),
