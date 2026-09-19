@@ -44,7 +44,7 @@ pub fn placement(sequence: u32) -> [i32; 2] {
 
 #[cfg(test)]
 pub fn visible(sequence: u32) -> CopyRegion {
-    source_crop(OutputSize::HD)
+    source_crop(OutputSize::FULL_HD)
         .clip_to(placement(sequence), Extent::new(WIDTH, HEIGHT).unwrap())
         .unwrap()
 }
@@ -164,9 +164,9 @@ mod tests {
 
     #[test]
     fn placed_crops_have_known_clipped_source_and_output_rectangles() {
-        assert_eq!(source_crop(OutputSize::HD).origin(), [32, 16]);
+        assert_eq!(source_crop(OutputSize::FULL_HD).origin(), [32, 16]);
         assert_eq!(
-            source_crop(OutputSize::HD).extent(),
+            source_crop(OutputSize::FULL_HD).extent(),
             Extent::new(1856, 1024).unwrap()
         );
         let expected = [
@@ -189,15 +189,15 @@ mod tests {
     #[test]
     fn scene_layers_have_distinct_colors_and_known_overlap() {
         for sequence in 0..FRAMES {
-            let [base, overlay, cursor, patch] = scene(sequence, OutputSize::HD);
+            let [base, overlay, cursor, patch] = scene(sequence, OutputSize::FULL_HD);
             assert_eq!(base.format, PackedFormat::Bgr10A2);
             assert_eq!(overlay.format, PackedFormat::Rgba8);
             assert_eq!(cursor.format, PackedFormat::Bgra8);
             assert_eq!(patch.format, PackedFormat::Rgb565);
             assert_eq!(patch.color, [255, 0, 0]);
-            assert_eq!(patch.visible(OutputSize::HD).destination(), [32, 864]);
+            assert_eq!(patch.visible(OutputSize::FULL_HD).destination(), [32, 864]);
             assert_eq!(
-                patch.visible(OutputSize::HD).extent(),
+                patch.visible(OutputSize::FULL_HD).extent(),
                 Extent::new(128, 64).unwrap()
             );
             assert!(separated(
@@ -205,29 +205,32 @@ mod tests {
                 output_color(BACKGROUND)
             ));
             assert!(separated(output_color(patch.color), output_color([255; 3])));
-            assert_eq!(base.visible(OutputSize::HD), visible(sequence));
+            assert_eq!(base.visible(OutputSize::FULL_HD), visible(sequence));
             assert_eq!(overlay.crop.image(), Extent::new(640, 480).unwrap());
-            assert_eq!(overlay.visible(OutputSize::HD).destination(), [640, 320]);
             assert_eq!(
-                overlay.visible(OutputSize::HD).extent(),
+                overlay.visible(OutputSize::FULL_HD).destination(),
+                [640, 320]
+            );
+            assert_eq!(
+                overlay.visible(OutputSize::FULL_HD).extent(),
                 Extent::new(640, 480).unwrap()
             );
             assert_eq!(cursor.crop.image(), Extent::new(128, 128).unwrap());
             assert_eq!(
-                cursor.visible(OutputSize::HD).destination(),
+                cursor.visible(OutputSize::FULL_HD).destination(),
                 [608 + sequence % 3 * 64, 288]
             );
             assert_eq!(
-                cursor.visible(OutputSize::HD).extent(),
+                cursor.visible(OutputSize::FULL_HD).extent(),
                 Extent::new(128, 128).unwrap()
             );
             assert!(separated(base.color, overlay.color));
             assert!(separated(base.color, cursor.color));
             assert!(separated(overlay.color, cursor.color));
             // The cursor intersects both the overlay and exposed base pixels.
-            let [x, y] = cursor.visible(OutputSize::HD).destination();
+            let [x, y] = cursor.visible(OutputSize::FULL_HD).destination();
             assert!(x + 128 > 640 && x < 1280);
-            assert!(y < 320 && y + cursor.visible(OutputSize::HD).extent().height() > 320);
+            assert!(y < 320 && y + cursor.visible(OutputSize::FULL_HD).extent().height() > 320);
         }
     }
 
