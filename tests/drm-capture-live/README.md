@@ -58,7 +58,10 @@ The binaries cover distinct boundaries:
   capture and PipeWire path. It requires twelve increasing DMA-BUF frame
   sequences while one output remains held, withdraws the offer, and repeats the
   complete renderer generation on the same display session. Supply a supported
-  private-image modifier, optionally with a `0x` prefix.
+  capture-output modifier, optionally with a `0x` prefix. By default the
+  renderer's private images use that modifier too; `--private-modifier HEX`
+  selects a different private-image modifier when the renderer and encoder
+  need distinct layouts.
   `--raw-format FOURCC` selects the exact capture output order when the
   default `XR24` is not accepted by the media device. Receiver mode requires
   `--va-render-node /dev/dri/renderDN`; it checks that the VA encoder and
@@ -163,13 +166,15 @@ pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
 pronk-renderer-capture-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
     WIDTH HEIGHT REFRESH_MILLIHZ MODIFIER \
     /path/to/pipewire-0-pronk-backend --raw-format FOURCC \
+    --private-modifier PRIVATE_MODIFIER \
     --va-render-node /dev/dri/renderDN --receiver RECEIVER_IP:8009
 ```
 
-Select a `FOURCC` and `MODIFIER` accepted by both the renderer's output
-allocator and the selected VA converter; the probe checks the converter's
-exact input tuple but cannot select a replacement allocation itself. The
-Mutter capture probe still uses software H.264 from mapped frames, while the
+Select a `FOURCC` and output `MODIFIER` accepted by the renderer's output
+allocator and the selected VA converter. The optional `PRIVATE_MODIFIER`
+must be supported by the renderer's private-image allocator. The probe checks
+the converter's exact input tuple but cannot select a replacement allocation
+itself. The Mutter capture probe still uses software H.264 from mapped frames, while the
 delegated-renderer probe uses VA H.264 from DMA-BUF frames.
 
 The probe authenticates the receiver and launches its mirroring application,

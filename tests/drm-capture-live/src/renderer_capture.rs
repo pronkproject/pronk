@@ -39,11 +39,16 @@ struct Probe {
     width: u32,
     height: u32,
     refresh_millihz: u32,
-    raw_format: u32,
-    modifier: u64,
+    output_modifier: u64,
     socket: PathBuf,
+    options: ProbeOptions,
+}
+
+struct ProbeOptions {
     receiver: Option<SocketAddr>,
     va_render_node: Option<PathBuf>,
+    raw_format: u32,
+    private_modifier: Option<u64>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -59,7 +64,8 @@ async fn main() -> anyhow::Result<()> {
         args.len() >= 8 && (args.len() - 8).is_multiple_of(2),
         "expected device, CRTC, connector, width, height, refresh millihertz, output modifier and private socket, followed by option/value pairs"
     );
-    let (address, va_render_node, raw_format) = parse_options(&args[8..])?;
+    let options = parse_options(&args[8..])?;
+    let address = options.receiver;
     let device = std::fs::metadata(&args[0])?.rdev();
     let target = Target {
         device_major: nix::sys::stat::major(device).try_into()?,
@@ -72,11 +78,9 @@ async fn main() -> anyhow::Result<()> {
         width: args[3].parse()?,
         height: args[4].parse()?,
         refresh_millihz: args[5].parse()?,
-        raw_format,
-        modifier: parse_u64(&args[6]).context("output modifier")?,
+        output_modifier: parse_u64(&args[6]).context("output modifier")?,
         socket: PathBuf::from(&args[7]),
-        receiver: address,
-        va_render_node,
+        options,
     };
     let mut receiver = Receiver::default();
     let result = tokio::select! {
@@ -110,12 +114,16 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
         width,
         height,
         refresh_millihz,
-        raw_format,
-        modifier,
+        output_modifier,
         socket,
+        options,
+    } = probe;
+    let ProbeOptions {
         receiver: address,
         va_render_node,
-    } = probe;
+        raw_format,
+        private_modifier,
+    } = options;
     let connection = zbus::Connection::session().await?;
     let acquired = connection
         .request_name_with_flags(
@@ -177,11 +185,14 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
             device_instance: "castkms-test".into(),
             node_description: "Live delegated renderer".into(),
             video_profile_id: "raw-dmabuf".into(),
-            raw_layout: pronk_backend_protocol::RawVideoLayout::dma_buf(raw_format, modifier),
+            raw_layout: pronk_backend_protocol::RawVideoLayout::dma_buf(
+                raw_format,
+                output_modifier,
+            ),
             video_bitrate: nz64(4_000_000),
             video_frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
             private_pool: RendererPrivatePoolConfig {
-                modifier: Some(modifier),
+                modifier: Some(private_modifier.unwrap_or(output_modifier)),
                 frame_capacity: NonZeroUsize::new(3).unwrap(),
                 source_capacity: NonZeroUsize::new(3).unwrap(),
             },
@@ -339,10 +350,11 @@ fn parse_u64(value: &str) -> anyhow::Result<u64> {
     }
 }
 
-fn parse_options(options: &[String]) -> anyhow::Result<(Option<SocketAddr>, Option<PathBuf>, u32)> {
+fn parse_options(options: &[String]) -> anyhow::Result<ProbeOptions> {
     let mut receiver = None;
     let mut va_render_node = None;
     let mut raw_format = None;
+    let mut private_modifier = None;
     let mut pairs = options.chunks_exact(2);
     for pair in &mut pairs {
         match pair[0].as_str() {
@@ -366,6 +378,10 @@ fn parse_options(options: &[String]) -> anyhow::Result<(Option<SocketAddr>, Opti
                 );
                 raw_format = Some(u32::from_le_bytes(bytes));
             }
+            "--private-modifier" => {
+                ensure!(private_modifier.is_none(), "duplicate --private-modifier");
+                private_modifier = Some(parse_u64(&pair[1]).context("private modifier")?);
+            }
             option => anyhow::bail!("unsupported renderer probe option {option}"),
         }
     }
@@ -378,11 +394,12 @@ fn parse_options(options: &[String]) -> anyhow::Result<(Option<SocketAddr>, Opti
         raw_format.is_none() || receiver.is_some(),
         "--raw-format applies only to receiver mode"
     );
-    Ok((
+    Ok(ProbeOptions {
         receiver,
         va_render_node,
-        raw_format.unwrap_or(u32::from_le_bytes(*b"XR24")),
-    ))
+        raw_format: raw_format.unwrap_or(u32::from_le_bytes(*b"XR24")),
+        private_modifier,
+    })
 }
 
 #[cfg(test)]
@@ -415,8 +432,8 @@ mod tests {
             "/dev/dri/renderD128",
         ]);
         receiver.extend(options(&["--raw-format", "AB24"]));
-        let (_, _, format) = parse_options(&receiver).unwrap();
-        assert_eq!(format, u32::from_le_bytes(*b"AB24"));
+        let parsed = parse_options(&receiver).unwrap();
+        assert_eq!(parsed.raw_format, u32::from_le_bytes(*b"AB24"));
         for value in ["AB2", "AB245", "é24", "A 24"] {
             let mut candidate = receiver[..4].to_vec();
             candidate.extend(options(&["--raw-format", value]));
@@ -425,5 +442,21 @@ mod tests {
         assert!(parse_options(&options(&["--raw-format", "AB24"])).is_err());
         receiver.extend(options(&["--raw-format", "XR24"]));
         assert!(parse_options(&receiver).is_err());
+    }
+
+    #[test]
+    fn private_modifier_is_independent_of_output_modifier() {
+        let parsed =
+            parse_options(&options(&["--private-modifier", "0x0100000000000002"])).unwrap();
+        assert_eq!(parsed.private_modifier, Some(0x0100000000000002));
+        assert_eq!(parse_options(&[]).unwrap().private_modifier, None);
+        assert!(parse_options(&options(&["--private-modifier", "invalid"])).is_err());
+        assert!(parse_options(&options(&[
+            "--private-modifier",
+            "1",
+            "--private-modifier",
+            "2",
+        ]))
+        .is_err());
     }
 }
