@@ -70,7 +70,7 @@ impl VideoEncoder {
         dimensions: &[(u32, u32)],
         cadence: VideoCadence,
     ) -> Result<Vec<bool>, MediaGraphError> {
-        let Self::VaH264 { .. } = self else {
+        let Self::VaH264 { render_node } = self else {
             return Ok(vec![true; dimensions.len()]);
         };
         gst::init().map_err(|error| {
@@ -79,7 +79,7 @@ impl VideoEncoder {
             ))
         })?;
         let converter = self.build_converter()?;
-        let encoder = self.build(NonZeroU64::new(2_000_000).unwrap(), cadence)?;
+        let encoder = build_va_h264(render_node, None, cadence)?;
         require_va_baseline_output(&encoder)?;
         let converter_output = converter
             .pad_template("src")
@@ -105,7 +105,7 @@ impl VideoEncoder {
         &self,
         cadence: VideoCadence,
     ) -> Result<Vec<DrmVideoFormat>, MediaGraphError> {
-        let Self::VaH264 { .. } = self else {
+        let Self::VaH264 { render_node } = self else {
             return Ok(Vec::new());
         };
         gst::init().map_err(|error| {
@@ -114,7 +114,7 @@ impl VideoEncoder {
             ))
         })?;
         let converter = self.build_converter()?;
-        let encoder = self.build(NonZeroU64::new(2_000_000).unwrap(), cadence)?;
+        let encoder = build_va_h264(render_node, None, cadence)?;
         require_va_baseline_output(&encoder)?;
         let template = converter
             .pad_template("sink")
@@ -274,40 +274,11 @@ impl VideoEncoder {
                 .map_err(|error| {
                     MediaGraphError::new(format!("construct {}: {error}", h264::ENCODER_NAME))
                 }),
-            Self::VaH264 { render_node } => {
-                let key_frame_interval = h264::key_frame_interval(cadence);
-                let bitrate = h264::bitrate_kbits(bitrate.get())?;
-                let factory = selected_va_factory(
-                    "h264enc",
-                    render_node,
-                    &[
-                        ("bitrate", VaPropertyValue::PlayingUnsigned(bitrate)),
-                        ("key-int-max", VaPropertyValue::Unsigned(key_frame_interval)),
-                        ("b-frames", VaPropertyValue::Unsigned(0)),
-                        ("cabac", VaPropertyValue::Boolean),
-                        ("dct8x8", VaPropertyValue::Boolean),
-                        ("aud", VaPropertyValue::Boolean),
-                        ("rate-control", VaPropertyValue::Enum("cbr")),
-                    ],
-                )?;
-                let encoder = gst::ElementFactory::make(&factory)
-                    .name("pronk-va-h264-encoder")
-                    .property("bitrate", bitrate)
-                    .property("key-int-max", key_frame_interval)
-                    .property("b-frames", 0_u32)
-                    .property("cabac", false)
-                    .property("dct8x8", false)
-                    .property("aud", true)
-                    .property_from_str("rate-control", "cbr")
-                    .build()
-                    .map_err(|error| {
-                        MediaGraphError::new(format!(
-                            "construct selected VA H.264 encoder {factory}: {error}"
-                        ))
-                    })?;
-                validate_va_device(&encoder, render_node)?;
-                Ok(encoder)
-            }
+            Self::VaH264 { render_node } => build_va_h264(
+                render_node,
+                Some(h264::bitrate_kbits(bitrate.get())?),
+                cadence,
+            ),
         }
     }
 
@@ -352,6 +323,52 @@ impl VideoEncoder {
             }
         }
     }
+}
+
+fn build_va_h264(
+    render_node: &Path,
+    bitrate: Option<u32>,
+    cadence: VideoCadence,
+) -> Result<gst::Element, MediaGraphError> {
+    let key_frame_interval = h264::key_frame_interval(cadence);
+    let bitrate_control = bitrate.map_or(
+        VaPropertyValue::PlayingUnsignedAny,
+        VaPropertyValue::PlayingUnsigned,
+    );
+    let factory = selected_va_factory(
+        "h264enc",
+        render_node,
+        &[
+            ("bitrate", bitrate_control),
+            ("key-int-max", VaPropertyValue::Unsigned(key_frame_interval)),
+            ("b-frames", VaPropertyValue::Unsigned(0)),
+            ("cabac", VaPropertyValue::Boolean),
+            ("dct8x8", VaPropertyValue::Boolean),
+            ("aud", VaPropertyValue::Boolean),
+            ("rate-control", VaPropertyValue::Enum("cbr")),
+        ],
+    )?;
+    let builder = gst::ElementFactory::make(&factory).name("pronk-va-h264-encoder");
+    let builder = if let Some(bitrate) = bitrate {
+        builder.property("bitrate", bitrate)
+    } else {
+        builder
+    };
+    let encoder = builder
+        .property("key-int-max", key_frame_interval)
+        .property("b-frames", 0_u32)
+        .property("cabac", false)
+        .property("dct8x8", false)
+        .property("aud", true)
+        .property_from_str("rate-control", "cbr")
+        .build()
+        .map_err(|error| {
+            MediaGraphError::new(format!(
+                "construct selected VA H.264 encoder {factory}: {error}"
+            ))
+        })?;
+    validate_va_device(&encoder, render_node)?;
+    Ok(encoder)
 }
 
 fn supported_va_dimensions(
@@ -491,6 +508,7 @@ fn supports_va_baseline_caps(output: &gst::CapsRef) -> Result<bool, MediaGraphEr
 enum VaPropertyValue<'a> {
     Boolean,
     Unsigned(u32),
+    PlayingUnsignedAny,
     PlayingUnsigned(u32),
     Enum(&'a str),
 }
@@ -560,8 +578,10 @@ fn validate_va_properties(
                 element.name(),
             )));
         }
-        if matches!(value, VaPropertyValue::PlayingUnsigned(_))
-            && !property.flags().contains(gst::PARAM_FLAG_MUTABLE_PLAYING)
+        if matches!(
+            value,
+            VaPropertyValue::PlayingUnsignedAny | VaPropertyValue::PlayingUnsigned(_)
+        ) && !property.flags().contains(gst::PARAM_FLAG_MUTABLE_PLAYING)
         {
             return Err(MediaGraphError::new(format!(
                 "{} cannot change its {name} property while playing",
@@ -584,6 +604,10 @@ fn va_property_accepts(property: &gst::glib::ParamSpec, value: VaPropertyValue<'
         VaPropertyValue::Unsigned(value) => property
             .downcast_ref::<gst::glib::ParamSpecUInt>()
             .is_some_and(|spec| (spec.minimum()..=spec.maximum()).contains(&value)),
+        VaPropertyValue::PlayingUnsignedAny => {
+            property.flags().contains(gst::PARAM_FLAG_MUTABLE_PLAYING)
+                && property.is::<gst::glib::ParamSpecUInt>()
+        }
         VaPropertyValue::PlayingUnsigned(value) => {
             property.flags().contains(gst::PARAM_FLAG_MUTABLE_PLAYING)
                 && va_property_accepts(property, VaPropertyValue::Unsigned(value))
@@ -790,6 +814,28 @@ mod tests {
         assert!(!va_property_accepts(
             &playing,
             VaPropertyValue::PlayingUnsigned(101)
+        ));
+    }
+
+    #[test]
+    fn va_caps_probe_does_not_require_an_arbitrary_bitrate() {
+        let property = gst::glib::ParamSpecUInt::builder("bitrate")
+            .minimum(3_000)
+            .maximum(20_000)
+            .default_value(3_000)
+            .mutable_playing()
+            .build();
+        assert!(va_property_accepts(
+            &property,
+            VaPropertyValue::PlayingUnsignedAny
+        ));
+        assert!(!va_property_accepts(
+            &property,
+            VaPropertyValue::PlayingUnsigned(2_000)
+        ));
+        assert!(va_property_accepts(
+            &property,
+            VaPropertyValue::PlayingUnsigned(8_000)
         ));
     }
 
