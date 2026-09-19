@@ -90,7 +90,16 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let timeout = if output_size.width > 1920 { 80 } else { 30 };
+    // The 4K pixel oracle checks every decoded pixel on the CPU.
+    let timeout = if output_size.width >= 3840 {
+        150
+    } else if output_size.width > 1920 {
+        80
+    } else if mode == source::Mode::ProductionVaH264 {
+        45
+    } else {
+        30
+    };
     let result = runtime.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(timeout),

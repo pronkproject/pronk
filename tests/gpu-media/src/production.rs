@@ -17,6 +17,7 @@ use crate::pattern::FRAMES;
 use crate::OutputSize;
 
 pub const MINIMUM_ENCODED_FRAMES: usize = 12;
+const UPDATED_VIDEO_BITRATE: u64 = 18_000_000;
 
 pub enum Event {
     Activated,
@@ -65,6 +66,9 @@ impl Consumer {
         let activation = tokio::spawn(async move {
             actor.configure(configuration).await?;
             actor.start(generation).await?;
+            actor
+                .set_video_bitrate(generation, NonZeroU64::new(UPDATED_VIDEO_BITRATE).unwrap())
+                .await?;
             Ok(actor)
         });
         Ok(Self {
@@ -116,6 +120,10 @@ impl Consumer {
             (MINIMUM_ENCODED_FRAMES as u64..=u64::from(FRAMES)).contains(&statistics.frames),
             "production encoder reported {} useful frames",
             statistics.frames
+        );
+        ensure!(
+            statistics.video_bitrate == UPDATED_VIDEO_BITRATE && statistics.bitrate_changes == 1,
+            "production encoder did not apply the live bitrate change: {statistics:?}"
         );
         ensure!(
             statistics

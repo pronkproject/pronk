@@ -155,6 +155,8 @@ checks the actor's generation-scoped access units and reported encoder,
 VA-memory path and render device before sending the same bytes through the
 hardware-decoding pixel oracle. This is the preferred qualification profile;
 `va-h264` remains a smaller transport and plugin diagnostic.
+After starting the production graph, the fixture changes the encoder bitrate
+and checks the reported effective rate before validating decoded frames.
 
 For the tested Fedora/Lunar Lake installation, the codec-capable VA driver
 is selected explicitly:

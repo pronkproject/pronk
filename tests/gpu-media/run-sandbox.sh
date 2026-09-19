@@ -8,7 +8,12 @@ profile=${5:?media profile required}
 pixel_format=${6:?pixel format required}
 output_size=${7:?output size required}
 access=${8:?choose allowed or denied}
-case "$output_size" in 1920x1080) runtime_limit=35 ;; 2560x1440|3840x2160) runtime_limit=90 ;; *) exit 2 ;; esac
+case "$output_size" in
+1920x1080) runtime_limit=55 ;;
+2560x1440) runtime_limit=90 ;;
+3840x2160) runtime_limit=160 ;;
+*) exit 2 ;;
+esac
 # Device bindings name one resolved character device, never the whole DRM tree.
 render_node=$(realpath -e -- "$render_node")
 [ -c "$render_node" ]

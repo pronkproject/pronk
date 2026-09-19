@@ -12,7 +12,11 @@ pixel_format=${5:-$default_format}
 case "$pixel_format" in XR24|AR24|XB24|AB24) ;; *) echo "format must be XR24, AR24, XB24 or AB24" >&2; exit 2 ;; esac
 output_size=${6:-1920x1080}
 case "$output_size" in 1920x1080|2560x1440|3840x2160) ;; *) echo "size must be 1920x1080, 2560x1440 or 3840x2160" >&2; exit 2 ;; esac
-case "$output_size" in 1920x1080) runtime_limit=45 ;; *) runtime_limit=100 ;; esac
+case "$output_size" in
+1920x1080) runtime_limit=65 ;;
+2560x1440) runtime_limit=100 ;;
+3840x2160) runtime_limit=170 ;;
+esac
 test_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_dir=$(CDPATH= cd -- "$test_dir/../.." && pwd)
 gpu_runtime_dir=$(mktemp -d /var/tmp/pronk-gpu-media.XXXXXXXX)
