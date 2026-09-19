@@ -6,7 +6,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use pronk_userns::is_host_root_owner;
+use pronk_userns::is_system_file_owner;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
@@ -83,7 +83,7 @@ pub struct PnpIdResolver {
 }
 
 impl PnpIdResolver {
-    /// Load a root-owned database that is not writable by group or others.
+    /// Load a trusted system database that is not writable by group or others.
     pub fn load_system(
         path: impl AsRef<Path>,
         aliases: &[PnpAlias],
@@ -99,7 +99,7 @@ impl PnpIdResolver {
             source,
         })?;
         if !metadata.is_file()
-            || !is_host_root_owner(metadata.uid())
+            || !is_system_file_owner(metadata.uid())
             || metadata.mode() & 0o022 != 0
         {
             return Err(PnpIdError::UntrustedFile {
@@ -349,7 +349,7 @@ pub enum PnpIdError {
         path: std::path::PathBuf,
         source: io::Error,
     },
-    #[error("PNP database {} is not a root-owned regular file without group/other writes (uid={uid}, mode={mode:#o})", path.display())]
+    #[error("PNP database {} is not a trusted system regular file without group/other writes (uid={uid}, mode={mode:#o})", path.display())]
     UntrustedFile {
         path: std::path::PathBuf,
         uid: u32,
@@ -480,7 +480,12 @@ TOL\tTCL Corporation\n";
     }
 
     #[test]
-    fn loads_the_packaged_root_owned_hwdata_database() {
+    fn loads_the_packaged_hwdata_database_when_ownership_is_observable() {
+        let metadata = std::fs::metadata(SYSTEM_PNP_IDS_PATH).unwrap();
+        if !is_system_file_owner(metadata.uid()) {
+            eprintln!("test namespace cannot establish ownership of the packaged PNP database");
+            return;
+        }
         let resolver =
             PnpIdResolver::load_system(SYSTEM_PNP_IDS_PATH, &[], DEFAULT_SYNTHESIZER_PNP_ID)
                 .unwrap();

@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use nix::unistd::Uid;
 use pronk_backend_protocol::PROTOCOL_MAJOR;
-use pronk_userns::is_host_root_owner;
+use pronk_userns::is_system_file_owner;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -41,10 +41,7 @@ pub struct BackendRegistry {
 impl BackendRegistry {
     pub fn load_installed(runtime_directory: &Path) -> Result<Self, BackendRegistryError> {
         validate_runtime_directory(runtime_directory)?;
-        Self::load_root_owned_directory(
-            Path::new(INSTALLED_BACKEND_REGISTRY_DIR),
-            runtime_directory,
-        )
+        Self::load_system_directory(Path::new(INSTALLED_BACKEND_REGISTRY_DIR), runtime_directory)
     }
 
     pub fn get(&self, backend_id: &str) -> Option<&InstalledBackend> {
@@ -65,11 +62,11 @@ impl BackendRegistry {
         self.backends.is_empty()
     }
 
-    fn load_root_owned_directory(
+    fn load_system_directory(
         registry_directory: &Path,
         runtime_directory: &Path,
     ) -> Result<Self, BackendRegistryError> {
-        validate_root_owned_directory(registry_directory)?;
+        validate_system_directory(registry_directory)?;
         let entries =
             fs::read_dir(registry_directory).map_err(|source| BackendRegistryError::Io {
                 operation: "read registry directory",
@@ -96,7 +93,7 @@ impl BackendRegistry {
 
         let mut definitions = Vec::with_capacity(paths.len());
         for path in paths {
-            validate_root_owned_file(&path)?;
+            validate_system_file(&path)?;
             let metadata = fs::metadata(&path).map_err(|source| BackendRegistryError::Io {
                 operation: "inspect backend definition",
                 path: path.clone(),
@@ -244,7 +241,7 @@ fn validate_runtime_directory(path: &Path) -> Result<(), BackendRegistryError> {
         source,
     })?;
     let trusted_owner = if is_system_runtime {
-        is_host_root_owner(metadata.uid())
+        is_system_file_owner(metadata.uid())
     } else {
         metadata.uid() == effective_uid.as_raw()
     };
@@ -258,7 +255,7 @@ fn validate_runtime_directory(path: &Path) -> Result<(), BackendRegistryError> {
     Ok(())
 }
 
-fn validate_root_owned_directory(path: &Path) -> Result<(), BackendRegistryError> {
+fn validate_system_directory(path: &Path) -> Result<(), BackendRegistryError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| BackendRegistryError::Io {
         operation: "inspect registry directory",
         path: path.into(),
@@ -266,7 +263,7 @@ fn validate_root_owned_directory(path: &Path) -> Result<(), BackendRegistryError
     })?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
-        || !is_host_root_owner(metadata.uid())
+        || !is_system_file_owner(metadata.uid())
         || metadata.mode() & 0o022 != 0
     {
         return Err(BackendRegistryError::UntrustedRegistryDirectory(
@@ -276,7 +273,7 @@ fn validate_root_owned_directory(path: &Path) -> Result<(), BackendRegistryError
     Ok(())
 }
 
-fn validate_root_owned_file(path: &Path) -> Result<(), BackendRegistryError> {
+fn validate_system_file(path: &Path) -> Result<(), BackendRegistryError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| BackendRegistryError::Io {
         operation: "inspect backend definition",
         path: path.into(),
@@ -284,7 +281,7 @@ fn validate_root_owned_file(path: &Path) -> Result<(), BackendRegistryError> {
     })?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
-        || !is_host_root_owner(metadata.uid())
+        || !is_system_file_owner(metadata.uid())
         || metadata.mode() & 0o022 != 0
     {
         return Err(BackendRegistryError::UntrustedDefinition(path.into()));
@@ -298,9 +295,9 @@ pub enum BackendRegistryError {
     InvalidRuntimeDirectory(PathBuf),
     #[error("backend runtime directory is not owned securely by the effective user: {}", .0.display())]
     UntrustedRuntimeDirectory(PathBuf),
-    #[error("backend registry directory is not a root-owned non-writable directory: {}", .0.display())]
+    #[error("backend registry directory is not a trusted non-writable system directory: {}", .0.display())]
     UntrustedRegistryDirectory(PathBuf),
-    #[error("backend definition is not a root-owned non-writable regular file: {}", .0.display())]
+    #[error("backend definition is not a trusted non-writable system file: {}", .0.display())]
     UntrustedDefinition(PathBuf),
     #[error("{operation} {}: {source}", path.display())]
     Io {
