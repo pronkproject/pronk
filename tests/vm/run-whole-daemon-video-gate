@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if test "$#" -ne 1; then
-	printf 'usage: PRONK_VM_WHOLE_DAEMON_GATE=real-device [PRONK_VM_AUDIO=true] %s BACKEND-ID:DEVICE-ID\n' "$0" >&2
+	printf 'usage: PRONK_VM_WHOLE_DAEMON_GATE=real-device [PRONK_VM_AUDIO=true] [PRONK_VM_REQUIRE_VA_RENDER_NODE=/dev/dri/renderDN] %s BACKEND-ID:DEVICE-ID\n' "$0" >&2
 	exit 2
 fi
 if test "${PRONK_VM_WHOLE_DAEMON_GATE:-}" != real-device; then
@@ -26,6 +26,7 @@ route_prime_mode=${PRONK_VM_ROUTE_PRIME_MODE:-1280x720@60.000}
 cast_primary=${PRONK_VM_CAST_PRIMARY:-false}
 visible_hold_seconds=${PRONK_VM_VISIBLE_HOLD_SECONDS:-0}
 audio=${PRONK_VM_AUDIO:-false}
+va_render_node=${PRONK_VM_REQUIRE_VA_RENDER_NODE:-}
 core_unit=pronk.service
 socket_unit=pronk-chromiacast.socket
 gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -63,6 +64,11 @@ case "$visible_hold_seconds" in
 		exit 2
 		;;
 esac
+if test -n "$va_render_node" && ! test -c "$va_render_node"; then
+	printf 'PRONK_VM_REQUIRE_VA_RENDER_NODE is not a character device: %s\n' \
+		"$va_render_node" >&2
+	exit 2
+fi
 if test "$visible_hold_seconds" -gt 900; then
 	printf '%s\n' 'PRONK_VM_VISIBLE_HOLD_SECONDS may not exceed 900' >&2
 	exit 2
@@ -96,6 +102,17 @@ backend_logs() {
 		journalctl --user --no-pager -o short-monotonic \
 			-u 'pronk-chromiacast@*.service' -n 300 2>/dev/null || true
 	fi
+}
+
+assert_va_encoding_path() {
+	local cursor=$1
+	local selected=$2
+	backend_logs "$cursor" |
+		grep -F 'configured video encoding path' |
+		grep -E 'video_encoder=.*va.*h264enc' |
+		grep -F 'DMA-BUF DMA_DRM to VA-memory NV12' |
+		grep -F 'render_device=' |
+		grep -F "$selected" >/dev/null
 }
 
 snapshot() {
@@ -438,6 +455,10 @@ if ! assert_initial_running_stays_stable "$initial_cursor"; then
 	printf '%s\n' 'the initial media generation did not remain Running beyond the receiver-feedback watchdog' >&2
 	false
 fi
+if test -n "$va_render_node" && ! assert_va_encoding_path "$initial_cursor" "$va_render_node"; then
+	printf 'the installed backend did not report VA H.264 on %s\n' "$va_render_node" >&2
+	false
+fi
 printf '%s\n' 'whole_daemon_initial_transport=pass'
 printf '%s\n' 'whole_daemon_initial_running_stable=pass'
 if test "$visible_hold_seconds" -gt 0; then
@@ -462,6 +483,10 @@ if ! wait_for_recovery "$backend_cursor"; then
 	printf '%s\n' 'media did not recover after the backend process was killed' >&2
 	false
 fi
+if test -n "$va_render_node" && ! assert_va_encoding_path "$backend_cursor" "$va_render_node"; then
+	printf 'the replacement backend did not report VA H.264 on %s\n' "$va_render_node" >&2
+	false
+fi
 printf '%s\n' 'whole_daemon_backend_recovery=pass'
 printf '%s\n' 'whole_daemon_attachment_retained_across_backend_restart=pass'
 
@@ -474,6 +499,10 @@ if ! wait_for_policy; then
 fi
 if ! wait_for_recovery "$pipewire_cursor"; then
 	printf '%s\n' 'media did not recover after PipeWire was restarted' >&2
+	false
+fi
+if test -n "$va_render_node" && ! assert_va_encoding_path "$pipewire_cursor" "$va_render_node"; then
+	printf 'the recovered media did not report VA H.264 on %s\n' "$va_render_node" >&2
 	false
 fi
 printf '%s\n' 'whole_daemon_pipewire_recovery=pass'

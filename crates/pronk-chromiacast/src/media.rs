@@ -518,6 +518,20 @@ impl ChromiacastMediaSession {
             discard_negotiated_transport(negotiated).await;
             return Err(error.into());
         }
+        match self.graph.statistics(generation).await {
+            Ok(graph_path) => tracing::info!(
+                media_generation = generation.get(),
+                video_encoder = graph_path.encoder_name.as_deref().unwrap_or("unknown"),
+                video_memory_path = graph_path.video_memory_path.as_deref().unwrap_or("unknown"),
+                render_device = graph_path.render_device.as_deref().unwrap_or("none"),
+                "configured video encoding path"
+            ),
+            Err(error) => tracing::warn!(
+                media_generation = generation.get(),
+                %error,
+                "could not inspect configured video encoding path"
+            ),
+        }
         let adaptive_playout_delay = negotiated
             .sender
             .supports_target_playout_delay_updates()
