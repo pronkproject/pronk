@@ -340,9 +340,13 @@ impl Validate for PreparationRequest {
 }
 
 impl PreparationRequest {
-    /// Whether a selected raw layout can carry a particular offered mode.
+    /// Whether a raw layout is offered at this mode, apart from profile limits.
     pub fn supports_layout(&self, mode: &DisplayMode, layout: &RawVideoLayout) -> bool {
         self.candidate_modes.contains(mode)
+            && self
+                .video_profiles
+                .iter()
+                .any(|profile| profile.raw_layouts.contains(layout))
             && (self.mode_raw_layouts.is_empty()
                 || self
                     .mode_raw_layouts
@@ -1123,6 +1127,39 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn preparation_layout_requires_an_offered_format() {
+        let layout = RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
+        let other = RawVideoLayout::system_memory(u32::from_le_bytes(*b"AR24"));
+        let mut request = PreparationRequest {
+            preparation_generation: 1,
+            candidate_modes: vec![mode()],
+            mode_raw_layouts: Vec::new(),
+            video_profiles: vec![video_profile()],
+            audio_profiles: Vec::new(),
+            requested_features: 0,
+        };
+        request.validate().unwrap();
+        assert!(request.supports_layout(&mode(), &layout));
+        assert!(!request.supports_layout(&mode(), &other));
+
+        request.video_profiles[0].max_width = 1280;
+        request.validate().unwrap();
+        assert!(request.supports_layout(&mode(), &layout));
+        request.mode_raw_layouts.push(ModeRawLayouts {
+            mode: mode(),
+            raw_layouts: vec![layout],
+        });
+        request.validate().unwrap();
+        request.mode_raw_layouts[0].raw_layouts = vec![other];
+        assert_eq!(
+            request.validate(),
+            Err(ValidationError::InvalidMediaLayout(
+                "mode raw-layout offer is absent from every video profile"
+            ))
+        );
     }
 
     #[test]
