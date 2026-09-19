@@ -26,6 +26,9 @@ fn nz64(value: u64) -> NonZeroU64 {
     NonZeroU64::new(value).unwrap()
 }
 
+const RECEIVER_OBSERVATION: Duration = Duration::from_secs(15);
+const MINIMUM_TRANSPORT_FRAMES_PER_SECOND: u128 = 24;
+
 pub async fn run(
     capture: &mut impl CapturePipelinePort,
     request: MediaStartRequest,
@@ -75,12 +78,13 @@ pub async fn run(
         video_bitrate: bitrate,
     };
     let mut decoder = Some(Decoder::new()?);
-    let mut received = 0;
+    let mut received = 0_u64;
     let mut decoded = 0;
     let mut colors = BTreeSet::new();
     let mut last_timestamp = None;
-    let mut acknowledged = 0;
-    let receiver_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut observation_start: Option<tokio::time::Instant> = None;
+    let mut initial_acknowledged = 0;
+    let mut initial_encoded = 0;
     {
         let mut started = false;
         let activation = async {
@@ -96,11 +100,19 @@ pub async fn run(
             || colors.len() < 2
             || !started
             || (address.is_some()
-                && (acknowledged < 30 || tokio::time::Instant::now() < receiver_deadline))
+                && observation_start.is_none_or(|start| start.elapsed() < RECEIVER_OBSERVATION))
         {
             let check_pixels = decoded < 12 || colors.len() < 2;
             tokio::select! {
-                result = &mut activation, if !started => { result?; started = true; }
+                result = &mut activation, if !started => {
+                    result?;
+                    started = true;
+                    if address.is_some() {
+                        initial_acknowledged = receiver.statistics().await?.frames_acked;
+                        initial_encoded = received;
+                        observation_start = Some(tokio::time::Instant::now());
+                    }
+                }
                 frame = encoded.recv() => {
                     let frame = frame.context("encoded output stopped")?;
                     if received == 0 {
@@ -170,18 +182,26 @@ pub async fn run(
                     );
                     if address.is_some() {
                         let statistics = receiver.statistics().await?;
-                        acknowledged = statistics.frames_acked;
                         eprintln!(
-                            "receiver acknowledged={acknowledged} in_flight={}",
+                            "receiver acknowledged={} in_flight={}",
+                            statistics.frames_acked,
                             statistics.in_flight_frames
                         );
-                        if acknowledged == 0 {
+                        if statistics.frames_acked == 0 {
                             media.request_key_frame(generation).await?;
                         }
                     }
                 }
             }
         }
+    }
+    if let Some(start) = observation_start {
+        let final_acknowledged = receiver.statistics().await?.frames_acked;
+        verify_transport_cadence(
+            received.saturating_sub(initial_encoded),
+            final_acknowledged.saturating_sub(initial_acknowledged),
+            start.elapsed(),
+        )?;
     }
     let statistics = media.stop(generation).await?;
     media.shutdown().await?;
@@ -206,6 +226,24 @@ fn verify_encoded_delivery(statistics: &pronk_media::MediaGraphStatistics) -> an
         statistics.dropped_frames == 0,
         "media graph discarded {} encoded access units",
         statistics.dropped_frames
+    );
+    Ok(())
+}
+
+fn verify_transport_cadence(
+    encoded: u64,
+    acknowledged: u64,
+    elapsed: Duration,
+) -> anyhow::Result<()> {
+    let minimum = elapsed
+        .as_nanos()
+        .saturating_mul(MINIMUM_TRANSPORT_FRAMES_PER_SECOND)
+        .div_ceil(1_000_000_000)
+        .min(u128::from(u64::MAX)) as u64;
+    ensure!(
+        encoded >= minimum && acknowledged >= minimum,
+        "transport cadence below 24 frames/s over {:.2}s: encoded={encoded}, acknowledged={acknowledged}, required={minimum}",
+        elapsed.as_secs_f64(),
     );
     Ok(())
 }
@@ -283,7 +321,7 @@ fn qualify_va_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{verify_encoded_delivery, verify_va_execution};
+    use super::{verify_encoded_delivery, verify_transport_cadence, verify_va_execution};
     use pronk_media::MediaGraphStatistics;
     use std::path::Path;
 
@@ -314,5 +352,17 @@ mod tests {
         assert!(verify_encoded_delivery(&statistics).is_ok());
         statistics.dropped_frames = 1;
         assert!(verify_encoded_delivery(&statistics).is_err());
+    }
+
+    #[test]
+    fn transport_cadence_counts_the_observed_interval() {
+        let elapsed = std::time::Duration::from_secs(15);
+        assert!(verify_transport_cadence(360, 360, elapsed).is_ok());
+        assert!(verify_transport_cadence(359, 360, elapsed).is_err());
+        assert!(verify_transport_cadence(360, 359, elapsed).is_err());
+        assert!(
+            verify_transport_cadence(360, 360, elapsed + std::time::Duration::from_millis(1))
+                .is_err()
+        );
     }
 }
