@@ -1499,14 +1499,16 @@ async fn shutdown_device(
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
+    use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     use pronk_backend_protocol::{DeviceAvailability, DeviceInfo, DisplayMode, VideoProfile};
-    use pronk_media::VideoFrameDependency;
+    use pronk_media::{VideoEncoder, VideoFrameDependency};
 
     use super::*;
     use crate::discovery::FIXTURE_DEVICE_ID;
+    use crate::media::chromecast_video_cadence;
 
     fn system_layout() -> RawVideoLayout {
         RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))
@@ -2256,6 +2258,113 @@ mod tests {
         offer.validate().unwrap();
         retain_supported_layouts(&mut offer, vec![vec![graphics_layout()]]);
         assert_eq!(offer.mode_raw_layouts[0].raw_layouts, [graphics_layout()]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PRONK_GPU_RENDER_NODE and a matching VA converter"]
+    async fn selected_va_device_prepares_only_its_usable_mode_formats() {
+        let render_node = std::env::var_os("PRONK_GPU_RENDER_NODE")
+            .expect("PRONK_GPU_RENDER_NODE names the selected VA render node");
+        let render_node = std::path::PathBuf::from(render_node);
+        let metadata = std::fs::metadata(&render_node).unwrap();
+        let render_device = pronk_backend_protocol::RenderDeviceIdentity {
+            major: u32::try_from(nix::sys::stat::major(metadata.rdev())).unwrap(),
+            minor: u32::try_from(nix::sys::stat::minor(metadata.rdev())).unwrap(),
+        };
+        let encoder = VideoEncoder::va_h264(&render_node);
+        let raw_layouts: Vec<_> = encoder
+            .supported_dma_buf_formats(chromecast_video_cadence())
+            .unwrap()
+            .into_iter()
+            .filter(|format| {
+                [b"AR24", b"XR24", b"AB24", b"XB24"]
+                    .iter()
+                    .any(|fourcc| format.format == u32::from_le_bytes(**fourcc))
+            })
+            .map(|format| RawVideoLayout::dma_buf(format.format, format.modifier))
+            .collect();
+        assert!(!raw_layouts.is_empty());
+        // Source allocation is qualified by the separate GPU media fixture.
+        // Here the offer exposes converter formats to exercise preparation.
+        let mut offer = request();
+        offer.candidate_modes = vec![
+            DisplayMode {
+                width: 3840,
+                height: 2160,
+                refresh_millihz: 30_000,
+                flags: 0,
+            },
+            DisplayMode {
+                width: 2560,
+                height: 1440,
+                refresh_millihz: 60_000,
+                flags: 0,
+            },
+            offer.candidate_modes[0],
+        ];
+        offer.video_profiles[0].max_width = 3840;
+        offer.video_profiles[0].max_height = 2160;
+        offer.video_profiles[0].raw_layouts = raw_layouts.clone();
+        offer.validate().unwrap();
+        let supported = encoder
+            .supported_dma_buf_formats_for_dimensions(
+                &offer
+                    .candidate_modes
+                    .iter()
+                    .map(|mode| (mode.width, mode.height))
+                    .collect::<Vec<_>>(),
+                chromecast_video_cadence(),
+            )
+            .unwrap();
+        let most_modes = raw_layouts
+            .iter()
+            .map(|layout| {
+                supported
+                    .iter()
+                    .filter(|formats| {
+                        formats.iter().any(|format| {
+                            *layout == RawVideoLayout::dma_buf(format.format, format.modifier)
+                        })
+                    })
+                    .count()
+            })
+            .max()
+            .unwrap();
+        assert!(most_modes > 0);
+        let offered_modes = offer.candidate_modes.clone();
+        let (actor, handle, _events) = DeviceActor::spawn(
+            device(),
+            "12345678-1234-1234-1234-123456789abc".into(),
+            1,
+            0,
+            Arc::new(ScriptedConnector {
+                device_id: FIXTURE_DEVICE_ID,
+                setup: Ok(ControlSetupInfo::Unsupported),
+            }),
+            VideoEncoderPolicy::VaH264 {
+                render_node,
+                render_device,
+                raw_layouts,
+            },
+        )
+        .unwrap();
+        let capabilities = handle.prepare(offer).await.unwrap();
+        eprintln!(
+            "selected VA backend retained modes: {:?}",
+            capabilities.modes
+        );
+        let layout = capabilities.video_profiles[0].raw_layouts[0];
+        assert_eq!(capabilities.modes.len(), most_modes);
+        for mode in &capabilities.modes {
+            let index = offered_modes
+                .iter()
+                .position(|offered| offered == mode)
+                .unwrap();
+            assert!(supported[index].iter().any(|format| {
+                layout == RawVideoLayout::dma_buf(format.format, format.modifier)
+            }));
+        }
+        actor.shutdown().await.unwrap();
     }
 
     #[test]

@@ -848,6 +848,22 @@ not expose a primary DRM node or the complete `/dev/dri` directory. A machine
 that needs explicit VA driver selection may add its qualified
 `LIBVA_DRIVER_NAME` and `LIBVA_DRIVERS_PATH` to the same drop-in.
 
+The opt-in backend preparation test checks that the selected VA node returns
+only display modes with an accepted format at that size, without connecting to
+a receiver:
+
+```sh
+PRONK_GPU_RENDER_NODE=/dev/dri/renderD128 \
+LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
+    cargo test -p pronk-chromiacast \
+    selected_va_device_prepares_only_its_usable_mode_formats \
+    -- --ignored --nocapture
+```
+
+Those driver paths are examples for the qualified development machine. The
+test isolates backend selection; the generated-image fixture also checks that
+the source Vulkan device can create the selected format and modifier.
+
 The backend opens the configured path during startup, requires a DRM render
 node and records its device numbers. It later rejects a userspace-rendered
 video target produced by another render device before media negotiation. Those
