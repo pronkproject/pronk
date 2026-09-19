@@ -25,7 +25,7 @@ require_line "backend_id = \"$backend_id\""
 require_line "runtime_socket = \"$runtime_socket\""
 require_line "socket_unit = \"$socket_unit\""
 require_line "service_template = \"$service_template\""
-require_line 'protocol_major = 4'
+require_line 'protocol_major = 5'
 
 field_count=$(grep -Ec '^[a-z_]+[[:space:]]*=' "$definition")
 if [ "$field_count" -ne 6 ]; then

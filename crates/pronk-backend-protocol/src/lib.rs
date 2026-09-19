@@ -20,7 +20,7 @@ mod session;
 
 pub use session::*;
 
-pub const PROTOCOL_MAJOR: u16 = 4;
+pub const PROTOCOL_MAJOR: u16 = 5;
 pub const PROTOCOL_MINOR: u16 = 0;
 
 pub const CAPABILITY_PIPEWIRE_REMOTE_FDS_V1: u64 = 1 << 0;

@@ -407,6 +407,16 @@ fn validate_capabilities_against_offer(
                 "raw video layout",
             ));
         }
+        if capabilities.modes.iter().any(|mode| {
+            returned
+                .raw_layouts
+                .iter()
+                .any(|layout| !offer.supports_layout(mode, layout))
+        }) {
+            return Err(BackendSessionError::CapabilitiesOutsideOffer(
+                "mode raw video layout",
+            ));
+        }
     }
     for returned in &capabilities.audio_profiles {
         let Some(offered) = offer
@@ -591,6 +601,7 @@ mod tests {
                 refresh_millihz: 60_000,
                 flags: 0,
             }],
+            mode_raw_layouts: Vec::new(),
             video_profiles: vec![VideoProfile {
                 profile_id: "h264-high".into(),
                 codec: "h264".into(),
@@ -654,13 +665,36 @@ mod tests {
         ));
 
         let mut expanded = capabilities.clone();
-        expanded.video_profiles[0].raw_layouts = vec![
-            pronk_backend_protocol::RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9),
-        ];
+        expanded.video_profiles[0].raw_layouts =
+            vec![pronk_backend_protocol::RawVideoLayout::dma_buf(
+                u32::from_le_bytes(*b"AR24"),
+                9,
+            )];
         assert!(matches!(
             validate_capabilities_against_offer(&offer, &expanded),
             Err(BackendSessionError::CapabilitiesOutsideOffer(
                 "raw video layout"
+            ))
+        ));
+
+        let mut offer_for_modes = offer.clone();
+        offer_for_modes.video_profiles[0].raw_layouts.push(
+            pronk_backend_protocol::RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9),
+        );
+        offer_for_modes.mode_raw_layouts = vec![pronk_backend_protocol::ModeRawLayouts {
+            mode: offer.candidate_modes[0],
+            raw_layouts: offer.video_profiles[0].raw_layouts.clone(),
+        }];
+        let mut unsupported = capabilities.clone();
+        unsupported.video_profiles[0].raw_layouts =
+            vec![pronk_backend_protocol::RawVideoLayout::dma_buf(
+                u32::from_le_bytes(*b"AR24"),
+                9,
+            )];
+        assert!(matches!(
+            validate_capabilities_against_offer(&offer_for_modes, &unsupported),
+            Err(BackendSessionError::CapabilitiesOutsideOffer(
+                "mode raw video layout"
             ))
         ));
 

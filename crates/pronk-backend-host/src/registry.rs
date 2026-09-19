@@ -345,7 +345,7 @@ backend_id = "mock"
 runtime_socket = "pronk/backends/mock.sock"
 socket_unit = "pronk-backend-mock.socket"
 service_template = "pronk-backend-mock@.service"
-protocol_major = 4
+protocol_major = 5
 "#;
 
     fn registry(documents: &[(&str, &str)]) -> Result<BackendRegistry, BackendRegistryError> {

@@ -24,10 +24,13 @@ The Chromiacast P2P gate launches the production backend executable with an
 unmanaged-test-only Device/control fixture. It proves that authenticated,
 versioned registration completes before discovery is available, obtains a
 revisioned Device only after Start, creates a generation-bound session, and
-returns bounded setup-endpoint make/model only after `Prepare`. The
-fixture uses alternate UUID spellings for `deviceId` and `ssdp_udn`, so the
-gate also exercises exact normalized selected-device cross-checking. It stops
-and recreates the same session object path to prove bounded object lifetime.
+returns bounded setup-endpoint make/model only after `Prepare`. Its preparation
+offer limits two large modes to a layout the software encoder cannot consume;
+the backend must omit those modes while retaining a smaller system-memory
+mode. The fixture uses alternate UUID spellings for `deviceId` and `ssdp_udn`,
+so the gate also exercises exact normalized selected-device cross-checking.
+It stops and recreates the same session object path to prove bounded object
+lifetime.
 The prepared session advertises control, accepts one normalized volume
 operation, and must return the exact correlated `ControlCompleted` signal.
 It also resolves `Sony Corporation` through the installed root-owned

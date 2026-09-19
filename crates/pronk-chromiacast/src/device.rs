@@ -1067,10 +1067,11 @@ async fn prepare_device(
     if media.is_prepared() {
         return Err(DeviceActorError::AlreadyPrepared);
     }
-    request.candidate_modes = media.supported_video_modes(request.candidate_modes)?;
-    if request.candidate_modes.is_empty() {
+    let supported_modes = media.supported_video_modes(request.candidate_modes.clone())?;
+    if supported_modes.is_empty() {
         return Err(DeviceActorError::NoSupportedMode);
     }
+    retain_supported_modes(&mut request, supported_modes);
     let control = connect(device, connector).await?;
     let query = query_identity(device, control.as_ref()).await;
     let identity = match query {
@@ -1093,6 +1094,13 @@ async fn prepare_device(
     }
     *control_slot = Some(control);
     Ok(capabilities)
+}
+
+fn retain_supported_modes(request: &mut PreparationRequest, supported_modes: Vec<DisplayMode>) {
+    request
+        .mode_raw_layouts
+        .retain(|entry| supported_modes.contains(&entry.mode));
+    request.candidate_modes = supported_modes;
 }
 
 async fn connect(
@@ -1282,27 +1290,39 @@ fn negotiate_capabilities(
 ) -> Result<DeviceCapabilities, DeviceActorError> {
     let audio_requested = request.requested_features & SESSION_FEATURE_AUDIO != 0;
     let control_requested = request.requested_features & SESSION_FEATURE_CONTROL != 0;
-    let modes: Vec<_> = request
+    let candidate_modes: Vec<_> = request
         .candidate_modes
-        .into_iter()
+        .iter()
+        .copied()
         .filter(supported_sender_mode)
         .collect();
-    if modes.is_empty() {
+    if candidate_modes.is_empty() {
         return Err(DeviceActorError::NoSupportedMode);
     }
     let video_profiles: Vec<_> = request
         .video_profiles
-        .into_iter()
-        .filter_map(|profile| narrow_h264_profile(profile, raw_layouts))
+        .iter()
+        .cloned()
+        .filter_map(|profile| narrow_h264_profile(profile, raw_layouts, &candidate_modes, &request))
         .take(1)
         .collect();
     if video_profiles.is_empty() {
         return Err(DeviceActorError::NoSupportedVideoProfile);
     }
+    let selected_layout = video_profiles[0].raw_layouts[0];
+    let selected_profile = &video_profiles[0];
+    let modes = candidate_modes
+        .into_iter()
+        .filter(|mode| {
+            profile_supports_mode(selected_profile, mode)
+                && request.supports_layout(mode, &selected_layout)
+        })
+        .collect();
     let audio_profiles: Vec<_> = if audio_requested {
         request
             .audio_profiles
-            .into_iter()
+            .iter()
+            .cloned()
             .filter_map(narrow_opus_profile)
             .take(1)
             .collect()
@@ -1345,19 +1365,40 @@ fn narrow_opus_profile(profile: AudioProfile) -> Option<AudioProfile> {
 fn narrow_h264_profile(
     mut profile: VideoProfile,
     raw_layouts: &[RawVideoLayout],
+    modes: &[DisplayMode],
+    request: &PreparationRequest,
 ) -> Option<VideoProfile> {
     if profile.codec != "h264" {
         return None;
     }
-    let raw_layout = profile
-        .raw_layouts
-        .iter()
-        .find(|layout| raw_layouts.contains(layout))?;
     profile.max_width = profile.max_width.min(3_840);
     profile.max_height = profile.max_height.min(2_160);
     profile.max_refresh_millihz = profile.max_refresh_millihz.min(60_000);
-    profile.raw_layouts = vec![*raw_layout];
+    let raw_layout = profile
+        .raw_layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, layout)| raw_layouts.contains(layout))
+        .map(|(index, layout)| {
+            let mode_count = modes
+                .iter()
+                .filter(|mode| {
+                    profile_supports_mode(&profile, mode) && request.supports_layout(mode, layout)
+                })
+                .count();
+            (index, *layout, mode_count)
+        })
+        .filter(|(_, _, mode_count)| *mode_count > 0)
+        .max_by_key(|(index, _, mode_count)| (*mode_count, std::cmp::Reverse(*index)))?
+        .1;
+    profile.raw_layouts = vec![raw_layout];
     Some(profile)
+}
+
+fn profile_supports_mode(profile: &VideoProfile, mode: &DisplayMode) -> bool {
+    mode.width <= profile.max_width
+        && mode.height <= profile.max_height
+        && mode.refresh_millihz <= profile.max_refresh_millihz
 }
 
 fn supported_sender_mode(mode: &DisplayMode) -> bool {
@@ -1536,6 +1577,7 @@ mod tests {
                 refresh_millihz: 60_000,
                 flags: 0,
             }],
+            mode_raw_layouts: Vec::new(),
             video_profiles: vec![VideoProfile {
                 profile_id: "h264-high".into(),
                 codec: "h264".into(),
@@ -2004,6 +2046,157 @@ mod tests {
         assert_eq!(
             negotiate_capabilities(offer, display_identity(), &[graphics_layout()]),
             Err(DeviceActorError::NoSupportedVideoProfile)
+        );
+    }
+
+    #[test]
+    fn a_selected_gpu_layout_retains_only_compatible_display_modes() {
+        let mut offer = request();
+        let large = DisplayMode {
+            width: 3_840,
+            height: 2_160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        };
+        let small = offer.candidate_modes[0];
+        offer.candidate_modes = vec![large, small];
+        offer.video_profiles[0].max_width = large.width;
+        offer.video_profiles[0].max_height = large.height;
+        offer.video_profiles[0].raw_layouts = vec![system_layout(), graphics_layout()];
+        offer.mode_raw_layouts = vec![
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: large,
+                raw_layouts: vec![system_layout()],
+            },
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: small,
+                raw_layouts: vec![system_layout(), graphics_layout()],
+            },
+        ];
+        offer.validate().unwrap();
+        let graphics =
+            negotiate_capabilities(offer.clone(), display_identity(), &[graphics_layout()])
+                .unwrap();
+        assert_eq!(graphics.modes, [small]);
+        assert_eq!(graphics.video_profiles[0].raw_layouts, [graphics_layout()]);
+        let software =
+            negotiate_capabilities(offer, display_identity(), &[system_layout()]).unwrap();
+        assert_eq!(software.modes, [large, small]);
+    }
+
+    #[test]
+    fn encoder_layout_selection_preserves_the_most_modes() {
+        let mut offer = request();
+        let large = DisplayMode {
+            width: 3_840,
+            height: 2_160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        };
+        let small = offer.candidate_modes[0];
+        let broad_layout = RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AB24"), 9);
+        offer.candidate_modes = vec![large, small];
+        offer.video_profiles[0].max_width = large.width;
+        offer.video_profiles[0].max_height = large.height;
+        offer.video_profiles[0].raw_layouts = vec![graphics_layout(), broad_layout];
+        offer.mode_raw_layouts = vec![
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: large,
+                raw_layouts: vec![broad_layout],
+            },
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: small,
+                raw_layouts: vec![graphics_layout(), broad_layout],
+            },
+        ];
+        offer.validate().unwrap();
+        let capabilities = negotiate_capabilities(
+            offer,
+            display_identity(),
+            &[graphics_layout(), broad_layout],
+        )
+        .unwrap();
+        assert_eq!(capabilities.video_profiles[0].raw_layouts, [broad_layout]);
+        assert_eq!(capabilities.modes, [large, small]);
+    }
+
+    #[test]
+    fn encoder_mode_filter_also_narrows_per_mode_layouts() {
+        let mut offer = request();
+        let large = DisplayMode {
+            width: 3_840,
+            height: 2_160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        };
+        let small = offer.candidate_modes[0];
+        offer.candidate_modes.insert(0, large);
+        offer.mode_raw_layouts = vec![
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: large,
+                raw_layouts: vec![system_layout()],
+            },
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: small,
+                raw_layouts: vec![system_layout()],
+            },
+        ];
+        retain_supported_modes(&mut offer, vec![small]);
+        offer.validate().unwrap();
+        assert_eq!(offer.candidate_modes, [small]);
+        assert_eq!(offer.mode_raw_layouts[0].mode, small);
+        assert_eq!(offer.mode_raw_layouts.len(), 1);
+    }
+
+    #[test]
+    fn video_profile_limits_exclude_larger_display_modes() {
+        let mut offer = request();
+        let large = DisplayMode {
+            width: 3_840,
+            height: 2_160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        };
+        let small = offer.candidate_modes[0];
+        offer.candidate_modes.insert(0, large);
+        let capabilities =
+            negotiate_capabilities(offer, display_identity(), &[system_layout()]).unwrap();
+        assert_eq!(capabilities.modes, [small]);
+    }
+
+    #[test]
+    fn unavailable_large_only_layout_does_not_hide_a_usable_fallback() {
+        let mut offer = request();
+        let large = DisplayMode {
+            width: 3_840,
+            height: 2_160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        };
+        let small = offer.candidate_modes[0];
+        offer.candidate_modes.insert(0, large);
+        offer.video_profiles[0].raw_layouts = vec![graphics_layout(), system_layout()];
+        offer.mode_raw_layouts = vec![
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: large,
+                raw_layouts: vec![graphics_layout()],
+            },
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: small,
+                raw_layouts: vec![system_layout()],
+            },
+        ];
+        offer.validate().unwrap();
+        let capabilities = negotiate_capabilities(
+            offer,
+            display_identity(),
+            &[graphics_layout(), system_layout()],
+        )
+        .unwrap();
+        assert_eq!(capabilities.modes, [small]);
+        assert_eq!(
+            capabilities.video_profiles[0].raw_layouts,
+            [system_layout()]
         );
     }
 

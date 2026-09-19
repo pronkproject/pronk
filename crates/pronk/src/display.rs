@@ -755,26 +755,28 @@ async fn run_display_setup_inner(
     if context.media_runtime.capture_source == CaptureSource::Renderer {
         if let Some(render_node) = kernel_session.renderer_render_node() {
             let render_node = render_node.to_path_buf();
-            let modes = offer.candidate_modes.clone();
+            let probe_modes = offer.candidate_modes.clone();
             let mut probe = tokio::task::spawn_blocking(move || {
-                crate::capture_output_layouts::for_modes(&render_node, &modes)
+                crate::capture_output_layouts::for_modes(&render_node, &probe_modes)
             });
             let result = tokio::select! {
                 biased;
                 _ = context.cancellation.cancelled() => return Err(DisplaySetupError::Cancelled),
                 result = &mut probe => result,
             };
-            offer.video_profiles[0].raw_layouts = match result {
+            let layouts = match result {
                 Ok(Ok(layouts)) => layouts,
                 Ok(Err(error)) => {
                     warn!(%error, "renderer output layout probe failed");
-                    crate::capture_output_layouts::system_only()
+                    crate::capture_output_layouts::system_only_offer()
                 }
                 Err(error) => {
                     warn!(%error, "renderer output layout worker failed");
-                    crate::capture_output_layouts::system_only()
+                    crate::capture_output_layouts::system_only_offer()
                 }
             };
+            offer.video_profiles[0].raw_layouts = layouts.raw_layouts;
+            offer.mode_raw_layouts = layouts.mode_raw_layouts;
         } else {
             offer.video_profiles[0].raw_layouts = crate::capture_output_layouts::system_only();
         }

@@ -627,6 +627,7 @@ fn media_gate_preparation_request() -> PreparationRequest {
                 flags: 0,
             },
         ],
+        mode_raw_layouts: Vec::new(),
         video_profiles: vec![VideoProfile {
             profile_id: "h264-test".into(),
             codec: "h264".into(),
@@ -1159,6 +1160,7 @@ fn mock_preparation_request(preparation_generation: u64) -> PreparationRequest {
                 flags: 0,
             },
         ],
+        mode_raw_layouts: Vec::new(),
         video_profiles: vec![VideoProfile {
             profile_id: "h264-high".into(),
             codec: "h264".into(),
@@ -1249,6 +1251,7 @@ async fn run_valid_connection(path: &Path, connection_generation: u64) -> anyhow
             refresh_millihz: 60_000,
             flags: 0,
         }],
+        mode_raw_layouts: Vec::new(),
         video_profiles: vec![VideoProfile {
             profile_id: "h264-high".into(),
             codec: "h264".into(),

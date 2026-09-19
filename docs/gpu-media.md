@@ -47,23 +47,21 @@ Its accepted tuples therefore come from the selected converter rather than a har
 assumption. Pad-template checks are an advertisement filter, not a promise
 that a driver will successfully encode every frame. Pronk separately probes
 formats and modifiers that the selected Vulkan device can export and
-reimport at every offered display size. It presents those layouts to the
-backend in preference order. The initial Cast mode set contains only modes
-the sender can carry, so a discarded non-16:9 mode cannot remove otherwise
-usable GPU layouts from that intersection. The backend still checks the
-received mode list independently. If the GPU probe fails or no render node is
-available, Pronk offers only its known system-memory layout, not an unverified
-linear DMA-BUF. The backend chooses one exact intersection, and
+reimport at each offered display size. It presents a bounded union in
+preference order, with a per-mode list of available layouts. The backend
+selects one exact layout and retains only compatible display modes. If the
+GPU probe fails or no render node is available, Pronk offers only its known
+system-memory layout, not an unverified linear DMA-BUF. The backend chooses
+one exact intersection, and
 Pronk requests that same layout from the capture provider before allocating
 its output pool. If no intersection exists, preparation fails without silently
 changing either layout.
 
-The current backend offer carries one raw-layout list for all its modes.
-Pronk therefore requires a GPU modifier to work at every proposed size. A
-machine whose renderer and encoder overlap only at a lower resolution can
-still lose the GPU offer because of a larger proposed mode. Per-mode raw
-layout negotiation is needed to retain that lower-resolution GPU route while
-also preserving independently usable system-memory modes.
+An empty per-mode list in the protocol means every offered profile layout
+works at every candidate mode. Otherwise, each candidate mode has exactly
+one entry, and every listed layout also belongs to an offered video profile.
+This lets a lower-resolution GPU route coexist with independently usable
+system-memory modes without advertising a layout at an unsupported size.
 
 ## Ownership and synchronization
 

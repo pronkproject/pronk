@@ -24,52 +24,54 @@ pub fn initial_preparation_offer(
     audio_enabled: bool,
     raw_layouts: &[RawVideoLayout],
 ) -> PreparationRequest {
+    let candidate_modes = vec![
+        DisplayMode {
+            width: 3840,
+            height: 2160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        },
+        DisplayMode {
+            width: 2560,
+            height: 1440,
+            refresh_millihz: 60_000,
+            flags: 0,
+        },
+        DisplayMode {
+            width: 1920,
+            height: 1080,
+            refresh_millihz: 60_000,
+            flags: 0,
+        },
+        DisplayMode {
+            width: 1600,
+            height: 900,
+            refresh_millihz: 60_000,
+            flags: 0,
+        },
+        DisplayMode {
+            width: 1366,
+            height: 768,
+            refresh_millihz: 60_000,
+            flags: 0,
+        },
+        DisplayMode {
+            width: 1280,
+            height: 720,
+            refresh_millihz: 60_000,
+            flags: 0,
+        },
+        DisplayMode {
+            width: 640,
+            height: 480,
+            refresh_millihz: 60_000,
+            flags: 0,
+        },
+    ];
     PreparationRequest {
         preparation_generation: 1,
-        candidate_modes: vec![
-            DisplayMode {
-                width: 3840,
-                height: 2160,
-                refresh_millihz: 30_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 2560,
-                height: 1440,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1920,
-                height: 1080,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1600,
-                height: 900,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1366,
-                height: 768,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1280,
-                height: 720,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 640,
-                height: 480,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-        ],
+        candidate_modes,
+        mode_raw_layouts: Vec::new(),
         video_profiles: vec![VideoProfile {
             profile_id: "h264-high".into(),
             codec: "h264".into(),
@@ -389,6 +391,11 @@ mod tests {
         video.validate().unwrap();
         assert_eq!(video.requested_features, SESSION_FEATURE_CONTROL);
         assert!(video.audio_profiles.is_empty());
+        assert!(video.mode_raw_layouts.is_empty());
+        assert!(video.supports_layout(
+            &video.candidate_modes[0],
+            &video.video_profiles[0].raw_layouts[0]
+        ));
         assert_eq!(video.candidate_modes.last().unwrap().width, 640);
 
         let audiovisual = initial_preparation_offer(

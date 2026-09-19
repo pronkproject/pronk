@@ -163,6 +163,32 @@ impl Validate for RawVideoStorage {
     }
 }
 
+/// Raw-frame storage available when the display uses one particular mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ModeRawLayouts {
+    pub mode: DisplayMode,
+    pub raw_layouts: Vec<RawVideoLayout>,
+}
+
+impl Validate for ModeRawLayouts {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.mode.validate()?;
+        validate_nonempty_bounded(
+            "mode raw video layouts",
+            &self.raw_layouts,
+            MAX_RAW_VIDEO_LAYOUTS,
+        )?;
+        for (index, layout) in self.raw_layouts.iter().enumerate() {
+            if self.raw_layouts[..index].contains(layout) {
+                return Err(ValidationError::InvalidMediaLayout(
+                    "a display mode repeats a raw video layout",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct VideoProfile {
     pub profile_id: String,
@@ -245,6 +271,8 @@ impl Validate for AudioProfile {
 pub struct PreparationRequest {
     pub preparation_generation: u64,
     pub candidate_modes: Vec<DisplayMode>,
+    /// Empty when every profile layout works at every candidate mode.
+    pub mode_raw_layouts: Vec<ModeRawLayouts>,
     pub video_profiles: Vec<VideoProfile>,
     pub audio_profiles: Vec<AudioProfile>,
     pub requested_features: u64,
@@ -254,6 +282,13 @@ impl Validate for PreparationRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         validate_generation("preparation", self.preparation_generation)?;
         validate_nonempty_bounded("candidate modes", &self.candidate_modes, MAX_MODES)?;
+        if !self.mode_raw_layouts.is_empty()
+            && self.mode_raw_layouts.len() != self.candidate_modes.len()
+        {
+            return Err(ValidationError::InvalidMediaLayout(
+                "each candidate mode needs one raw-layout offer",
+            ));
+        }
         validate_nonempty_bounded("video profiles", &self.video_profiles, MAX_VIDEO_PROFILES)?;
         validate_bounded("audio profiles", &self.audio_profiles, MAX_AUDIO_PROFILES)?;
         validate_unique_profiles("video profile", &self.video_profiles, |profile| {
@@ -263,12 +298,47 @@ impl Validate for PreparationRequest {
             profile.profile_id.as_str()
         })?;
         validate_feature_bits(self.requested_features)?;
+        for (index, offered) in self.mode_raw_layouts.iter().enumerate() {
+            offered.validate()?;
+            if !self.candidate_modes.contains(&offered.mode)
+                || self.mode_raw_layouts[..index]
+                    .iter()
+                    .any(|previous| previous.mode == offered.mode)
+            {
+                return Err(ValidationError::InvalidMediaLayout(
+                    "mode raw-layout offers must name distinct candidate modes",
+                ));
+            }
+            if offered.raw_layouts.iter().any(|layout| {
+                !self
+                    .video_profiles
+                    .iter()
+                    .any(|profile| profile.raw_layouts.contains(layout))
+            }) {
+                return Err(ValidationError::InvalidMediaLayout(
+                    "mode raw-layout offer is absent from every video profile",
+                ));
+            }
+        }
         if self.requested_features & SESSION_FEATURE_AUDIO != 0 && self.audio_profiles.is_empty() {
             return Err(ValidationError::InvalidMediaLayout(
                 "audio was requested without an audio profile",
             ));
         }
         Ok(())
+    }
+}
+
+impl PreparationRequest {
+    /// Whether a selected raw layout can carry a particular offered mode.
+    pub fn supports_layout(&self, mode: &DisplayMode, layout: &RawVideoLayout) -> bool {
+        self.candidate_modes.contains(mode)
+            && (self.mode_raw_layouts.is_empty()
+                || self
+                    .mode_raw_layouts
+                    .iter()
+                    .find(|entry| entry.mode == *mode)
+                    .is_some_and(|entry| entry.raw_layouts.contains(layout)))
     }
 }
 
@@ -912,14 +982,39 @@ mod tests {
 
     #[test]
     fn validates_preparation_bounds_and_identity_provenance() {
-        let request = PreparationRequest {
+        let mut request = PreparationRequest {
             preparation_generation: 1,
             candidate_modes: vec![mode()],
+            mode_raw_layouts: Vec::new(),
             video_profiles: vec![video_profile()],
             audio_profiles: vec![audio_profile()],
             requested_features: SESSION_FEATURE_AUDIO,
         };
         request.validate().unwrap();
+        request.mode_raw_layouts = vec![ModeRawLayouts {
+            mode: mode(),
+            raw_layouts: vec![RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))],
+        }];
+        request.validate().unwrap();
+        let mut invalid = request.clone();
+        invalid.mode_raw_layouts[0].raw_layouts =
+            vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)];
+        assert!(invalid.validate().is_err());
+        let mut invalid = request.clone();
+        invalid.mode_raw_layouts[0].mode.width += 1;
+        assert!(invalid.validate().is_err());
+        let mut invalid = request.clone();
+        let repeated = invalid.mode_raw_layouts[0].raw_layouts[0];
+        invalid.mode_raw_layouts[0].raw_layouts.push(repeated);
+        assert!(invalid.validate().is_err());
+        let mut invalid = request.clone();
+        invalid.candidate_modes.push(DisplayMode {
+            width: 1280,
+            height: 720,
+            refresh_millihz: 60_000,
+            flags: 0,
+        });
+        assert!(invalid.validate().is_err());
 
         let identity = DisplayIdentity {
             manufacturer_name: Some("Sony".into()),
@@ -1136,8 +1231,13 @@ mod tests {
         assert_eq!(DisplayMode::SIGNATURE, "(uuuu)");
         assert_eq!(RawVideoStorage::SIGNATURE, "u");
         assert_eq!(RawVideoLayout::SIGNATURE, "(uut)");
+        assert_eq!(ModeRawLayouts::SIGNATURE, "((uuuu)a(uut))");
         assert_eq!(VideoProfile::SIGNATURE, "(ssuuua(uut))");
         assert_eq!(AudioProfile::SIGNATURE, "(ssyau)");
+        assert_eq!(
+            PreparationRequest::SIGNATURE,
+            "(ta(uuuu)a((uuuu)a(uut))a(ssuuua(uut))a(ssyau)t)"
+        );
         assert_eq!(IdentitySource::SIGNATURE, "u");
         assert_eq!(IdentitySource::SetupEndpoint as u32, 1);
         assert_eq!(DisplayIdentity::SIGNATURE, "(asuasuas)");

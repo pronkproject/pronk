@@ -169,18 +169,49 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await
         .context("create Chromiacast BackendSession1 proxy")?;
+    let system_layout =
+        pronk_backend_protocol::RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
+    let mut offer = pronk::preparation::initial_preparation_offer(false, &[system_layout]);
+    if live_device_id.is_none() {
+        let gpu_layout =
+            pronk_backend_protocol::RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9);
+        offer.video_profiles[0].raw_layouts.push(gpu_layout);
+        ensure!(
+            offer.candidate_modes[0].width == 3840 && offer.candidate_modes[1].width == 2560,
+            "fixture large modes changed"
+        );
+        offer.mode_raw_layouts = offer
+            .candidate_modes
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, mode)| pronk_backend_protocol::ModeRawLayouts {
+                mode,
+                raw_layouts: vec![if index < 2 { gpu_layout } else { system_layout }],
+            })
+            .collect();
+    }
     let capabilities = session
-        .prepare(pronk::preparation::initial_preparation_offer(
-            false,
-            &[pronk_backend_protocol::RawVideoLayout::system_memory(
-                u32::from_le_bytes(*b"XR24"),
-            )],
-        ))
+        .prepare(offer.clone())
         .await
         .context("prepare authenticated Chromiacast device")?;
     capabilities
         .validate()
         .context("validate Chromiacast capabilities")?;
+    if live_device_id.is_none() {
+        ensure!(
+            capabilities
+                .modes
+                .iter()
+                .all(|mode| mode != &offer.candidate_modes[0])
+                && capabilities
+                    .modes
+                    .iter()
+                    .all(|mode| mode != &offer.candidate_modes[1])
+                && capabilities.modes.contains(&offer.candidate_modes[2]),
+            "Chromiacast retained a mode without its selected raw layout"
+        );
+    }
     if live_device_id.is_none() {
         ensure!(
             capabilities.display_identity.manufacturer_name.as_deref() == Some("Sony Corporation")
