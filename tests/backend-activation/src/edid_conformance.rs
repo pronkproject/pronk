@@ -16,6 +16,7 @@ pub fn check(
     decoder: &OsStr,
     edid: &[u8],
     expected_product_name: &str,
+    expected_first_vic_mismatch: Option<u8>,
 ) -> anyhow::Result<ConformanceOutcome> {
     let mut child = Command::new(decoder)
         .args(["--check", "--skip-hex-dump", "-"])
@@ -67,8 +68,14 @@ pub fn check(
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("Block "))
         .collect::<Vec<_>>();
+    let mut expected_warnings = vec!["Missing Display Product Name.".to_string()];
+    if let Some(vic) = expected_first_vic_mismatch {
+        expected_warnings.push(format!(
+            "Video Data Block: VIC {vic} and the first DTD are not identical. Is this intended?"
+        ));
+    }
     ensure!(
-        warnings == ["Missing Display Product Name."],
+        warnings == expected_warnings,
         "edid-decode reported unexpected warnings:\n{stdout}"
     );
     Ok(outcome)

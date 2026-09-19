@@ -187,7 +187,11 @@ async fn main() -> anyhow::Result<()> {
             .enumerate()
             .map(|(index, mode)| pronk_backend_protocol::ModeRawLayouts {
                 mode,
-                raw_layouts: vec![if index < 2 { gpu_layout } else { system_layout }],
+                raw_layouts: vec![if index == 0 {
+                    gpu_layout
+                } else {
+                    system_layout
+                }],
             })
             .collect();
     }
@@ -204,11 +208,7 @@ async fn main() -> anyhow::Result<()> {
                 .modes
                 .iter()
                 .all(|mode| mode != &offer.candidate_modes[0])
-                && capabilities
-                    .modes
-                    .iter()
-                    .all(|mode| mode != &offer.candidate_modes[1])
-                && capabilities.modes.contains(&offer.candidate_modes[2]),
+                && capabilities.modes.contains(&offer.candidate_modes[1]),
             "Chromiacast retained a mode without its selected raw layout"
         );
     }
@@ -284,6 +284,8 @@ async fn main() -> anyhow::Result<()> {
             edid_decode.as_os_str(),
             prepared.generated_edid().edid().as_bytes(),
             &device.display_name,
+            // 1440p is preferred, while 1080p is the first CTA video code.
+            Some(16),
         )
         .context("validate authenticated Chromiacast DisplayID")?;
     } else {
@@ -299,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
                 edid_decode.as_os_str(),
                 prepared.generated_edid().edid().as_bytes(),
                 expected,
+                None,
             )
             .context("validate live Chromiacast DisplayID")?;
         }

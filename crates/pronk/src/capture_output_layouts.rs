@@ -239,14 +239,15 @@ mod tests {
     fn selected_gpu_reports_layouts_for_the_full_presentation_offer() {
         let node = std::env::var_os("PRONK_GPU_RENDER_NODE")
             .expect("set PRONK_GPU_RENDER_NODE to the intended render node");
-        let modes =
-            crate::preparation::initial_preparation_offer(false, &system_only()).candidate_modes;
+        let mut offer = crate::preparation::initial_preparation_offer(false, &system_only());
+        let modes = offer.candidate_modes.clone();
         let layouts = for_modes(Path::new(&node), &modes).unwrap();
         eprintln!("mode output layouts: {layouts:?}");
         assert_eq!(
             layouts.raw_layouts[0],
             RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))
         );
+        assert_eq!(layouts.mode_raw_layouts.len(), modes.len());
         if let Ok(expected) = std::env::var("PRONK_GPU_MODIFIER") {
             let modifier = u64::from_str_radix(expected.trim_start_matches("0x"), 16).unwrap();
             assert!(layouts.raw_layouts.contains(&RawVideoLayout::dma_buf(
@@ -254,5 +255,8 @@ mod tests {
                 modifier,
             )));
         }
+        offer.video_profiles[0].raw_layouts = layouts.raw_layouts;
+        offer.mode_raw_layouts = layouts.mode_raw_layouts;
+        pronk_backend_protocol::Validate::validate(&offer).unwrap();
     }
 }

@@ -61,5 +61,5 @@ fn check_fixture(
         cec_physical_address: cec.then_some(0x1000),
     })?;
 
-    edid_conformance::check(decoder, generated.edid().as_bytes(), product_name)
+    edid_conformance::check(decoder, generated.edid().as_bytes(), product_name, None)
 }
