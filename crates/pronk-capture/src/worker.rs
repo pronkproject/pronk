@@ -105,7 +105,10 @@ async fn run<B: Backend>(
                         next = id.checked_add(1);
                         uses[slot] = Use::Writing { request, reply };
                     }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.raw_os_error() == Some(nix::libc::EBUSY) =>
+                    {
                         let _ = reply.send(Err(CaptureError::Backpressure));
                     }
                     Err(error) => {

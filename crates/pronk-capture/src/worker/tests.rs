@@ -11,7 +11,7 @@ struct State {
     queued: Vec<(RequestId, usize)>,
     completed: VecDeque<Completed>,
     busy: bool,
-    reject_once: bool,
+    reject_once_errno: Option<i32>,
     disconnected: bool,
     closes: usize,
 }
@@ -33,8 +33,8 @@ impl Backend for Fake {
 
     fn queue(&mut self, request: RequestId, slot: usize, _: &Buffer) -> io::Result<()> {
         let mut state = self.shared.state.lock().unwrap();
-        if std::mem::take(&mut state.reject_once) {
-            return Err(io::ErrorKind::WouldBlock.into());
+        if let Some(errno) = state.reject_once_errno.take() {
+            return Err(io::Error::from_raw_os_error(errno));
         }
         state.queued.push((request, slot));
         self.shared.queued.notify_one();
@@ -220,16 +220,18 @@ async fn producer_failure_is_not_published_as_pixels() {
 
 #[tokio::test]
 async fn rejected_admission_does_not_consume_a_slot_or_request_name() {
-    let (actor, shared) = fixture(1);
-    shared.state.lock().unwrap().reject_once = true;
-    assert!(matches!(
-        actor.capture().await,
-        Err(CaptureError::Backpressure)
-    ));
-    let frame = frame(&actor, &shared).await;
-    assert_eq!(frame.request().get(), 1);
-    drop(frame);
-    actor.shutdown().await.unwrap();
+    for errno in [nix::libc::EAGAIN, nix::libc::EBUSY] {
+        let (actor, shared) = fixture(1);
+        shared.state.lock().unwrap().reject_once_errno = Some(errno);
+        assert!(matches!(
+            actor.capture().await,
+            Err(CaptureError::Backpressure)
+        ));
+        let frame = frame(&actor, &shared).await;
+        assert_eq!(frame.request().get(), 1);
+        drop(frame);
+        actor.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]
