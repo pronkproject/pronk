@@ -281,7 +281,7 @@ impl VideoEncoder {
                     "h264enc",
                     render_node,
                     &[
-                        ("bitrate", VaPropertyValue::Unsigned(bitrate)),
+                        ("bitrate", VaPropertyValue::PlayingUnsigned(bitrate)),
                         ("key-int-max", VaPropertyValue::Unsigned(key_frame_interval)),
                         ("b-frames", VaPropertyValue::Unsigned(0)),
                         ("cabac", VaPropertyValue::Boolean),
@@ -345,7 +345,7 @@ impl VideoEncoder {
                 let bitrate = h264::bitrate_kbits(bitrate.get())?;
                 validate_va_properties(
                     encoder,
-                    &[("bitrate", VaPropertyValue::Unsigned(bitrate))],
+                    &[("bitrate", VaPropertyValue::PlayingUnsigned(bitrate))],
                 )?;
                 encoder.set_property("bitrate", bitrate);
                 Ok(u64::from(bitrate).saturating_mul(1_000))
@@ -491,6 +491,7 @@ fn supports_va_baseline_caps(output: &gst::CapsRef) -> Result<bool, MediaGraphEr
 enum VaPropertyValue<'a> {
     Boolean,
     Unsigned(u32),
+    PlayingUnsigned(u32),
     Enum(&'a str),
 }
 
@@ -559,6 +560,14 @@ fn validate_va_properties(
                 element.name(),
             )));
         }
+        if matches!(value, VaPropertyValue::PlayingUnsigned(_))
+            && !property.flags().contains(gst::PARAM_FLAG_MUTABLE_PLAYING)
+        {
+            return Err(MediaGraphError::new(format!(
+                "{} cannot change its {name} property while playing",
+                element.name(),
+            )));
+        }
         if !va_property_accepts(&property, value) {
             return Err(MediaGraphError::new(format!(
                 "{} does not accept {name}={value:?}",
@@ -575,6 +584,10 @@ fn va_property_accepts(property: &gst::glib::ParamSpec, value: VaPropertyValue<'
         VaPropertyValue::Unsigned(value) => property
             .downcast_ref::<gst::glib::ParamSpecUInt>()
             .is_some_and(|spec| (spec.minimum()..=spec.maximum()).contains(&value)),
+        VaPropertyValue::PlayingUnsigned(value) => {
+            property.flags().contains(gst::PARAM_FLAG_MUTABLE_PLAYING)
+                && va_property_accepts(property, VaPropertyValue::Unsigned(value))
+        }
         VaPropertyValue::Enum(value) => {
             property.is::<gst::glib::ParamSpecEnum>()
                 && gst::glib::Value::deserialize_with_pspec(value, property).is_ok()
@@ -726,6 +739,14 @@ mod tests {
         assert!(wrong_type
             .to_string()
             .contains("does not accept num-buffers"));
+        let not_mutable = validate_va_properties(
+            &element,
+            &[("max-lateness", VaPropertyValue::PlayingUnsigned(0))],
+        )
+        .unwrap_err();
+        assert!(not_mutable
+            .to_string()
+            .contains("cannot change its max-lateness property while playing"));
         assert!(validate_va_properties(
             &element,
             &[("enable-last-sample", VaPropertyValue::Boolean)],
@@ -751,6 +772,24 @@ mod tests {
         assert!(!va_property_accepts(
             &property,
             VaPropertyValue::Unsigned(101)
+        ));
+        assert!(!va_property_accepts(
+            &property,
+            VaPropertyValue::PlayingUnsigned(100)
+        ));
+        let playing = gst::glib::ParamSpecUInt::builder("bitrate")
+            .minimum(1)
+            .maximum(100)
+            .default_value(1)
+            .mutable_playing()
+            .build();
+        assert!(va_property_accepts(
+            &playing,
+            VaPropertyValue::PlayingUnsigned(100)
+        ));
+        assert!(!va_property_accepts(
+            &playing,
+            VaPropertyValue::PlayingUnsigned(101)
         ));
     }
 
