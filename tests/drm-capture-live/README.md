@@ -203,7 +203,8 @@ The final-image capture probes use reference CPU composition. The renderer
 capture probe explicitly selects DMA-BUF storage and qualifies delegated GPU
 composition into a Vulkan-allocated destination through generic final-image
 delivery. Its receiver mode carries that output through the production media
-graph and software H.264 encoder. It does not qualify hardware encoding or the
-installed service sandbox. The default probes do not exercise receiver
+graph and a selected VA H.264 encoder. The live probe verifies the graph's
+reported VA-memory path and render device after the run. It does not qualify
+the installed service sandbox. The default probes do not exercise receiver
 transport; either optional receiver mode still needs visual confirmation to
 establish television playback.
