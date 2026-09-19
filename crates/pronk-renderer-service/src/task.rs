@@ -1,6 +1,7 @@
 //! Private orchestration for a renderer generation.
 
 use std::io;
+use std::num::NonZeroUsize;
 use std::os::fd::AsFd;
 
 use castkms_renderer::Renderer;
@@ -96,6 +97,7 @@ fn prepare_generation<F: AsFd>(
         config.private_pool.frame_capacity,
         config.private_pool.source_capacity,
     )?;
+    require_refresh_capacity(frame_capacity)?;
     let scene_pool = profile.create_pool(frame_capacity, source_capacity)?;
     let scene_images = match PreparedSceneImages::new(
         device,
@@ -142,6 +144,16 @@ fn prepare_generation<F: AsFd>(
     Ok((reader, output))
 }
 
+fn require_refresh_capacity(capacity: NonZeroUsize) -> io::Result<()> {
+    if capacity.get() < 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "renderer needs two final images to refresh its retained frame",
+        ));
+    }
+    Ok(())
+}
+
 fn choose_private_modifier(available: &[u64], requested: Option<u64>) -> io::Result<u64> {
     match requested {
         Some(modifier) if available.contains(&modifier) => Ok(modifier),
@@ -165,8 +177,19 @@ fn choose_private_modifier(available: &[u64], requested: Option<u64>) -> io::Res
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_private_modifier, Started};
+    use super::{choose_private_modifier, require_refresh_capacity, Started};
     use drm_display_executor::scene::geometry::Extent;
+    use std::io;
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn retained_frame_requires_another_slot_for_refresh() {
+        let one = NonZeroUsize::new(1).unwrap();
+        let error = require_refresh_capacity(one).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("two final images"));
+        assert!(require_refresh_capacity(NonZeroUsize::new(2).unwrap()).is_ok());
+    }
 
     #[test]
     fn setup_result_carries_only_renderer_geometry() {
