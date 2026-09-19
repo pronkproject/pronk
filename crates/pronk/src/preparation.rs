@@ -513,6 +513,12 @@ mod tests {
         let mut returned = capabilities();
         returned.modes.insert(0, mode(3840, 2160, 30_000));
         returned.modes.insert(1, mode(1920, 1080, 120_000));
+        let mut alternate_profile = returned.video_profiles[0].clone();
+        alternate_profile.profile_id = "h264-large".into();
+        alternate_profile.max_width = 3840;
+        alternate_profile.max_height = 2160;
+        alternate_profile.max_refresh_millihz = 120_000;
+        returned.video_profiles.push(alternate_profile);
         let prepared =
             PreparedCastDevice::from_capabilities(device(), returned, &resolver(), true).unwrap();
         assert_eq!(
@@ -612,7 +618,10 @@ mod tests {
         );
 
         let mut narrowed_profile = capabilities();
+        let mut alternate_profile = narrowed_profile.video_profiles[0].clone();
         narrowed_profile.video_profiles[0].max_width = 1280;
+        alternate_profile.profile_id = "h264-large".into();
+        narrowed_profile.video_profiles.push(alternate_profile);
         let narrowed_profile =
             PreparedCastDevice::from_capabilities(device(), narrowed_profile, &resolver(), true)
                 .unwrap();

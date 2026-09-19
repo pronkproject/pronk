@@ -407,12 +407,17 @@ fn validate_capabilities_against_offer(
                 "raw video layout",
             ));
         }
-        if capabilities.modes.iter().any(|mode| {
-            returned
-                .raw_layouts
-                .iter()
-                .any(|layout| !offer.supports_layout(mode, layout))
-        }) {
+        if capabilities
+            .modes
+            .iter()
+            .filter(|mode| returned.supports_mode(mode))
+            .any(|mode| {
+                returned
+                    .raw_layouts
+                    .iter()
+                    .any(|layout| !offer.supports_layout(mode, layout))
+            })
+        {
             return Err(BackendSessionError::CapabilitiesOutsideOffer(
                 "mode raw video layout",
             ));
@@ -715,5 +720,46 @@ mod tests {
                 "feature bits"
             ))
         ));
+    }
+
+    #[test]
+    fn a_narrower_secondary_profile_need_not_carry_larger_modes() {
+        let mut offer = preparation();
+        let small = offer.candidate_modes[0];
+        let large = DisplayMode {
+            width: 3840,
+            height: 2160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        };
+        let broad_layout =
+            pronk_backend_protocol::RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9);
+        let narrow_layout = offer.video_profiles[0].raw_layouts[0];
+        offer.candidate_modes.insert(0, large);
+        offer.video_profiles[0].raw_layouts = vec![broad_layout];
+        offer.video_profiles.push(VideoProfile {
+            profile_id: "h264-small".into(),
+            codec: "h264".into(),
+            max_width: small.width,
+            max_height: small.height,
+            max_refresh_millihz: small.refresh_millihz,
+            raw_layouts: vec![narrow_layout],
+        });
+        offer.mode_raw_layouts = vec![
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: large,
+                raw_layouts: vec![broad_layout],
+            },
+            pronk_backend_protocol::ModeRawLayouts {
+                mode: small,
+                raw_layouts: vec![broad_layout, narrow_layout],
+            },
+        ];
+        offer.validate().unwrap();
+        let mut returned = capabilities();
+        returned.modes = offer.candidate_modes.clone();
+        returned.video_profiles = offer.video_profiles.clone();
+        returned.validate().unwrap();
+        validate_capabilities_against_offer(&offer, &returned).unwrap();
     }
 }

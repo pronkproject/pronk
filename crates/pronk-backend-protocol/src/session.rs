@@ -431,6 +431,25 @@ impl Validate for DeviceCapabilities {
         validate_unique_profiles("audio profile", &self.audio_profiles, |profile| {
             profile.profile_id.as_str()
         })?;
+        if self.modes.iter().any(|mode| {
+            !self
+                .video_profiles
+                .iter()
+                .any(|profile| profile.supports_mode(mode))
+        }) {
+            return Err(ValidationError::InvalidMediaLayout(
+                "a device mode has no usable video profile",
+            ));
+        }
+        if self
+            .video_profiles
+            .iter()
+            .any(|profile| !self.modes.iter().any(|mode| profile.supports_mode(mode)))
+        {
+            return Err(ValidationError::InvalidMediaLayout(
+                "a video profile has no usable device mode",
+            ));
+        }
         validate_feature_bits(self.features)?;
         if self.features & SESSION_FEATURE_AUDIO != 0 && self.audio_profiles.is_empty() {
             return Err(ValidationError::InvalidMediaLayout(
@@ -1089,6 +1108,43 @@ mod tests {
         outside = mode();
         outside.refresh_millihz = profile.max_refresh_millihz + 1;
         assert!(!profile.supports_mode(&outside));
+    }
+
+    #[test]
+    fn device_modes_and_video_profiles_must_each_have_a_usable_pair() {
+        let mut capabilities = DeviceCapabilities {
+            preparation_generation: 1,
+            display_identity: DisplayIdentity {
+                manufacturer_name: Some("Sony".into()),
+                manufacturer_source: IdentitySource::SetupEndpoint,
+                product_name: Some("BRAVIA".into()),
+                product_source: IdentitySource::SetupEndpoint,
+                pnp_id: None,
+            },
+            modes: vec![mode()],
+            video_profiles: vec![video_profile()],
+            audio_profiles: Vec::new(),
+            features: 0,
+        };
+        capabilities.validate().unwrap();
+        capabilities.modes[0].width = capabilities.video_profiles[0].max_width + 1;
+        assert_eq!(
+            capabilities.validate(),
+            Err(ValidationError::InvalidMediaLayout(
+                "a device mode has no usable video profile"
+            ))
+        );
+        capabilities.modes[0] = mode();
+        let mut alternate_profile = capabilities.video_profiles[0].clone();
+        alternate_profile.profile_id = "h264-small".into();
+        alternate_profile.max_width = 1280;
+        capabilities.video_profiles.push(alternate_profile);
+        assert_eq!(
+            capabilities.validate(),
+            Err(ValidationError::InvalidMediaLayout(
+                "a video profile has no usable device mode"
+            ))
+        );
     }
 
     #[test]
