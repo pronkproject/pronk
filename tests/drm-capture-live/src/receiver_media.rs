@@ -74,7 +74,7 @@ pub async fn run(
         video_cadence: cadence,
         video_bitrate: bitrate,
     };
-    let mut decoder = Decoder::new()?;
+    let mut decoder = Some(Decoder::new()?);
     let mut received = 0;
     let mut decoded = 0;
     let mut colors = BTreeSet::new();
@@ -98,6 +98,7 @@ pub async fn run(
             || (address.is_some()
                 && (acknowledged < 30 || tokio::time::Instant::now() < receiver_deadline))
         {
+            let check_pixels = decoded < 12 || colors.len() < 2;
             tokio::select! {
                 result = &mut activation, if !started => { result?; started = true; }
                 frame = encoded.recv() => {
@@ -118,15 +119,31 @@ pub async fn run(
                         "empty encoded frame or duration"
                     );
                     last_timestamp = Some(frame.media_timestamp);
-                    if address.is_some() {
-                        receiver.send(frame.clone()).await?;
+                    if check_pixels {
+                        if address.is_some() {
+                            receiver.send(frame.clone()).await?;
+                        }
+                        decoder
+                            .as_ref()
+                            .context("pixel oracle stopped before its sample was complete")?
+                            .push(frame)?;
+                    } else if address.is_some() {
+                        receiver.send(frame).await?;
                     }
-                    decoder.push(frame)?;
                     received += 1;
                 }
-                pixels = decoder.next(width, height) => {
+                pixels = async {
+                    decoder
+                        .as_mut()
+                        .context("pixel oracle stopped before its sample was complete")?
+                        .next(width, height)
+                        .await
+                }, if check_pixels => {
                     colors.insert(pixels?);
                     decoded += 1;
+                    if decoded >= 12 && colors.len() >= 2 {
+                        drop(decoder.take());
+                    }
                 }
                 event = receiver.next_event(), if address.is_some() => {
                     match event? {
@@ -139,7 +156,9 @@ pub async fn run(
                     }
                 }
                 _ = tick.tick() => {
-                    decoder.check()?;
+                    if let Some(decoder) = decoder.as_ref() {
+                        decoder.check()?;
+                    }
                     let snapshot = media.snapshot();
                     ensure!(
                         snapshot.state != pronk_media::MediaGraphState::Failed,
