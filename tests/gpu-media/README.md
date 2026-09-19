@@ -233,6 +233,11 @@ LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
     0100000000000009 production-va-h264 sandbox AR24 3840x2160
 ```
 
+On the tested Lunar Lake device, the 4K sandbox run passes with `AR24`,
+`XB24` and `AB24`: 20 generated frames produce 16 encoded and hardware-decoded
+images with matching pixels and no raw-queue drops. The fixture's timestamps
+do not establish sustained live 4K30 casting to a receiver.
+
 The encoder disables B-frames, requests constrained-baseline byte-stream access
 units, and supplies parameter sets with keyframes. Validation checks the caps,
 decode timestamps no later than presentation, exact fixture presentation
