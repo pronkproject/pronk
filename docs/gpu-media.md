@@ -714,6 +714,13 @@ format/modifier import and every required private extent before the identity or
 pool exists, so an active storage profile does not defer basic layout discovery
 until a source-bearing job has been claimed.
 
+The active renderer retains its latest completed final image for capture
+requests while it renders the next scene. The service therefore requires at
+least two final-image slots. The bounded 4K pool reduces the requested
+three final and three source slots to two final and one source slot; a smaller
+budget fails preparation rather than publishing a renderer that cannot
+advance to a new frame.
+
 `SceneComposer` prepares one ordered visual program before source acquisition.
 It retains every layer's exact crop, destination, transform, blend and color
 program and validates their packed format, modifier and source extent against
