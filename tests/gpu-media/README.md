@@ -32,7 +32,7 @@ No installed WirePlumber policy, service unit or casting session is changed.
 This fixture does not qualify the production classified connection policy.
 
 Four generated single-memory-plane modifier images belong to a separate
-producer Vulkan device instance: a 1920x1080 base, a 640x480 overlay, a
+producer Vulkan device instance: an output-sized base, a 640x480 overlay, a
 128x128 cursor-sized layer and a 128x64 RGB565 patch. The base uses packed
 ten-bit BGR with two alpha bits, the overlay uses eight-bit RGBA and the
 cursor-sized layer uses eight-bit BGRA.
@@ -73,8 +73,9 @@ eviction and scheduling dependencies. Those require driver-specific observation
 and stalled-consumer tests. Shared GPU execution time remains shared even when
 buffer lifetimes are independent.
 
-The base source selects a 1856x1024 crop starting at (32,16), placed over a
-black 1920x1080 background. Placements cycle through (-32,16), (32,-16) and
+The base source selects a crop starting at (32,16), leaving a narrow border
+inside the chosen output size. At 1080p that crop is 1856x1024. Placements
+cycle through (-32,16), (32,-16) and
 (64,32), exercising left clipping, top clipping and an inset rectangle. The
 independent geometry model supplies expected visible rectangles; unit tests
 check those against literal source and destination coordinates. The overlay
@@ -218,8 +219,9 @@ LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
 The same production and sandbox checks also pass with `XB24` on this device.
 
 The optional sixth argument chooses the output size: `1920x1080` (the
-default), `2560x1440` or `3840x2160`. Source layers retain their fixed
-geometry, so larger runs also check the uncovered background. Their longer
+default), `2560x1440` or `3840x2160`. The base source grows with the output;
+overlays retain their fixed geometry, and larger runs still check uncovered
+background. Their longer
 bounded runtime covers the full decoded-pixel oracle rather than relaxing its
 checks. For example:
 

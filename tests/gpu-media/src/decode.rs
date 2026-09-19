@@ -93,8 +93,8 @@ pub fn verify(
         )?;
         let stride = usize::try_from(frame.plane_stride()[0])?;
         let pixels = frame.plane_data(0)?;
-        let regions = pattern::scene(sequence).map(|plane| {
-            let region = plane.visible();
+        let regions = pattern::scene(sequence, output_size).map(|plane| {
+            let region = plane.visible(output_size);
             let [left, top] = region.destination();
             (
                 left..left + region.extent().width(),

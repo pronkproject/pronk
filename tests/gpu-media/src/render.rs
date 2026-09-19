@@ -35,7 +35,7 @@ pub struct PrivateStorage {
 impl PrivateStorage {
     pub fn allocate(worker: &Device, output_size: crate::OutputSize) -> Result<Self> {
         let nz = |value| NonZeroU32::new(value).unwrap();
-        let inputs = pattern::scene(0)
+        let inputs = pattern::scene(0, output_size)
             .into_iter()
             .map(|plane| {
                 worker.allocate_private(

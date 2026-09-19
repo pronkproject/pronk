@@ -185,7 +185,7 @@ pub async fn run(
                 })
                 .collect::<Result<Vec<_>>>()?;
             let staging = render::PrivateStorage::allocate(&device, output_size)?;
-            let incoming = pattern::scene(0)
+            let incoming = pattern::scene(0, output_size)
                 .into_iter()
                 .map(|plane| {
                     producer.allocate_with_format(
@@ -348,7 +348,7 @@ pub async fn run(
                 let input = incoming.take().context("producer image is in flight")?;
                 let worker = Arc::clone(&worker);
                 let output_worker = Arc::clone(&output_worker);
-                let scene = pattern::scene(published);
+                let scene = pattern::scene(published, output_size);
                 let source_use = SourceUse::new(NonZeroUsize::new(scene.len()).unwrap())?;
                 let submissions = (0..scene.len())
                     .map(|_| source_use.begin())

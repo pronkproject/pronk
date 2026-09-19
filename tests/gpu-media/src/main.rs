@@ -21,12 +21,14 @@ struct OutputSize {
 }
 
 impl OutputSize {
+    const HD: Self = Self {
+        width: 1920,
+        height: 1080,
+    };
+
     fn parse(value: &str) -> Result<Self> {
         match value {
-            "1920x1080" => Ok(Self {
-                width: 1920,
-                height: 1080,
-            }),
+            "1920x1080" => Ok(Self::HD),
             "2560x1440" => Ok(Self {
                 width: 2560,
                 height: 1440,
@@ -79,10 +81,7 @@ fn main() -> Result<()> {
         .as_deref()
         .map(OutputSize::parse)
         .transpose()?
-        .unwrap_or(OutputSize {
-            width: 1920,
-            height: 1080,
-        });
+        .unwrap_or(OutputSize::HD);
     anyhow::ensure!(args.next().is_none(), "unexpected argument");
     let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16)?;
     if sandbox::verify(&node)? {

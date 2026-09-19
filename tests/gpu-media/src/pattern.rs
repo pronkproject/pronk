@@ -4,10 +4,14 @@ use drm_display_executor::scene::color::Lut;
 use drm_display_executor::scene::geometry::{CopyRegion, Extent, SourceRect};
 use pronk_gpu::vulkan::PackedFormat;
 
+use crate::OutputSize;
+
 pub const FRAMES: u32 = 20;
 pub const EDGE_TOLERANCE: u8 = 16;
 pub const TOLERANCE: u8 = 6;
+#[cfg(test)]
 pub const WIDTH: u32 = 1920;
+#[cfg(test)]
 pub const HEIGHT: u32 = 1080;
 pub const BACKGROUND: [u8; 3] = [0; 3];
 pub const GAMMA: [[u16; 3]; 2] = [[0, 65535, 0], [65535, 0, 65535]];
@@ -20,11 +24,11 @@ pub fn output_color(rgb: [u8; 3]) -> [u8; 3] {
         .map(|value| ((u32::from(value) + 128) / 257) as u8)
 }
 
-pub fn source_crop() -> SourceRect {
+pub fn source_crop(output_size: OutputSize) -> SourceRect {
     SourceRect::new(
-        Extent::new(WIDTH, HEIGHT).unwrap(),
+        Extent::new(output_size.width, output_size.height).unwrap(),
         [32, 16],
-        Extent::new(1856, 1024).unwrap(),
+        Extent::new(output_size.width - 64, output_size.height - 56).unwrap(),
     )
     .unwrap()
 }
@@ -40,7 +44,7 @@ pub fn placement(sequence: u32) -> [i32; 2] {
 
 #[cfg(test)]
 pub fn visible(sequence: u32) -> CopyRegion {
-    source_crop()
+    source_crop(OutputSize::HD)
         .clip_to(placement(sequence), Extent::new(WIDTH, HEIGHT).unwrap())
         .unwrap()
 }
@@ -56,18 +60,21 @@ pub struct Plane {
 pub type Scene = [Plane; 4];
 
 impl Plane {
-    pub fn visible(self) -> CopyRegion {
+    pub fn visible(self, output_size: OutputSize) -> CopyRegion {
         self.crop
-            .clip_to(self.placement, Extent::new(WIDTH, HEIGHT).unwrap())
+            .clip_to(
+                self.placement,
+                Extent::new(output_size.width, output_size.height).unwrap(),
+            )
             .unwrap()
     }
 }
 
 /// Base, overlay, cursor-sized layer and RGB565 patch, all with opaque pixels.
-pub fn scene(sequence: u32) -> Scene {
+pub fn scene(sequence: u32, output_size: OutputSize) -> Scene {
     let base = Plane {
         format: PackedFormat::Bgr10A2,
-        crop: source_crop(),
+        crop: source_crop(output_size),
         placement: placement(sequence),
         color: color(sequence),
     };
@@ -157,8 +164,11 @@ mod tests {
 
     #[test]
     fn placed_crops_have_known_clipped_source_and_output_rectangles() {
-        assert_eq!(source_crop().origin(), [32, 16]);
-        assert_eq!(source_crop().extent(), Extent::new(1856, 1024).unwrap());
+        assert_eq!(source_crop(OutputSize::HD).origin(), [32, 16]);
+        assert_eq!(
+            source_crop(OutputSize::HD).extent(),
+            Extent::new(1856, 1024).unwrap()
+        );
         let expected = [
             ([64, 16], [0, 16], [1824, 1024]),
             ([32, 32], [32, 0], [1856, 1008]),
@@ -179,36 +189,58 @@ mod tests {
     #[test]
     fn scene_layers_have_distinct_colors_and_known_overlap() {
         for sequence in 0..FRAMES {
-            let [base, overlay, cursor, patch] = scene(sequence);
+            let [base, overlay, cursor, patch] = scene(sequence, OutputSize::HD);
             assert_eq!(base.format, PackedFormat::Bgr10A2);
             assert_eq!(overlay.format, PackedFormat::Rgba8);
             assert_eq!(cursor.format, PackedFormat::Bgra8);
             assert_eq!(patch.format, PackedFormat::Rgb565);
             assert_eq!(patch.color, [255, 0, 0]);
-            assert_eq!(patch.visible().destination(), [32, 864]);
-            assert_eq!(patch.visible().extent(), Extent::new(128, 64).unwrap());
+            assert_eq!(patch.visible(OutputSize::HD).destination(), [32, 864]);
+            assert_eq!(
+                patch.visible(OutputSize::HD).extent(),
+                Extent::new(128, 64).unwrap()
+            );
             assert!(separated(
                 output_color(patch.color),
                 output_color(BACKGROUND)
             ));
             assert!(separated(output_color(patch.color), output_color([255; 3])));
-            assert_eq!(base.visible(), visible(sequence));
+            assert_eq!(base.visible(OutputSize::HD), visible(sequence));
             assert_eq!(overlay.crop.image(), Extent::new(640, 480).unwrap());
-            assert_eq!(overlay.visible().destination(), [640, 320]);
-            assert_eq!(overlay.visible().extent(), Extent::new(640, 480).unwrap());
+            assert_eq!(overlay.visible(OutputSize::HD).destination(), [640, 320]);
+            assert_eq!(
+                overlay.visible(OutputSize::HD).extent(),
+                Extent::new(640, 480).unwrap()
+            );
             assert_eq!(cursor.crop.image(), Extent::new(128, 128).unwrap());
             assert_eq!(
-                cursor.visible().destination(),
+                cursor.visible(OutputSize::HD).destination(),
                 [608 + sequence % 3 * 64, 288]
             );
-            assert_eq!(cursor.visible().extent(), Extent::new(128, 128).unwrap());
+            assert_eq!(
+                cursor.visible(OutputSize::HD).extent(),
+                Extent::new(128, 128).unwrap()
+            );
             assert!(separated(base.color, overlay.color));
             assert!(separated(base.color, cursor.color));
             assert!(separated(overlay.color, cursor.color));
             // The cursor intersects both the overlay and exposed base pixels.
-            let [x, y] = cursor.visible().destination();
+            let [x, y] = cursor.visible(OutputSize::HD).destination();
             assert!(x + 128 > 640 && x < 1280);
-            assert!(y < 320 && y + cursor.visible().extent().height() > 320);
+            assert!(y < 320 && y + cursor.visible(OutputSize::HD).extent().height() > 320);
         }
+    }
+
+    #[test]
+    fn larger_output_uses_a_full_size_base_source() {
+        let output = OutputSize {
+            width: 3840,
+            height: 2160,
+        };
+        let [base, ..] = scene(0, output);
+        assert_eq!(base.crop.image(), Extent::new(3840, 2160).unwrap());
+        let visible = base.visible(output);
+        assert!(visible.extent().width() > WIDTH);
+        assert!(visible.extent().height() > HEIGHT);
     }
 }
