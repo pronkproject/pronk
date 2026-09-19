@@ -97,6 +97,8 @@ fn describe_video_layout(
     let format = match description.format {
         value if value == u32::from_le_bytes(*b"XR24") => VideoPixelFormat::Xrgb8888,
         value if value == u32::from_le_bytes(*b"AR24") => VideoPixelFormat::Argb8888,
+        value if value == u32::from_le_bytes(*b"XB24") => VideoPixelFormat::Xbgr8888,
+        value if value == u32::from_le_bytes(*b"AB24") => VideoPixelFormat::Abgr8888,
         _ => {
             return Err(invalid(
                 "PipeWire does not support the capture pixel format",
@@ -322,5 +324,39 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn packed_capture_formats_preserve_their_drm_pixel_order() {
+        for (fourcc, expected) in [
+            (*b"AR24", VideoPixelFormat::Argb8888),
+            (*b"XB24", VideoPixelFormat::Xbgr8888),
+            (*b"AB24", VideoPixelFormat::Abgr8888),
+        ] {
+            let layout = describe_video_layout(
+                Layout {
+                    width: nz(1),
+                    height: nz(1),
+                },
+                BufferDescription {
+                    format: u32::from_le_bytes(fourcc),
+                    pitch: nz(4),
+                    size: NonZeroU64::new(4).unwrap(),
+                    storage: BufferStorage::DrmModifier {
+                        modifier: 9,
+                        offset: 0,
+                    },
+                },
+            )
+            .unwrap();
+            assert_eq!(layout.format, expected);
+            assert_eq!(
+                layout.storage,
+                VideoBufferStorage::DrmModifier {
+                    modifier: 9,
+                    offset: 0
+                }
+            );
+        }
     }
 }

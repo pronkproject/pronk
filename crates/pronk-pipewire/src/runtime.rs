@@ -792,6 +792,8 @@ fn pixel_format(format: crate::VideoPixelFormat) -> VideoFormat {
     match format {
         crate::VideoPixelFormat::Xrgb8888 => VideoFormat::BGRx,
         crate::VideoPixelFormat::Argb8888 => VideoFormat::BGRA,
+        crate::VideoPixelFormat::Xbgr8888 => VideoFormat::RGBx,
+        crate::VideoPixelFormat::Abgr8888 => VideoFormat::RGBA,
     }
 }
 

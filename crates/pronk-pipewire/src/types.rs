@@ -15,6 +15,9 @@ pub enum VideoPixelFormat {
     Xrgb8888,
     /// The producer supplies meaningful alpha, including opaque alpha for video.
     Argb8888,
+    Xbgr8888,
+    /// The producer supplies meaningful alpha, including opaque alpha for video.
+    Abgr8888,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
