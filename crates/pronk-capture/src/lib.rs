@@ -1,7 +1,7 @@
 //! One capture stream, with destination ownership independent of media transport.
 //!
 //! Allocation and display activation are external. The actor accepts fresh,
-//! independently writable linear XRGB8888 allocations for one authorization
+//! independently writable allocations in the negotiated format and modifier for one authorization
 //! domain. Never recycle exported storage into a differently authorized session.
 
 pub mod allocation;

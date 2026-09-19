@@ -1,7 +1,7 @@
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-use drm_capture::{Client, Description, Destination, OfferId, Plane, RequestId};
+use drm_capture::{Client, Description, Destination, Plane, RequestId};
 use pronk_dmabuf::{export_dependencies, Access};
 
 use crate::names::Registration;
@@ -22,15 +22,12 @@ impl<F: AsFd> Native<F> {
         buffers: &[Buffer],
         config: Config,
         registration: Registration,
-        expected_offer: Option<OfferId>,
+        description: Option<Description>,
     ) -> io::Result<(Self, Layout)> {
-        let offer = client.describe()?;
-        if expected_offer.is_some_and(|expected| expected != offer.offer) {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "capture offer changed while the generation was starting",
-            ));
-        }
+        let offer = match description {
+            Some(description) => description,
+            None => client.describe()?,
+        };
         if buffers.iter().any(|buffer| {
             let description = buffer.description();
             description.format != offer.format || description.modifier() != offer.modifier
