@@ -175,18 +175,21 @@ delegated-renderer probe uses VA H.264 from DMA-BUF frames.
 The probe authenticates the receiver and launches its mirroring application,
 **replacing current playback**. It offers the captured mode as H.264 at 30 fps,
 4 Mbit/s and 400 ms target delay, rejecting incompatible receiver constraints.
-It forwards the production encoder's access units, requests key frames on
-feedback, and requires at least thirty acknowledged frames over a run of at
-least fifteen seconds. A dropped encoded frame ends the probe rather than
-continuing a broken dependency chain. Normal completion, error, Ctrl-C, and the
-probe timeout all attempt to stop the application; that does not restore whatever
-the receiver was previously playing.
+It forwards the production encoder's access units and requests key frames on
+feedback. After twelve locally decoded frames and both pattern colors, the
+pixel oracle stops decoding so it cannot limit the rest of the run. For at
+least fifteen seconds after media activation, the probe requires 24 encoded
+and acknowledged frames per second on average, measured against the actual
+elapsed time. Any encoded output loss fails the run. Normal completion, error,
+Ctrl-C, and the probe timeout all attempt to stop the application; that does
+not restore whatever the receiver was previously playing.
 
-Local decoding and receiver acknowledgements are distinct results. Neither
-acknowledgements nor successful packet delivery prove that the television
-displays the changing pattern. Observe the receiver before claiming visible
-end-to-end playback. The VM needs outbound TCP and bidirectional UDP; an
-explicit endpoint avoids relying on multicast discovery through NAT.
+The rate check is transport evidence, not a display frame-rate measurement.
+Local decoding confirms changing content only in its initial bounded sample;
+receiver acknowledgements do not prove that the television displays later
+changes or all acknowledged frames. Observe the receiver before claiming
+visible end-to-end playback. The VM needs outbound TCP and bidirectional UDP;
+an explicit endpoint avoids relying on multicast discovery through NAT.
 
 Set `RUST_LOG=chromiacast::control=trace` to record the negotiation message
 types and routing when diagnosing an offer timeout. Logging goes to stderr.
