@@ -2285,23 +2285,25 @@ mod tests {
             .collect();
         assert!(!raw_layouts.is_empty());
         // Source allocation is qualified by the separate GPU media fixture.
-        // Here the offer exposes converter formats to exercise preparation.
+        // Here the complete presentation offer exercises backend preparation.
         let mut offer = request();
-        offer.candidate_modes = vec![
-            DisplayMode {
-                width: 3840,
-                height: 2160,
-                refresh_millihz: 30_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 2560,
-                height: 1440,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            offer.candidate_modes[0],
-        ];
+        offer.candidate_modes = [
+            (3840, 2160, 30_000),
+            (2560, 1440, 60_000),
+            (1920, 1080, 60_000),
+            (1600, 900, 60_000),
+            (1366, 768, 60_000),
+            (1280, 720, 60_000),
+            (640, 480, 60_000),
+        ]
+        .into_iter()
+        .map(|(width, height, refresh_millihz)| DisplayMode {
+            width,
+            height,
+            refresh_millihz,
+            flags: 0,
+        })
+        .collect();
         offer.video_profiles[0].max_width = 3840;
         offer.video_profiles[0].max_height = 2160;
         offer.video_profiles[0].raw_layouts = raw_layouts.clone();
@@ -2353,6 +2355,10 @@ mod tests {
             "selected VA backend retained modes: {:?}",
             capabilities.modes
         );
+        assert!(capabilities
+            .modes
+            .iter()
+            .any(|mode| { (mode.width, mode.height, mode.refresh_millihz) == (640, 480, 60_000) }));
         let layout = capabilities.video_profiles[0].raw_layouts[0];
         assert_eq!(capabilities.modes.len(), most_modes);
         for mode in &capabilities.modes {

@@ -850,7 +850,8 @@ that needs explicit VA driver selection may add its qualified
 
 The opt-in backend preparation test checks that the selected VA node returns
 only display modes with an accepted format at that size, without connecting to
-a receiver:
+a receiver. It uses the complete seven-mode Cast offer and requires the
+640×480 compatibility timing needed by the generated EDID:
 
 ```sh
 PRONK_GPU_RENDER_NODE=/dev/dri/renderD128 \
