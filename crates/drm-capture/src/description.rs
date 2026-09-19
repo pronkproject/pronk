@@ -43,24 +43,71 @@ struct Describe {
     reserved: u64,
 }
 
-nix::ioctl_read!(describe, b'd', 0x00, Describe);
+nix::ioctl_readwrite!(describe, b'd', 0x00, Describe);
+
+/// One exact final-image layout requested from a capture provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestedLayout {
+    format: u32,
+    modifier: u64,
+}
+
+impl RequestedLayout {
+    pub fn new(format: u32, modifier: u64) -> io::Result<Self> {
+        if format == 0 || modifier == INVALID_MODIFIER {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid capture layout",
+            ));
+        }
+        Ok(Self { format, modifier })
+    }
+}
 
 impl<F: AsFd> Client<F> {
     /// Query current permission and the latest configuration without capturing.
     pub fn describe(&self) -> io::Result<Description> {
         query(self.as_fd())
     }
+
+    pub fn describe_layout(&self, layout: RequestedLayout) -> io::Result<Description> {
+        query_layout(self.as_fd(), Some(layout))
+    }
 }
 
 pub(crate) fn query(fd: BorrowedFd<'_>) -> io::Result<Description> {
+    query_layout(fd, None)
+}
+
+pub(crate) fn query_layout(
+    fd: BorrowedFd<'_>,
+    requested: Option<RequestedLayout>,
+) -> io::Result<Description> {
     let mut output = Describe::default();
+    if let Some(layout) = requested {
+        output.format = layout.format;
+        output.modifier = layout.modifier;
+    }
     // SAFETY: The initialized output is writable for its complete ABI size,
     // and the borrowed file remains live throughout the query.
     unsafe { describe(fd.as_raw_fd(), &mut output) }?;
-    output.decode()
+    output.decode_requested(requested)
 }
 
 impl Describe {
+    fn decode_requested(self, requested: Option<RequestedLayout>) -> io::Result<Description> {
+        let description = self.decode()?;
+        if requested.is_some_and(|layout| {
+            description.format != layout.format || description.modifier != layout.modifier
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "capture provider returned a different output layout",
+            ));
+        }
+        Ok(description)
+    }
+
     fn decode(self) -> io::Result<Description> {
         let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid capture description");
         if self.reserved != 0 || self.format == 0 || self.modifier == INVALID_MODIFIER {
@@ -101,7 +148,7 @@ mod tests {
         assert_eq!(size_of::<Describe>(), 48);
         assert_eq!(offset_of!(Describe, modifier), 32);
         assert_eq!(offset_of!(Describe, reserved), 40);
-        assert_eq!(nix::request_code_read!(b'd', 0, 48), 0x8030_6400);
+        assert_eq!(nix::request_code_readwrite!(b'd', 0, 48), 0xc030_6400);
     }
 
     #[test]
@@ -111,6 +158,32 @@ mod tests {
         assert_eq!(output.max_requests.get(), 4);
         assert_eq!((output.width.get(), output.height.get()), (640, 480));
         assert_eq!(output.refresh_millihz.get(), 60_000);
+    }
+
+    #[test]
+    fn exact_layout_excludes_the_default_request_and_invalid_modifier() {
+        assert!(RequestedLayout::new(0, 0).is_err());
+        assert!(RequestedLayout::new(u32::from_le_bytes(*b"AR24"), INVALID_MODIFIER).is_err());
+        assert!(RequestedLayout::new(u32::from_le_bytes(*b"AR24"), 0).is_ok());
+    }
+
+    #[test]
+    fn exact_request_rejects_a_mismatched_provider_description() {
+        let requested = RequestedLayout::new(u32::from_le_bytes(*b"AR24"), 9).unwrap();
+        assert_eq!(
+            valid()
+                .decode_requested(Some(requested))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        let matching = Describe {
+            format: u32::from_le_bytes(*b"AR24"),
+            modifier: 9,
+            ..valid()
+        };
+        assert!(matching.decode_requested(Some(requested)).is_ok());
+        assert!(valid().decode_requested(None).is_ok());
     }
 
     #[test]

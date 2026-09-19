@@ -3,7 +3,7 @@
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 
-use crate::{Client, Description};
+use crate::{Client, Description, RequestedLayout};
 
 /// A final-image capability, without monitor, renderer or revocation authority.
 ///
@@ -34,6 +34,10 @@ impl Access {
     /// destination, or reserved offer is created by a successful observation.
     pub fn describe(&self) -> io::Result<Description> {
         crate::description::query(self.fd.as_fd())
+    }
+
+    pub fn describe_layout(&self, layout: RequestedLayout) -> io::Result<Description> {
+        crate::description::query_layout(self.fd.as_fd(), Some(layout))
     }
 
     pub fn into_fd(self) -> OwnedFd {

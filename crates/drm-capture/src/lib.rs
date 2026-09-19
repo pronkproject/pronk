@@ -17,7 +17,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 pub use access::Access;
 pub use completion::Completion;
-pub use description::{Description, OfferId};
+pub use description::{Description, OfferId, RequestedLayout};
 pub use destination::{Destination, DestinationId, Plane};
 pub use grant::{create_grant, Control};
 pub use queue::RequestId;
