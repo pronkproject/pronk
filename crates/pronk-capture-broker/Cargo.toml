@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 castkms-monitor = { path = "../castkms-monitor" }
-castkms-renderer = { path = "../castkms-renderer" }
 drm-capture = { path = "../drm-capture" }
 nix.workspace = true
 thiserror.workspace = true

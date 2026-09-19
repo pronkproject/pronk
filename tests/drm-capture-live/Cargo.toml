@@ -27,10 +27,6 @@ name = "pronk-capture-broker-live-test"
 path = "src/broker.rs"
 
 [[bin]]
-name = "pronk-renderer-capture-live-test"
-path = "src/renderer_capture.rs"
-
-[[bin]]
 name = "pronk-capture-video-live-test"
 path = "src/video.rs"
 

@@ -9,7 +9,6 @@ use anyhow::Context;
 use nix::unistd::Uid;
 use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
 use pronk::display::MediaRuntime;
-use pronk::display_media::CaptureSource;
 use pronk::kernel_session_provider::KernelSessionProvider;
 use pronk::manager::{BackendConfig, ManagerActor};
 use pronk_backend_host::{
@@ -26,8 +25,8 @@ const KERNEL_SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn main() -> anyhow::Result<()> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    let capture_source = match daemon_options::parse(&arguments).map_err(anyhow::Error::msg)? {
-        daemon_options::Command::Run { capture_source } => capture_source,
+    match daemon_options::parse(&arguments).map_err(anyhow::Error::msg)? {
+        daemon_options::Command::Run => (),
         daemon_options::Command::Version => {
             println!("pronk {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -52,14 +51,13 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("create Tokio runtime")?;
-    runtime.block_on(run(capture_source))
+    runtime.block_on(run())
 }
 
-async fn run(capture_source: CaptureSource) -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let effective_uid = Uid::effective();
     let runtime_directory = PathBuf::from(format!("/run/user/{}", effective_uid.as_raw()));
-    let media_runtime =
-        MediaRuntime::for_user(effective_uid.as_raw()).with_capture_source(capture_source);
+    let media_runtime = MediaRuntime::for_user(effective_uid.as_raw());
     let registry = BackendRegistry::load_installed(&runtime_directory)
         .context("load the installed backend registry")?;
     let connection = zbus::Connection::session()
@@ -113,7 +111,7 @@ async fn run(capture_source: CaptureSource) -> anyhow::Result<()> {
         .context("acquire the Pronk bus name")?;
     info!(
         backends = registry.len(),
-        ?capture_source,
+        capture_source = "final-image",
         bus = "session",
         "Pronk device inventory is available"
     );

@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         connector_id: NonZeroU32::new(args[2].parse()?).context("zero connector")?,
     };
     tokio::time::timeout(Duration::from_secs(30), run(target)).await??;
-    println!("PASS: live Mutter broker capture, renderer startup, release and reacquisition");
+    println!("PASS: live Mutter broker capture, release and reacquisition");
     Ok(())
 }
 
@@ -57,9 +57,8 @@ async fn run(target: Target) -> anyhow::Result<()> {
     for pass in 0..2 {
         let session = provider.acquire(target, CancellationToken::new()).await?;
         session.attach_monitor(None)?;
-        let (client, renderer) = wait_for_output(&session).await?;
+        let client = wait_for_output(&session).await?;
         let witness = client.as_fd().try_clone_to_owned()?;
-        let renderer_witness = renderer.as_fd().try_clone_to_owned()?;
         let offer = client.describe()?;
         let buffers = heap.allocate(
             Layout {
@@ -94,7 +93,6 @@ async fn run(target: Target) -> anyhow::Result<()> {
             frame.layout().height,
             frame.request().get()
         );
-        drop(renderer);
         drop(actor.shutdown().await?);
         session.release().await?;
         let revoked = drm_capture::Client::from_fd(witness)
@@ -104,13 +102,6 @@ async fn run(target: Target) -> anyhow::Result<()> {
             revoked.raw_os_error() == Some(nix::libc::EKEYREVOKED),
             "unexpected released-grant error: {revoked}"
         );
-        let revoked = castkms_renderer::Renderer::from_fd(renderer_witness)
-            .err()
-            .context("released renderer capability remained active")?;
-        ensure!(
-            revoked.raw_os_error() == Some(nix::libc::EKEYREVOKED),
-            "unexpected released-renderer error: {revoked}"
-        );
         held = Some(frame);
     }
     drop(held);
@@ -119,7 +110,7 @@ async fn run(target: Target) -> anyhow::Result<()> {
 
 async fn wait_for_output(
     session: &pronk_capture_broker::Session,
-) -> anyhow::Result<(drm_capture::Client, castkms_renderer::Renderer)> {
+) -> anyhow::Result<drm_capture::Client> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let capture = match session.open_capture() {
@@ -130,16 +121,7 @@ async fn wait_for_output(
             }
             Err(error) => return Err(error.into()),
         };
-        let renderer = match session.open_renderer() {
-            Ok(renderer) => renderer,
-            Err(error) if transient(&error) && Instant::now() < deadline => {
-                drop(capture);
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        return Ok((capture, renderer));
+        return Ok(capture);
     }
 }
 

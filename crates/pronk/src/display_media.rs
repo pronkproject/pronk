@@ -21,8 +21,8 @@ use crate::renderer_session::RendererAccess;
 /// permits switching to the other after a capability or pipeline error.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureSource {
-    #[default]
     Renderer,
+    #[default]
     FinalImage,
 }
 

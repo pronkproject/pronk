@@ -2,8 +2,8 @@
 
 Display setup and media lifetimes use application-owned interfaces. They do not
 depend on the protocol used to obtain kernel authority. Mutter is the configured
-issuer; no administrative issuer or compositor-independent production setup is
-implemented yet.
+issuer for monitor control and capture. A trusted administrative renderer
+issuer is not yet connected to the installed service.
 
 Code dependencies point toward the application-owned interfaces:
 
@@ -15,9 +15,9 @@ Mutter adapter             → broker and kernel clients
 
 `mutter_kernel_session` translates the broker into those application interfaces.
 `pronk-capture-broker` implements the D-Bus protocol. The adapter retains issuer
-connections and renderer endpoint numbers; application session IDs are opaque
-diagnostic values. `castkms-monitor` implements monitor
-ioctls without depending on Mutter. The generic `drm-capture` client likewise
+connections; application session IDs are opaque diagnostic values.
+`castkms-monitor` implements monitor ioctls without depending on Mutter. The
+generic `drm-capture` client likewise
 has no issuer or application dependency.
 
 ## One display lifetime, separate capabilities
@@ -27,10 +27,10 @@ has no issuer or application dependency.
 issuer's authority alive. Its diagnostic ID is local to the provider, not a
 capability and not an identity comparable across issuers.
 
-Taking renderer access transfers that endpoint exactly once. Cloning capture
-access duplicates only the same capture file description. Neither operation
-transfers the display lifetime. Retaining a capture descriptor therefore cannot
-prevent the display owner from requesting release.
+The Mutter adapter supplies no renderer access. Cloning capture access
+duplicates only the same capture file description and does not transfer the
+display lifetime. Retaining a capture descriptor therefore cannot prevent the
+display owner from requesting release.
 
 `KernelDisplay` owns attachment, route observation, and detach. It establishes
 observation before mutating the monitor. Cancellation before attachment avoids
@@ -38,16 +38,15 @@ the mutation; cancellation after the operation began waits for it, detaches
 when needed, and releases the session. Synchronous monitor calls run on a
 blocking worker rather than on the async scheduler.
 
-Explicit session release closes local capture access, releases any unused
-renderer endpoint, and then releases display control. A renderer release error
-does not skip control release. Ordinary drop requests cleanup too, but does
-not wait for it or promise successful recovery after a process crash.
+Explicit session release closes local capture access and then releases display
+control. Ordinary drop requests cleanup too, but does not wait for it or promise
+successful recovery after a process crash.
 
 ## Authority is not constraints selection
 
-`RendererSession` uses `RendererProvider` to issue a renderer endpoint for one
-display lifetime. Acquiring that endpoint neither publishes a backend nor
-selects display constraints.
+`RendererSession` is an application-owned interface for a trusted issuer.
+Acquiring an endpoint neither publishes a backend nor selects display
+constraints. The Mutter display broker does not implement this interface.
 
 The renderer pipeline validates the endpoint and render node, prepares private
 storage, completes its native readiness check, and publishes an immutable
@@ -55,20 +54,19 @@ configuration. The compositor discovers it through the generic KMS constraints
 list and selects its ID with an ordinary atomic update. No private broker
 request acknowledges or completes that selection.
 
-The Mutter adapter only issues and revokes authority. Its endpoint numbers and
-D-Bus connection never become native graphics identities. The renderer
-pipeline receives a checked descriptor, render-node selection, and an opaque
-release obligation. Compositor cooperation grants no additional pixel access,
-and atomic acceptance is not GPU completion.
+The renderer pipeline requires a checked descriptor, render-node selection,
+and an opaque release obligation from a separate trusted service. Compositor
+cooperation grants no additional pixel access, and atomic acceptance is not GPU
+completion.
 
 CastKMS binds renderer authority to the compositor's DRM master identity. A
 temporary transfer to another master makes renderer and capture operations
 return `EACCES`; it does not turn the foreign master's pixels into an ordinary
 stream failure that can be bypassed. Pronk suspends or retires the affected
 media generation and waits for display observation to report active authority
-again. It then reuses the retained capture access and obtains a fresh renderer
-endpoint for a fresh generation. Configurations, jobs, and private storage from
-the earlier uninterrupted master interval are never revived.
+again. It then reuses the retained capture access. A separately issued renderer
+endpoint would require a fresh generation; configurations, jobs, and private
+storage from the earlier master interval must never be revived.
 
 ## Release and abandoned operations
 
@@ -77,10 +75,9 @@ release also observes its result; dropping that wait does not cancel cleanup.
 The Tokio runtime must remain alive for the worker to finish. Issuers bound
 their outstanding acquisition and cleanup operations.
 
-The Mutter broker retains a late-issued session or renderer endpoint until the
-caller claims it. If a reply is abandoned, cleanup goes to the original issuer,
-not a new owner of the same bus name. Invalid reply metadata follows the same
-cleanup path whenever the session identity is usable.
+The Mutter broker retains a late-issued display session until the caller claims
+it. If a reply is abandoned, cleanup goes to the original issuer, not a new
+owner of the same bus name.
 
 Explicit broker release closes local capability descriptors before waiting.
 Its timeout bounds the caller's wait, not the remote operation. The provider
@@ -89,18 +86,14 @@ reported failure, not confirmation that kernel or native work has ended.
 
 ## Choosing images without changing display authority
 
-`CaptureSource::Renderer` is the default. It transfers renderer access and a
-clone of capture access into the GPU pipeline. Renderer access supplies
-complete scenes; capture access supplies only recipient-owned final-image
-destinations. `CaptureSource::FinalImage` instead clones capture access without
-taking renderer access. It neither publishes a userspace renderer backend nor
-changes display constraints. Unused renderer access stays session-owned.
+`CaptureSource::FinalImage` is the default. It clones capture access without
+acquiring renderer authority, publishing a userspace renderer backend, or
+changing display constraints. `CaptureSource::Renderer` requires authority from
+a trusted issuer; the installed Mutter-based service cannot use it yet.
 
-The final-image path can operate with a provider that has no renderer endpoint.
-Both paths keep the same display, media-generation, private PipeWire, and
-failure-reporting interfaces. Neither selection silently falls back to the
-other after an authorization or pipeline failure. The installed service still
-uses the Mutter issuer in either mode.
+The final-image path operates with a provider that has no renderer endpoint.
+Selecting the renderer path without one fails explicitly; it never silently
+falls back after an authorization or pipeline failure.
 
 The network backend receives final images and media configuration, not monitor
 control, renderer source descriptors, or issuer revocation authority. Buffer
@@ -111,8 +104,8 @@ reuse and capture namespace lifetimes are described in
 
 Application tests use an independent fake issuer to exercise attach, observe,
 cancel, detach, optional renderer ownership, and final-image selection. Private
-D-Bus tests additionally cover the real Mutter adapter's ownership transfers,
-late replies, malformed metadata, original-owner cleanup, and bounded release.
+D-Bus tests additionally cover the Mutter adapter's ownership transfers,
+late replies, original-owner cleanup, and bounded release.
 They do not start a compositor or prove an administrative kernel issuance path.
 
 ```sh

@@ -42,38 +42,12 @@ The binaries cover distinct boundaries:
   **synthetic** PipeWire events, including stale releases and retirement.
 - `pronk-capture-broker-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID`:
   acquisition through a live Mutter broker, managed monitor attachment, actor
-  capture, renderer startup snapshot, explicit release, revocation of retained
+  capture, explicit release, revocation of retained
   descriptors, and reacquisition. It requires an isolated session bus whose
   Mutter owns the active output. It does not open a DRM primary descriptor or
   submit a modeset directly, and refuses to replace an existing owner of the
   Pronk bus name. Unlike the fixture probes, Mutter must already be displaying
   content. Obtain the exact output IDs from that test device.
-- Delegated GPU rendering:
-  `pronk-renderer-capture-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID
-  WIDTH HEIGHT REFRESH_MILLIHZ MODIFIER
-  /path/to/pipewire-0-pronk-backend`
-  transfers renderer authority from the Mutter broker into the application
-  capture port, publishes renderer constraints after private GPU setup, waits
-  for Mutter to select the new constraints entry, and then starts the generic
-  capture and PipeWire path. It requires twelve increasing DMA-BUF frame
-  sequences while one output remains held, withdraws the offer, and repeats the
-  complete renderer generation on the same display session. Supply a supported
-  capture-output modifier, optionally with a `0x` prefix. By default the
-  renderer's private images use that modifier too; `--private-modifier HEX`
-  selects a different private-image modifier when the renderer and encoder
-  need distinct layouts.
-  `--raw-format FOURCC` selects the exact capture output order when the
-  default `XR24` is not accepted by the media device. Receiver mode requires
-  `--va-render-node /dev/dri/renderDN`; it checks that the VA encoder and
-  renderer use the same device and that the encoder accepts the output's
-  format, modifier, picture size and bitrate before starting Cast. There is
-  no software-encoder fallback for the DMA-BUF renderer target.
-  Like the live Mutter media probe, it requires the sibling pattern client,
-  the classified core/backend sockets, and the versioned WirePlumber policy.
-  The compositor and Vulkan worker must also be able to import each other's
-  DMA-BUFs through the selected GPU driver. A virtual GPU that accelerates
-  OpenGL and Vulkan in separate contexts qualifies only when buffers can cross
-  that boundary; successful renderer discovery and selection are not enough.
 - `pronk-capture-pipewire-live-test /dev/dri/cardN /path/to/private/socket`:
   twelve real frames through PipeWire and GStreamer, checking every pixel,
   retained DMA-BUF memory, changing content, and a held sample across six
@@ -154,7 +128,7 @@ disposable VM, like the other fixture probes.
 ## Optional receiver test
 
 Only after arranging permission to interrupt a specific receiver, append
-`--receiver IP:PORT` to the live Mutter media or delegated-renderer probe.
+`--receiver IP:PORT` to the live Mutter media probe.
 There is no automatic receiver selection. For example, inside the disposable
 compositor environment:
 
@@ -163,19 +137,9 @@ pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
     WIDTH HEIGHT /path/to/pipewire-0-pronk-backend \
     --receiver RECEIVER_IP:8009
 
-pronk-renderer-capture-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
-    WIDTH HEIGHT REFRESH_MILLIHZ MODIFIER \
-    /path/to/pipewire-0-pronk-backend --raw-format FOURCC \
-    --private-modifier PRIVATE_MODIFIER \
-    --va-render-node /dev/dri/renderDN --receiver RECEIVER_IP:8009
 ```
 
-Select a `FOURCC` and output `MODIFIER` accepted by the renderer's output
-allocator and the selected VA converter. The optional `PRIVATE_MODIFIER`
-must be supported by the renderer's private-image allocator. The probe checks
-the converter's exact input tuple but cannot select a replacement allocation
-itself. The Mutter capture probe still uses software H.264 from mapped frames, while the
-delegated-renderer probe uses VA H.264 from DMA-BUF frames.
+The Mutter capture probe uses software H.264 from mapped frames.
 
 The probe authenticates the receiver and launches its mirroring application,
 **replacing current playback**. It offers the captured mode as H.264 at 30 fps,
@@ -208,12 +172,6 @@ units, not capture descriptors or raw images. The qualification executable
 combines capture and networking only for testing; it is not the installed
 backend's process or sandbox boundary.
 
-The final-image capture probes use reference CPU composition. The renderer
-capture probe explicitly selects DMA-BUF storage and qualifies delegated GPU
-composition into a Vulkan-allocated destination through generic final-image
-delivery. Its receiver mode carries that output through the production media
-graph and a selected VA H.264 encoder. The live probe verifies the graph's
-reported VA-memory path and render device after the run. It does not qualify
-the installed service sandbox. The default probes do not exercise receiver
-transport; either optional receiver mode still needs visual confirmation to
-establish television playback.
+The final-image capture probes use reference CPU composition. They do not
+qualify delegated GPU composition or the installed service sandbox. Optional
+receiver mode still needs visual confirmation to establish television playback.

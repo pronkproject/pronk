@@ -68,14 +68,12 @@ pronkctl list-displays
 The current session bundle is video-only, so display creation must include
 `--no-audio` until the broker publishes a separate audio capability.
 
-`pronkd --capture-source final-image` selects the generic final-image capture
-pipeline instead of the userspace renderer. It does not publish a renderer
-backend or select its display constraints. That pipeline uses CPU-mappable linear
+The default `final-image` source selects generic capture without publishing a
+renderer backend or selecting its display constraints. It uses CPU-mappable linear
 destinations from `/dev/dma_heap/system`, which must be accessible to the
 service account.
-The installed service keeps the `renderer` default; selecting either source
-never enables automatic fallback to the other on errors. Both selections still
-use the configured Mutter session issuer.
+The installed service uses this source. Delegated GPU composition requires a
+separate trusted renderer service, which is not wired into Pronk yet.
 
 Remove the display by the identifier printed by `add-display` or
 `list-displays`:

@@ -2,7 +2,7 @@
 
 use super::*;
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
 use zbus::connection::{AuthMechanism, Builder};
@@ -15,7 +15,6 @@ const PATH: &str = "/org/gnome/Mutter/CastKms";
 #[derive(Debug, PartialEq)]
 enum Event {
     Acquire(String),
-    ReleaseRenderer(u64, String),
     ReleaseDisplay(String),
 }
 
@@ -52,7 +51,7 @@ impl Broker {
         crtc: u32,
         connector: u32,
         #[zbus(header)] header: Header<'_>,
-    ) -> (BusFd, BusFd, u64, BusFd, String, u64) {
+    ) -> (BusFd, BusFd, u64) {
         assert_eq!((major, minor, crtc, connector), (226, 9, 17, 29));
         self.0
             .events
@@ -67,17 +66,7 @@ impl Broker {
             let file: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
             file.into()
         };
-        (fd(), fd(), 13, fd(), "/dev/dri/renderD128".into(), 7)
-    }
-
-    fn release_renderer(&self, session: u64, endpoint: u64, #[zbus(header)] header: Header<'_>) {
-        assert_eq!(session, 7);
-        self.0
-            .events
-            .lock()
-            .unwrap()
-            .push(Event::ReleaseRenderer(endpoint, destination(header)));
-        self.0.changed.notify_one();
+        (fd(), fd(), 7)
     }
 
     fn release_display_session(&self, session: u64, #[zbus(header)] header: Header<'_>) {
@@ -168,28 +157,24 @@ async fn unused_authority_is_released_in_order_to_the_original_issuer() {
         fixture.state.events.lock().unwrap().as_slice(),
         &[
             Event::Acquire(":1.37".into()),
-            Event::ReleaseRenderer(13, ":1.37".into()),
             Event::ReleaseDisplay(":1.37".into()),
         ]
     );
 }
 
 #[tokio::test]
-async fn failed_renderer_validation_keeps_endpoint_cleanup() {
+async fn broker_does_not_supply_renderer_authority() {
     let fixture = Fixture::new(false).await;
     let mut session = fixture.acquire().await;
-    let renderer = session.take_renderer_access().unwrap();
     assert_eq!(
-        renderer.open().unwrap_err().raw_os_error(),
-        Some(nix::libc::ENOTTY)
+        session.take_renderer_access().unwrap_err().kind(),
+        io::ErrorKind::NotFound
     );
-    fixture.events_reach(2).await;
     session.release().await.unwrap();
     assert_eq!(
         fixture.state.events.lock().unwrap().as_slice(),
         &[
             Event::Acquire(":1.37".into()),
-            Event::ReleaseRenderer(13, ":1.37".into()),
             Event::ReleaseDisplay(":1.37".into()),
         ]
     );
