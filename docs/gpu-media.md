@@ -866,6 +866,19 @@ LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
     -- --ignored --nocapture
 ```
 
+To run the same test under the backend unit's device, memory-execution and
+syscall restrictions, build it outside the sandbox and launch it in a
+collected transient user service:
+
+```sh
+LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
+    sh tests/backend-activation/run-va-preparation-sandbox.sh /dev/dri/renderD128
+```
+
+The wrapper binds and authorizes only the selected render node. It keeps the
+build and test logs in the printed `/var/tmp` directory and does not start a
+receiver session or modify the installed backend unit.
+
 Those driver paths are examples for the qualified development machine. The
 test isolates backend selection; the generated-image fixture also checks that
 the source Vulkan device can create the selected format and modifier.
