@@ -64,10 +64,23 @@ case "$visible_hold_seconds" in
 		exit 2
 		;;
 esac
-if test -n "$va_render_node" && ! test -c "$va_render_node"; then
-	printf 'PRONK_VM_REQUIRE_VA_RENDER_NODE is not a character device: %s\n' \
-		"$va_render_node" >&2
-	exit 2
+if test -n "$va_render_node"; then
+	case "$va_render_node" in
+		/dev/dri/renderD*) va_number=${va_render_node#/dev/dri/renderD} ;;
+		*) va_number= ;;
+	esac
+	case "$va_number" in
+		''|*[!0-9]*)
+			printf 'PRONK_VM_REQUIRE_VA_RENDER_NODE must name one DRM render node: %s\n' \
+				"$va_render_node" >&2
+			exit 2
+			;;
+	esac
+	if ! test -c "$va_render_node"; then
+		printf 'PRONK_VM_REQUIRE_VA_RENDER_NODE is not a character device: %s\n' \
+			"$va_render_node" >&2
+		exit 2
+	fi
 fi
 if test "$visible_hold_seconds" -gt 900; then
 	printf '%s\n' 'PRONK_VM_VISIBLE_HOLD_SECONDS may not exceed 900' >&2
@@ -111,8 +124,7 @@ assert_va_encoding_path() {
 		grep -F 'configured video encoding path' |
 		grep -E 'video_encoder=.*va.*h264enc' |
 		grep -F 'DMA-BUF DMA_DRM to VA-memory NV12' |
-		grep -F 'render_device=' |
-		grep -F "$selected" >/dev/null
+		grep -E "render_device=(\"$selected\"|$selected)( |$)" >/dev/null
 }
 
 snapshot() {
