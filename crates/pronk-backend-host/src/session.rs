@@ -398,6 +398,15 @@ fn validate_capabilities_against_offer(
                 "video profile limits",
             ));
         }
+        if returned
+            .raw_layouts
+            .iter()
+            .any(|layout| !offered.raw_layouts.contains(layout))
+        {
+            return Err(BackendSessionError::CapabilitiesOutsideOffer(
+                "raw video layout",
+            ));
+        }
     }
     for returned in &capabilities.audio_profiles {
         let Some(offered) = offer
@@ -641,6 +650,17 @@ mod tests {
             validate_capabilities_against_offer(&offer, &expanded),
             Err(BackendSessionError::CapabilitiesOutsideOffer(
                 "video profile limits"
+            ))
+        ));
+
+        let mut expanded = capabilities.clone();
+        expanded.video_profiles[0].raw_layouts = vec![
+            pronk_backend_protocol::RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9),
+        ];
+        assert!(matches!(
+            validate_capabilities_against_offer(&offer, &expanded),
+            Err(BackendSessionError::CapabilitiesOutsideOffer(
+                "raw video layout"
             ))
         ));
 
