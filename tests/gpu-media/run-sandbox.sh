@@ -5,7 +5,8 @@ socket=${2:?private socket required}
 render_node=${3:?render node required}
 modifier=${4:?modifier required}
 profile=${5:?media profile required}
-access=${6:?choose allowed or denied}
+pixel_format=${6:?pixel format required}
+access=${7:?choose allowed or denied}
 # Device bindings name one resolved character device, never the whole DRM tree.
 render_node=$(realpath -e -- "$render_node")
 [ -c "$render_node" ]
@@ -45,4 +46,4 @@ exec systemd-run --user --wait --pipe --collect \
     --setenv=GST_REGISTRY=/tmp/pronk-gpu-registry.bin \
     --setenv=XDG_CACHE_HOME=/tmp/pronk-gpu-cache \
     "--setenv=PRONK_GPU_TEST_SANDBOX=$access" "$@" \
-    "$binary" "$socket" "$render_node" "$modifier" "$profile"
+    "$binary" "$socket" "$render_node" "$modifier" "$profile" "$pixel_format"

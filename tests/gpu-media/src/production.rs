@@ -39,6 +39,12 @@ impl Consumer {
         generation: NonZeroU64,
     ) -> Result<Self> {
         let remote = UnixStream::connect(socket)?;
+        let encoder = VideoEncoder::va_h264(render_node);
+        let cadence = VideoCadence::new(nz(30), nz(1));
+        ensure!(
+            encoder.supported_dimensions(&[(1920, 1080)], cadence)? == [true],
+            "selected VA converter and encoder do not accept the fixture picture size"
+        );
         let (actor, output) = MediaGraphActor::spawn_with_output(FRAMES as usize)?;
         let configuration = MediaGraphConfiguration {
             media_generation: generation,
@@ -49,8 +55,8 @@ impl Consumer {
                 caps,
             },
             audio: None,
-            video_encoder: VideoEncoder::va_h264(render_node),
-            video_cadence: VideoCadence::new(nz(30), nz(1)),
+            video_encoder: encoder,
+            video_cadence: cadence,
             video_bitrate: NonZeroU64::new(20_000_000).unwrap(),
         };
         let activation = tokio::spawn(async move {
@@ -109,7 +115,10 @@ impl Consumer {
             statistics.frames
         );
         ensure!(
-            statistics.encoder_name.as_deref() == Some("vah264enc")
+            statistics
+                .encoder_name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("va") && name.ends_with("h264enc"))
                 && statistics.video_memory_path.as_deref()
                     == Some("DMA-BUF DMA_DRM to VA-memory NV12"),
             "production encoder did not report the qualified VA path: {statistics:?}"

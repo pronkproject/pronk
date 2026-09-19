@@ -10,7 +10,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use pronk::gpu_output::{GpuOutput, OutputEvent, OutputReady};
 use pronk_dmabuf::Completion;
 use pronk_gpu::output_pool::OutputPool;
-use pronk_gpu::vulkan::Device;
+use pronk_gpu::vulkan::{Device, PackedFormat};
 use pronk_pipewire::{
     PipeWireRemote, VideoBuffer, VideoBufferLayout, VideoBufferStorage, VideoDamage, VideoFrame,
     VideoSourceActor, VideoSourceConfig, VideoSourceGeneration,
@@ -29,6 +29,41 @@ pub enum Mode {
     Raw,
     VaH264,
     ProductionVaH264,
+}
+
+#[derive(Clone, Copy)]
+pub enum OutputFormat {
+    Xrgb,
+    Argb,
+    Xbgr,
+    Abgr,
+}
+
+impl OutputFormat {
+    fn packed(self) -> PackedFormat {
+        match self {
+            Self::Xrgb | Self::Argb => PackedFormat::Bgra8,
+            Self::Xbgr | Self::Abgr => PackedFormat::Rgba8,
+        }
+    }
+
+    fn pixel(self) -> pronk_pipewire::VideoPixelFormat {
+        match self {
+            Self::Xrgb => pronk_pipewire::VideoPixelFormat::Xrgb8888,
+            Self::Argb => pronk_pipewire::VideoPixelFormat::Argb8888,
+            Self::Xbgr => pronk_pipewire::VideoPixelFormat::Xbgr8888,
+            Self::Abgr => pronk_pipewire::VideoPixelFormat::Abgr8888,
+        }
+    }
+
+    fn fourcc(self) -> &'static str {
+        match self {
+            Self::Xrgb => "XR24",
+            Self::Argb => "AR24",
+            Self::Xbgr => "XB24",
+            Self::Abgr => "AB24",
+        }
+    }
 }
 
 impl Mode {
@@ -106,7 +141,13 @@ impl MediaConsumer {
     }
 }
 
-pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Result<()> {
+pub async fn run(
+    socket: &Path,
+    node: &Path,
+    modifier: u64,
+    mode: Mode,
+    output_format: OutputFormat,
+) -> Result<()> {
     ensure!(
         std::env::var_os("PIPEWIRE_REMOTE").as_deref() == Some(socket.as_os_str()),
         "development remote must match the explicitly supplied private socket"
@@ -131,7 +172,12 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             let images = (0..SLOTS)
                 .map(|_| {
                     output_worker
-                        .allocate(nz(WIDTH), nz(HEIGHT), modifier)
+                        .allocate_with_format(
+                            output_format.packed(),
+                            nz(WIDTH),
+                            nz(HEIGHT),
+                            modifier,
+                        )
                         .map(Some)
                         .map_err(Into::into)
                 })
@@ -165,12 +211,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             dma_buf: image.export()?,
             timelines: None,
             layout: VideoBufferLayout {
-                format: match mode {
-                    Mode::Raw => pronk_pipewire::VideoPixelFormat::Xrgb8888,
-                    Mode::VaH264 | Mode::ProductionVaH264 => {
-                        pronk_pipewire::VideoPixelFormat::Argb8888
-                    }
-                },
+                format: output_format.pixel(),
                 width: layout.width,
                 height: layout.height,
                 pitch: NonZeroU32::new(layout.pitch.try_into()?).context("zero pitch")?,
@@ -223,7 +264,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             socket,
             identity.node_name.clone(),
             identity.object_serial,
-            input_caps(modifier, mode),
+            input_caps(modifier, output_format),
             &render_node,
             generation,
         )?)
@@ -240,6 +281,7 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
                     &consumer_socket,
                     &consumer_name,
                     modifier,
+                    output_format.fourcc(),
                     FRAMES,
                     &consumer_render_node,
                     fixture_mode,
@@ -248,7 +290,21 @@ pub async fn run(socket: &Path, node: &Path, modifier: u64, mode: Mode) -> Resul
             .await??,
         )
     };
-    let link = link.wait_with_output().await?;
+    let link = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut link = Box::pin(link.wait_with_output());
+        loop {
+            tokio::select! {
+                result = &mut link => break Ok::<_, anyhow::Error>(result?),
+                event = consumer.next() => match event? {
+                    MediaEvent::Production(production::Event::Activated) => {},
+                    MediaEvent::Fixture(Event::Error(error)) => anyhow::bail!("{error}"),
+                    _ => anyhow::bail!("media consumer produced a frame before the private video link"),
+                },
+            }
+        }
+    })
+    .await
+    .context("private video ports did not become linkable")??;
     ensure!(
         link.status.success(),
         "private link failed: {}",
@@ -445,11 +501,8 @@ fn nz(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
 }
 
-fn input_caps(modifier: u64, mode: Mode) -> String {
-    let fourcc = match mode {
-        Mode::Raw => "XR24",
-        Mode::VaH264 | Mode::ProductionVaH264 => "AR24",
-    };
+fn input_caps(modifier: u64, output_format: OutputFormat) -> String {
+    let fourcc = output_format.fourcc();
     let drm_format = if modifier == 0 {
         fourcc.into()
     } else {

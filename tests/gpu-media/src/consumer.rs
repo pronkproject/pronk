@@ -34,16 +34,13 @@ impl Consumer {
         socket: &Path,
         node: &str,
         modifier: u64,
+        fourcc: &str,
         frames: u32,
         render_node: &Path,
         mode: Mode,
     ) -> Result<Self> {
         gst::init()?;
         let socket = UnixStream::connect(socket)?;
-        let fourcc = match mode {
-            Mode::Raw => "XR24",
-            Mode::VaH264 => "AR24",
-        };
         let drm_format = if modifier == 0 {
             fourcc.into()
         } else {

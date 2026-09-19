@@ -33,6 +33,15 @@ fn main() -> Result<()> {
         Some(mode) if mode == "production-va-h264" => source::Mode::ProductionVaH264,
         _ => anyhow::bail!("profile must be raw, va-h264 or production-va-h264"),
     };
+    let output_format = match args.next().as_deref() {
+        None if mode == source::Mode::Raw => source::OutputFormat::Xrgb,
+        None => source::OutputFormat::Argb,
+        Some(value) if value == "XR24" => source::OutputFormat::Xrgb,
+        Some(value) if value == "AR24" => source::OutputFormat::Argb,
+        Some(value) if value == "XB24" => source::OutputFormat::Xbgr,
+        Some(value) if value == "AB24" => source::OutputFormat::Abgr,
+        _ => anyhow::bail!("output format must be XR24, AR24, XB24 or AB24"),
+    };
     anyhow::ensure!(args.next().is_none(), "unexpected argument");
     let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16)?;
     if sandbox::verify(&node)? {
@@ -44,7 +53,7 @@ fn main() -> Result<()> {
     let result = runtime.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(30),
-            source::run(&socket, &node, modifier, mode),
+            source::run(&socket, &node, modifier, mode, output_format),
         )
         .await
         .context("GPU transport test timed out")?

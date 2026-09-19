@@ -169,7 +169,12 @@ impl SubmittedRead {
         // Only an internal bridge crosses Vulkan devices. The exported capture
         // destination is allocated and accessed exclusively by the output side.
         let layout = output.layout();
-        let bridge = worker.allocate(layout.width, layout.height, layout.modifier)?;
+        let bridge = worker.allocate_with_format(
+            layout.format,
+            layout.width,
+            layout.height,
+            layout.modifier,
+        )?;
         let copied = private.copy_into_and_wait(bridge)?;
         let bridge_fd = copied.destination.export()?;
         let bridge_layout = copied.destination.layout();

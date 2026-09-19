@@ -1,12 +1,15 @@
 #!/bin/sh
 set -eu
-[ "$#" -le 4 ] || { echo "expected render node, modifier, optional profile and execution" >&2; exit 2; }
+[ "$#" -le 5 ] || { echo "expected render node, modifier, optional profile, execution and format" >&2; exit 2; }
 render_node=${1:?render node required}
 modifier=${2:?hexadecimal DRM modifier required}
 profile=${3:-raw}
 case "$profile" in raw|va-h264|production-va-h264) ;; *) echo "profile must be raw, va-h264 or production-va-h264" >&2; exit 2 ;; esac
 execution=${4:-host}
 case "$execution" in host|sandbox|sandbox-denied) ;; *) echo "execution must be host, sandbox or sandbox-denied" >&2; exit 2 ;; esac
+case "$profile" in raw) default_format=XR24 ;; *) default_format=AR24 ;; esac
+pixel_format=${5:-$default_format}
+case "$pixel_format" in XR24|AR24|XB24|AB24) ;; *) echo "format must be XR24, AR24, XB24 or AB24" >&2; exit 2 ;; esac
 test_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_dir=$(CDPATH= cd -- "$test_dir/../.." && pwd)
 gpu_runtime_dir=$(mktemp -d /var/tmp/pronk-gpu-media.XXXXXXXX)
@@ -30,7 +33,7 @@ while [ ! -S "$gpu_runtime_dir/pronk-gpu-test" ]; do
     sleep 0.05
 done
 echo "Private graph: $gpu_runtime_dir"
-set -- "$binary" "$gpu_runtime_dir/pronk-gpu-test" "$render_node" "$modifier" "$profile"
+set -- "$binary" "$gpu_runtime_dir/pronk-gpu-test" "$render_node" "$modifier" "$profile" "$pixel_format"
 case "$execution" in
 sandbox) set -- sh "$test_dir/run-sandbox.sh" "$@" allowed ;;
 sandbox-denied) set -- sh "$test_dir/run-sandbox.sh" "$@" denied ;;
