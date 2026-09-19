@@ -167,8 +167,9 @@ impl<F: AsFd> SceneJob<'_, F> {
 impl<F: AsFd> PublishedRenderer<F> {
     /// Claim the next changed complete scene as one source-read transaction.
     ///
-    /// `None` means the current scene is blank or unchanged, or that this
-    /// constraints entry is not selected. The exclusive borrow prevents
+    /// `None` means the current scene is unchanged, disabled, or this
+    /// constraints entry is not selected. A newly blank active output is a
+    /// zero-layer job. The exclusive borrow prevents
     /// another source or scene job on this renderer endpoint.
     ///
     /// ```compile_fail
@@ -296,7 +297,7 @@ pub(super) fn decode_scene(bytes: &[u8]) -> io::Result<DecodedScene> {
         .map_err(|_| invalid("CastKMS returned empty scene dimensions"))?;
     let layer_count = usize::try_from(header.plane_count)
         .ok()
-        .filter(|count| (1..=RENDERER_JOB_MAX_PLANES).contains(count))
+        .filter(|count| *count <= RENDERER_JOB_MAX_PLANES)
         .ok_or_else(|| invalid("CastKMS returned an invalid scene layer count"))?;
     let output_color_count = usize::try_from(header.output_color_op_count)
         .ok()
@@ -689,6 +690,33 @@ mod tests {
         let total = bytes.len() as u32;
         patch(&mut bytes, 4, total);
         (bytes, dma_buf, peer)
+    }
+
+    #[test]
+    fn active_blank_scene_has_content_without_source_descriptors() {
+        let mut bytes = Vec::new();
+        word(&mut bytes, RENDERER_JOB_VERSION);
+        word(&mut bytes, 0);
+        wide(&mut bytes, 7);
+        wide(&mut bytes, 9);
+        wide(&mut bytes, 12);
+        word(&mut bytes, 1920);
+        word(&mut bytes, 1080);
+        word(&mut bytes, 0);
+        word(&mut bytes, u32::MAX);
+        word(&mut bytes, 1);
+        word(&mut bytes, 0);
+        word(&mut bytes, RENDERER_COLOR_OP_BYPASS);
+        word(&mut bytes, 0);
+        let total = bytes.len() as u32;
+        patch(&mut bytes, 4, total);
+
+        let scene = decode_scene(&bytes).unwrap();
+        assert_eq!(scene.id.get(), 7);
+        assert_eq!(scene.content_serial.get(), 12);
+        assert!(scene.layers.is_empty());
+        assert!(scene.acquire_fence.is_none());
+        assert_eq!(scene.color.as_ref(), [ColorOperation::Bypass]);
     }
 
     #[test]
