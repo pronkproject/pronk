@@ -41,19 +41,23 @@ The Chromecast backend selects VA converter and encoder factories whose
 reported render device matches its configured node, then queries that
 converter's DMA-BUF sink-pad template and checks the encoder's
 constrained-baseline output caps during startup. During preparation it
-also intersects the selected converter's VA-memory output caps with the
-encoder's input caps and omits display modes whose picture sizes do not fit.
-Its accepted tuples therefore come from the selected converter rather than a hard-coded VA
-assumption. Pad-template checks are an advertisement filter, not a promise
-that a driver will successfully encode every frame. Pronk separately probes
-formats and modifiers that the selected Vulkan device can export and
-reimport at each offered display size. It presents a bounded union in
-preference order, with a per-mode list of available layouts. The backend
-selects one exact layout and retains only compatible display modes. If the
-GPU probe fails or no render node is available, Pronk offers only its known
-system-memory layout, not an unverified linear DMA-BUF. The backend chooses
-one exact intersection. Pronk requests that same layout from the capture
-provider before allocating its output pool. If no intersection exists,
+checks each converter DMA-BUF input format at each proposed picture size,
+then intersects the converter's VA-memory output caps with the encoder's
+input caps. A mode is retained only when its source layout and the encoder
+both accept that size. Its accepted tuples therefore come from the selected
+converter rather than a hard-coded VA assumption. Pad-template checks are an
+advertisement filter, not a promise that a driver will successfully encode
+every frame. Pronk separately probes formats and modifiers that the selected
+Vulkan device can export and reimport at each offered display size. It
+presents a bounded union in preference order, with a per-mode list of
+available layouts. The backend
+intersects each mode's source layouts with the formats accepted by its
+converter at that size, then selects one exact layout and retains only
+compatible display modes. If the GPU probe fails or no render node is
+available, Pronk offers only its known system-memory layout, not an
+unverified linear DMA-BUF. The backend chooses one exact intersection. Pronk
+requests that same layout from the capture provider before allocating its
+output pool. If no intersection exists,
 preparation fails without silently changing either layout.
 
 An empty per-mode list in the protocol means every offered profile layout

@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use chromiacast::{AppAvailability, CastApp, CastConnection, SetupInfoOutcome, APP_MIRRORING};
 use pronk_backend_protocol::{
     AudioProfile, ControlKind, ControlOperation, DeviceCapabilities, DisplayIdentity, DisplayMode,
-    IdentitySource, MediaConfiguration, PipeWireTarget, PreparationRequest, RawVideoLayout,
-    SessionStatistics, StopReason, SuspendReason, Validate, VideoProfile, MAX_ERROR_TEXT_BYTES,
-    MAX_MANUFACTURER_NAME_BYTES, MAX_PRODUCT_NAME_BYTES, SESSION_FEATURE_AUDIO,
-    SESSION_FEATURE_CONTROL,
+    IdentitySource, MediaConfiguration, ModeRawLayouts, PipeWireTarget, PreparationRequest,
+    RawVideoLayout, SessionStatistics, StopReason, SuspendReason, Validate, VideoProfile,
+    MAX_ERROR_TEXT_BYTES, MAX_MANUFACTURER_NAME_BYTES, MAX_PRODUCT_NAME_BYTES,
+    SESSION_FEATURE_AUDIO, SESSION_FEATURE_CONTROL,
 };
 use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, OPUS_SAMPLE_RATE};
 use thiserror::Error;
@@ -1067,11 +1067,11 @@ async fn prepare_device(
     if media.is_prepared() {
         return Err(DeviceActorError::AlreadyPrepared);
     }
-    let supported_modes = media.supported_video_modes(request.candidate_modes.clone())?;
-    if supported_modes.is_empty() {
+    let supported_layouts = media.supported_video_layouts(&request.candidate_modes)?;
+    retain_supported_layouts(&mut request, supported_layouts);
+    if request.candidate_modes.is_empty() {
         return Err(DeviceActorError::NoSupportedMode);
     }
-    retain_supported_modes(&mut request, supported_modes);
     let control = connect(device, connector).await?;
     let query = query_identity(device, control.as_ref()).await;
     let identity = match query {
@@ -1101,6 +1101,47 @@ fn retain_supported_modes(request: &mut PreparationRequest, supported_modes: Vec
         .mode_raw_layouts
         .retain(|entry| supported_modes.contains(&entry.mode));
     request.candidate_modes = supported_modes;
+}
+
+fn retain_supported_layouts(
+    request: &mut PreparationRequest,
+    supported_layouts: Vec<Vec<RawVideoLayout>>,
+) {
+    debug_assert_eq!(request.candidate_modes.len(), supported_layouts.len());
+    let offered = std::mem::take(&mut request.mode_raw_layouts);
+    let mut usable = Vec::new();
+    for (mode, supported) in request
+        .candidate_modes
+        .iter()
+        .copied()
+        .zip(supported_layouts)
+    {
+        let source = if offered.is_empty() {
+            request
+                .video_profiles
+                .iter()
+                .flat_map(|profile| profile.raw_layouts.iter().copied())
+                .collect::<Vec<_>>()
+        } else {
+            offered
+                .iter()
+                .find(|entry| entry.mode == mode)
+                .map(|entry| entry.raw_layouts.clone())
+                .unwrap_or_default()
+        };
+        let mut raw_layouts = Vec::new();
+        for layout in source {
+            if supported.contains(&layout) && !raw_layouts.contains(&layout) {
+                raw_layouts.push(layout);
+            }
+        }
+        if !raw_layouts.is_empty() {
+            usable.push(ModeRawLayouts { mode, raw_layouts });
+        }
+    }
+    let modes = usable.iter().map(|entry| entry.mode).collect();
+    request.mode_raw_layouts = usable;
+    retain_supported_modes(request, modes);
 }
 
 async fn connect(
@@ -2170,6 +2211,51 @@ mod tests {
         assert_eq!(offer.candidate_modes, [small]);
         assert_eq!(offer.mode_raw_layouts[0].mode, small);
         assert_eq!(offer.mode_raw_layouts.len(), 1);
+    }
+
+    #[test]
+    fn encoder_format_limits_apply_to_each_offered_mode() {
+        let mut offer = request();
+        let large = DisplayMode {
+            width: 3_840,
+            height: 2_160,
+            refresh_millihz: 30_000,
+            flags: 0,
+        };
+        let small = offer.candidate_modes[0];
+        let ar = graphics_layout();
+        let ab = RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AB24"), 9);
+        offer.candidate_modes.insert(0, large);
+        offer.video_profiles[0].raw_layouts = vec![ar, ab];
+        offer.mode_raw_layouts = vec![
+            ModeRawLayouts {
+                mode: large,
+                raw_layouts: vec![ar, ab],
+            },
+            ModeRawLayouts {
+                mode: small,
+                raw_layouts: vec![ar],
+            },
+        ];
+        offer.validate().unwrap();
+
+        retain_supported_layouts(&mut offer, vec![vec![ab], vec![ar]]);
+        assert_eq!(offer.candidate_modes, [large, small]);
+        assert_eq!(offer.mode_raw_layouts[0].raw_layouts, [ab]);
+        assert_eq!(offer.mode_raw_layouts[1].raw_layouts, [ar]);
+
+        retain_supported_layouts(&mut offer, vec![vec![ar], vec![ar]]);
+        assert_eq!(offer.candidate_modes, [small]);
+        assert_eq!(offer.mode_raw_layouts[0].raw_layouts, [ar]);
+    }
+
+    #[test]
+    fn backend_formats_narrow_an_unrestricted_mode_offer() {
+        let mut offer = request();
+        offer.video_profiles[0].raw_layouts = vec![system_layout(), graphics_layout()];
+        offer.validate().unwrap();
+        retain_supported_layouts(&mut offer, vec![vec![graphics_layout()]]);
+        assert_eq!(offer.mode_raw_layouts[0].raw_layouts, [graphics_layout()]);
     }
 
     #[test]

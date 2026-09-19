@@ -120,41 +120,46 @@ impl VideoEncoder {
             .pad_template("sink")
             .ok_or_else(|| MediaGraphError::new("VA converter has no sink pad template"))?;
         let mut formats = Vec::new();
-        for (structure, features) in template.caps().iter_with_features() {
-            // The PipeWire source supplies DMA-BUF memory without additional
-            // caps features; a branch requiring metadata cannot negotiate it.
-            if features.size() != 1
-                || !features.contains("memory:DMABuf")
-                || structure.get::<&str>("format").ok() != Some("DMA_DRM")
-            {
-                continue;
+        for (format, _) in converter_dma_buf_formats(template.caps())? {
+            if !formats.contains(&format) {
+                formats.push(format);
             }
-            if let Ok(values) = structure.get::<gst::ListRef<'_>>("drm-format") {
-                for value in values.iter() {
-                    let text = value.get::<&str>().map_err(|_| {
-                        MediaGraphError::new("VA converter exposes a non-string DRM format")
-                    })?;
-                    let format = DrmVideoFormat::parse(text)?;
-                    if !formats.contains(&format) {
-                        formats.push(format);
-                    }
-                }
-            } else {
-                let text = structure.get::<&str>("drm-format").map_err(|_| {
-                    MediaGraphError::new("VA converter exposes no concrete DRM formats")
-                })?;
-                let format = DrmVideoFormat::parse(text)?;
-                if !formats.contains(&format) {
-                    formats.push(format);
-                }
-            }
-        }
-        if formats.is_empty() {
-            return Err(MediaGraphError::new(
-                "VA converter exposes no DMA-BUF DRM formats",
-            ));
         }
         Ok(formats)
+    }
+
+    /// Match each picture size against complete converter input tuples.
+    pub fn supported_dma_buf_formats_for_dimensions(
+        &self,
+        dimensions: &[(u32, u32)],
+        cadence: VideoCadence,
+    ) -> Result<Vec<Vec<DrmVideoFormat>>, MediaGraphError> {
+        let Self::VaH264 { .. } = self else {
+            return Ok(vec![Vec::new(); dimensions.len()]);
+        };
+        let supported = self.supported_dimensions(dimensions, cadence)?;
+        let converter = self.build_converter()?;
+        let input = converter
+            .pad_template("sink")
+            .ok_or_else(|| MediaGraphError::new("VA converter has no sink pad template"))?;
+        let formats = converter_dma_buf_formats(input.caps())?;
+        dimensions
+            .iter()
+            .zip(supported)
+            .map(|(&(width, height), supported)| {
+                let mut accepted = Vec::new();
+                if supported {
+                    for (format, text) in &formats {
+                        if accepts_dma_buf_format(input.caps(), text, width, height, cadence)?
+                            && !accepted.contains(format)
+                        {
+                            accepted.push(*format);
+                        }
+                    }
+                }
+                Ok(accepted)
+            })
+            .collect()
     }
 
     pub(crate) fn validate_input(&self, layout: &VideoInputLayout) -> Result<(), MediaGraphError> {
@@ -373,6 +378,76 @@ fn supported_dma_buf_dimensions(
             Ok(input.can_intersect(&requested))
         })
         .collect()
+}
+
+fn converter_dma_buf_formats(
+    caps: &gst::CapsRef,
+) -> Result<Vec<(DrmVideoFormat, String)>, MediaGraphError> {
+    let mut formats = Vec::new();
+    for (structure, features) in caps.iter_with_features() {
+        // The PipeWire source supplies DMA-BUF memory without additional
+        // caps features; a branch requiring metadata cannot negotiate it.
+        if features.size() != 1
+            || !features.contains("memory:DMABuf")
+            || structure.get::<&str>("format").ok() != Some("DMA_DRM")
+        {
+            continue;
+        }
+        let mut add = |text: &str| -> Result<(), MediaGraphError> {
+            let entry = (DrmVideoFormat::parse(text)?, text.to_owned());
+            if !formats.contains(&entry) {
+                formats.push(entry);
+            }
+            Ok(())
+        };
+        if let Ok(values) = structure.get::<gst::ListRef<'_>>("drm-format") {
+            for value in values.iter() {
+                let text = value.get::<&str>().map_err(|_| {
+                    MediaGraphError::new("VA converter exposes a non-string DRM format")
+                })?;
+                add(text)?;
+            }
+        } else {
+            let text = structure.get::<&str>("drm-format").map_err(|_| {
+                MediaGraphError::new("VA converter exposes no concrete DRM formats")
+            })?;
+            add(text)?;
+        }
+    }
+    if formats.is_empty() {
+        return Err(MediaGraphError::new(
+            "VA converter exposes no DMA-BUF DRM formats",
+        ));
+    }
+    Ok(formats)
+}
+
+fn accepts_dma_buf_format(
+    input: &gst::CapsRef,
+    drm_format: &str,
+    width: u32,
+    height: u32,
+    cadence: VideoCadence,
+) -> Result<bool, MediaGraphError> {
+    let integer = |value| {
+        i32::try_from(value)
+            .map_err(|_| MediaGraphError::new("VA picture dimension exceeds caps range"))
+    };
+    let requested = gst::Caps::builder("video/x-raw")
+        .features(["memory:DMABuf"])
+        .field("format", "DMA_DRM")
+        .field("drm-format", drm_format)
+        .field("width", integer(width)?)
+        .field("height", integer(height)?)
+        .field(
+            "framerate",
+            gst::Fraction::new(
+                integer(cadence.numerator.get())?,
+                integer(cadence.denominator.get())?,
+            ),
+        )
+        .build();
+    Ok(input.can_intersect(&requested))
 }
 
 fn require_va_baseline_output(encoder: &gst::Element) -> Result<(), MediaGraphError> {
@@ -632,6 +707,19 @@ mod tests {
     }
 
     #[test]
+    fn va_format_probe_keeps_input_limits_with_each_format() {
+        gst::init().unwrap();
+        let input: gst::Caps = "video/x-raw(memory:DMABuf),format=(string)DMA_DRM,drm-format=(string)AR24:0x0000000000000009,width=(int)[1,1920],height=(int)[1,1080],framerate=(fraction)[1/1,60/1]; video/x-raw(memory:DMABuf),format=(string)DMA_DRM,drm-format=(string)AB24:0x0000000000000009,width=(int)[1,3840],height=(int)[1,2160],framerate=(fraction)[1/1,60/1]"
+            .parse()
+            .unwrap();
+        let formats = converter_dma_buf_formats(&input).unwrap();
+        assert_eq!(formats.len(), 2);
+        assert!(accepts_dma_buf_format(&input, &formats[0].1, 1920, 1080, cadence()).unwrap());
+        assert!(!accepts_dma_buf_format(&input, &formats[0].1, 3840, 2160, cadence()).unwrap());
+        assert!(accepts_dma_buf_format(&input, &formats[1].1, 3840, 2160, cadence()).unwrap());
+    }
+
+    #[test]
     fn additional_caps_features_are_not_supplied_by_the_pipewire_source() {
         gst::init().unwrap();
         let requested: gst::Caps = "video/x-raw(memory:DMABuf),format=(string)DMA_DRM,drm-format=(string)AR24:0x0100000000000009"
@@ -668,5 +756,17 @@ mod tests {
             .unwrap();
         eprintln!("selected VA encoder supports offered sizes: {dimensions:?}");
         assert!(dimensions[0]);
+        let by_size = encoder
+            .supported_dma_buf_formats_for_dimensions(
+                &[(1920, 1080), (2560, 1440), (3840, 2160)],
+                cadence(),
+            )
+            .unwrap();
+        eprintln!("selected VA converter accepts formats by size: {by_size:?}");
+        assert!(!by_size[0].is_empty());
+        assert!(by_size
+            .iter()
+            .flatten()
+            .all(|format| formats.contains(format)));
     }
 }

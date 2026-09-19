@@ -301,25 +301,30 @@ impl ChromiacastMediaSession {
         self.encoder_policy.raw_layouts()
     }
 
-    pub(crate) fn supported_video_modes(
+    pub(crate) fn supported_video_layouts(
         &self,
-        modes: Vec<DisplayMode>,
-    ) -> Result<Vec<DisplayMode>, MediaSessionError> {
-        let supported = self
+        modes: &[DisplayMode],
+    ) -> Result<Vec<Vec<RawVideoLayout>>, MediaSessionError> {
+        let VideoEncoderPolicy::VaH264 { .. } = &self.encoder_policy else {
+            return Ok(vec![SOFTWARE_RAW_LAYOUTS.to_vec(); modes.len()]);
+        };
+        let dimensions = modes
+            .iter()
+            .map(|mode| (mode.width, mode.height))
+            .collect::<Vec<_>>();
+        let formats = self
             .encoder_policy
             .encoder(VideoCodec::H264)?
-            .supported_dimensions(
-                &modes
-                    .iter()
-                    .map(|mode| (mode.width, mode.height))
-                    .collect::<Vec<_>>(),
-                chromecast_video_cadence(),
-            )
-            .map_err(MediaSessionError::from)?;
-        Ok(modes
+            .supported_dma_buf_formats_for_dimensions(&dimensions, chromecast_video_cadence())?;
+        Ok(formats
             .into_iter()
-            .zip(supported)
-            .filter_map(|(mode, supported)| supported.then_some(mode))
+            .map(|formats| {
+                formats
+                    .into_iter()
+                    .map(|format| RawVideoLayout::dma_buf(format.format, format.modifier))
+                    .filter(|layout| self.encoder_policy.raw_layouts().contains(layout))
+                    .collect()
+            })
             .collect())
     }
 
