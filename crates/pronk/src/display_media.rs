@@ -4,7 +4,6 @@ use std::io;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
-use castkms_sys::DRM_FORMAT_MOD_LINEAR;
 use pronk_backend_protocol::{RawVideoLayout, RawVideoStorage};
 use pronk_pipewire::{ClassifiedSocketRemoteProvider, VideoFrameRate};
 
@@ -28,33 +27,32 @@ pub enum CaptureSource {
 }
 
 impl CaptureSource {
-    pub(crate) fn raw_layouts(self) -> &'static [RawVideoLayout] {
+    /// Initial offer before the selected kernel session identifies a GPU.
+    /// Renderer setup replaces these layouts with its probed output layouts.
+    pub(crate) fn initial_raw_layouts(self) -> &'static [RawVideoLayout] {
         const SYSTEM_XRGB8888: RawVideoLayout =
             RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
-        const DMA_BUF_XRGB8888: RawVideoLayout =
-            RawVideoLayout::dma_buf(u32::from_le_bytes(*b"XR24"), DRM_FORMAT_MOD_LINEAR);
         match self {
-            Self::Renderer => &[SYSTEM_XRGB8888, DMA_BUF_XRGB8888],
-            Self::FinalImage => &[SYSTEM_XRGB8888],
+            Self::Renderer | Self::FinalImage => &[SYSTEM_XRGB8888],
         }
     }
+}
 
-    pub(crate) fn select_raw_layout(
-        self,
-        offered: &[RawVideoLayout],
-    ) -> io::Result<RawVideoLayout> {
-        self.raw_layouts()
-            .iter()
-            .rev()
-            .copied()
-            .find(|layout| offered.contains(layout))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "backend raw-video layout is incompatible with the capture source",
-                )
-            })
-    }
+pub(crate) fn select_raw_layout(
+    supported: &[RawVideoLayout],
+    offered: &[RawVideoLayout],
+) -> io::Result<RawVideoLayout> {
+    supported
+        .iter()
+        .rev()
+        .copied()
+        .find(|layout| offered.contains(layout))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "backend raw-video layout is incompatible with the capture source",
+            )
+        })
 }
 
 /// Authority for the selected media path, without the display lifetime.
@@ -115,15 +113,19 @@ impl DisplayMediaAccess {
                         video_bitrate: config.video_bitrate,
                         video_frame_rate: config.video_frame_rate,
                         private_pool: RendererPrivatePoolConfig {
-                            modifier: DRM_FORMAT_MOD_LINEAR,
+                            modifier: None,
                             frame_capacity: NonZeroUsize::new(3).unwrap(),
                             source_capacity: NonZeroUsize::new(3).unwrap(),
                         },
                         capture_pool_size: NonZeroU32::new(4).unwrap(),
                         capture_request_capacity: NonZeroU32::new(3).unwrap(),
-                        capture_pool_byte_limit: NonZeroU64::new(128 * 1024 * 1024).unwrap(),
+                        // This bounds actual native allocations, not a preallocated
+                        // reservation. Four 4K images already nearly fill 128 MiB;
+                        // modifiers may require additional pitch or plane alignment.
+                        capture_pool_byte_limit: NonZeroU64::new(256 * 1024 * 1024).unwrap(),
                         capture_heap_path: "/dev/dma_heap/system".into(),
                         capture_poll_interval: Duration::from_millis(2),
+                        capture_offer_timeout: Duration::from_secs(10),
                         capture_shutdown_timeout: Duration::from_secs(5),
                     },
                 )?;
@@ -188,40 +190,44 @@ mod tests {
     }
 
     #[test]
-    fn renderer_prefers_matching_graphics_layout_without_requiring_it() {
+    fn exact_offer_intersection_selects_the_backend_layout() {
         let system = RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
-        let graphics = RawVideoLayout::dma_buf(u32::from_le_bytes(*b"XR24"), DRM_FORMAT_MOD_LINEAR);
+        let graphics = RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AB24"), 9);
         assert_eq!(
-            CaptureSource::Renderer
-                .select_raw_layout(&[system, graphics])
-                .unwrap(),
+            select_raw_layout(&[system, graphics], &[graphics]).unwrap(),
             graphics
         );
         assert_eq!(
-            CaptureSource::Renderer
-                .select_raw_layout(&[system])
-                .unwrap(),
+            select_raw_layout(&[system, graphics], &[system]).unwrap(),
             system
         );
-        assert!(CaptureSource::Renderer
-            .select_raw_layout(&[RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9,)])
-            .is_err());
+        assert!(select_raw_layout(
+            &[system, graphics],
+            &[RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AB24"), 16)]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn preliminary_offer_does_not_guess_gpu_storage() {
+        let system = RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
+        assert_eq!(CaptureSource::Renderer.initial_raw_layouts(), &[system]);
+        assert_eq!(CaptureSource::FinalImage.initial_raw_layouts(), &[system]);
     }
 
     #[test]
     fn final_image_capture_requires_mappable_storage() {
-        let system = RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
-        assert!(CaptureSource::FinalImage
-            .select_raw_layout(&[RawVideoLayout::dma_buf(
-                u32::from_le_bytes(*b"XR24"),
-                DRM_FORMAT_MOD_LINEAR,
-            )])
-            .is_err());
+        let access = DisplayMediaAccess::FinalImage(drm_capture::Access::from_fd(
+            std::fs::File::open("/dev/null").unwrap().into(),
+        ));
+        let mut configuration = config();
+        configuration.raw_layout = RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9);
         assert_eq!(
-            CaptureSource::FinalImage
-                .select_raw_layout(&[system])
-                .unwrap(),
-            system
+            access
+                .create_pipeline(remotes(), configuration)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
         );
     }
 

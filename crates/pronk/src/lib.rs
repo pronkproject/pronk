@@ -1,6 +1,7 @@
 pub mod caller;
 pub mod capability_lease;
 pub mod capture_health;
+mod capture_output_layouts;
 pub mod cast_display_slot;
 pub mod dbus;
 pub mod device_control_port;

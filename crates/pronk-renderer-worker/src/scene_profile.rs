@@ -21,6 +21,7 @@ use drm_display_executor::scene::{
 use pronk_gpu::vulkan::{Device, PackedFormat};
 use pronk_gpu::vulkan::{LayerRequirements, SceneRequirements, SourceRequirements};
 
+use crate::pool::{MAX_PRIVATE_BUFFERS, MAX_PRIVATE_POOL_BYTES, PRIVATE_PIXEL_BYTES};
 use crate::source::{explicit_modifier, packed_format};
 use crate::{SceneComposer, ScenePool, SceneStorageProfile};
 
@@ -73,10 +74,46 @@ impl PrimarySceneProfile {
         self.storage.create_pool(final_capacity, source_capacity)
     }
 
+    /// Bound one primary scene's final and source storage before allocating it.
+    ///
+    /// Leave one eighth of the private-pool limit for native image rounding.
+    /// The allocator's actual byte counts are checked again by `create_pool`.
+    pub fn bounded_capacities(
+        &self,
+        maximum_final: NonZeroUsize,
+        maximum_source: NonZeroUsize,
+    ) -> io::Result<(NonZeroUsize, NonZeroUsize)> {
+        bounded_capacities(self.storage.output(), maximum_final, maximum_source)
+    }
+
     /// Release the kernel declaration and matching private-storage policy.
     pub fn into_parts(self) -> (RendererConstraints, SceneStorageProfile) {
         (self.constraints, self.storage)
     }
+}
+
+fn bounded_capacities(
+    output: drm_display_executor::scene::geometry::Extent,
+    maximum_final: NonZeroUsize,
+    maximum_source: NonZeroUsize,
+) -> io::Result<(NonZeroUsize, NonZeroUsize)> {
+    if maximum_final.get() > MAX_PRIVATE_BUFFERS || maximum_source.get() > MAX_PRIVATE_BUFFERS {
+        return Err(invalid("private scene capacity exceeds its buffer limit"));
+    }
+    let bytes_per_image = u64::from(output.width())
+        .checked_mul(u64::from(output.height()))
+        .and_then(|pixels| pixels.checked_mul(PRIVATE_PIXEL_BYTES))
+        .ok_or_else(|| invalid("private scene image size overflowed"))?;
+    let budget = MAX_PRIVATE_POOL_BYTES - MAX_PRIVATE_POOL_BYTES / 8;
+    let slots = usize::try_from(budget / bytes_per_image)
+        .map_err(|_| invalid("private scene capacity exceeds the host size range"))?;
+    let final_count = maximum_final.get().min(slots.saturating_sub(1));
+    let source_count = maximum_source.get().min(slots.saturating_sub(final_count));
+    let final_count = NonZeroUsize::new(final_count)
+        .ok_or_else(|| invalid("private scene has no final-image capacity"))?;
+    let source_count = NonZeroUsize::new(source_count)
+        .ok_or_else(|| invalid("private scene has no source-image capacity"))?;
+    Ok((final_count, source_count))
 }
 
 fn append_source_layout(
@@ -271,6 +308,57 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capacity(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
+    #[test]
+    fn scene_capacity_preserves_depth_until_four_k_needs_a_smaller_pool() {
+        let below = drm_display_executor::scene::geometry::Extent::new(2560, 1440).unwrap();
+        assert_eq!(
+            bounded_capacities(below, capacity(3), capacity(3)).unwrap(),
+            (capacity(3), capacity(3))
+        );
+        let four_k = drm_display_executor::scene::geometry::Extent::new(3840, 2160).unwrap();
+        assert_eq!(
+            bounded_capacities(four_k, capacity(3), capacity(3)).unwrap(),
+            (capacity(2), capacity(1))
+        );
+        let too_large = drm_display_executor::scene::geometry::Extent::new(7680, 4320).unwrap();
+        assert!(bounded_capacities(too_large, capacity(3), capacity(3)).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly selected Vulkan render node and native memory"]
+    fn selected_gpu_allocates_the_bounded_four_k_scene_pool() {
+        let node = std::env::var_os("PRONK_GPU_RENDER_NODE").unwrap();
+        let device = Device::open(node).unwrap();
+        let output = drm_display_executor::scene::geometry::Extent::new(3840, 2160).unwrap();
+        let profile = PrimarySceneProfile::discover(&device, output).unwrap();
+        let (final_images, sources) = profile
+            .bounded_capacities(capacity(3), capacity(3))
+            .unwrap();
+        assert_eq!((final_images, sources), (capacity(2), capacity(1)));
+        let _pool = profile.create_pool(final_images, sources).unwrap();
+        let modifiers = device
+            .private_storage_modifiers(
+                PackedFormat::Bgra8,
+                NonZeroU32::new(output.width()).unwrap(),
+                NonZeroU32::new(output.height()).unwrap(),
+            )
+            .unwrap();
+        let modifier = modifiers.first().copied().unwrap();
+        let _packed = crate::PreparedSceneImages::new(
+            &device,
+            NonZeroU32::new(output.width()).unwrap(),
+            NonZeroU32::new(output.height()).unwrap(),
+            PackedFormat::Bgra8,
+            modifier,
+            final_images,
+        )
+        .unwrap();
+    }
 
     fn lut(entries: &[[u16; 3]]) -> WireColor {
         WireColor::Lut(entries.to_vec().into_boxed_slice())

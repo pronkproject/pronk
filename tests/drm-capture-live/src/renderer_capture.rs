@@ -145,6 +145,19 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
     let remotes =
         ClassifiedSocketRemoteProvider::new(ClassifiedSocketPaths::in_runtime_dir(runtime)?);
     let capture_access = session.capture_access()?;
+    let active_output = capture_access.describe()?;
+    ensure!(
+        active_output.width.get() == width && active_output.height.get() == height,
+        "active output is {}x{}; requested monitor is {width}x{height}",
+        active_output.width,
+        active_output.height,
+    );
+    let mode = RoutedMode {
+        width: active_output.width.get(),
+        height: active_output.height.get(),
+        refresh_millihz: active_output.refresh_millihz.get(),
+        flags: active_output.mode_flags,
+    };
     let renderer_access = session.take_renderer_access()?;
     let (mut capture, mut renderer_events) = RendererCapturePipeline::new(
         renderer_access,
@@ -164,24 +177,19 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
             video_bitrate: nz64(4_000_000),
             video_frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
             private_pool: RendererPrivatePoolConfig {
-                modifier,
+                modifier: Some(modifier),
                 frame_capacity: NonZeroUsize::new(3).unwrap(),
                 source_capacity: NonZeroUsize::new(3).unwrap(),
             },
             capture_pool_size: nz(4),
             capture_request_capacity: nz(3),
-            capture_pool_byte_limit: nz64(128 * 1024 * 1024),
+            capture_pool_byte_limit: nz64(256 * 1024 * 1024),
             capture_heap_path: "/dev/dma_heap/system".into(),
             capture_poll_interval: Duration::from_millis(2),
+            capture_offer_timeout: Duration::from_secs(10),
             capture_shutdown_timeout: Duration::from_secs(5),
         },
     )?;
-    let mode = RoutedMode {
-        width,
-        height,
-        refresh_millihz,
-        flags: 0,
-    };
     let run_result: anyhow::Result<()> = async {
         if address.is_some() {
             let media = receiver_media::run(

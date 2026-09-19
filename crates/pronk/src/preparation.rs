@@ -16,9 +16,10 @@ use thiserror::Error;
 
 /// Modes supported end-to-end by the generated EDID and Cast encoder paths.
 ///
-/// 4K is deliberately limited to 30 Hz. Lower standard monitor modes remain
-/// available at 60 Hz so the compositor can choose a useful compatibility or
-/// performance fallback without inventing modes the backend did not advertise.
+/// 4K is deliberately limited to 30 Hz. Lower 16:9 modes remain at 60 Hz;
+/// VGA is retained as the compatibility timing required by the generated EDID.
+/// Only modes that the Cast sender can use belong here, since the GPU output
+/// layout probe must not be constrained by modes the backend later discards.
 pub fn initial_preparation_offer(
     audio_enabled: bool,
     raw_layouts: &[RawVideoLayout],
@@ -40,30 +41,12 @@ pub fn initial_preparation_offer(
             },
             DisplayMode {
                 width: 1920,
-                height: 1200,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1920,
                 height: 1080,
                 refresh_millihz: 60_000,
                 flags: 0,
             },
             DisplayMode {
-                width: 1680,
-                height: 1050,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
                 width: 1600,
-                height: 900,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1440,
                 height: 900,
                 refresh_millihz: 60_000,
                 flags: 0,
@@ -76,31 +59,7 @@ pub fn initial_preparation_offer(
             },
             DisplayMode {
                 width: 1280,
-                height: 1024,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1280,
-                height: 800,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1280,
                 height: 720,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 1024,
-                height: 768,
-                refresh_millihz: 60_000,
-                flags: 0,
-            },
-            DisplayMode {
-                width: 800,
-                height: 600,
                 refresh_millihz: 60_000,
                 flags: 0,
             },
@@ -443,11 +402,18 @@ mod tests {
         );
         assert_eq!(audiovisual.audio_profiles.len(), 1);
         assert_eq!(audiovisual.video_profiles[0].max_width, 3840);
-        assert_eq!(audiovisual.candidate_modes.len(), 14);
-        assert_eq!(audiovisual.candidate_modes[0], mode(3840, 2160, 30_000));
-        assert!(audiovisual
-            .candidate_modes
-            .contains(&mode(2560, 1440, 60_000)));
+        assert_eq!(
+            audiovisual.candidate_modes,
+            [
+                mode(3840, 2160, 30_000),
+                mode(2560, 1440, 60_000),
+                mode(1920, 1080, 60_000),
+                mode(1600, 900, 60_000),
+                mode(1366, 768, 60_000),
+                mode(1280, 720, 60_000),
+                mode(640, 480, 60_000),
+            ]
+        );
     }
 
     fn device() -> DeviceInfo {

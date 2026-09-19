@@ -86,16 +86,24 @@ fn prepare_generation<F: AsFd>(
     let output = Extent::new(config.output_width.get(), config.output_height.get())
         .expect("nonzero renderer dimensions form a valid extent");
     let profile = PrimarySceneProfile::discover(device, output)?;
-    let scene_pool = profile.create_pool(
+    let modifiers = device.private_storage_modifiers(
+        config.output_format,
+        config.output_width,
+        config.output_height,
+    )?;
+    let modifier = choose_private_modifier(&modifiers, config.private_pool.modifier)?;
+    let (frame_capacity, source_capacity) = profile.bounded_capacities(
         config.private_pool.frame_capacity,
         config.private_pool.source_capacity,
     )?;
+    let scene_pool = profile.create_pool(frame_capacity, source_capacity)?;
     let scene_images = match PreparedSceneImages::new(
         device,
         config.output_width,
         config.output_height,
-        config.private_pool.modifier,
-        config.private_pool.frame_capacity,
+        config.output_format,
+        modifier,
+        frame_capacity,
     ) {
         Ok(images) => images,
         Err(error) => {
@@ -134,9 +142,30 @@ fn prepare_generation<F: AsFd>(
     Ok((reader, output))
 }
 
+fn choose_private_modifier(available: &[u64], requested: Option<u64>) -> io::Result<u64> {
+    match requested {
+        Some(modifier) if available.contains(&modifier) => Ok(modifier),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the selected GPU cannot allocate the requested private scene layout",
+        )),
+        None => available
+            .iter()
+            .copied()
+            .find(|modifier| *modifier == 0)
+            .or_else(|| available.first().copied())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the selected GPU has no exportable private scene layout",
+                )
+            }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Started;
+    use super::{choose_private_modifier, Started};
     use drm_display_executor::scene::geometry::Extent;
 
     #[test]
@@ -145,5 +174,14 @@ mod tests {
             output: Extent::new(1920, 1080).unwrap(),
         };
         assert!(matches!(ready, Started::Ready { output } if output.width() == 1920));
+    }
+
+    #[test]
+    fn private_storage_uses_a_checked_layout_without_requiring_linear() {
+        assert_eq!(choose_private_modifier(&[1, 9], None).unwrap(), 1);
+        assert_eq!(choose_private_modifier(&[0, 1, 9], None).unwrap(), 0);
+        assert_eq!(choose_private_modifier(&[0, 9], Some(9)).unwrap(), 9);
+        assert!(choose_private_modifier(&[0, 9], Some(1)).is_err());
+        assert!(choose_private_modifier(&[], None).is_err());
     }
 }

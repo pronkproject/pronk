@@ -751,7 +751,34 @@ async fn run_display_setup_inner(
             KernelSessionError::Cancelled => DisplaySetupError::Cancelled,
             error => DisplaySetupError::KernelSession(error),
         })?;
-    let offer = offer_for_kernel_session(&context.offer);
+    let mut offer = offer_for_kernel_session(&context.offer);
+    if context.media_runtime.capture_source == CaptureSource::Renderer {
+        if let Some(render_node) = kernel_session.renderer_render_node() {
+            let render_node = render_node.to_path_buf();
+            let modes = offer.candidate_modes.clone();
+            let mut probe = tokio::task::spawn_blocking(move || {
+                crate::capture_output_layouts::for_modes(&render_node, &modes)
+            });
+            let result = tokio::select! {
+                biased;
+                _ = context.cancellation.cancelled() => return Err(DisplaySetupError::Cancelled),
+                result = &mut probe => result,
+            };
+            offer.video_profiles[0].raw_layouts = match result {
+                Ok(Ok(layouts)) => layouts,
+                Ok(Err(error)) => {
+                    warn!(%error, "renderer output layout probe failed");
+                    crate::capture_output_layouts::system_only()
+                }
+                Err(error) => {
+                    warn!(%error, "renderer output layout worker failed");
+                    crate::capture_output_layouts::system_only()
+                }
+            };
+        } else {
+            offer.video_profiles[0].raw_layouts = crate::capture_output_layouts::system_only();
+        }
+    }
     if context.cancellation.is_cancelled() {
         return Err(DisplaySetupError::Cancelled);
     }
@@ -827,11 +854,10 @@ async fn run_display_setup_inner(
     }
     let video_profile = &prepared.capabilities().video_profiles[0];
     let video_profile_id = video_profile.profile_id.clone();
-    let raw_layout = match context
-        .media_runtime
-        .capture_source
-        .select_raw_layout(&video_profile.raw_layouts)
-    {
+    let raw_layout = match crate::display_media::select_raw_layout(
+        &offer.video_profiles[0].raw_layouts,
+        &video_profile.raw_layouts,
+    ) {
         Ok(raw_layout) => raw_layout,
         Err(error) => {
             stop_partial_backend(backend_session).await;
@@ -1386,7 +1412,7 @@ mod tests {
                 MediaRuntime::for_user(Uid::effective().as_raw()),
                 crate::preparation::initial_preparation_offer(
                     false,
-                    CaptureSource::Renderer.raw_layouts(),
+                    CaptureSource::Renderer.initial_raw_layouts(),
                 ),
                 false,
             ),
@@ -1460,7 +1486,7 @@ mod tests {
                 MediaRuntime::for_user(Uid::effective().as_raw()),
                 crate::preparation::initial_preparation_offer(
                     false,
-                    CaptureSource::Renderer.raw_layouts(),
+                    CaptureSource::Renderer.initial_raw_layouts(),
                 ),
                 false,
             ),

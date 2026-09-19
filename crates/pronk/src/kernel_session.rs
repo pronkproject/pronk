@@ -2,6 +2,7 @@
 
 use std::io;
 use std::num::NonZeroU64;
+use std::path::Path;
 
 use async_trait::async_trait;
 use drm_capture::Access as CaptureAccess;
@@ -91,6 +92,10 @@ impl KernelSession {
 
     pub fn capture_access(&self) -> io::Result<CaptureAccess> {
         self.capture.try_clone()
+    }
+
+    pub fn renderer_render_node(&self) -> Option<&Path> {
+        self.renderer.as_ref().map(RendererAccess::render_node)
     }
 
     pub fn take_renderer_access(&mut self) -> io::Result<RendererAccess> {

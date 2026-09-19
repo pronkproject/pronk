@@ -256,7 +256,11 @@ fn decode_output(
     if raw.image_id != expected_image.get() {
         return Err(invalid("CastKMS returned output for another private image"));
     }
-    if raw.memory_plane_count != 1 || raw.format == 0 || raw.reserved != [0; 2] {
+    if raw.memory_plane_count != 1
+        || raw.format == 0
+        || raw.modifier == castkms_sys::DRM_FORMAT_MOD_INVALID
+        || raw.reserved != [0; 2]
+    {
         return Err(invalid("CastKMS returned invalid output metadata"));
     }
     let extent = Extent::new(raw.width, raw.height)
@@ -275,12 +279,17 @@ fn decode_output(
         .ok()
         .filter(|size| *size > 0)
         .ok_or_else(|| invalid("CastKMS returned output without addressable storage"))?;
-    let end = u64::from(pitch.get())
-        .checked_mul(u64::from(extent.height()))
-        .and_then(|span| raw.offset.checked_add(span))
-        .ok_or_else(|| invalid("CastKMS returned an overflowing output layout"))?;
-    if end > allocation_size {
+    if raw.offset >= allocation_size {
         return Err(invalid("CastKMS returned output outside its storage"));
+    }
+    if raw.modifier == castkms_sys::DRM_FORMAT_MOD_LINEAR {
+        let end = u64::from(pitch.get())
+            .checked_mul(u64::from(extent.height()))
+            .and_then(|span| raw.offset.checked_add(span))
+            .ok_or_else(|| invalid("CastKMS returned an overflowing output layout"))?;
+        if end > allocation_size {
+            return Err(invalid("CastKMS returned output outside its storage"));
+        }
     }
     Ok((
         id,
@@ -373,6 +382,28 @@ mod tests {
         let mut raw = raw_output(storage(8191));
         raw.offset = 1;
         assert!(decode_output(raw, NonZeroU64::new(3).unwrap()).is_err());
+    }
+
+    #[test]
+    fn tiled_output_is_not_measured_as_linear_rows() {
+        let mut raw = raw_output(storage(4096));
+        raw.format = castkms_sys::DRM_FORMAT_ARGB8888;
+        raw.modifier = 9;
+        raw.pitch = 512;
+        raw.offset = 64;
+        let (_, image) = decode_output(raw, NonZeroU64::new(3).unwrap()).unwrap();
+        assert_eq!(image.format(), castkms_sys::DRM_FORMAT_ARGB8888);
+        assert_eq!(image.modifier(), 9);
+        assert_eq!(image.offset(), 64);
+
+        let mut outside = raw_output(storage(4096));
+        outside.modifier = 9;
+        outside.offset = 4096;
+        assert!(decode_output(outside, NonZeroU64::new(3).unwrap()).is_err());
+
+        let mut invalid_modifier = raw_output(storage(8192));
+        invalid_modifier.modifier = castkms_sys::DRM_FORMAT_MOD_INVALID;
+        assert!(decode_output(invalid_modifier, NonZeroU64::new(3).unwrap()).is_err());
     }
 
     #[test]

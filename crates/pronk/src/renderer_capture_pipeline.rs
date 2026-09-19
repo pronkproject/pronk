@@ -25,7 +25,9 @@ use crate::capture_health::{CaptureEvents, CaptureMonitor};
 use crate::device_session_port::{
     DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget, RenderDeviceIdentity,
 };
-use crate::drm_capture_pipeline::{capture_caps, CaptureOwner, CaptureSetup, CaptureSetupConfig};
+use crate::drm_capture_pipeline::{
+    capture_caps, CaptureOwner, CaptureSetup, CaptureSetupConfig, DescriptionState,
+};
 use crate::media_pipeline_port::{
     CaptureEvent, CapturePipelinePort, MediaPipelineError, PreparedCaptureMedia,
 };
@@ -50,13 +52,14 @@ pub struct RendererCapturePipelineConfig {
     pub capture_pool_byte_limit: NonZeroU64,
     pub capture_heap_path: PathBuf,
     pub capture_poll_interval: Duration,
+    pub capture_offer_timeout: Duration,
     pub capture_shutdown_timeout: Duration,
 }
 
-/// Allocation policy for renderer-private scene storage.
+/// Maximum allocation policy for renderer-private scene storage.
 #[derive(Debug, Clone, Copy)]
 pub struct RendererPrivatePoolConfig {
-    pub modifier: u64,
+    pub modifier: Option<u64>,
     pub frame_capacity: NonZeroUsize,
     pub source_capacity: NonZeroUsize,
 }
@@ -106,12 +109,29 @@ pub struct RendererCapturePipeline {
 }
 
 impl RendererCapturePipeline {
+    fn requested_capture_layout(&self) -> std::io::Result<Option<drm_capture::RequestedLayout>> {
+        match self.config.raw_layout.storage {
+            RawVideoStorage::SystemMemory => Ok(None),
+            RawVideoStorage::DmaBuf => drm_capture::RequestedLayout::new(
+                self.config.raw_layout.format,
+                self.config.raw_layout.modifier,
+            )
+            .map(Some),
+        }
+    }
+
     pub fn new(
         access: RendererAccess,
         capture: CaptureAccess,
         producer_remotes: ClassifiedSocketRemoteProvider,
         config: RendererCapturePipelineConfig,
     ) -> std::io::Result<(Self, CaptureEvents)> {
+        if config.capture_offer_timeout.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "capture offer timeout must be nonzero",
+            ));
+        }
         let OpenRenderer {
             renderer,
             lease,
@@ -236,6 +256,7 @@ impl RendererCapturePipeline {
         error: RendererStreamError<OwnedFd>,
     ) -> MediaPipelineError {
         let (primary, recovery) = self.recover_stream_error(operation, error);
+        tracing::warn!(error = %primary, "renderer stream setup failed");
         match recovery {
             EndpointRecovery::Retained => primary,
             EndpointRecovery::Closed => {
@@ -259,6 +280,7 @@ impl RendererCapturePipeline {
         renderer: RendererStream<OwnedFd>,
         primary: MediaPipelineError,
     ) -> MediaPipelineError {
+        tracing::warn!(error = %primary, "renderer capture setup failed");
         let stopped = renderer
             .shutdown()
             .await
@@ -274,14 +296,21 @@ impl RendererCapturePipeline {
         mut renderer_state: tokio::sync::watch::Receiver<RendererStreamState>,
         cancellation: CancellationToken,
     ) -> Result<drm_capture::Description, MediaPipelineError> {
+        let deadline = tokio::time::Instant::now() + self.config.capture_offer_timeout;
         loop {
             require_running_renderer(&renderer_state)?;
-            if let Some(description) = self
+            if let DescriptionState::Active(description) = self
                 .capture_setup
-                .describe_if_active(cancellation.clone())
+                .describe_if_active(
+                    self.requested_capture_layout().map_err(|error| {
+                        MediaPipelineError::new(format!("select capture layout: {error}"))
+                    })?,
+                    cancellation.clone(),
+                )
                 .await?
             {
                 if previous.is_none_or(|previous| description.offer != previous) {
+                    require_running_renderer(&renderer_state)?;
                     return Ok(description);
                 }
             }
@@ -289,6 +318,11 @@ impl RendererCapturePipeline {
                 biased;
                 _ = cancellation.cancelled() => {
                     return Err(MediaPipelineError::new("renderer start was cancelled"));
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(MediaPipelineError::new(
+                        "capture output did not accept the negotiated layout before the renderer deadline"
+                    ));
                 }
                 changed = renderer_state.changed() => {
                     changed.map_err(|_| {
@@ -394,15 +428,22 @@ impl CapturePipelinePort for RendererCapturePipeline {
                 .map_err(|error| MediaPipelineError::new(format!("open renderer GPU: {error}")))?,
         };
         let capture_device = device.clone();
-        let previous_offer = self
+        let requested_layout = self
+            .requested_capture_layout()
+            .map_err(|error| MediaPipelineError::new(format!("select capture layout: {error}")))?;
+        let previous_offer = match self
             .capture_setup
-            .describe_if_active(cancellation.clone())
+            .describe_if_active(requested_layout, cancellation.clone())
             .await?
-            .map(|description| description.offer);
+        {
+            DescriptionState::Active(description) => Some(description.offer),
+            DescriptionState::Inactive | DescriptionState::UnsupportedLayout => None,
+        };
         let output_width = NonZeroU32::new(request.route.mode.width)
             .ok_or_else(|| MediaPipelineError::new("renderer output width is zero"))?;
         let output_height = NonZeroU32::new(request.route.mode.height)
             .ok_or_else(|| MediaPipelineError::new("renderer output height is zero"))?;
+        let output_format = capture_format(self.config.raw_layout.format)?;
         let renderer = self
             .renderer
             .take()
@@ -413,6 +454,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
             RendererStreamConfig {
                 output_width,
                 output_height,
+                output_format,
                 source_interval: interval,
                 private_pool: PrivatePoolConfig {
                     modifier: self.config.private_pool.modifier,
@@ -514,7 +556,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
                     .create_actor_with_buffers(
                         self.capture_config(),
                         request,
-                        selected.offer,
+                        selected,
                         buffers,
                         cancellation.clone(),
                     )
@@ -800,6 +842,8 @@ fn capture_format(format: u32) -> Result<PackedFormat, MediaPipelineError> {
     Ok(match format {
         value if value == u32::from_le_bytes(*b"XR24") => PackedFormat::Bgra8,
         value if value == u32::from_le_bytes(*b"AR24") => PackedFormat::Bgra8,
+        value if value == u32::from_le_bytes(*b"XB24") => PackedFormat::Rgba8,
+        value if value == u32::from_le_bytes(*b"AB24") => PackedFormat::Rgba8,
         _ => {
             return Err(MediaPipelineError::new(
                 "renderer capture offer has an unsupported pixel format",
@@ -949,14 +993,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capture_formats_accept_only_the_renderer_output_encodings() {
+    fn capture_formats_select_the_matching_renderer_output_encoding() {
         for format in [*b"XR24", *b"AR24"] {
             assert_eq!(
                 capture_format(u32::from_le_bytes(format)).unwrap(),
                 PackedFormat::Bgra8
             );
         }
-        assert!(capture_format(u32::from_le_bytes(*b"XB24")).is_err());
+        for format in [*b"XB24", *b"AB24"] {
+            assert_eq!(
+                capture_format(u32::from_le_bytes(format)).unwrap(),
+                PackedFormat::Rgba8
+            );
+        }
+        assert!(capture_format(u32::from_le_bytes(*b"NV12")).is_err());
     }
 
     #[test]

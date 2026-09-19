@@ -8,7 +8,7 @@ use std::sync::Arc;
 use castkms_renderer::{RegisteredImage, RendererConfiguration};
 use pronk_dmabuf::SyncFile;
 use pronk_gpu::vulkan::{
-    DestinationCopy, DestinationImage, Device, Image, ImageLayout, PrivateCopy,
+    DestinationCopy, DestinationImage, Device, Image, ImageLayout, PackedFormat, PrivateCopy,
 };
 
 use crate::pool::{MAX_PRIVATE_BUFFERS, MAX_PRIVATE_POOL_BYTES};
@@ -124,6 +124,7 @@ impl PreparedSceneImages {
         device: &Device,
         width: NonZeroU32,
         height: NonZeroU32,
+        format: PackedFormat,
         modifier: u64,
         capacity: NonZeroUsize,
     ) -> io::Result<Self> {
@@ -134,7 +135,7 @@ impl PreparedSceneImages {
             .map_err(io::Error::other)?;
         let mut allocated_bytes = 0;
         for _ in 0..capacity.get() {
-            let image = device.allocate(width, height, modifier)?;
+            let image = device.allocate_with_format(format, width, height, modifier)?;
             allocated_bytes = account_allocation(allocated_bytes, image.layout().allocation_size)?;
             images.push(image);
         }

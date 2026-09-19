@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use drm_capture::Access;
+use drm_capture::{Access, RequestedLayout};
 use pronk_capture::allocation::Heap;
 use pronk_capture::{Actor, Buffer, Config as ActorConfig, Layout, Session};
 use pronk_pipewire::{MAX_VIDEO_BUFFERS, MIN_VIDEO_BUFFERS};
@@ -90,38 +90,65 @@ impl Setup {
         &self,
         config: SetupConfig,
         request: MediaStartRequest,
-        expected_offer: drm_capture::OfferId,
+        description: drm_capture::Description,
         buffers: Vec<Buffer>,
         cancellation: CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
         on_worker(Arc::clone(&self.0), cancellation, move |state, cancel| {
-            state.create_actor_from_buffers(config, request, Some(expected_offer), buffers, cancel)
+            state.create_actor_from_buffers(config, request, description, buffers, cancel)
         })
         .await
     }
 
     pub(crate) async fn describe_if_active(
         &self,
+        layout: Option<RequestedLayout>,
         cancellation: CancellationToken,
-    ) -> Result<Option<drm_capture::Description>, MediaPipelineError> {
-        on_worker(Arc::clone(&self.0), cancellation, |state, _| {
-            match state.describe() {
-                Ok(description) => Ok(Some(description)),
-                Err(error) if error.raw_os_error() == Some(nix::libc::ENODEV) => Ok(None),
-                Err(error) => Err(MediaPipelineError::new(format!(
-                    "describe capture output: {error}"
-                ))),
-            }
+    ) -> Result<DescriptionState, MediaPipelineError> {
+        on_worker(Arc::clone(&self.0), cancellation, move |state, _| {
+            DescriptionState::from_result(layout, state.describe(layout))
         })
         .await
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum DescriptionState {
+    Active(drm_capture::Description),
+    Inactive,
+    UnsupportedLayout,
+}
+
+impl DescriptionState {
+    fn from_result(
+        layout: Option<RequestedLayout>,
+        result: std::io::Result<drm_capture::Description>,
+    ) -> Result<Self, MediaPipelineError> {
+        match result {
+            Ok(description) => Ok(Self::Active(description)),
+            Err(error) if error.raw_os_error() == Some(nix::libc::ENODEV) => Ok(Self::Inactive),
+            Err(error)
+                if layout.is_some() && error.raw_os_error() == Some(nix::libc::EOPNOTSUPP) =>
+            {
+                Ok(Self::UnsupportedLayout)
+            }
+            Err(error) => Err(MediaPipelineError::new(format!(
+                "describe capture output: {error}"
+            ))),
+        }
+    }
+}
+
 impl State {
-    fn describe(&self) -> std::io::Result<drm_capture::Description> {
-        match &self.session {
-            Some(session) => session.describe(),
-            None => self.access.describe(),
+    fn describe(
+        &self,
+        layout: Option<RequestedLayout>,
+    ) -> std::io::Result<drm_capture::Description> {
+        match (&self.session, layout) {
+            (Some(session), Some(layout)) => session.describe_layout(layout),
+            (Some(session), None) => session.describe(),
+            (None, Some(layout)) => self.access.describe_layout(layout),
+            (None, None) => self.access.describe(),
         }
     }
 
@@ -132,7 +159,7 @@ impl State {
         expected_offer: Option<drm_capture::OfferId>,
         cancellation: &CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
-        let offer = self.describe().map_err(|error| {
+        let offer = self.describe(None).map_err(|error| {
             MediaPipelineError::new(format!("describe capture output: {error}"))
         })?;
         if expected_offer.is_some_and(|expected| expected != offer.offer) {
@@ -149,14 +176,14 @@ impl State {
         let buffers = Heap::open(&config.heap_path)
             .and_then(|heap| heap.allocate(layout, config.pool_size, config.pool_byte_limit))
             .map_err(|error| MediaPipelineError::new(format!("allocate capture pool: {error}")))?;
-        self.spawn_actor(config, request, expected_offer, buffers, cancellation)
+        self.spawn_actor(config, request, Some(offer), buffers, cancellation)
     }
 
     fn create_actor_from_buffers(
         &mut self,
         config: SetupConfig,
         request: MediaStartRequest,
-        expected_offer: Option<drm_capture::OfferId>,
+        description: drm_capture::Description,
         buffers: Vec<Buffer>,
         cancellation: &CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
@@ -165,14 +192,14 @@ impl State {
                 "capture buffer count does not match pool policy",
             ));
         }
-        self.spawn_actor(config, request, expected_offer, buffers, cancellation)
+        self.spawn_actor(config, request, Some(description), buffers, cancellation)
     }
 
     fn spawn_actor(
         &mut self,
         config: SetupConfig,
         request: MediaStartRequest,
-        expected_offer: Option<drm_capture::OfferId>,
+        description: Option<drm_capture::Description>,
         buffers: Vec<Buffer>,
         cancellation: &CancellationToken,
     ) -> Result<(Actor<CaptureOwner>, Layout), MediaPipelineError> {
@@ -192,8 +219,8 @@ impl State {
             poll_interval: config.poll_interval,
             shutdown_timeout: config.shutdown_timeout,
         };
-        let actor = match expected_offer {
-            Some(offer) => session.spawn_for_offer(buffers, actor_config, offer),
+        let actor = match description {
+            Some(description) => session.spawn_for_offer(buffers, actor_config, description),
             None => session.spawn(buffers, actor_config),
         }
         .map_err(|error| MediaPipelineError::new(format!("start capture actor: {error}")))?;
@@ -254,6 +281,25 @@ mod tests {
             poll_interval: Duration::from_millis(2),
             shutdown_timeout: Duration::from_secs(5),
         }
+    }
+
+    #[test]
+    fn exact_layout_waits_for_renderer_activation_but_default_failure_is_terminal() {
+        let exact = RequestedLayout::new(u32::from_le_bytes(*b"AR24"), 9).unwrap();
+        let unsupported = || std::io::Error::from_raw_os_error(nix::libc::EOPNOTSUPP);
+        assert!(matches!(
+            DescriptionState::from_result(Some(exact), Err(unsupported())).unwrap(),
+            DescriptionState::UnsupportedLayout
+        ));
+        assert!(DescriptionState::from_result(None, Err(unsupported())).is_err());
+        assert!(matches!(
+            DescriptionState::from_result(
+                Some(exact),
+                Err(std::io::Error::from_raw_os_error(nix::libc::ENODEV))
+            )
+            .unwrap(),
+            DescriptionState::Inactive
+        ));
     }
 
     #[test]

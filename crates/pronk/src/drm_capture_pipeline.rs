@@ -17,7 +17,7 @@ use pronk_pipewire::{
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::setup::{
-    CaptureOwner, Setup as CaptureSetup, SetupConfig as CaptureSetupConfig,
+    CaptureOwner, DescriptionState, Setup as CaptureSetup, SetupConfig as CaptureSetupConfig,
 };
 use crate::capture_health::{CaptureEvents, CaptureMonitor};
 use crate::device_session_port::{DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaTarget};
@@ -315,6 +315,8 @@ pub(crate) fn capture_caps(layout: VideoBufferLayout, frame_rate: VideoFrameRate
     let fourcc = match layout.format {
         VideoPixelFormat::Xrgb8888 => "XR24",
         VideoPixelFormat::Argb8888 => "AR24",
+        VideoPixelFormat::Xbgr8888 => "XB24",
+        VideoPixelFormat::Abgr8888 => "AB24",
     };
     match layout.storage {
         VideoBufferStorage::MappableLinear => format!(
@@ -322,6 +324,8 @@ pub(crate) fn capture_caps(layout: VideoBufferLayout, frame_rate: VideoFrameRate
             match layout.format {
                 VideoPixelFormat::Xrgb8888 => "BGRx",
                 VideoPixelFormat::Argb8888 => "BGRA",
+                VideoPixelFormat::Xbgr8888 => "RGBx",
+                VideoPixelFormat::Abgr8888 => "RGBA",
             },
             layout.width,
             layout.height,
