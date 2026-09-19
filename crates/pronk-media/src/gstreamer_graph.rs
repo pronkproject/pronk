@@ -161,9 +161,9 @@ impl GStreamerGraph {
             .property("autoconnect", true)
             // Preserve the imported DMA-BUF pool. `stream.is-live=false`
             // above prevents GstBaseSrc from holding one of these buffers in
-            // a live presentation timestamp wait, and the asynchronous queue
-            // remains after conversion so it retains I420 allocations rather
-            // than BGRx capture buffers.
+            // a live presentation timestamp wait. The asynchronous queue
+            // follows conversion so it retains encoder-input images rather
+            // than capture buffers, for both software and VA paths.
             .property("use-bufferpool", true)
             .property(
                 "client-name",

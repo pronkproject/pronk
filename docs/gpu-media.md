@@ -824,6 +824,11 @@ accepted by the worker rather than extending those defaults implicitly.
 
 ## Installed hardware encoder
 
+The media graph converts each DMA-BUF capture image into an independent
+VA-memory encoder input before its bounded asynchronous queue. An encoder
+stall therefore retains converted images, not capture-pool destinations.
+The software path uses the same queue boundary with converted I420 images.
+
 The installed Chromecast backend deliberately starts with software encoding
 and no DRM device in its private device namespace. Its software Cast offer
 prefers H.264 and retains VP8 for receivers that select it; a selected VA
