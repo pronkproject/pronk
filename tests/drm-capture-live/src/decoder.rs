@@ -12,7 +12,11 @@ pub struct Decoder {
 impl Decoder {
     pub fn new() -> anyhow::Result<Self> {
         gst::init()?;
-        let pipeline = gst::parse::launch("appsrc name=input format=time ! video/x-h264,stream-format=byte-stream,alignment=au ! h264parse ! avdec_h264 ! videoconvert ! video/x-raw,format=BGRx ! appsink name=output sync=false enable-last-sample=false")?
+        let decoder = ["avdec_h264", "openh264dec"]
+            .into_iter()
+            .find(|name| gst::ElementFactory::make(name).build().is_ok())
+            .context("no usable H.264 decoder (avdec_h264 or openh264dec)")?;
+        let pipeline = gst::parse::launch(&format!("appsrc name=input format=time ! video/x-h264,stream-format=byte-stream,alignment=au ! h264parse ! {decoder} ! videoconvert ! video/x-raw,format=BGRx ! appsink name=output sync=false enable-last-sample=false"))?
             .downcast::<gst::Pipeline>().map_err(|_| anyhow::anyhow!("expected decode pipeline"))?;
         let input = pipeline
             .by_name("input")
