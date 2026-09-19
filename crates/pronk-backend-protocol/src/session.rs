@@ -280,7 +280,8 @@ impl Validate for AudioProfile {
 pub struct PreparationRequest {
     pub preparation_generation: u64,
     pub candidate_modes: Vec<DisplayMode>,
-    /// Empty when every profile layout works at every candidate mode.
+    /// Empty when raw-layout availability has no per-mode restriction.
+    /// Video profile dimensions and refresh limits still apply separately.
     pub mode_raw_layouts: Vec<ModeRawLayouts>,
     pub video_profiles: Vec<VideoProfile>,
     pub audio_profiles: Vec<AudioProfile>,
