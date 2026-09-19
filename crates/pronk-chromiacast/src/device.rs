@@ -2347,6 +2347,7 @@ mod tests {
                 render_node,
                 render_device,
                 raw_layouts,
+                minimum_bitrate: 0,
             },
         )
         .unwrap();

@@ -74,10 +74,12 @@ impl VideoFeedbackController {
     pub(crate) fn new(
         configured_bitrate: NonZeroU64,
         receiver_minimum: Option<NonZeroU32>,
+        encoder_minimum: u64,
         playout_delay: Option<AdaptivePlayoutDelayConfiguration>,
     ) -> Self {
         let receiver_minimum = receiver_minimum.map_or(0, |value| u64::from(value.get()));
         let floor = receiver_minimum
+            .max(encoder_minimum)
             .max(DEFAULT_BITRATE_FLOOR)
             .min(configured_bitrate.get());
         Self {
@@ -334,11 +336,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn encoder_minimum_bounds_feedback_decreases() {
+        let mut controller = VideoFeedbackController::new(
+            NonZeroU64::new(2_000_000).unwrap(),
+            NonZeroU32::new(500_000),
+            1_200_000,
+            None,
+        );
+        controller.current = NonZeroU64::new(1_300_000).unwrap();
+        assert_eq!(controller.decreased_bitrate(), NonZeroU64::new(1_200_000));
+        controller.current = NonZeroU64::new(1_200_000).unwrap();
+        assert_eq!(controller.decreased_bitrate(), None);
+    }
+
+    #[test]
     fn coalesces_key_frame_requests_and_reduces_at_a_bounded_rate() {
         let start = Instant::now();
         let mut controller = VideoFeedbackController::new(
             NonZeroU64::new(2_000_000).unwrap(),
             NonZeroU32::new(500_000),
+            0,
             None,
         );
         let overloaded = VideoTransportPressure {
@@ -398,6 +415,7 @@ mod tests {
         let mut controller = VideoFeedbackController::new(
             NonZeroU64::new(2_000_000).unwrap(),
             NonZeroU32::new(500_000),
+            0,
             None,
         );
         let overloaded = VideoTransportPressure {
@@ -436,6 +454,7 @@ mod tests {
         let mut controller = VideoFeedbackController::new(
             NonZeroU64::new(2_000_000).unwrap(),
             None,
+            0,
             Some(AdaptivePlayoutDelayConfiguration {
                 minimum: Duration::from_millis(17),
                 initial: INITIAL_PLAYOUT_DELAY,
@@ -499,6 +518,7 @@ mod tests {
         let mut controller = VideoFeedbackController::new(
             NonZeroU64::new(2_000_000).unwrap(),
             None,
+            0,
             Some(AdaptivePlayoutDelayConfiguration {
                 minimum,
                 initial: INITIAL_PLAYOUT_DELAY,
@@ -561,6 +581,7 @@ mod tests {
         let mut controller = VideoFeedbackController::new(
             NonZeroU64::new(2_000_000).unwrap(),
             None,
+            0,
             Some(AdaptivePlayoutDelayConfiguration {
                 minimum: Duration::from_millis(17),
                 initial: INITIAL_PLAYOUT_DELAY,
@@ -613,6 +634,7 @@ mod tests {
         let mut controller = VideoFeedbackController::new(
             NonZeroU64::new(2_000_000).unwrap(),
             None,
+            0,
             Some(AdaptivePlayoutDelayConfiguration {
                 minimum: Duration::from_millis(17),
                 initial: INITIAL_PLAYOUT_DELAY,
@@ -683,6 +705,7 @@ mod tests {
         let mut controller = VideoFeedbackController::new(
             NonZeroU64::new(2_000_000).unwrap(),
             None,
+            0,
             Some(AdaptivePlayoutDelayConfiguration {
                 minimum: Duration::from_millis(17),
                 initial: INITIAL_PLAYOUT_DELAY,
@@ -715,6 +738,7 @@ mod tests {
         let mut controller = VideoFeedbackController::new(
             NonZeroU64::new(2_000_000).unwrap(),
             None,
+            0,
             Some(AdaptivePlayoutDelayConfiguration {
                 minimum: Duration::from_millis(17),
                 initial: Duration::from_millis(17),

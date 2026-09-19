@@ -229,9 +229,13 @@ fn resolve_encoder_policy(selection: VideoEncoderSelection) -> anyhow::Result<Vi
     render_device
         .validate()
         .context("validate selected render-device identity")?;
-    let formats = pronk_media::VideoEncoder::va_h264(render_node.clone())
+    let encoder = pronk_media::VideoEncoder::va_h264(render_node.clone());
+    let formats = encoder
         .supported_dma_buf_formats(chromecast_video_cadence())
         .context("qualify selected VA H.264 encoder and DMA-BUF input formats")?;
+    let minimum_bitrate = encoder
+        .minimum_bitrate(chromecast_video_cadence())
+        .context("query selected VA H.264 minimum bitrate")?;
     let raw_layouts = formats
         .into_iter()
         .map(|format| {
@@ -242,6 +246,7 @@ fn resolve_encoder_policy(selection: VideoEncoderSelection) -> anyhow::Result<Vi
         render_node,
         render_device,
         raw_layouts,
+        minimum_bitrate,
     })
 }
 
@@ -414,5 +419,25 @@ mod tests {
             render_node: PathBuf::from("/dev/pronk-missing-render-node"),
         })
         .is_err());
+    }
+
+    #[test]
+    #[ignore = "requires PRONK_GPU_RENDER_NODE and a matching VA encoder"]
+    fn selected_va_policy_reads_the_encoder_minimum() {
+        let render_node = PathBuf::from(
+            std::env::var_os("PRONK_GPU_RENDER_NODE")
+                .expect("PRONK_GPU_RENDER_NODE names the selected VA render node"),
+        );
+        let policy = resolve_encoder_policy(VideoEncoderSelection::VaH264 { render_node }).unwrap();
+        let VideoEncoderPolicy::VaH264 {
+            minimum_bitrate,
+            raw_layouts,
+            ..
+        } = policy
+        else {
+            unreachable!("requested a VA encoder")
+        };
+        assert!(!raw_layouts.is_empty());
+        eprintln!("selected VA encoder minimum bitrate: {minimum_bitrate} bit/s");
     }
 }

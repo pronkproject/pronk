@@ -45,6 +45,7 @@ pub(crate) enum VideoEncoderPolicy {
         render_node: PathBuf,
         render_device: RenderDeviceIdentity,
         raw_layouts: Vec<RawVideoLayout>,
+        minimum_bitrate: u64,
     },
 }
 
@@ -54,6 +55,25 @@ impl VideoEncoderPolicy {
             Self::Software => &SOFTWARE_RAW_LAYOUTS,
             Self::VaH264 { raw_layouts, .. } => raw_layouts,
         }
+    }
+
+    fn minimum_bitrate(&self) -> u64 {
+        match self {
+            Self::Software => 0,
+            Self::VaH264 {
+                minimum_bitrate, ..
+            } => *minimum_bitrate,
+        }
+    }
+
+    fn validate_bitrate(&self, bitrate: u64) -> Result<(), String> {
+        let minimum = self.minimum_bitrate();
+        if bitrate < minimum {
+            return Err(format!(
+                "video bitrate {bitrate} bit/s is below the selected encoder minimum of {minimum} bit/s"
+            ));
+        }
+        Ok(())
     }
 
     fn offer(&self) -> VideoOffer {
@@ -510,6 +530,7 @@ impl ChromiacastMediaSession {
         self.feedback_controller = Some(VideoFeedbackController::new(
             NonZeroU64::new(self.video_bitrate).expect("validated bitrate is nonzero"),
             negotiated.minimum_bitrate,
+            self.encoder_policy.minimum_bitrate(),
             adaptive_playout_delay,
         ));
 
@@ -1043,6 +1064,9 @@ impl ChromiacastMediaSession {
         let bitrate = u32::try_from(configuration.video_bitrate).map_err(|_| {
             MediaSessionError::InvalidRequest("video bitrate exceeds Cast's u32 range".into())
         })?;
+        self.encoder_policy
+            .validate_bitrate(configuration.video_bitrate)
+            .map_err(MediaSessionError::InvalidRequest)?;
         let video_cadence = chromecast_video_cadence();
         if !caps.supports_cadence(video_cadence) {
             return Err(MediaSessionError::InvalidRequest(format!(
@@ -1615,6 +1639,7 @@ mod tests {
             render_node: PathBuf::from("/dev/dri/renderD128"),
             render_device: test_render_device(),
             raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
+            minimum_bitrate: 0,
         };
         assert_eq!(policy.offer(), VideoOffer::H264Only);
         assert!(policy.encoder(VideoCodec::Vp8).is_err());
@@ -1632,6 +1657,7 @@ mod tests {
             render_node: PathBuf::from("/dev/dri/renderD128"),
             render_device: test_render_device(),
             raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
+            minimum_bitrate: 0,
         };
         policy
             .validate_video_target(Some(test_render_device()))
@@ -1658,6 +1684,7 @@ mod tests {
                 render_node: PathBuf::from("/dev/dri/renderD128"),
                 render_device: test_render_device(),
                 raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
+                minimum_bitrate: 0,
             },
             Box::new(graph),
             video_receiver,
@@ -1680,6 +1707,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_va_bitrate_is_rejected_before_transport() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (video_output, video_receiver) = mpsc::channel(4);
+        let (_audio_output, audio_receiver) = mpsc::channel(1);
+        let mut media = ChromiacastMediaSession::with_graph_outputs(
+            session_id.into(),
+            7,
+            VideoEncoderPolicy::VaH264 {
+                render_node: PathBuf::from("/dev/dri/renderD128"),
+                render_device: test_render_device(),
+                raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
+                minimum_bitrate: 3_000_000,
+            },
+            Box::new(FakeGraph::video(video_output)),
+            video_receiver,
+            audio_receiver,
+        );
+        media.complete_preparation(capabilities()).unwrap();
+        let mut transport = FakeTransport::default();
+
+        let error = media
+            .configure(
+                remote(),
+                vec![target_on_render_device(session_id, 1)],
+                configuration(),
+                1,
+                &mut transport,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MediaSessionError::InvalidRequest(message) if message.contains("3000000")
+        ));
+        assert!(transport.configuration.is_none());
+        assert_eq!(media.state, SessionState::Prepared);
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn rejected_encoder_selection_closes_the_negotiated_sender() {
         let session_id = "12345678-1234-1234-1234-123456789abc";
         let (video_output, video_receiver) = mpsc::channel(4);
@@ -1692,6 +1759,7 @@ mod tests {
                 render_node: PathBuf::from("/dev/dri/renderD128"),
                 render_device: test_render_device(),
                 raw_layouts: vec![RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9)],
+                minimum_bitrate: 0,
             },
             Box::new(graph),
             video_receiver,
