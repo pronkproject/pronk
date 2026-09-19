@@ -11,6 +11,21 @@ additional planes. Building also requires libdrm and GTK 3 development
 files; GTK supplies the Wayland pattern client. Build the programs before
 entering a privileged test environment:
 
+The VM must have a connected CastKMS monitor with a 640x480 mode before the
+basic fixture starts. Merely loading the driver creates no connected output;
+an administrative monitor attachment or the isolated Mutter/Pronk setup must
+remain alive for the duration of the probe.
+
+For the standalone VM probes, the kernel selftest utility `monitor-run` can
+hold the fallback monitor while giving the child process DRM master:
+
+```sh
+monitor-run /dev/dri/cardN pronk-drm-capture-live-test /dev/dri/cardN
+```
+
+The same wrapper can run `run-pipewire.sh` or `run-pipeline.sh` with their
+usual arguments. It detaches the monitor after the child exits.
+
 ```sh
 cargo build --locked -p pronk-drm-capture-live-test
 ```
@@ -108,8 +123,9 @@ wrapper. Its server configuration is shared with the generated-GPU test;
 no system PipeWire instance or installed policy is changed.
 
 Pass the encoded probe instead to exercise H.264; that additionally requires
-the `x264enc`, `h264parse`, and `avdec_h264` GStreamer plugins. Encoder startup
-is driven concurrently with capture because the media actor acknowledges
+the `x264enc` and `h264parse` GStreamer plugins, plus either `avdec_h264` or
+`openh264dec`. Encoder startup is driven concurrently with capture because
+the media actor acknowledges
 startup only after receiving media.
 
 For the application pipeline probe, use the wrapper that also starts the

@@ -1,8 +1,9 @@
 # GPU media integration
 
 The PipeWire producer accepts two explicit storage descriptions for one
-packed memory plane. `VideoPixelFormat` separately selects XRGB8888 or
-ARGB8888; producers selecting alpha must supply meaningful alpha values:
+packed memory plane. `VideoPixelFormat` separately selects XRGB8888,
+ARGB8888, XBGR8888 or ABGR8888; producers selecting alpha must supply
+meaningful alpha values:
 
 - `VideoBufferStorage::MappableLinear` preserves the existing CastKMS CPU
   capture path. The plane begins at offset zero, its modifier is linear, and
@@ -26,7 +27,7 @@ formula. The caller must obtain a valid, single-memory-plane description from
 its graphics API and the receiving API must support importing it. The transport
 checks dimensions, signed PipeWire field bounds and offset containment; it
 does not validate vendor-specific tiling. Auxiliary memory planes and other
-pixel formats beyond those two are not supported by this initial adapter.
+pixel formats beyond those four are not supported by this adapter.
 
 The backend protocol describes encoder input as bounded
 `(storage, DRM fourcc, modifier)` tuples. Pronk offers the tuples its selected
@@ -36,19 +37,40 @@ PipeWire caps. Matching DMA-BUF storage alone is insufficient: a format or
 modifier mismatch fails preparation or media configuration before a graph is
 started.
 
-The Chromecast backend queries the selected VA converter's DMA-BUF sink-pad
-template during startup. Its advertised tuples therefore belong to the
-selected render device and converter rather than to a hard-coded assumption
-about VA support. The current renderer source offers linear XRGB8888. A host
-whose converter accepts only another tuple, such as tiled ARGB8888, has no
-compatible hardware-encoding path until capture allocation can select that
-tuple. Pronk reports the incompatibility instead of silently changing either
-layout.
+The Chromecast backend selects VA converter and encoder factories whose
+reported render device matches its configured node, then queries that
+converter's DMA-BUF sink-pad template and checks the encoder's
+constrained-baseline output caps during startup. During preparation it
+also intersects the selected converter's VA-memory output caps with the
+encoder's input caps and omits display modes whose picture sizes do not fit.
+Its accepted tuples therefore come from the selected converter rather than a hard-coded VA
+assumption. Pad-template checks are an advertisement filter, not a promise
+that a driver will successfully encode every frame. Pronk separately probes
+formats and modifiers that the selected Vulkan device can export and
+reimport at every offered display size. It presents those layouts to the
+backend in preference order. The initial Cast mode set contains only modes
+the sender can carry, so a discarded non-16:9 mode cannot remove otherwise
+usable GPU layouts from that intersection. The backend still checks the
+received mode list independently. If the GPU probe fails or no render node is
+available, Pronk offers only its known system-memory layout, not an unverified
+linear DMA-BUF. The backend chooses one exact intersection, and
+Pronk requests that same layout from the capture provider before allocating
+its output pool. If no intersection exists, preparation fails without silently
+changing either layout.
+
+The current backend offer carries one raw-layout list for all its modes.
+Pronk therefore requires a GPU modifier to work at every proposed size. A
+machine whose renderer and encoder overlap only at a lower resolution can
+still lose the GPU offer because of a larger proposed mode. Per-mode raw
+layout negotiation is needed to retain that lower-resolution GPU route while
+also preserving independently usable system-memory modes.
 
 ## Ownership and synchronization
 
-The layout API does not submit GPU work or allocate buffers. Those operations
-remain with the capture/executor owner, outside the PipeWire loop. In
+The PipeWire layout description API does not submit GPU work or allocate
+buffers. The renderer's startup probe does allocate and discard images to
+check export and reimport; the later capture pool has separate ownership and
+native validation. These operations stay outside the PipeWire loop. In
 ready-before-publish transport, publication requires the caller to establish
 producer completion.
 A `BufferReleased` event reports the end of PipeWire retention, not completion
@@ -181,7 +203,11 @@ and image creation; format, modifier, dimensions and backing checks remain
 mandatory. Read-only image usage is not revocation of a DMA-BUF descriptor or
 protection against another import of the same allocation.
 
-Images use dedicated device-local memory. Their immutable `ImageLayout` reports
+Exportable images use dedicated memory, preferring a compatible device-local
+type while accepting another compatible type when Vulkan permits it. Imported
+DMA-BUF images follow the same preference after intersecting the image and
+descriptor memory-type masks. Non-exportable composition images still require
+device-local memory. The immutable `ImageLayout` reports
 packed channel order, dimensions, modifier, plane offset, pitch and allocation
 size directly from Vulkan. `Device::allocate` selects BGRA storage;
 `allocate_with_format` explicitly selects `PackedFormat::Bgra8`, `Rgba8`,
@@ -795,7 +821,9 @@ accepted by the worker rather than extending those defaults implicitly.
 ## Installed hardware encoder
 
 The installed Chromecast backend deliberately starts with software encoding
-and no DRM device in its private device namespace. A deployment that has
+and no DRM device in its private device namespace. Its software Cast offer
+prefers H.264 and retains VP8 for receivers that select it; a selected VA
+policy offers H.264 only. A deployment that has
 qualified one VA H.264 render node can select it for every socket-activated
 backend process with a `pronk-chromiacast@.service.d` systemd drop-in such as:
 
@@ -839,25 +867,41 @@ The installed renderer path offers both mapped and DMA-BUF raw-frame storage
 to the media backend. A software encoder selects mapped storage, which the
 shared capture actor allocates from the configured DMA heap. A graphics-capable
 encoder may select DMA-BUF storage, which makes the renderer allocate the
-generic capture offer's exact XR24 or AR24 format and modifier on the selected
+generic capture offer's exact packed RGB format and modifier on the selected
 Vulkan device. An explicit linear modifier remains graphics storage and is
 advertised through DMA_DRM rather than being inferred to be CPU-mappable.
+The four-image GPU capture pool accounts actual native allocation sizes
+against a 256 MiB limit, rather than assuming tightly packed rows. This is
+an upper bound, not a reservation; a modifier whose four allocations exceed
+it still fails setup. The mapped capture pool retains its separate 128 MiB
+limit.
 
-Raw-frame storage negotiation does not select the capture format or modifier.
-Those still follow the display and renderer constraints rather than the
-encoder's import abilities. Hardware encoding therefore remains unavailable
-when the capture offer has no tuple accepted by the selected encoder, even
-though both sides support DMA-BUF storage in general.
+Raw-frame storage negotiation selects the final-image capture format and
+modifier, not the KMS source framebuffer format. The renderer's source scene
+still follows display constraints independently. An exact capture description
+and registered destination must agree; changing either requires a fresh offer
+or buffer pool.
+Renderer-private packed scene images choose an exportable modifier supported
+by the selected GPU, preferring linear when it is available. They are not the
+backend's capture pool, so a GPU that cannot allocate linear private images
+can use another checked modifier without changing the negotiated media layout.
+The float scene pool retains its 512 MiB allocation limit. Its source and final
+image capacities are selected from the active mode before allocation, with
+one-eighth of that limit left for native rounding: the current one-primary
+policy keeps three of each at 2560×1440 and below, and uses two final images
+plus one source image at 3840×2160. Capture requests and exported destinations
+retain separate budgets. Actual native allocation sizes are checked after this
+conservative size estimate, so a device with unusually large images may still
+reject a mode rather than exceed the limit.
 
 The generated-image harness joins a separate producer's source import, private
 staging, exported output reuse and hardware encoding for one explicit tiled
 tuple. It overwrites source and staging before checking the decoded output.
-Negotiating a display constraint that is also compatible with the selected
-encoder remains integration work. Hardware encoding also requires the
+Hardware encoding also requires the
 deployment to install the per-instance device authorization above; the default
 software encoder and base service sandbox remain available without DRM access.
-A transport-level modifier test is not qualification of the complete private
-PipeWire, encoder or receiver path.
+The private generated-image test qualifies GPU output through the production
+PipeWire and VA H.264 path but not a live CastKMS capture or receiver session.
 
 Userspace-rendered video targets carry the major and minor number of the exact
 render node used to select their Vulkan device. The Chromecast backend records

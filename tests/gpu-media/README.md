@@ -50,8 +50,9 @@ source-side Vulkan image and memory owners are destroyed before the output
 device imports it. The output device copies the bridge into a persistent output
 image and destroys the import after completion. The private composition image
 is overwritten black before publication. Only the four output allocations are
-registered with PipeWire. They remain eight-bit BGRA regardless of source
-precision or channel order; the hardware H.264 profile is not ten-bit or HDR.
+registered with PipeWire. They remain eight-bit packed RGB in the selected
+output channel order, regardless of source precision; the hardware H.264
+profile is not ten-bit or HDR.
 Private input and composition allocations are created before source admission
 and reused across frames; they have no export API or external reuse dependency.
 A single immutable blend program is created alongside that storage and retained
@@ -168,6 +169,23 @@ registry in each log directory so plugin discovery reflects the chosen driver.
 Missing codec support or incompatible formats fail the test; there is no
 software-encoder fallback.
 
+To inspect the exact GPU/VA layout overlap at every initially offered Cast
+picture size, run the opt-in qualification test with the same render node:
+
+```sh
+PRONK_GPU_RENDER_NODE=/dev/dri/renderD128 \
+PRONK_EXPECT_SHARED_MODE=3840x2160 \
+LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
+    cargo test -p pronk-gpu-media-test --features native \
+    --test hardware_offer -- --ignored --nocapture
+```
+
+The test allocates, exports and reimports disposable Vulkan images for each
+candidate modifier, then intersects them with the selected VA converter's
+advertised DMA-BUF formats. It reports per-size and common layouts. Omit
+`PRONK_EXPECT_SHARED_MODE` to inspect another machine without requiring 4K;
+the test still cannot guarantee that every later VA frame import succeeds.
+
 This profile describes the Vulkan image as ARGB with producer-written opaque
 alpha. On this device VA conversion accepts tiled ARGB but not tiled XRGB;
 the raw profile retains XRGB. Conversion must produce independent VA-memory
@@ -176,6 +194,28 @@ remains retained through six encoded outputs, so a successful diagnostic run
 exercises subsequent publications while that input is unavailable for
 rewriting. The production profile instead exercises the production queue and
 buffer-return policy.
+
+An explicitly linear ARGB DMA-BUF does not link to this device's VA converter:
+its advertised DMA-BUF sink caps list the tested tiled modifier but not linear
+ARGB. The installed backend intersects exact converter caps with Pronk's GPU
+offer, so that unsupported tuple is excluded before a session is prepared.
+The fixture reports a converter-link error promptly if it is requested anyway.
+
+The optional fifth argument selects an exact output fourcc: `XR24`, `AR24`,
+`XB24` or `AB24`. The raw profile defaults to `XR24`; encoded profiles default
+to `AR24`. The private bridge, PipeWire caps and VA input all follow that exact
+choice. A selected converter need not accept every fourcc it can render: this
+machine's VA converter advertises tiled `AR24`, `XB24` and `AB24`, but not tiled
+`XR24`. The production test checks decoded pixel order for each supported
+choice:
+
+```sh
+LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
+    sh tests/gpu-media/run-private.sh /dev/dri/renderD128 \
+    0100000000000009 production-va-h264 sandbox AB24
+```
+
+The same production and sandbox checks also pass with `XB24` on this device.
 
 The encoder disables B-frames, requests constrained-baseline byte-stream access
 units, and supplies parameter sets with keyframes. Validation checks the caps,
