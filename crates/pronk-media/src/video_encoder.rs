@@ -61,6 +61,19 @@ impl VideoCodec {
 }
 
 impl VideoEncoder {
+    /// Minimum rate accepted by the selected hardware encoder, in bit/s.
+    pub fn minimum_bitrate(&self, cadence: VideoCadence) -> Result<u64, MediaGraphError> {
+        let Self::VaH264 { render_node } = self else {
+            return Ok(0);
+        };
+        let encoder = build_va_h264(render_node, None, cadence)?;
+        let property = encoder
+            .find_property("bitrate")
+            .and_then(|property| property.downcast::<gst::glib::ParamSpecUInt>().ok())
+            .ok_or_else(|| MediaGraphError::new("VA H.264 bitrate control is not unsigned"))?;
+        Ok(u64::from(property.minimum()).saturating_mul(1_000))
+    }
+
     /// Check the selected encoder path against concrete picture sizes.
     ///
     /// The converter's DMA-BUF input, VA output and encoder input must all
