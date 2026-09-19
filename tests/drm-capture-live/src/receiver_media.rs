@@ -205,7 +205,7 @@ pub async fn run(
     }
     let statistics = media.stop(generation).await?;
     media.shutdown().await?;
-    verify_encoded_delivery(&statistics)?;
+    verify_video_delivery(&statistics)?;
     if let Some(render_node) = va_render_node.as_deref() {
         verify_va_execution(&statistics, render_node)?;
     }
@@ -221,11 +221,12 @@ pub async fn run(
     Ok(())
 }
 
-fn verify_encoded_delivery(statistics: &pronk_media::MediaGraphStatistics) -> anyhow::Result<()> {
+fn verify_video_delivery(statistics: &pronk_media::MediaGraphStatistics) -> anyhow::Result<()> {
     ensure!(
-        statistics.dropped_frames == 0,
-        "media graph discarded {} encoded access units",
-        statistics.dropped_frames
+        statistics.dropped_video_frames() == 0,
+        "media graph lost video frames: raw queue overruns={}, encoded access units discarded={}",
+        statistics.raw_frames_dropped,
+        statistics.dropped_frames,
     );
     Ok(())
 }
@@ -321,7 +322,7 @@ fn qualify_va_target(
 
 #[cfg(test)]
 mod tests {
-    use super::{verify_encoded_delivery, verify_transport_cadence, verify_va_execution};
+    use super::{verify_transport_cadence, verify_va_execution, verify_video_delivery};
     use pronk_media::MediaGraphStatistics;
     use std::path::Path;
 
@@ -347,11 +348,14 @@ mod tests {
     }
 
     #[test]
-    fn encoded_output_loss_fails_the_receiver_probe() {
+    fn raw_or_encoded_video_loss_fails_the_receiver_probe() {
         let mut statistics = MediaGraphStatistics::default();
-        assert!(verify_encoded_delivery(&statistics).is_ok());
+        assert!(verify_video_delivery(&statistics).is_ok());
         statistics.dropped_frames = 1;
-        assert!(verify_encoded_delivery(&statistics).is_err());
+        assert!(verify_video_delivery(&statistics).is_err());
+        statistics.dropped_frames = 0;
+        statistics.raw_frames_dropped = 1;
+        assert!(verify_video_delivery(&statistics).is_err());
     }
 
     #[test]

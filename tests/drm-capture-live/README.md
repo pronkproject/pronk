@@ -185,7 +185,8 @@ feedback. After twelve locally decoded frames and both pattern colors, the
 pixel oracle stops decoding so it cannot limit the rest of the run. For at
 least fifteen seconds after media activation, the probe requires 24 encoded
 and acknowledged frames per second on average, measured against the actual
-elapsed time. Any encoded output loss fails the run. Normal completion, error,
+elapsed time. Raw-queue overruns or discarded encoded access units fail the
+run. Normal completion, error,
 Ctrl-C, and the probe timeout all attempt to stop the application; that does
 not restore whatever the receiver was previously playing.
 
