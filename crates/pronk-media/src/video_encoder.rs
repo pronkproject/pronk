@@ -63,8 +63,8 @@ impl VideoCodec {
 impl VideoEncoder {
     /// Check the selected encoder path against concrete picture sizes.
     ///
-    /// A converter accepting a DMA-BUF layout does not imply that its VA
-    /// output and the encoder accept every display mode in the offer.
+    /// The converter's DMA-BUF input, VA output and encoder input must all
+    /// accept the selected picture size and cadence.
     pub fn supported_dimensions(
         &self,
         dimensions: &[(u32, u32)],
@@ -84,11 +84,20 @@ impl VideoEncoder {
         let converter_output = converter
             .pad_template("src")
             .ok_or_else(|| MediaGraphError::new("VA converter has no source pad template"))?;
+        let converter_input = converter
+            .pad_template("sink")
+            .ok_or_else(|| MediaGraphError::new("VA converter has no sink pad template"))?;
         let encoder_input = encoder
             .pad_template("sink")
             .ok_or_else(|| MediaGraphError::new("VA encoder has no sink pad template"))?;
         let compatible = converter_output.caps().intersect(encoder_input.caps());
-        supported_va_dimensions(&compatible, dimensions, cadence)
+        let input = supported_dma_buf_dimensions(converter_input.caps(), dimensions, cadence)?;
+        let output = supported_va_dimensions(&compatible, dimensions, cadence)?;
+        Ok(input
+            .into_iter()
+            .zip(output)
+            .map(|(input, output)| input && output)
+            .collect())
     }
 
     /// Query concrete DMA-BUF layouts accepted by the selected converter.
@@ -345,6 +354,27 @@ fn supported_va_dimensions(
         .collect()
 }
 
+fn supported_dma_buf_dimensions(
+    input: &gst::CapsRef,
+    dimensions: &[(u32, u32)],
+    cadence: VideoCadence,
+) -> Result<Vec<bool>, MediaGraphError> {
+    dimensions
+        .iter()
+        .map(|&(width, height)| {
+            let requested = format!(
+                "video/x-raw(memory:DMABuf),format=(string)DMA_DRM,width=(int){width},height=(int){height},framerate=(fraction){}",
+                cadence.caps_fraction()
+            )
+            .parse::<gst::Caps>()
+            .map_err(|error| {
+                MediaGraphError::new(format!("construct DMA-BUF picture-size caps: {error}"))
+            })?;
+            Ok(input.can_intersect(&requested))
+        })
+        .collect()
+}
+
 fn require_va_baseline_output(encoder: &gst::Element) -> Result<(), MediaGraphError> {
     let output = encoder
         .pad_template("src")
@@ -585,6 +615,19 @@ mod tests {
         assert_eq!(
             supported_va_dimensions(&compatible, &[(1920, 1080)], sixty).unwrap(),
             [false]
+        );
+    }
+
+    #[test]
+    fn va_size_probe_also_checks_dma_buf_input_limits() {
+        gst::init().unwrap();
+        let input: gst::Caps = "video/x-raw(memory:DMABuf),format=(string)DMA_DRM,drm-format=(string)AR24:0x0100000000000009,width=(int)[1,1920],height=(int)[1,1080],framerate=(fraction)[1/1,60/1]"
+            .parse()
+            .unwrap();
+        let dimensions = [(1920, 1080), (2560, 1440)];
+        assert_eq!(
+            supported_dma_buf_dimensions(&input, &dimensions, cadence()).unwrap(),
+            [true, false]
         );
     }
 
