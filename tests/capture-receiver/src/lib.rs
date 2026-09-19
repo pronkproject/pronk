@@ -172,13 +172,13 @@ fn validate_profile(answer: &chromiacast::Answer, width: u32, height: u32) -> an
                             .frame_rate
                             .is_some_and(|rate| 30 * u64::from(rate.denominator())
                                 > u64::from(rate.numerator())))
-                && !video
+                && video
                     .min_bit_rate
-                    .is_some_and(|minimum| minimum > 4_000_000)
-                && !video
+                    .is_none_or(|minimum| minimum <= 4_000_000)
+                && video
                     .max_bit_rate
-                    .is_some_and(|maximum| maximum < 4_000_000)
-                && !video.max_delay.is_some_and(|maximum| maximum < 400)
+                    .is_none_or(|maximum| maximum >= 4_000_000)
+                && video.max_delay.is_none_or(|maximum| maximum >= 400)
                 && !video
                     .max_pixels_per_second
                     .is_some_and(|maximum| f64::from(width) * f64::from(height) * 30.0 > maximum),
