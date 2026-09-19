@@ -22,6 +22,7 @@ use pronk::renderer_capture_pipeline::{
 };
 use pronk_capture_broker::{Provider, Target};
 use pronk_capture_receiver_test::Receiver;
+use pronk_media::VideoEncoder;
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use tokio_util::sync::CancellationToken;
 
@@ -38,9 +39,11 @@ struct Probe {
     width: u32,
     height: u32,
     refresh_millihz: u32,
+    raw_format: u32,
     modifier: u64,
     socket: PathBuf,
     receiver: Option<SocketAddr>,
+    va_render_node: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -53,10 +56,10 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("initialize probe logging: {error}"))?;
     let args: Vec<_> = std::env::args().skip(1).collect();
     ensure!(
-        args.len() == 8 || (args.len() == 10 && args[8] == "--receiver"),
-        "expected device, CRTC, connector, width, height, refresh millihertz, output modifier and private socket, optionally --receiver IP:PORT; receiver mode interrupts playback"
+        args.len() >= 8 && (args.len() - 8).is_multiple_of(2),
+        "expected device, CRTC, connector, width, height, refresh millihertz, output modifier and private socket, followed by option/value pairs"
     );
-    let address: Option<SocketAddr> = args.get(9).map(|address| address.parse()).transpose()?;
+    let (address, va_render_node, raw_format) = parse_options(&args[8..])?;
     let device = std::fs::metadata(&args[0])?.rdev();
     let target = Target {
         device_major: nix::sys::stat::major(device).try_into()?,
@@ -69,9 +72,11 @@ async fn main() -> anyhow::Result<()> {
         width: args[3].parse()?,
         height: args[4].parse()?,
         refresh_millihz: args[5].parse()?,
+        raw_format,
         modifier: parse_u64(&args[6]).context("output modifier")?,
         socket: PathBuf::from(&args[7]),
         receiver: address,
+        va_render_node,
     };
     let mut receiver = Receiver::default();
     let result = tokio::select! {
@@ -105,9 +110,11 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
         width,
         height,
         refresh_millihz,
+        raw_format,
         modifier,
         socket,
         receiver: address,
+        va_render_node,
     } = probe;
     let connection = zbus::Connection::session().await?;
     let acquired = connection
@@ -170,10 +177,7 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
             device_instance: "castkms-test".into(),
             node_description: "Live delegated renderer".into(),
             video_profile_id: "raw-dmabuf".into(),
-            raw_layout: pronk_backend_protocol::RawVideoLayout::dma_buf(
-                u32::from_le_bytes(*b"XR24"),
-                modifier,
-            ),
+            raw_layout: pronk_backend_protocol::RawVideoLayout::dma_buf(raw_format, modifier),
             video_bitrate: nz64(4_000_000),
             video_frame_rate: pronk_pipewire::VideoFrameRate::integer(nz(30)),
             private_pool: RendererPrivatePoolConfig {
@@ -205,6 +209,7 @@ async fn run(probe: Probe, receiver: &mut Receiver) -> anyhow::Result<()> {
                 &socket,
                 receiver,
                 address,
+                VideoEncoder::va_h264(va_render_node.context("VA render node is missing")?),
             );
             tokio::pin!(media);
             tokio::select! {
@@ -331,5 +336,94 @@ fn parse_u64(value: &str) -> anyhow::Result<u64> {
     match value.strip_prefix("0x") {
         Some(hex) => Ok(u64::from_str_radix(hex, 16)?),
         None => Ok(value.parse()?),
+    }
+}
+
+fn parse_options(options: &[String]) -> anyhow::Result<(Option<SocketAddr>, Option<PathBuf>, u32)> {
+    let mut receiver = None;
+    let mut va_render_node = None;
+    let mut raw_format = None;
+    let mut pairs = options.chunks_exact(2);
+    for pair in &mut pairs {
+        match pair[0].as_str() {
+            "--receiver" => {
+                ensure!(receiver.is_none(), "duplicate --receiver");
+                receiver = Some(pair[1].parse().context("receiver address")?);
+            }
+            "--va-render-node" => {
+                ensure!(va_render_node.is_none(), "duplicate --va-render-node");
+                va_render_node = Some(PathBuf::from(&pair[1]));
+            }
+            "--raw-format" => {
+                ensure!(raw_format.is_none(), "duplicate --raw-format");
+                let bytes: [u8; 4] = pair[1]
+                    .as_bytes()
+                    .try_into()
+                    .context("raw format must be a four-character DRM format")?;
+                ensure!(
+                    bytes.iter().all(u8::is_ascii_graphic),
+                    "raw format must contain four printable ASCII characters"
+                );
+                raw_format = Some(u32::from_le_bytes(bytes));
+            }
+            option => anyhow::bail!("unsupported renderer probe option {option}"),
+        }
+    }
+    ensure!(pairs.remainder().is_empty(), "option requires a value");
+    ensure!(
+        receiver.is_some() == va_render_node.is_some(),
+        "--receiver and --va-render-node must be supplied together"
+    );
+    ensure!(
+        raw_format.is_none() || receiver.is_some(),
+        "--raw-format applies only to receiver mode"
+    );
+    Ok((
+        receiver,
+        va_render_node,
+        raw_format.unwrap_or(u32::from_le_bytes(*b"XR24")),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_options;
+
+    fn options(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).into()).collect()
+    }
+
+    #[test]
+    fn receiver_requires_a_selected_va_device() {
+        assert!(parse_options(&options(&["--receiver", "192.0.2.1:8009"])).is_err());
+        assert!(parse_options(&options(&["--va-render-node", "/dev/dri/renderD128"])).is_err());
+        assert!(parse_options(&options(&[
+            "--receiver",
+            "192.0.2.1:8009",
+            "--va-render-node",
+            "/dev/dri/renderD128",
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn raw_format_is_an_exact_fourcc() {
+        let mut receiver = options(&[
+            "--receiver",
+            "192.0.2.1:8009",
+            "--va-render-node",
+            "/dev/dri/renderD128",
+        ]);
+        receiver.extend(options(&["--raw-format", "AB24"]));
+        let (_, _, format) = parse_options(&receiver).unwrap();
+        assert_eq!(format, u32::from_le_bytes(*b"AB24"));
+        for value in ["AB2", "AB245", "é24", "A 24"] {
+            let mut candidate = receiver[..4].to_vec();
+            candidate.extend(options(&["--raw-format", value]));
+            assert!(parse_options(&candidate).is_err());
+        }
+        assert!(parse_options(&options(&["--raw-format", "AB24"])).is_err());
+        receiver.extend(options(&["--raw-format", "XR24"]));
+        assert!(parse_options(&receiver).is_err());
     }
 }

@@ -149,7 +149,14 @@ async fn run(
         },
     };
     let media_result = tokio::select! {
-        result = receiver_media::run(&mut capture, request, socket, receiver, address) => result,
+        result = receiver_media::run(
+            &mut capture,
+            request,
+            socket,
+            receiver,
+            address,
+            pronk_media::VideoEncoder::software(pronk_media::VideoCodec::H264),
+        ) => result,
         event = capture_events.next_event() => {
             Err(anyhow::anyhow!("capture stopped while qualifying media: {event:?}"))
         }

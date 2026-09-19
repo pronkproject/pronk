@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroU64};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -10,8 +11,8 @@ use pronk::media_pipeline_port::CapturePipelinePort;
 use pronk::media_session::{MediaStartRequest, MediaStopReason};
 use pronk_capture_receiver_test::{Receiver, SenderEvent};
 use pronk_media::{
-    MediaGraphActor, MediaGraphConfiguration, PipeWireVideoInput, VideoCadence, VideoCodec,
-    VideoEncoder, VideoFrameDependency,
+    MediaGraphActor, MediaGraphConfiguration, PipeWireVideoInput, ValidatedVideoCaps, VideoCadence,
+    VideoEncoder, VideoFrameDependency, VideoInputLayout,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -31,11 +32,26 @@ pub async fn run(
     socket: &Path,
     receiver: &mut Receiver,
     address: Option<SocketAddr>,
+    encoder: VideoEncoder,
 ) -> anyhow::Result<()> {
     let generation = NonZeroU64::new(request.media_generation).context("zero media generation")?;
     let width = request.route.mode.width;
     let height = request.route.mode.height;
     let prepared = capture.start(request, CancellationToken::new()).await?;
+    let video_target = prepared.video_target;
+    let cadence = VideoCadence::new(nz(30), nz(1));
+    let bitrate = nz64(4_000_000);
+    if let Some(render_node) = encoder.render_node() {
+        qualify_va_target(
+            &video_target,
+            &encoder,
+            render_node,
+            width,
+            height,
+            cadence,
+            bitrate,
+        )?;
+    }
     if let Some(address) = address {
         eprintln!(
             "Starting an explicit receiver test at {address}; current playback will be interrupted"
@@ -43,7 +59,6 @@ pub async fn run(
         receiver.start(address, width, height).await?;
     }
 
-    let video_target = prepared.video_target;
     let (media, mut encoded) = MediaGraphActor::spawn_with_output(16)?;
     let config = MediaGraphConfiguration {
         media_generation: generation,
@@ -54,9 +69,9 @@ pub async fn run(
             caps: video_target.caps,
         },
         audio: None,
-        video_encoder: VideoEncoder::software(VideoCodec::H264),
-        video_cadence: VideoCadence::new(nz(30), nz(1)),
-        video_bitrate: nz64(4_000_000),
+        video_encoder: encoder,
+        video_cadence: cadence,
+        video_bitrate: bitrate,
     };
     let mut decoder = Decoder::new()?;
     let mut received = 0;
@@ -159,5 +174,52 @@ pub async fn run(
         )
         .await?;
     eprintln!("Encoded={received} decoded={decoded} colors={colors:?}");
+    Ok(())
+}
+
+fn qualify_va_target(
+    video_target: &pronk::device_session_port::DeviceMediaTarget,
+    encoder: &VideoEncoder,
+    render_node: &Path,
+    width: u32,
+    height: u32,
+    cadence: VideoCadence,
+    bitrate: NonZeroU64,
+) -> anyhow::Result<()> {
+    let metadata = std::fs::metadata(render_node)
+        .with_context(|| format!("inspect selected render device {}", render_node.display()))?;
+    ensure!(
+        metadata.file_type().is_char_device(),
+        "selected VA render device is not a character device"
+    );
+    let device = video_target
+        .render_device
+        .context("renderer did not identify its render device")?;
+    ensure!(
+        u64::from(device.major) == nix::sys::stat::major(metadata.rdev())
+            && u64::from(device.minor) == nix::sys::stat::minor(metadata.rdev()),
+        "selected VA render device differs from the renderer's Vulkan device"
+    );
+    let caps = ValidatedVideoCaps::parse(&video_target.caps)?;
+    ensure!(
+        caps.width.get() == width && caps.height.get() == height && caps.supports_cadence(cadence),
+        "renderer video target does not match the requested picture and cadence"
+    );
+    let format = match caps.layout {
+        VideoInputLayout::DmaBuf { drm_format } => drm_format,
+        VideoInputLayout::SystemMemoryBgrx => {
+            anyhow::bail!("VA H.264 requires a DMA-BUF video target")
+        }
+    };
+    let accepted = encoder.supported_dma_buf_formats_for_dimensions(&[(width, height)], cadence)?;
+    ensure!(
+        accepted.first().is_some_and(|formats| formats.contains(&format)),
+        "selected VA converter does not accept the renderer's exact output layout {format:?} at {width}x{height}"
+    );
+    let (minimum_bitrate, maximum_bitrate) = encoder.bitrate_limits(cadence)?;
+    ensure!(
+        (minimum_bitrate..=maximum_bitrate).contains(&bitrate.get()),
+        "test bitrate is outside the selected VA encoder range {minimum_bitrate}..={maximum_bitrate} bit/s"
+    );
     Ok(())
 }
