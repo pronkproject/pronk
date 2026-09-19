@@ -57,8 +57,8 @@ if timeout --signal=TERM --kill-after=5 75 \
     --setenv=GST_REGISTRY=/tmp/pronk-va-preparation-registry.bin \
     --setenv=XDG_CACHE_HOME=/tmp/pronk-va-preparation-cache \
     "$@" "$test_binary" \
-    selected_va_device_prepares_only_its_usable_mode_formats \
-    --ignored --nocapture > "$test_run_dir/test.log" 2>&1; then
+    selected_va_ --ignored --nocapture --test-threads=1 \
+    > "$test_run_dir/test.log" 2>&1; then
     cat "$test_run_dir/test.log"
 else
     result=$?
