@@ -291,6 +291,7 @@ impl Validate for PreparationRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         validate_generation("preparation", self.preparation_generation)?;
         validate_nonempty_bounded("candidate modes", &self.candidate_modes, MAX_MODES)?;
+        validate_unique_modes("candidate mode", &self.candidate_modes)?;
         if !self.mode_raw_layouts.is_empty()
             && self.mode_raw_layouts.len() != self.candidate_modes.len()
         {
@@ -415,6 +416,7 @@ impl Validate for DeviceCapabilities {
         validate_generation("preparation", self.preparation_generation)?;
         self.display_identity.validate()?;
         validate_nonempty_bounded("device modes", &self.modes, MAX_MODES)?;
+        validate_unique_modes("device mode", &self.modes)?;
         validate_nonempty_bounded(
             "device video profiles",
             &self.video_profiles,
@@ -914,6 +916,21 @@ where
     Ok(())
 }
 
+fn validate_unique_modes(
+    field: &'static str,
+    modes: &[DisplayMode],
+) -> Result<(), ValidationError> {
+    for (index, mode) in modes.iter().enumerate() {
+        if modes[..index].contains(mode) {
+            return Err(ValidationError::DuplicateIdentifier {
+                field,
+                value: format!("{}x{}@{}mHz", mode.width, mode.height, mode.refresh_millihz),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1058,6 +1075,54 @@ mod tests {
             ..identity
         };
         assert_eq!(invalid.validate(), Err(ValidationError::InvalidPnpId));
+    }
+
+    #[test]
+    fn preparation_rejects_duplicate_modes_without_mode_layouts() {
+        let mut request = PreparationRequest {
+            preparation_generation: 1,
+            candidate_modes: vec![mode()],
+            mode_raw_layouts: Vec::new(),
+            video_profiles: vec![video_profile()],
+            audio_profiles: vec![audio_profile()],
+            requested_features: SESSION_FEATURE_AUDIO,
+        };
+        request.validate().unwrap();
+        request.candidate_modes.push(mode());
+        assert!(matches!(
+            request.validate(),
+            Err(ValidationError::DuplicateIdentifier {
+                field: "candidate mode",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn returned_capabilities_reject_duplicate_modes() {
+        let mut capabilities = DeviceCapabilities {
+            preparation_generation: 1,
+            display_identity: DisplayIdentity {
+                manufacturer_name: None,
+                manufacturer_source: IdentitySource::Absent,
+                product_name: None,
+                product_source: IdentitySource::Absent,
+                pnp_id: None,
+            },
+            modes: vec![mode()],
+            video_profiles: vec![video_profile()],
+            audio_profiles: Vec::new(),
+            features: 0,
+        };
+        capabilities.validate().unwrap();
+        capabilities.modes.push(mode());
+        assert!(matches!(
+            capabilities.validate(),
+            Err(ValidationError::DuplicateIdentifier {
+                field: "device mode",
+                ..
+            })
+        ));
     }
 
     #[test]
