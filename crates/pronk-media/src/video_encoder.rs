@@ -207,7 +207,8 @@ impl VideoEncoder {
                     MediaGraphError::new(format!("construct video converter: {error}"))
                 }),
             Self::VaH264 { render_node } => {
-                let factory = selected_va_factory("postproc", render_node, &[], &[])?;
+                let factory =
+                    selected_va_factory("postproc", render_node, &["disable-passthrough"], &[])?;
                 let converter = gst::ElementFactory::make(&factory)
                     .name("pronk-va-video-convert")
                     .property("disable-passthrough", true)
