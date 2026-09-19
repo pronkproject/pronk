@@ -207,8 +207,11 @@ impl VideoEncoder {
                     MediaGraphError::new(format!("construct video converter: {error}"))
                 }),
             Self::VaH264 { render_node } => {
-                let factory =
-                    selected_va_factory("postproc", render_node, &["disable-passthrough"], &[])?;
+                let factory = selected_va_factory(
+                    "postproc",
+                    render_node,
+                    &[("disable-passthrough", VaPropertyValue::Boolean)],
+                )?;
                 let converter = gst::ElementFactory::make(&factory)
                     .name("pronk-va-video-convert")
                     .property("disable-passthrough", true)
@@ -273,28 +276,23 @@ impl VideoEncoder {
                 }),
             Self::VaH264 { render_node } => {
                 let key_frame_interval = h264::key_frame_interval(cadence);
-                if key_frame_interval > 1_024 {
-                    return Err(MediaGraphError::new(
-                        "VA H.264 key-frame interval exceeds the encoder limit",
-                    ));
-                }
+                let bitrate = h264::bitrate_kbits(bitrate.get())?;
                 let factory = selected_va_factory(
                     "h264enc",
                     render_node,
                     &[
-                        "bitrate",
-                        "key-int-max",
-                        "b-frames",
-                        "cabac",
-                        "dct8x8",
-                        "aud",
-                        "rate-control",
+                        ("bitrate", VaPropertyValue::Unsigned(bitrate)),
+                        ("key-int-max", VaPropertyValue::Unsigned(key_frame_interval)),
+                        ("b-frames", VaPropertyValue::Unsigned(0)),
+                        ("cabac", VaPropertyValue::Boolean),
+                        ("dct8x8", VaPropertyValue::Boolean),
+                        ("aud", VaPropertyValue::Boolean),
+                        ("rate-control", VaPropertyValue::Text("cbr")),
                     ],
-                    &[("rate-control", "cbr")],
                 )?;
                 let encoder = gst::ElementFactory::make(&factory)
                     .name("pronk-va-h264-encoder")
-                    .property("bitrate", h264::bitrate_kbits(bitrate.get())?)
+                    .property("bitrate", bitrate)
                     .property("key-int-max", key_frame_interval)
                     .property("b-frames", 0_u32)
                     .property("cabac", false)
@@ -485,11 +483,17 @@ fn supports_va_baseline_caps(output: &gst::CapsRef) -> Result<bool, MediaGraphEr
     Ok(output.can_intersect(&baseline))
 }
 
+#[derive(Clone, Copy)]
+enum VaPropertyValue<'a> {
+    Boolean,
+    Unsigned(u32),
+    Text(&'a str),
+}
+
 fn selected_va_factory(
     suffix: &str,
     render_node: &Path,
-    required_properties: &[&str],
-    required_values: &[(&str, &str)],
+    properties: &[(&str, VaPropertyValue<'_>)],
 ) -> Result<String, MediaGraphError> {
     let metadata = render_node.metadata().map_err(|error| {
         MediaGraphError::new(format!(
@@ -524,7 +528,7 @@ fn selected_va_factory(
             continue;
         };
         match validate_va_device(&element, render_node)
-            .and_then(|()| validate_va_properties(&element, required_properties, required_values))
+            .and_then(|()| validate_va_properties(&element, properties))
         {
             Ok(()) => return Ok(factory),
             Err(error) => available.push(format!("{factory}: {error}")),
@@ -539,10 +543,9 @@ fn selected_va_factory(
 
 fn validate_va_properties(
     element: &gst::Element,
-    names: &[&str],
-    values: &[(&str, &str)],
+    properties: &[(&str, VaPropertyValue<'_>)],
 ) -> Result<(), MediaGraphError> {
-    for name in names {
+    for &(name, value) in properties {
         let property = element.find_property(name).ok_or_else(|| {
             MediaGraphError::new(format!("{} has no {name} property", element.name()))
         })?;
@@ -552,19 +555,26 @@ fn validate_va_properties(
                 element.name(),
             )));
         }
-    }
-    for &(name, value) in values {
-        let property = element.find_property(name).ok_or_else(|| {
-            MediaGraphError::new(format!("{} has no {name} property", element.name()))
-        })?;
-        gst::glib::Value::deserialize_with_pspec(value, &property).map_err(|_| {
-            MediaGraphError::new(format!(
-                "{} does not accept {name}={value}",
+        if !va_property_accepts(&property, value) {
+            return Err(MediaGraphError::new(format!(
+                "{} does not accept {name}",
                 element.name()
-            ))
-        })?;
+            )));
+        }
     }
     Ok(())
+}
+
+fn va_property_accepts(property: &gst::glib::ParamSpec, value: VaPropertyValue<'_>) -> bool {
+    match value {
+        VaPropertyValue::Boolean => property.is::<gst::glib::ParamSpecBoolean>(),
+        VaPropertyValue::Unsigned(value) => property
+            .downcast_ref::<gst::glib::ParamSpecUInt>()
+            .is_some_and(|spec| (spec.minimum()..=spec.maximum()).contains(&value)),
+        VaPropertyValue::Text(value) => {
+            gst::glib::Value::deserialize_with_pspec(value, property).is_ok()
+        }
+    }
 }
 
 fn validate_va_device(element: &gst::Element, requested: &Path) -> Result<(), MediaGraphError> {
@@ -672,7 +682,7 @@ mod tests {
     #[test]
     fn va_element_selection_rejects_a_regular_file_as_a_render_device() {
         let executable = std::env::current_exe().unwrap();
-        let error = selected_va_factory("h264enc", &executable, &[], &[]).unwrap_err();
+        let error = selected_va_factory("h264enc", &executable, &[]).unwrap_err();
         assert!(error.to_string().contains("not a character device"));
     }
 
@@ -680,13 +690,47 @@ mod tests {
     fn va_property_preflight_reports_unsupported_encoder_controls() {
         gst::init().unwrap();
         let element = gst::ElementFactory::make("fakesink").build().unwrap();
-        let missing = validate_va_properties(&element, &["rate-control"], &[]).unwrap_err();
+        let missing = validate_va_properties(
+            &element,
+            &[("rate-control", VaPropertyValue::Text("cbr"))],
+        )
+        .unwrap_err();
         assert!(missing.to_string().contains("rate-control property"));
-        let readonly = validate_va_properties(&element, &["last-sample"], &[]).unwrap_err();
+        let readonly = validate_va_properties(
+            &element,
+            &[("last-sample", VaPropertyValue::Boolean)],
+        )
+        .unwrap_err();
         assert!(readonly.to_string().contains("cannot set its last-sample property"));
-        let unsupported =
-            validate_va_properties(&element, &[], &[("state-error", "cbr")]).unwrap_err();
-        assert!(unsupported.to_string().contains("state-error=cbr"));
+        let unsupported = validate_va_properties(
+            &element,
+            &[("state-error", VaPropertyValue::Text("cbr"))],
+        )
+        .unwrap_err();
+        assert!(unsupported.to_string().contains("does not accept state-error"));
+        let wrong_type = validate_va_properties(
+            &element,
+            &[("num-buffers", VaPropertyValue::Unsigned(0))],
+        )
+        .unwrap_err();
+        assert!(wrong_type.to_string().contains("does not accept num-buffers"));
+        assert!(validate_va_properties(
+            &element,
+            &[("enable-last-sample", VaPropertyValue::Boolean)],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn va_property_preflight_respects_unsigned_limits() {
+        let property = gst::glib::ParamSpecUInt::builder("bitrate")
+            .minimum(1)
+            .maximum(100)
+            .default_value(1)
+            .build();
+        assert!(!va_property_accepts(&property, VaPropertyValue::Unsigned(0)));
+        assert!(va_property_accepts(&property, VaPropertyValue::Unsigned(100)));
+        assert!(!va_property_accepts(&property, VaPropertyValue::Unsigned(101)));
     }
 
     #[test]
