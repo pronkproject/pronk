@@ -343,6 +343,7 @@ impl VideoEncoder {
             }
             Self::VaH264 { .. } => {
                 let bitrate = h264::bitrate_kbits(bitrate.get())?;
+                validate_va_properties(encoder, &[("bitrate", VaPropertyValue::Unsigned(bitrate))])?;
                 encoder.set_property("bitrate", bitrate);
                 Ok(u64::from(bitrate).saturating_mul(1_000))
             }
@@ -731,6 +732,17 @@ mod tests {
         assert!(!va_property_accepts(&property, VaPropertyValue::Unsigned(0)));
         assert!(va_property_accepts(&property, VaPropertyValue::Unsigned(100)));
         assert!(!va_property_accepts(&property, VaPropertyValue::Unsigned(101)));
+    }
+
+    #[test]
+    fn va_bitrate_update_rejects_an_incompatible_encoder() {
+        gst::init().unwrap();
+        let encoder = gst::ElementFactory::make("fakesink").build().unwrap();
+        let backend = VideoEncoder::va_h264("/dev/null");
+        let error = backend
+            .set_bitrate(&encoder, std::num::NonZeroU64::new(1_000_000).unwrap())
+            .unwrap_err();
+        assert!(error.to_string().contains("bitrate property"));
     }
 
     #[test]
