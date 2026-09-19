@@ -5,7 +5,27 @@ use std::os::fd::AsFd;
 
 use crate::scene_image::{RenderedFrame, SceneImage};
 use crate::scene_reads::{PreparedSceneReads, SubmittedSceneReads};
-use crate::{PrivateBuffer, QualifiedSceneJob, SceneBuffers, SceneCompositionError, SceneInputs};
+use crate::{
+    PrivateBuffer, QualifiedSceneJob, SceneBuffers, SceneComposer, SceneCompositionError,
+    SceneFrames, SceneInputs,
+};
+
+impl<'job, F: AsFd> QualifiedSceneJob<'job, F> {
+    /// Render an active output with no visible source planes.
+    pub(crate) fn render_blank(
+        self,
+        destination: PrivateBuffer,
+        target: SceneImage,
+    ) -> Result<RenderedFrame, SceneCompletionError> {
+        let (job, composer) = self.into_parts();
+        let frames = SceneFrames::new(job.content_serial(), Vec::new())
+            .map_err(|error| SceneCompletionError::Source(error.into_parts().1))?;
+        let rendered = finish_scene(job, composer, destination, target, frames)?;
+        let (sources, frame) = rendered.into_parts();
+        debug_assert!(sources.is_empty());
+        Ok(frame)
+    }
+}
 
 impl<'job, F: AsFd> QualifiedSceneJob<'job, F> {
     /// Import sources only after a complete private slot has been reserved.
@@ -174,26 +194,35 @@ impl<F: AsFd> SubmittedSceneJob<'_, F> {
             .reads
             .wait(content_serial)
             .map_err(SceneCompletionError::Source)?;
-        let composed = composer
-            .compose_and_wait(SceneInputs::new(self.destination, frames, [0; 3]))
-            .map_err(SceneCompletionError::Composition)?;
-        let (sources, frame) = composed.into_parts();
-        let completed = self
-            .target
-            .write(frame)
-            .map_err(SceneCompletionError::PrivateImage)?;
-        job.release_submitted(completed.completion.as_fd())
-            .map_err(|error| {
-                SceneCompletionError::Release(io::Error::new(
-                    error.error().kind(),
-                    error.error().to_string(),
-                ))
-            })?;
-        Ok(RenderedScene {
-            sources,
-            frame: completed.frame,
-        })
+        finish_scene(job, composer, self.destination, self.target, frames)
     }
+}
+
+fn finish_scene<F: AsFd>(
+    job: castkms_renderer::SceneJob<'_, F>,
+    composer: SceneComposer,
+    destination: PrivateBuffer,
+    target: SceneImage,
+    frames: SceneFrames,
+) -> Result<RenderedScene, SceneCompletionError> {
+    let composed = composer
+        .compose_and_wait(SceneInputs::new(destination, frames, [0; 3]))
+        .map_err(SceneCompletionError::Composition)?;
+    let (sources, frame) = composed.into_parts();
+    let completed = target
+        .write(frame)
+        .map_err(SceneCompletionError::PrivateImage)?;
+    job.release_submitted(completed.completion.as_fd())
+        .map_err(|error| {
+            SceneCompletionError::Release(io::Error::new(
+                error.error().kind(),
+                error.error().to_string(),
+            ))
+        })?;
+    Ok(RenderedScene {
+        sources,
+        frame: completed.frame,
+    })
 }
 
 /// A published private image and the reusable float sources that produced it.

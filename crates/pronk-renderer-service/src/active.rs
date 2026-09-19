@@ -67,6 +67,7 @@ fn try_deliver<F: AsFd>(
             *current = Some(frame);
             Ok(())
         }
+        Ok(DeliveryAttempt::Stale(frame)) => return_frame(reader, frame),
         Err(error) => {
             let (frame, cause) = error.into_parts();
             if let Some(frame) = frame {

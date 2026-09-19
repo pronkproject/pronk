@@ -149,8 +149,13 @@ impl SceneStorageProfile {
     }
 
     fn accepts(&self, scene: SceneRequirements<'_>) -> bool {
-        self.output == scene.output
-            && self.sources.len() == scene.layers.len()
+        if self.output != scene.output {
+            return false;
+        }
+        if scene.layers.is_empty() {
+            return true;
+        }
+        self.sources.len() == scene.layers.len()
             && self
                 .sources
                 .iter()
@@ -663,6 +668,50 @@ mod tests {
         let modifier = std::env::var("PRONK_GPU_MODIFIER").expect("select hex modifier");
         let modifier = u64::from_str_radix(modifier.trim_start_matches("0x"), 16).unwrap();
         (Device::open(node).unwrap(), modifier)
+    }
+
+    #[test]
+    #[ignore = "requires explicit Vulkan GPU and modifier selection"]
+    fn blank_scene_uses_primary_profile_without_source_reads() {
+        let (device, modifier) = device();
+        let extent = Extent::new(4, 3).unwrap();
+        let source = SourceRequirements {
+            format: PackedFormat::Bgra8,
+            extent,
+            modifier,
+        };
+        let storage =
+            SceneStorageProfile::single_primary(&device, extent, vec![source].into()).unwrap();
+        let composer = SceneComposer::with_storage(
+            &storage,
+            SceneRequirements {
+                output: extent,
+                layers: &[],
+                color: OutputColor::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(composer.layer_count(), 0);
+
+        let mut pool = storage
+            .create_pool(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(1).unwrap())
+            .unwrap();
+        let SceneBuffers {
+            destination,
+            sources,
+        } = pool.take().unwrap().unwrap();
+        let serial = NonZeroU64::new(73).unwrap();
+        let frames = SceneFrames::new(serial, Vec::new()).unwrap();
+        let composed = composer
+            .compose_and_wait(SceneInputs::new(destination, frames, [0; 3]))
+            .unwrap();
+        let (returned_sources, frame) = composed.into_parts();
+        assert!(returned_sources.is_empty());
+        assert_eq!(frame.content_serial(), Some(serial));
+        assert_eq!(frame.source_alpha(), SourceAlpha::Opaque);
+        pool.restore_sources(sources).ok().unwrap();
+        pool.restore_destination(frame.buffer).ok().unwrap();
+        assert_eq!(pool.available(), 1);
     }
 
     #[test]

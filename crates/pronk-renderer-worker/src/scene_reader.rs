@@ -146,6 +146,19 @@ impl<F: AsFd> SceneReader<F> {
                 return Ok(SceneAttempt::Rejected { cause });
             }
         };
+        if scene.composer().layer_count() == 0 {
+            let crate::SceneBuffers {
+                destination,
+                sources,
+            } = buffers;
+            let frame = scene
+                .render_blank(destination, target)
+                .map_err(SceneAttemptError::Complete)?;
+            self.private
+                .restore_sources(sources)
+                .map_err(|_| SceneAttemptError::ReturnSlot)?;
+            return Ok(SceneAttempt::Rendered(frame));
+        }
         let prepared = match scene.prepare(buffers, target) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -233,8 +246,11 @@ impl<F: AsFd> SceneReader<F> {
 #[must_use = "handle idle, rejected or completed scene work"]
 pub enum SceneAttempt {
     NoSlot,
+    /// No changed scene is available; an active blank change is a renderable job.
     NoScene,
-    Rejected { cause: io::Error },
+    Rejected {
+        cause: io::Error,
+    },
     Rendered(RenderedFrame),
 }
 

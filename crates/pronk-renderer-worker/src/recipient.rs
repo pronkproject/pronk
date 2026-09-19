@@ -15,6 +15,8 @@ use crate::SceneReader;
 pub enum DeliveryAttempt {
     NoRecipient(RenderedFrame),
     Delivered(RenderedFrame),
+    /// No recipient access began because the private image belongs to old output content.
+    Stale(RenderedFrame),
 }
 
 /// Failed delivery, retaining a reusable frame when no access began.
@@ -76,6 +78,9 @@ impl<F: AsFd> SceneReader<F> {
         let job = match self.output.try_acquire(frame.scene.registration()) {
             Ok(Some(job)) => job,
             Ok(None) => return Ok(DeliveryAttempt::NoRecipient(frame)),
+            Err(cause) if cause.raw_os_error() == Some(nix::libc::ESTALE) => {
+                return Ok(DeliveryAttempt::Stale(frame));
+            }
             Err(cause) => return Err(DeliveryError::before_access(cause, frame)),
         };
         let destination = match import_destination(&device, job.destination()) {
