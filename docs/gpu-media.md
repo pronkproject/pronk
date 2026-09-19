@@ -869,8 +869,10 @@ LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
 VA factory selection also checks the converter and encoder controls needed by
 the configured graph, including the requested rate-control mode and numeric
 limits. An unsupported control rejects the selected hardware profile instead
-of crashing graph construction. Later bitrate changes are checked against the
-active encoder's limits before the reported rate changes.
+of crashing graph construction. The bitrate control must also be mutable while
+playing, because receiver feedback changes it during a session. Later bitrate
+changes are checked against the active encoder's limits before the reported
+rate changes.
 
 To run the same test under the backend unit's device, memory-execution and
 syscall restrictions, build it outside the sandbox and launch it in a
