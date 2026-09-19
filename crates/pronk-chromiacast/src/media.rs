@@ -952,10 +952,7 @@ impl ChromiacastMediaSession {
                     "configured video profile was not negotiated by Prepare".into(),
                 )
             })?;
-        if negotiated_mode.width > profile.max_width
-            || negotiated_mode.height > profile.max_height
-            || negotiated_mode.refresh_millihz > profile.max_refresh_millihz
-        {
+        if !profile.supports_mode(negotiated_mode) {
             return Err(MediaSessionError::InvalidRequest(
                 "configured mode exceeds the negotiated video profile".into(),
             ));

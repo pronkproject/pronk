@@ -234,6 +234,15 @@ impl Validate for VideoProfile {
     }
 }
 
+impl VideoProfile {
+    /// Whether this profile can encode pictures at the offered mode.
+    pub fn supports_mode(&self, mode: &DisplayMode) -> bool {
+        mode.width <= self.max_width
+            && mode.height <= self.max_height
+            && mode.refresh_millihz <= self.max_refresh_millihz
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct AudioProfile {
     pub profile_id: String,
@@ -1065,6 +1074,21 @@ mod tests {
             DRM_FORMAT_MOD_INVALID,
         )];
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn video_profile_limits_include_refresh_as_well_as_picture_size() {
+        let profile = video_profile();
+        assert!(profile.supports_mode(&mode()));
+        let mut outside = mode();
+        outside.width = profile.max_width + 1;
+        assert!(!profile.supports_mode(&outside));
+        outside = mode();
+        outside.height = profile.max_height + 1;
+        assert!(!profile.supports_mode(&outside));
+        outside = mode();
+        outside.refresh_millihz = profile.max_refresh_millihz + 1;
+        assert!(!profile.supports_mode(&outside));
     }
 
     #[test]

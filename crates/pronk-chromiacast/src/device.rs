@@ -1314,8 +1314,7 @@ fn negotiate_capabilities(
     let modes = candidate_modes
         .into_iter()
         .filter(|mode| {
-            profile_supports_mode(selected_profile, mode)
-                && request.supports_layout(mode, &selected_layout)
+            selected_profile.supports_mode(mode) && request.supports_layout(mode, &selected_layout)
         })
         .collect();
     let audio_profiles: Vec<_> = if audio_requested {
@@ -1382,9 +1381,7 @@ fn narrow_h264_profile(
         .map(|(index, layout)| {
             let mode_count = modes
                 .iter()
-                .filter(|mode| {
-                    profile_supports_mode(&profile, mode) && request.supports_layout(mode, layout)
-                })
+                .filter(|mode| profile.supports_mode(mode) && request.supports_layout(mode, layout))
                 .count();
             (index, *layout, mode_count)
         })
@@ -1393,12 +1390,6 @@ fn narrow_h264_profile(
         .1;
     profile.raw_layouts = vec![raw_layout];
     Some(profile)
-}
-
-fn profile_supports_mode(profile: &VideoProfile, mode: &DisplayMode) -> bool {
-    mode.width <= profile.max_width
-        && mode.height <= profile.max_height
-        && mode.refresh_millihz <= profile.max_refresh_millihz
 }
 
 fn supported_sender_mode(mode: &DisplayMode) -> bool {

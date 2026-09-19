@@ -319,6 +319,9 @@ fn select_initial_modes(
     let mut supported = Vec::new();
     let mut identities = HashSet::new();
     for mode in &capabilities.modes {
+        if !capabilities.video_profiles[0].supports_mode(mode) {
+            continue;
+        }
         let Ok(mode) = EdidMode::new(mode.width, mode.height, mode.refresh_millihz) else {
             continue;
         };
@@ -506,6 +509,23 @@ mod tests {
     }
 
     #[test]
+    fn generated_edid_omits_modes_outside_the_selected_video_profile() {
+        let mut returned = capabilities();
+        returned.modes.insert(0, mode(3840, 2160, 30_000));
+        returned.modes.insert(1, mode(1920, 1080, 120_000));
+        let prepared =
+            PreparedCastDevice::from_capabilities(device(), returned, &resolver(), true).unwrap();
+        assert_eq!(
+            prepared.generated_edid().modes(),
+            &[
+                EdidMode::new(1920, 1080, 60_000).unwrap(),
+                EdidMode::new(1280, 720, 60_000).unwrap(),
+                EdidMode::new(640, 480, 60_000).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
     fn omits_unencodable_presentation_text_without_losing_stable_identity() {
         let mut capabilities = capabilities();
         capabilities.display_identity.product_name = Some("Téléviseur".into());
@@ -580,7 +600,7 @@ mod tests {
         );
 
         let mut changed_profile = capabilities();
-        changed_profile.video_profiles[0].max_width = 1280;
+        changed_profile.video_profiles[0].max_width = 2560;
         let changed_profile =
             PreparedCastDevice::from_capabilities(device(), changed_profile, &resolver(), true)
                 .unwrap();
@@ -589,6 +609,16 @@ mod tests {
             Err(PreparedDeviceRecoveryError::VideoProfileChanged(
                 "h264-high".into()
             ))
+        );
+
+        let mut narrowed_profile = capabilities();
+        narrowed_profile.video_profiles[0].max_width = 1280;
+        let narrowed_profile =
+            PreparedCastDevice::from_capabilities(device(), narrowed_profile, &resolver(), true)
+                .unwrap();
+        assert_eq!(
+            original.validate_recovery(&narrowed_profile),
+            Err(PreparedDeviceRecoveryError::EdidChanged)
         );
     }
 }

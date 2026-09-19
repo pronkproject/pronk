@@ -52,16 +52,18 @@ preference order, with a per-mode list of available layouts. The backend
 selects one exact layout and retains only compatible display modes. If the
 GPU probe fails or no render node is available, Pronk offers only its known
 system-memory layout, not an unverified linear DMA-BUF. The backend chooses
-one exact intersection, and
-Pronk requests that same layout from the capture provider before allocating
-its output pool. If no intersection exists, preparation fails without silently
-changing either layout.
+one exact intersection. Pronk requests that same layout from the capture
+provider before allocating its output pool. If no intersection exists,
+preparation fails without silently changing either layout.
 
 An empty per-mode list in the protocol means every offered profile layout
 works at every candidate mode. Otherwise, each candidate mode has exactly
 one entry, and every listed layout also belongs to an offered video profile.
 This lets a lower-resolution GPU route coexist with independently usable
 system-memory modes without advertising a layout at an unsupported size.
+Pronk uses the first returned video profile for the session and includes in
+the generated display identity only modes within its picture-size and
+refresh limits.
 
 ## Ownership and synchronization
 
