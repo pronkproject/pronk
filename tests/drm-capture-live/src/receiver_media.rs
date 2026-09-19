@@ -41,7 +41,8 @@ pub async fn run(
     let video_target = prepared.video_target;
     let cadence = VideoCadence::new(nz(30), nz(1));
     let bitrate = nz64(4_000_000);
-    if let Some(render_node) = encoder.render_node() {
+    let va_render_node = encoder.render_node().map(Path::to_path_buf);
+    if let Some(render_node) = va_render_node.as_deref() {
         qualify_va_target(
             &video_target,
             &encoder,
@@ -163,8 +164,11 @@ pub async fn run(
             }
         }
     }
-    media.stop(generation).await?;
+    let statistics = media.stop(generation).await?;
     media.shutdown().await?;
+    if let Some(render_node) = va_render_node.as_deref() {
+        verify_va_execution(&statistics, render_node)?;
+    }
     drop(decoder);
     capture
         .stop(
@@ -174,6 +178,30 @@ pub async fn run(
         )
         .await?;
     eprintln!("Encoded={received} decoded={decoded} colors={colors:?}");
+    Ok(())
+}
+
+fn verify_va_execution(
+    statistics: &pronk_media::MediaGraphStatistics,
+    selected_node: &Path,
+) -> anyhow::Result<()> {
+    ensure!(
+        statistics
+            .encoder_name
+            .as_deref()
+            .is_some_and(|name| name.starts_with("va") && name.ends_with("h264enc"))
+            && statistics.video_memory_path.as_deref() == Some("DMA-BUF DMA_DRM to VA-memory NV12"),
+        "live media graph did not use the selected VA H.264 path: {statistics:?}"
+    );
+    let reported = statistics
+        .render_device
+        .as_deref()
+        .context("live VA media graph did not report its render device")?;
+    ensure!(
+        std::fs::metadata(reported)?.rdev() == std::fs::metadata(selected_node)?.rdev(),
+        "live VA media graph used {reported}, not {}",
+        selected_node.display()
+    );
     Ok(())
 }
 
@@ -222,4 +250,32 @@ fn qualify_va_target(
         "test bitrate is outside the selected VA encoder range {minimum_bitrate}..={maximum_bitrate} bit/s"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_va_execution;
+    use pronk_media::MediaGraphStatistics;
+    use std::path::Path;
+
+    #[test]
+    fn live_va_result_requires_the_selected_encoder_path() {
+        let selected = Path::new("/dev/null");
+        let mut statistics = MediaGraphStatistics {
+            encoder_name: Some("vah264enc".into()),
+            video_memory_path: Some("DMA-BUF DMA_DRM to VA-memory NV12".into()),
+            render_device: Some(selected.display().to_string()),
+            ..MediaGraphStatistics::default()
+        };
+        assert!(verify_va_execution(&statistics, selected).is_ok());
+
+        statistics.encoder_name = Some("x264enc".into());
+        assert!(verify_va_execution(&statistics, selected).is_err());
+        statistics.encoder_name = Some("vah264enc".into());
+        statistics.video_memory_path = Some("system-memory BGRx to system-memory I420".into());
+        assert!(verify_va_execution(&statistics, selected).is_err());
+        statistics.video_memory_path = Some("DMA-BUF DMA_DRM to VA-memory NV12".into());
+        statistics.render_device = Some("/dev/zero".into());
+        assert!(verify_va_execution(&statistics, selected).is_err());
+    }
 }
