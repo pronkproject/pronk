@@ -166,6 +166,7 @@ pub async fn run(
     }
     let statistics = media.stop(generation).await?;
     media.shutdown().await?;
+    verify_encoded_delivery(&statistics)?;
     if let Some(render_node) = va_render_node.as_deref() {
         verify_va_execution(&statistics, render_node)?;
     }
@@ -178,6 +179,15 @@ pub async fn run(
         )
         .await?;
     eprintln!("Encoded={received} decoded={decoded} colors={colors:?}");
+    Ok(())
+}
+
+fn verify_encoded_delivery(statistics: &pronk_media::MediaGraphStatistics) -> anyhow::Result<()> {
+    ensure!(
+        statistics.dropped_frames == 0,
+        "media graph discarded {} encoded access units",
+        statistics.dropped_frames
+    );
     Ok(())
 }
 
@@ -254,7 +264,7 @@ fn qualify_va_target(
 
 #[cfg(test)]
 mod tests {
-    use super::verify_va_execution;
+    use super::{verify_encoded_delivery, verify_va_execution};
     use pronk_media::MediaGraphStatistics;
     use std::path::Path;
 
@@ -277,5 +287,13 @@ mod tests {
         statistics.video_memory_path = Some("DMA-BUF DMA_DRM to VA-memory NV12".into());
         statistics.render_device = Some("/dev/zero".into());
         assert!(verify_va_execution(&statistics, selected).is_err());
+    }
+
+    #[test]
+    fn encoded_output_loss_fails_the_receiver_probe() {
+        let mut statistics = MediaGraphStatistics::default();
+        assert!(verify_encoded_delivery(&statistics).is_ok());
+        statistics.dropped_frames = 1;
+        assert!(verify_encoded_delivery(&statistics).is_err());
     }
 }
