@@ -59,6 +59,12 @@ The binaries cover distinct boundaries:
   sequences while one output remains held, withdraws the offer, and repeats the
   complete renderer generation on the same display session. Supply a supported
   private-image modifier, optionally with a `0x` prefix.
+  `--raw-format FOURCC` selects the exact capture output order when the
+  default `XR24` is not accepted by the media device. Receiver mode requires
+  `--va-render-node /dev/dri/renderDN`; it checks that the VA encoder and
+  renderer use the same device and that the encoder accepts the output's
+  format, modifier, picture size and bitrate before starting Cast. There is
+  no software-encoder fallback for the DMA-BUF renderer target.
   Like the live Mutter media probe, it requires the sibling pattern client,
   the classified core/backend sockets, and the versioned WirePlumber policy.
   The compositor and Vulkan worker must also be able to import each other's
@@ -156,8 +162,15 @@ pronk-capture-mutter-media-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
 
 pronk-renderer-capture-live-test /dev/dri/cardN CRTC_ID CONNECTOR_ID \
     WIDTH HEIGHT REFRESH_MILLIHZ MODIFIER \
-    /path/to/pipewire-0-pronk-backend --receiver RECEIVER_IP:8009
+    /path/to/pipewire-0-pronk-backend --raw-format FOURCC \
+    --va-render-node /dev/dri/renderDN --receiver RECEIVER_IP:8009
 ```
+
+Select a `FOURCC` and `MODIFIER` accepted by both the renderer's output
+allocator and the selected VA converter; the probe checks the converter's
+exact input tuple but cannot select a replacement allocation itself. The
+Mutter capture probe still uses software H.264 from mapped frames, while the
+delegated-renderer probe uses VA H.264 from DMA-BUF frames.
 
 The probe authenticates the receiver and launches its mirroring application,
 **replacing current playback**. It offers the captured mode as H.264 at 30 fps,
