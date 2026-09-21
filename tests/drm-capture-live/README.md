@@ -7,7 +7,7 @@ The kernel must provide the matching generic capture interface and the
 built-in reference renderer. Fixture probes select the first connected output
 offering 640x480 and find its compatible primary plane; additional outputs,
 cursors and overlays may remain enabled. They do not test composition of those
-additional planes. Building also requires libdrm and GTK 3 development
+additional planes. Building also requires libdrm and GTK 4 development
 files; GTK supplies the Wayland pattern client. Build the programs before
 entering a privileged test environment:
 
