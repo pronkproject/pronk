@@ -1,12 +1,16 @@
 //! Session ownership for Mutter's private CastKMS display broker.
 //!
-//! Monitor control and final-image capture arrive as separate descriptors under
-//! one broker lifetime. Sessions confer no renderer, primary-node, audio or CEC
-//! access. Release revokes both capabilities; it does not acknowledge completion
-//! of admitted output writes.
+//! Monitor control, final-image capture, and an initial renderer endpoint arrive
+//! as separate descriptors under one broker lifetime. The renderer issuer is
+//! bound to that exact session and can issue a replacement only after the worker
+//! retires the prior endpoint. Sessions confer no primary-node, audio or CEC
+//! access. Release revokes the broker capabilities; it does not acknowledge
+//! completion of admitted output writes.
 
+use std::io;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +45,10 @@ pub enum Error {
     InvalidCapacity,
     #[error("Mutter returned a zero display-session identifier")]
     InvalidSession,
+    #[error("Mutter returned a zero renderer identifier")]
+    InvalidRenderer,
+    #[error("Mutter returned an invalid render node")]
+    InvalidRenderNode,
     #[error("display-session broker operation failed: {0}")]
     Bus(#[from] zbus::Error),
 }
@@ -68,8 +76,27 @@ pub struct Session {
     timeout: Duration,
     monitor: Option<OwnedFd>,
     capture: Option<OwnedFd>,
+    renderer: Option<RendererEndpoint>,
     release: Option<oneshot::Sender<()>>,
     done: Option<oneshot::Receiver<Result<(), Error>>>,
+}
+
+/// One renderer descriptor issued for a display session.
+#[derive(Debug)]
+pub struct RendererEndpoint {
+    fd: OwnedFd,
+    id: NonZeroU64,
+    issuer: RendererIssuer,
+}
+
+/// Bounded renderer issuance for one exact broker display session.
+#[derive(Debug, Clone)]
+pub struct RendererIssuer {
+    connection: zbus::Connection,
+    owner: OwnedUniqueName,
+    session_id: NonZeroU64,
+    render_node: PathBuf,
+    timeout: Duration,
 }
 
 impl Session {
@@ -98,6 +125,16 @@ impl Session {
     /// the session ID alone is neither kernel authority nor an output identity.
     pub fn target(&self) -> Target {
         self.target
+    }
+
+    /// Transfer the initial renderer endpoint and its session-bound issuer.
+    pub fn take_renderer(&mut self) -> io::Result<RendererEndpoint> {
+        self.renderer.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "the display session has no renderer endpoint",
+            )
+        })
     }
 
     pub fn capture_access(&self) -> std::io::Result<drm_capture::Access> {
@@ -136,12 +173,72 @@ impl Session {
     pub async fn release(mut self) -> Result<(), Error> {
         self.monitor.take();
         self.capture.take();
+        self.renderer.take();
         self.release.take();
         let done = self.done.take().expect("live session owns completion");
         tokio::time::timeout(self.timeout, done)
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::WorkerStopped)?
+    }
+}
+
+impl RendererEndpoint {
+    /// Split the endpoint from the broker issuer that must revoke this ID.
+    pub fn into_parts(self) -> (OwnedFd, NonZeroU64, RendererIssuer) {
+        (self.fd, self.id, self.issuer)
+    }
+}
+
+impl RendererIssuer {
+    pub fn render_node(&self) -> &Path {
+        &self.render_node
+    }
+
+    /// Issue a fresh endpoint after an earlier renderer generation retires.
+    pub async fn acquire(&self) -> Result<RendererEndpoint, Error> {
+        tokio::time::timeout(self.timeout, self.acquire_inner())
+            .await
+            .map_err(|_| Error::Timeout)?
+    }
+
+    async fn acquire_inner(&self) -> Result<RendererEndpoint, Error> {
+        let result = self
+            .connection
+            .call_method(
+                Some(self.owner.as_str()),
+                PATH,
+                Some(SERVICE),
+                "AcquireRenderer",
+                &(self.session_id.get(),),
+            )
+            .await;
+        let (fd, id) = result.and_then(|message| message.body().deserialize::<(BusFd, u64)>())?;
+        let id = NonZeroU64::new(id).ok_or(Error::InvalidRenderer)?;
+        Ok(RendererEndpoint {
+            fd: fd.into(),
+            id,
+            issuer: self.clone(),
+        })
+    }
+
+    /// Revoke an endpoint after its local descriptor and admitted work drain.
+    pub async fn release(&self, renderer_id: NonZeroU64) -> Result<(), Error> {
+        tokio::time::timeout(self.timeout, async {
+            self.connection
+                .call_method(
+                    Some(self.owner.as_str()),
+                    PATH,
+                    Some(SERVICE),
+                    "ReleaseRenderer",
+                    &(self.session_id.get(), renderer_id.get()),
+                )
+                .await
+                .and_then(|message| message.body().deserialize::<()>())
+                .map_err(Error::from)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
     }
 }
 
@@ -237,14 +334,27 @@ async fn run_session(
             ),
         )
         .await;
-    let received = result.and_then(|message| message.body().deserialize::<(BusFd, BusFd, u64)>());
-    let (monitor, capture, id) = match received {
-        Ok((monitor, capture, id)) => {
+    let received = result.and_then(|message| {
+        message
+            .body()
+            .deserialize::<(BusFd, BusFd, u64, BusFd, String, u64)>()
+    });
+    let (monitor, renderer, renderer_id, capture, render_node, id) = match received {
+        Ok((monitor, renderer, renderer_id, capture, render_node, id)) => {
             let Some(id) = NonZeroU64::new(id) else {
                 let _ = send.send(Err(Error::InvalidSession));
                 return;
             };
-            (monitor, capture, id)
+            let Some(renderer_id) = NonZeroU64::new(renderer_id) else {
+                let _ = send.send(Err(Error::InvalidRenderer));
+                return;
+            };
+            let render_node = PathBuf::from(render_node);
+            if !render_node.is_absolute() {
+                let _ = send.send(Err(Error::InvalidRenderNode));
+                return;
+            }
+            (monitor, renderer, renderer_id, capture, render_node, id)
         }
         Err(error) => {
             let _ = send.send(Err(error.into()));
@@ -252,6 +362,7 @@ async fn run_session(
         }
     };
     let monitor: OwnedFd = monitor.into();
+    let renderer: OwnedFd = renderer.into();
     let capture: OwnedFd = capture.into();
     let (release, wait_release) = oneshot::channel();
     let (done, wait_done) = oneshot::channel();
@@ -263,6 +374,17 @@ async fn run_session(
         timeout,
         monitor: Some(monitor),
         capture: Some(capture),
+        renderer: Some(RendererEndpoint {
+            fd: renderer,
+            id: renderer_id,
+            issuer: RendererIssuer {
+                connection: connection.clone(),
+                owner: owner.clone(),
+                session_id: id,
+                render_node,
+                timeout,
+            },
+        }),
         release: Some(release),
         done: Some(wait_done),
     };

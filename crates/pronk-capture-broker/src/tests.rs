@@ -12,6 +12,7 @@ struct State {
     owner: Mutex<String>,
     requests: Mutex<usize>,
     releases: Mutex<Vec<(u64, String)>>,
+    renderer_releases: Mutex<Vec<(u64, u64, String)>>,
     entered: Notify,
     released: Notify,
     gate: Mutex<Option<Arc<Notify>>>,
@@ -19,6 +20,8 @@ struct State {
     release_gate: Mutex<Option<Arc<Notify>>>,
     release_error: AtomicBool,
     invalid_id: AtomicBool,
+    invalid_renderer_id: AtomicBool,
+    invalid_render_node: AtomicBool,
 }
 
 struct Bus(Arc<State>);
@@ -34,6 +37,7 @@ impl Bus {
 struct Mutter {
     state: Arc<State>,
     monitor: Mutex<Option<OwnedFd>>,
+    renderer: Mutex<Option<OwnedFd>>,
     capture: Mutex<Option<OwnedFd>>,
 }
 
@@ -45,7 +49,7 @@ impl Mutter {
         minor: u32,
         crtc: u32,
         connector: u32,
-    ) -> zbus::fdo::Result<(BusFd, BusFd, u64)> {
+    ) -> zbus::fdo::Result<(BusFd, BusFd, u64, BusFd, String, u64)> {
         assert_eq!((major, minor, crtc, connector), (226, 42, 7, 11));
         *self.state.requests.lock().unwrap() += 1;
         self.state.entered.notify_one();
@@ -54,10 +58,22 @@ impl Mutter {
             gate.notified().await;
         }
         let monitor = self.monitor.lock().unwrap().take().unwrap();
+        let renderer = self.renderer.lock().unwrap().take().unwrap();
         let capture = self.capture.lock().unwrap().take().unwrap();
         Ok((
             monitor.into(),
+            renderer.into(),
+            if self.state.invalid_renderer_id.load(Ordering::SeqCst) {
+                0
+            } else {
+                13
+            },
             capture.into(),
+            if self.state.invalid_render_node.load(Ordering::SeqCst) {
+                "renderD128".into()
+            } else {
+                "/dev/dri/renderD128".into()
+            },
             if self.state.invalid_id.load(Ordering::SeqCst) {
                 0
             } else {
@@ -88,11 +104,37 @@ impl Mutter {
             Ok(())
         }
     }
+
+    fn acquire_renderer(
+        &self,
+        session: u64,
+        #[zbus(header)] header: Header<'_>,
+    ) -> zbus::fdo::Result<(BusFd, u64)> {
+        assert_eq!(session, 91);
+        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        assert_eq!(header.destination().unwrap().as_str(), ":1.88");
+        Ok((fd.into(), 14))
+    }
+
+    fn release_renderer(
+        &self,
+        session: u64,
+        renderer: u64,
+        #[zbus(header)] header: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.state.renderer_releases.lock().unwrap().push((
+            session,
+            renderer,
+            header.destination().unwrap().to_string(),
+        ));
+        Ok(())
+    }
 }
 
 struct Fixture {
     _server: zbus::Connection,
     monitor_peer: std::os::unix::net::UnixStream,
+    renderer_peer: std::os::unix::net::UnixStream,
     capture_peer: std::os::unix::net::UnixStream,
     provider: Provider,
     state: Arc<State>,
@@ -106,6 +148,7 @@ impl Fixture {
             ..State::default()
         });
         let (monitor, monitor_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (renderer, renderer_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (capture, capture_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (server, client) = UnixStream::pair().unwrap();
         let server = Builder::unix_stream(server)
@@ -120,6 +163,7 @@ impl Fixture {
                 Mutter {
                     state: Arc::clone(&state),
                     monitor: Mutex::new(Some(monitor.into())),
+                    renderer: Mutex::new(Some(renderer.into())),
                     capture: Mutex::new(Some(capture.into())),
                 },
             )
@@ -131,6 +175,7 @@ impl Fixture {
         Self {
             _server: server,
             monitor_peer,
+            renderer_peer,
             capture_peer,
             provider: Provider::new(
                 connection,
@@ -153,9 +198,9 @@ fn target() -> Target {
 }
 
 #[tokio::test]
-async fn session_carries_only_monitor_and_capture() {
+async fn session_carries_monitor_capture_and_a_bound_renderer() {
     let mut fixture = Fixture::new(false).await;
-    let session = fixture
+    let mut session = fixture
         .provider
         .acquire(target(), CancellationToken::new())
         .await
@@ -164,6 +209,17 @@ async fn session_carries_only_monitor_and_capture() {
     assert_eq!(session.target().device_minor, 42);
     assert_eq!(session.target().crtc_id.get(), 7);
     assert_eq!(session.target().connector_id.get(), 11);
+    let (renderer, renderer_id, issuer) = session.take_renderer().unwrap().into_parts();
+    assert_eq!(renderer_id.get(), 13);
+    assert_eq!(
+        issuer.render_node(),
+        std::path::Path::new("/dev/dri/renderD128")
+    );
+    fixture.renderer_peer.write_all(&[0x26]).unwrap();
+    let mut renderer = std::os::unix::net::UnixStream::from(renderer);
+    let mut byte = [0];
+    renderer.read_exact(&mut byte).unwrap();
+    assert_eq!(byte, [0x26]);
     fixture.monitor_peer.write_all(&[0x37]).unwrap();
     let mut monitor =
         std::os::unix::net::UnixStream::from(session.monitor().try_clone_to_owned().unwrap());
@@ -175,6 +231,14 @@ async fn session_carries_only_monitor_and_capture() {
         std::os::unix::net::UnixStream::from(session.capture_access().unwrap().into_fd());
     capture.read_exact(&mut byte).unwrap();
     assert_eq!(byte, [0x49]);
+    let replacement = issuer.acquire().await.unwrap();
+    let (_, replacement_id, issuer) = replacement.into_parts();
+    assert_eq!(replacement_id.get(), 14);
+    issuer.release(replacement_id).await.unwrap();
+    assert_eq!(
+        fixture.state.renderer_releases.lock().unwrap().as_slice(),
+        &[(91, 14, ":1.88".into())]
+    );
     *fixture.state.owner.lock().unwrap() = ":1.99".into();
     session.release().await.unwrap();
     assert_eq!(
@@ -225,7 +289,11 @@ async fn dropping_a_session_releases_the_issuing_owner() {
         fixture.state.releases.lock().unwrap().as_slice(),
         &[(91, ":1.88".into())]
     );
-    for peer in [&mut fixture.monitor_peer, &mut fixture.capture_peer] {
+    for peer in [
+        &mut fixture.monitor_peer,
+        &mut fixture.renderer_peer,
+        &mut fixture.capture_peer,
+    ] {
         peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         assert_eq!(peer.read(&mut [0]).unwrap(), 0);
     }
@@ -242,7 +310,59 @@ async fn invalid_session_id_closes_capabilities() {
             .await,
         Err(Error::InvalidSession)
     ));
-    for peer in [&mut fixture.monitor_peer, &mut fixture.capture_peer] {
+    for peer in [
+        &mut fixture.monitor_peer,
+        &mut fixture.renderer_peer,
+        &mut fixture.capture_peer,
+    ] {
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn invalid_renderer_id_closes_capabilities() {
+    let mut fixture = Fixture::new(false).await;
+    fixture
+        .state
+        .invalid_renderer_id
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture
+            .provider
+            .acquire(target(), CancellationToken::new())
+            .await,
+        Err(Error::InvalidRenderer)
+    ));
+    for peer in [
+        &mut fixture.monitor_peer,
+        &mut fixture.renderer_peer,
+        &mut fixture.capture_peer,
+    ] {
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn relative_render_node_closes_capabilities() {
+    let mut fixture = Fixture::new(false).await;
+    fixture
+        .state
+        .invalid_render_node
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture
+            .provider
+            .acquire(target(), CancellationToken::new())
+            .await,
+        Err(Error::InvalidRenderNode)
+    ));
+    for peer in [
+        &mut fixture.monitor_peer,
+        &mut fixture.renderer_peer,
+        &mut fixture.capture_peer,
+    ] {
         peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         assert_eq!(peer.read(&mut [0]).unwrap(), 0);
     }
