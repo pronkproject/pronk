@@ -329,7 +329,6 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::CStr;
     use std::io::Read;
     use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixStream;
@@ -355,8 +354,7 @@ mod tests {
     }
 
     fn storage(bytes: u64) -> OwnedFd {
-        let name = CStr::from_bytes_with_nul(b"castkms-output\0").unwrap();
-        let fd = memfd_create(name, MemFdCreateFlag::MFD_CLOEXEC).unwrap();
+        let fd = memfd_create(c"castkms-output", MemFdCreateFlag::MFD_CLOEXEC).unwrap();
         ftruncate(&fd, i64::try_from(bytes).unwrap()).unwrap();
         fd
     }
@@ -408,8 +406,7 @@ mod tests {
 
     #[test]
     fn output_record_requires_close_on_exec() {
-        let name = CStr::from_bytes_with_nul(b"castkms-output\0").unwrap();
-        let fd = memfd_create(name, MemFdCreateFlag::empty()).unwrap();
+        let fd = memfd_create(c"castkms-output", MemFdCreateFlag::empty()).unwrap();
         ftruncate(&fd, 8192).unwrap();
         assert!(decode_output(raw_output(fd), NonZeroU64::new(3).unwrap()).is_err());
     }
