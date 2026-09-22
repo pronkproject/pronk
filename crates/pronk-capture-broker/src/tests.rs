@@ -160,6 +160,10 @@ async fn session_carries_only_monitor_and_capture() {
         .acquire(target(), CancellationToken::new())
         .await
         .unwrap();
+    assert_eq!(session.target().device_major, 226);
+    assert_eq!(session.target().device_minor, 42);
+    assert_eq!(session.target().crtc_id.get(), 7);
+    assert_eq!(session.target().connector_id.get(), 11);
     fixture.monitor_peer.write_all(&[0x37]).unwrap();
     let mut monitor =
         std::os::unix::net::UnixStream::from(session.monitor().try_clone_to_owned().unwrap());

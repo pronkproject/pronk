@@ -64,6 +64,7 @@ pub struct Provider {
 #[derive(Debug)]
 pub struct Session {
     id: NonZeroU64,
+    target: Target,
     timeout: Duration,
     monitor: Option<OwnedFd>,
     capture: Option<OwnedFd>,
@@ -89,6 +90,14 @@ impl Session {
 
     pub fn id(&self) -> NonZeroU64 {
         self.id
+    }
+
+    /// Exact output retained by this display-session authorization.
+    ///
+    /// A separate privileged renderer issuer must receive this same target;
+    /// the session ID alone is neither kernel authority nor an output identity.
+    pub fn target(&self) -> Target {
+        self.target
     }
 
     pub fn capture_access(&self) -> std::io::Result<drm_capture::Access> {
@@ -250,6 +259,7 @@ async fn run_session(
     // them and follows the same cleanup path as an unclaimed successful reply.
     let session = Session {
         id,
+        target,
         timeout,
         monitor: Some(monitor),
         capture: Some(capture),
