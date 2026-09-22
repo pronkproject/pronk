@@ -207,18 +207,17 @@ The fixture reports a converter-link error promptly if it is requested anyway.
 The optional fifth argument selects an exact output fourcc: `XR24`, `AR24`,
 `XB24` or `AB24`. The raw profile defaults to `XR24`; encoded profiles default
 to `AR24`. The private bridge, PipeWire caps and VA input all follow that exact
-choice. A selected converter need not accept every fourcc it can render: this
-machine's VA converter advertises tiled `AR24`, `XB24` and `AB24`, but not tiled
-`XR24`. The production test checks decoded pixel order for each supported
-choice:
+choice. A selected converter need not accept every fourcc it can render. The
+current Arrow Lake qualification returns only tiled `AR24` at every offered
+size. Tiled `XR24`, `XB24`, and `AB24` do not link to the selected VA converter,
+so the production profile rejects them before encoding. Use `AR24` for the
+qualified encoded path:
 
 ```sh
 LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
     sh tests/gpu-media/run-private.sh /dev/dri/renderD128 \
-    0100000000000009 production-va-h264 sandbox AB24
+    0100000000000009 production-va-h264 sandbox AR24
 ```
-
-The same production and sandbox checks also pass with `XB24` on this device.
 
 The optional sixth argument chooses the output size: `1920x1080` (the
 default), `2560x1440` or `3840x2160`. The base source grows with the output;
@@ -233,10 +232,10 @@ LIBVA_DRIVERS_PATH=/usr/lib64/dri-nonfree LIBVA_DRIVER_NAME=iHD \
     0100000000000009 production-va-h264 sandbox AR24 3840x2160
 ```
 
-On the tested Lunar Lake device, the 4K sandbox run passes with `AR24`,
-`XB24` and `AB24`: 20 generated frames produce 16 encoded and hardware-decoded
-images with matching pixels and no raw-queue drops. The fixture's timestamps
-do not establish sustained live 4K30 casting to a receiver.
+On the tested Arrow Lake device, the 4K sandbox run passes with `AR24`: 20
+generated frames produce 16 encoded and hardware-decoded images with matching
+pixels and no raw-queue drops. The fixture's timestamps do not establish
+sustained live 4K30 casting to a receiver.
 
 The encoder disables B-frames, requests constrained-baseline byte-stream access
 units, and supplies parameter sets with keyframes. Validation checks the caps,
