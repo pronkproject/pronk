@@ -73,6 +73,23 @@ pub const RENDERER_CONSTRAINTS_YUV_ENCODING_BT2020: u32 = 1 << YUV_ENCODING_BT20
 pub const RENDERER_CONSTRAINTS_YUV_RANGE_LIMITED: u32 = 1 << YUV_RANGE_LIMITED;
 pub const RENDERER_CONSTRAINTS_YUV_RANGE_FULL: u32 = 1 << YUV_RANGE_FULL;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsRendererFiles {
+    pub renderer_fd: i32,
+    pub revoke_fd: i32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct DrmCastkmsCreateRenderer {
+    pub crtc_id: u32,
+    pub connector_id: u32,
+    pub files: u64,
+    pub flags: u32,
+    pub reserved: [u32; 3],
+}
+
 /// Native-pointer layout used by the standard DRM `VERSION` ioctl.
 ///
 /// Unlike driver-private DRM UAPIs, this standard structure intentionally uses
@@ -395,6 +412,13 @@ nix::ioctl_readwrite!(drm_ioctl_mode_getresources, b'd', 0xa0, DrmModeCardRes);
 nix::ioctl_readwrite!(drm_ioctl_mode_getencoder, b'd', 0xa6, DrmModeGetEncoder);
 nix::ioctl_readwrite!(drm_ioctl_mode_getconnector, b'd', 0xa7, DrmModeGetConnector);
 
+nix::ioctl_write_ptr!(
+    drm_ioctl_castkms_create_renderer,
+    b'd',
+    0x01,
+    DrmCastkmsCreateRenderer
+);
+
 nix::ioctl_read!(
     drm_ioctl_castkms_renderer_query,
     b'd',
@@ -459,6 +483,7 @@ nix::ioctl_write_ptr!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::{offset_of, size_of};
 
     #[test]
     fn renderer_operations_match_the_uapi_layouts() {
@@ -562,5 +587,14 @@ mod tests {
         assert_eq!(std::mem::size_of::<DrmModeGetEncoder>(), 20);
         assert_eq!(std::mem::align_of::<DrmModeGetEncoder>(), 4);
         assert_eq!(std::mem::offset_of!(DrmModeGetEncoder, crtc_id), 8);
+    }
+
+    #[test]
+    fn renderer_creation_matches_the_uapi_layout() {
+        assert_eq!(size_of::<DrmCastkmsRendererFiles>(), 8);
+        assert_eq!(size_of::<DrmCastkmsCreateRenderer>(), 32);
+        assert_eq!(offset_of!(DrmCastkmsCreateRenderer, files), 8);
+        assert_eq!(offset_of!(DrmCastkmsCreateRenderer, reserved), 20);
+        assert_eq!(nix::request_code_write!(b'd', 0x01, 32), 0x4020_6401);
     }
 }

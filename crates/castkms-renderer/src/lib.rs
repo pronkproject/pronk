@@ -19,14 +19,15 @@ pub use source::{FormatModifier, SourceImage, SourcePlane, SourceReleaseError};
 
 use std::fmt;
 use std::io;
-use std::num::NonZeroU64;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::num::{NonZeroU32, NonZeroU64};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use castkms_sys::{
-    drm_ioctl_castkms_renderer_configure, drm_ioctl_castkms_renderer_publish,
-    drm_ioctl_castkms_renderer_query, drm_ioctl_castkms_renderer_withdraw,
-    DrmCastkmsRendererConfigure, DrmCastkmsRendererPublish, DrmCastkmsRendererPublishResult,
+    drm_ioctl_castkms_create_renderer, drm_ioctl_castkms_renderer_configure,
+    drm_ioctl_castkms_renderer_publish, drm_ioctl_castkms_renderer_query,
+    drm_ioctl_castkms_renderer_withdraw, DrmCastkmsCreateRenderer, DrmCastkmsRendererConfigure,
+    DrmCastkmsRendererFiles, DrmCastkmsRendererPublish, DrmCastkmsRendererPublishResult,
     DrmCastkmsRendererQuery, DrmCastkmsRendererWithdraw, RENDERER_STATE_CONFIGURED,
     RENDERER_STATE_EMPTY, RENDERER_STATE_PUBLISHED, RENDERER_STATE_PUBLISHING,
     RENDERER_STATE_WITHDRAWN, RENDERER_VERSION,
@@ -80,11 +81,69 @@ pub struct Renderer<F = OwnedFd> {
     endpoint: Endpoint<F>,
 }
 
+/// Revocation authority for an administratively issued renderer endpoint.
+///
+/// Closing the final copy prevents new renderer work through every duplicate
+/// endpoint file while leaving cleanup operations available to those files.
+#[derive(Debug)]
+pub struct Revocation(OwnedFd);
+
+impl AsFd for Revocation {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
 impl Renderer {
     /// Adopt and validate a freshly issued renderer descriptor.
     pub fn from_fd(fd: OwnedFd) -> io::Result<Self> {
         Self::from_owner(fd)
     }
+
+    /// Create an endpoint through a privileged, non-master DRM file.
+    ///
+    /// The kernel requires `CAP_SYS_ADMIN` in the initial user namespace and
+    /// binds the result to the independently observed current DRM master for
+    /// the selected output. The caller retains `Revocation` for the endpoint's
+    /// intended lifetime; dropping it stops fresh renderer work.
+    pub fn create_administrative(
+        issuer: BorrowedFd<'_>,
+        crtc: NonZeroU32,
+        connector: NonZeroU32,
+    ) -> io::Result<(Self, Revocation)> {
+        let mut files = DrmCastkmsRendererFiles {
+            renderer_fd: -1,
+            revoke_fd: -1,
+        };
+        let request = DrmCastkmsCreateRenderer {
+            crtc_id: crtc.get(),
+            connector_id: connector.get(),
+            files: (&mut files as *mut DrmCastkmsRendererFiles) as u64,
+            ..Default::default()
+        };
+        // SAFETY: The request and its writable output stay live for the ioctl.
+        // On successful return, the kernel installed both fresh descriptors.
+        unsafe { drm_ioctl_castkms_create_renderer(issuer.as_raw_fd(), &request) }?;
+        let (renderer, revoke) = adopt_created_files(files)?;
+        Ok((Self::from_fd(renderer)?, Revocation(revoke)))
+    }
+}
+
+fn adopt_created_files(files: DrmCastkmsRendererFiles) -> io::Result<(OwnedFd, OwnedFd)> {
+    // SAFETY: A successful ioctl transfers ownership of each nonnegative
+    // descriptor exactly once. Adopting both before validation closes malformed
+    // success output without leaking an installed descriptor.
+    let renderer =
+        (files.renderer_fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(files.renderer_fd) });
+    let revoke = (files.revoke_fd >= 0 && files.revoke_fd != files.renderer_fd)
+        .then(|| unsafe { OwnedFd::from_raw_fd(files.revoke_fd) });
+    let (Some(renderer), Some(revoke)) = (renderer, revoke) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CastKMS returned invalid renderer descriptors",
+        ));
+    };
+    Ok((renderer, revoke))
 }
 
 impl<F: AsFd> Renderer<F> {
@@ -435,6 +494,45 @@ fn unsupported(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::IntoRawFd;
+
+    #[test]
+    fn failed_administrative_creation_keeps_the_issuer_open() {
+        let issuer = std::fs::File::open("/dev/null").unwrap();
+        let id = NonZeroU32::new(1).unwrap();
+        assert_eq!(
+            Renderer::create_administrative(issuer.as_fd(), id, id)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(nix::libc::ENOTTY)
+        );
+        assert!(issuer.metadata().is_ok());
+    }
+
+    #[test]
+    fn malformed_created_descriptors_are_closed() {
+        let (renderer, revoke) = nix::unistd::pipe().unwrap();
+        let renderer = renderer.into_raw_fd();
+        let revoke = revoke.into_raw_fd();
+        assert!(adopt_created_files(DrmCastkmsRendererFiles {
+            renderer_fd: renderer,
+            revoke_fd: renderer,
+        })
+        .is_err());
+        assert_eq!(
+            nix::fcntl::fcntl(renderer, nix::fcntl::FcntlArg::F_GETFD),
+            Err(nix::errno::Errno::EBADF)
+        );
+        assert!(adopt_created_files(DrmCastkmsRendererFiles {
+            renderer_fd: -1,
+            revoke_fd: revoke,
+        })
+        .is_err());
+        assert_eq!(
+            nix::fcntl::fcntl(revoke, nix::fcntl::FcntlArg::F_GETFD),
+            Err(nix::errno::Errno::EBADF)
+        );
+    }
 
     #[test]
     fn only_an_empty_acquisition_is_idle() {
