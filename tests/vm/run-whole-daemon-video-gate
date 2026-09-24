@@ -522,8 +522,14 @@ fi
 printf '%s\n' 'whole_daemon_pipewire_recovery=pass'
 printf '%s\n' 'whole_daemon_attachment_retained_across_pipewire_restart=pass'
 
-"$pronkctl" remove-display "$display_id"
+remove_started_ns=$(date +%s%N)
+if ! timeout 1 "$pronkctl" remove-display "$display_id"; then
+	printf '%s\n' 'display removal did not complete within one second' >&2
+	false
+fi
+remove_elapsed_ms=$((( $(date +%s%N) - remove_started_ns ) / 1000000))
 display_id=
+printf 'whole_daemon_orderly_remove_elapsed_ms=%s\n' "$remove_elapsed_ms"
 printf '%s\n' 'whole_daemon_orderly_remove=pass'
 if test "$audio" = true; then
 	printf '%s\n' 'whole_daemon_castkms_to_device_av=pass'
