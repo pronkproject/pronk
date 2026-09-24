@@ -110,12 +110,11 @@ No test claims to revoke previously exported backing allocations.
 ## Application integration
 
 Pronk's application owns an issuer-independent display session. Its configured
-Mutter adapter obtains separate monitor-control, renderer, and final-image
-capture capabilities. The display observer retains monitor control and the
-issuer's release obligation. The final-image pipeline receives capture access.
-The renderer pipeline receives an endpoint plus a session-bound route for fresh
-endpoints; neither pipeline receives monitor control or the issuer's revocation
-files. See [display-session ownership](kernel-sessions.md).
+Mutter adapter obtains separate monitor-control and final-image capture
+capabilities. The display observer retains monitor control and the issuer's
+release obligation. The final-image pipeline receives capture access. The
+privileged CastKMS renderer service obtains its own endpoint and does not pass
+raw sources to Pronk. See [display-session ownership](kernel-sessions.md).
 
 The default `final-image` source captures without acquiring images through a
 renderer endpoint or requesting a renderer transition. Selection is explicit,

@@ -15,8 +15,6 @@ const PATH: &str = "/org/gnome/Mutter/CastKms";
 #[derive(Debug, PartialEq)]
 enum Event {
     Acquire(String),
-    AcquireRenderer(String),
-    ReleaseRenderer(String),
     ReleaseDisplay(String),
 }
 
@@ -53,7 +51,7 @@ impl Broker {
         crtc: u32,
         connector: u32,
         #[zbus(header)] header: Header<'_>,
-    ) -> (BusFd, BusFd, u64, BusFd, String, u64) {
+    ) -> (BusFd, BusFd, u64) {
         assert_eq!((major, minor, crtc, connector), (226, 9, 17, 29));
         self.0
             .events
@@ -68,30 +66,7 @@ impl Broker {
             let file: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
             file.into()
         };
-        (fd(), fd(), 8, fd(), "/dev/dri/renderD128".into(), 7)
-    }
-
-    fn acquire_renderer(&self, session: u64, #[zbus(header)] header: Header<'_>) -> (BusFd, u64) {
-        assert_eq!(session, 7);
-        self.0
-            .events
-            .lock()
-            .unwrap()
-            .push(Event::AcquireRenderer(destination(header)));
-        self.0.changed.notify_one();
-        let file: std::os::fd::OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
-        (file.into(), 9)
-    }
-
-    fn release_renderer(&self, session: u64, renderer: u64, #[zbus(header)] header: Header<'_>) {
-        assert_eq!(session, 7);
-        assert!(matches!(renderer, 8 | 9));
-        self.0
-            .events
-            .lock()
-            .unwrap()
-            .push(Event::ReleaseRenderer(destination(header)));
-        self.0.changed.notify_one();
+        (fd(), fd(), 7)
     }
 
     fn release_display_session(&self, session: u64, #[zbus(header)] header: Header<'_>) {
@@ -182,63 +157,21 @@ async fn unused_authority_is_released_in_order_to_the_original_issuer() {
         fixture.state.events.lock().unwrap().as_slice(),
         &[
             Event::Acquire(":1.37".into()),
-            Event::ReleaseRenderer(":1.37".into()),
             Event::ReleaseDisplay(":1.37".into()),
         ]
     );
 }
 
 #[tokio::test]
-async fn broker_supplies_session_bound_renderer_authority() {
+async fn broker_does_not_supply_renderer_authority() {
     let fixture = Fixture::new(false).await;
     let mut session = fixture.acquire().await;
-    let renderer = session.take_renderer_access().unwrap();
-    assert_eq!(
-        renderer.render_node(),
-        std::path::Path::new("/dev/dri/renderD128")
-    );
-    renderer.release().await.unwrap();
+    assert!(session.take_renderer_access().is_err());
     session.release().await.unwrap();
     assert_eq!(
         fixture.state.events.lock().unwrap().as_slice(),
         &[
             Event::Acquire(":1.37".into()),
-            Event::ReleaseRenderer(":1.37".into()),
-            Event::ReleaseDisplay(":1.37".into()),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn renderer_issuer_replaces_an_endpoint_with_the_original_broker_owner() {
-    let fixture = Fixture::new(false).await;
-    let mut broker_session = fixture
-        .provider
-        .acquire(
-            pronk_capture_broker::Target {
-                device_major: 226,
-                device_minor: 9,
-                crtc_id: std::num::NonZeroU32::new(17).unwrap(),
-                connector_id: std::num::NonZeroU32::new(29).unwrap(),
-            },
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    let (_, initial_id, issuer) = broker_session.take_renderer().unwrap().into_parts();
-    let provider = MutterRendererProvider(issuer.clone());
-    let replacement = provider.acquire(CancellationToken::new()).await.unwrap();
-    replacement.release().await.unwrap();
-    issuer.release(initial_id).await.unwrap();
-    *fixture.state.owner.lock().unwrap() = ":1.99".into();
-    broker_session.release().await.unwrap();
-    assert_eq!(
-        fixture.state.events.lock().unwrap().as_slice(),
-        &[
-            Event::Acquire(":1.37".into()),
-            Event::AcquireRenderer(":1.37".into()),
-            Event::ReleaseRenderer(":1.37".into()),
-            Event::ReleaseRenderer(":1.37".into()),
             Event::ReleaseDisplay(":1.37".into()),
         ]
     );

@@ -1,21 +1,16 @@
 //! Translate Mutter's display broker into application-owned capabilities.
 
 use std::io;
-use std::sync::Arc;
 
 use async_trait::async_trait;
-use pronk_capture_broker::{Provider, RendererEndpoint, RendererIssuer, Session};
+use pronk_capture_broker::{Provider, Session};
 use pronk_core::output::{CastKmsOutput, OutputConnection};
 use tokio_util::sync::CancellationToken;
 
-use crate::capability_lease::CapabilityLease;
 use crate::kernel_session::{
     KernelSession, KernelSessionControl, KernelSessionError, MonitorCapabilities,
 };
 use crate::kernel_session_provider::KernelSessionProvider;
-use crate::renderer_session::{
-    RendererAccess, RendererProvider, RendererSession, RendererSessionError,
-};
 
 #[async_trait]
 impl KernelSessionProvider for Provider {
@@ -56,18 +51,15 @@ impl KernelSessionProvider for Provider {
 impl TryFrom<Session> for KernelSession {
     type Error = KernelSessionError;
 
-    fn try_from(mut session: Session) -> Result<Self, Self::Error> {
+    fn try_from(session: Session) -> Result<Self, Self::Error> {
         let capture = session.capture_access().map_err(|error| {
             KernelSessionError::failed("retain final-image capture authority", error)
         })?;
-        let renderer = renderer_access(session.take_renderer().map_err(|error| {
-            KernelSessionError::failed("retain Mutter renderer authority", error)
-        })?);
         Ok(Self::new(
             session.id(),
             Box::new(MutterSession(session)),
             capture,
-            Some(renderer),
+            None,
         ))
     }
 }
@@ -94,50 +86,6 @@ fn session_error(error: pronk_capture_broker::Error) -> KernelSessionError {
         pronk_capture_broker::Error::WorkerStopped => KernelSessionError::Unavailable,
         error => KernelSessionError::failed("Mutter display session", error),
     }
-}
-
-fn renderer_error(error: pronk_capture_broker::Error) -> RendererSessionError {
-    match error {
-        pronk_capture_broker::Error::Cancelled => RendererSessionError::Cancelled,
-        pronk_capture_broker::Error::Timeout => RendererSessionError::Timeout,
-        pronk_capture_broker::Error::WorkerStopped => RendererSessionError::Unavailable,
-        error => RendererSessionError::failed("Mutter renderer", error),
-    }
-}
-
-/// Mutter is the trusted issuer for the display session and binds every
-/// replacement endpoint to the same private broker session.
-#[derive(Debug, Clone)]
-struct MutterRendererProvider(RendererIssuer);
-
-#[async_trait]
-impl RendererProvider for MutterRendererProvider {
-    async fn acquire(
-        &self,
-        cancellation: CancellationToken,
-    ) -> Result<RendererAccess, RendererSessionError> {
-        if cancellation.is_cancelled() {
-            return Err(RendererSessionError::Cancelled);
-        }
-        self.0
-            .acquire()
-            .await
-            .map(renderer_access)
-            .map_err(renderer_error)
-    }
-}
-
-fn renderer_access(endpoint: RendererEndpoint) -> RendererAccess {
-    let (fd, id, issuer) = endpoint.into_parts();
-    let render_node = issuer.render_node().to_path_buf();
-    let session = RendererSession::new(Arc::new(MutterRendererProvider(issuer.clone())));
-    let lease = CapabilityLease::new(async move {
-        issuer
-            .release(id)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))
-    });
-    RendererAccess::new(fd, lease, render_node, session)
 }
 
 #[derive(Debug)]

@@ -8,23 +8,24 @@ transport, encoding, and network delivery in separate components.
 The default path is:
 
 ```text
-Mutter session broker
-  → CastKMS monitor, capture, and renderer files
-  → GPU renderer
+Mutter session broker → CastKMS monitor and capture files
+CastKMS built-in renderer or privileged GPU renderer → final image
+Final-image capture
   → private PipeWire connection
   → media backend and encoder
   → receiver
 ```
 
 Pronk does not open-endedly delegate the DRM primary node. Anonymous kernel
-files carry the authority needed for one display session. The renderer can read
-complete scene descriptions, while the capture side receives only completed
-images. The network backend receives neither compositor source buffers nor DRM
+files carry monitor and capture authority for one display session. A separate
+privileged service can read complete scene descriptions and produce the final
+image. The network backend receives neither compositor source buffers nor DRM
 authority.
 
 ## Requirements
 
 - the Rust CastKMS driver and its generic DRM capture support;
+- the privileged CastKMS renderer service for GPU composition;
 - Mutter with the `org.gnome.Mutter.CastKms` session broker;
 - PipeWire and WirePlumber;
 - GStreamer with the plugins required by the selected backend;
@@ -72,8 +73,9 @@ The default `final-image` source selects generic capture without publishing a
 renderer backend or selecting its display constraints. It uses CPU-mappable linear
 destinations from `/dev/dma_heap/system`, which must be accessible to the
 service account.
-The installed service uses this source. Delegated GPU composition requires a
-separate trusted renderer service, which is not wired into Pronk yet.
+The installed service uses this source. Delegated GPU composition is provided
+by the separate CastKMS renderer service, which publishes constraints that
+Mutter can select without giving renderer authority to Pronk.
 
 Remove the display by the identifier printed by `add-display` or
 `list-displays`:
@@ -91,8 +93,9 @@ owned resources to retire.
 
 `pronkd` owns device inventory and display-session state. It discovers CastKMS
 outputs but receives their authority only through Mutter's session broker. A
-display session contains independent monitor-control, capture, and renderer
-files, so one role cannot silently acquire another role's access.
+display session contains independent monitor-control and capture files. The
+renderer service obtains its own privileged endpoint, so a Pronk session cannot
+acquire access to compositor sources.
 
 The renderer worker consumes bounded, versioned complete-scene descriptions.
 It stages compositor sources into private GPU images before an exported output

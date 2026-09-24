@@ -11,10 +11,10 @@ second control plane.
 ## Why does Pronk need a Mutter broker?
 
 Opening a DRM node identifies a device; it does not prove that a process may
-attach a monitor, read the completed image, or inspect the compositor's source
-buffers. Mutter owns the display policy decision and can grant those roles
-independently. The broker also ties their lifetime to the requesting login and
-the selected CastKMS output.
+attach a monitor or read the completed image. Mutter owns those display policy
+decisions and grants the two roles independently. The broker also ties their
+lifetime to the requesting login and the selected CastKMS output. A separate
+privileged service owns access to compositor sources for GPU rendering.
 
 ## Why are monitor control, capture, and rendering separate files?
 
@@ -77,8 +77,8 @@ scope.
 
 ## Does renderer failure have to be perfectly recoverable?
 
-No. Pronk closes admission, releases work it can account for, and requests an
-orderly return to the in-kernel renderer. A renderer crash is treated like a
+No. The renderer service closes admission, releases work it can account for,
+and requests an orderly return to the in-kernel renderer. A renderer crash is treated like a
 GPU reset: the system should contain the failure and recover when practical,
 but the design does not pretend that every failed native submission can be
 reconstructed without loss.
