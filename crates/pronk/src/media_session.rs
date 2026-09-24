@@ -23,6 +23,10 @@ use crate::display_state::{DisplayRuntimeState, MediaState, RouteState, RouteTar
 const COMMAND_CAPACITY: usize = 32;
 const MAX_ERROR_BYTES: usize = 512;
 pub const DEFAULT_MEDIA_PHASE_TIMEOUT: Duration = Duration::from_secs(15);
+// Display removal and daemon exit must relinquish local owners promptly. This
+// is a hard ceiling for their complete media cleanup, independent of the
+// longer budget used while serving an active display.
+pub const MAX_MEDIA_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaRoute {
@@ -543,10 +547,11 @@ async fn shutdown_driver(
     // Cleanup and final owner shutdown share one phase budget. Reserving one
     // third for the final call prevents a slow StopMedia from consuming the
     // entire deadline and skipping the resource owner's shutdown hook.
-    let deadline = Instant::now() + policy.phase_timeout;
-    let final_reserve = (policy.phase_timeout / 3).max(Duration::from_nanos(1));
+    let shutdown_timeout = policy.phase_timeout.min(MAX_MEDIA_SHUTDOWN_TIMEOUT);
+    let deadline = Instant::now() + shutdown_timeout;
+    let final_reserve = (shutdown_timeout / 3).max(Duration::from_nanos(1));
     let stop_policy = MediaSessionPolicy {
-        phase_timeout: policy.phase_timeout.saturating_sub(final_reserve),
+        phase_timeout: shutdown_timeout.saturating_sub(final_reserve),
     };
     let media_result = stop_to_idle(state, driver, stop_policy, reason, cleanup_phase()).await;
     let final_policy = MediaSessionPolicy {
@@ -1257,6 +1262,33 @@ mod tests {
         assert_eq!(
             driver.calls().last(),
             Some(&Call::Shutdown(MediaStopReason::BackendShutdown))
+        );
+    }
+
+    #[tokio::test]
+    async fn default_shutdown_is_never_given_the_active_media_phase_budget() {
+        let driver = FakeDriver::default();
+        let actor = MediaSessionActor::spawn(Box::new(driver.clone())).unwrap();
+        let handle = actor.handle();
+        handle.activate(route(1, 1920)).await.unwrap();
+        driver.block_stop.store(true, Ordering::SeqCst);
+
+        let started = std::time::Instant::now();
+        let error = actor
+            .shutdown(MediaStopReason::DisplayRemoved)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MediaSessionActorError::PhaseTimeout {
+                phase: "stop media",
+                ..
+            }
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(
+            driver.calls().last(),
+            Some(&Call::Shutdown(MediaStopReason::DisplayRemoved))
         );
     }
 
