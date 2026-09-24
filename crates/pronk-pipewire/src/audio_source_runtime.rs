@@ -29,6 +29,7 @@ use crate::audio_source::{
 use crate::policy_gate::{
     PolicyGate, PolicyMarkerChange, PRIVATE_NODE_POLICY_VERSION, PRIVATE_NODE_PROPERTY,
 };
+use crate::remote_monitor::RemoteDisconnectMonitor;
 use crate::PipeWireRemote;
 
 const EVENT_QUEUE_CAPACITY: usize = 8;
@@ -271,11 +272,18 @@ fn run(
         .map_err(|error| pipewire_error("create audio main loop", error))?;
     let context = pw::context::ContextRc::new(&mainloop, None)
         .map_err(|error| pipewire_error("create audio context", error))?;
-    let core = match remote {
-        PipeWireRemote::Connected(fd) => context.connect_fd_rc(fd, None),
-        PipeWireRemote::AmbientDevelopment => context.connect_rc(None),
-    }
-    .map_err(|error| pipewire_error("connect audio core", error))?;
+    let (remote_for_monitor, core) = match remote {
+        PipeWireRemote::Connected(fd) => {
+            let monitor = fd.try_clone().map_err(|error| {
+                AudioSourceRuntimeError::PipeWire(format!(
+                    "duplicate classified PipeWire remote: {error}"
+                ))
+            })?;
+            (Some(monitor), context.connect_fd_rc(fd, None))
+        }
+        PipeWireRemote::AmbientDevelopment => (None, context.connect_rc(None)),
+    };
+    let core = core.map_err(|error| pipewire_error("connect audio core", error))?;
     let registry = core
         .get_registry_rc()
         .map_err(|error| pipewire_error("get audio registry", error))?;
@@ -301,6 +309,34 @@ fn run(
         state_for_startup_cancel.borrow_mut().shutting_down = true;
         mainloop_for_startup_cancel.quit();
     });
+
+    let (remote_closed_sender, remote_closed_receiver) = pw::channel::channel();
+    let state_for_remote_closed = state.clone();
+    let mainloop_for_remote_closed = mainloop.clone();
+    let _remote_closed = remote_closed_receiver.attach(mainloop.loop_(), move |()| {
+        if !state_for_remote_closed.borrow().shutting_down {
+            fail(
+                &state_for_remote_closed,
+                &mainloop_for_remote_closed,
+                AudioSourceRuntimeError::PipeWire(
+                    "classified PipeWire remote disconnected".to_string(),
+                ),
+            );
+        }
+    });
+    let _remote_monitor = remote_for_monitor
+        .map(|remote| {
+            let sender = remote_closed_sender.clone();
+            RemoteDisconnectMonitor::spawn(remote, move || {
+                let _ = sender.send(());
+            })
+        })
+        .transpose()
+        .map_err(|error| {
+            AudioSourceRuntimeError::PipeWire(format!(
+                "monitor classified PipeWire remote: {error}"
+            ))
+        })?;
 
     let state_for_core = state.clone();
     let mainloop_for_core = mainloop.clone();
