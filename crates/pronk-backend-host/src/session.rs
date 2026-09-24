@@ -20,9 +20,15 @@ use crate::DeviceInventorySnapshot;
 pub const BACKEND_SESSION_CREATE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const BACKEND_SESSION_PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const BACKEND_SESSION_MEDIA_CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
+// Receiver control is only awaited while replacing an active generation.
+// Display removal and final backend shutdown release the control connection
+// locally, so they cannot inherit this network-operation budget.
 pub const BACKEND_SESSION_MEDIA_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 pub const BACKEND_SESSION_CONTROL_TIMEOUT: Duration = Duration::from_millis(1_500);
-pub const BACKEND_SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+// The final Stop method only tears down local actors and descriptors. Keep a
+// short defensive bound so a wedged backend cannot make shutdown visible to
+// users as a multi-second delay.
+pub const BACKEND_SESSION_STOP_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendSessionRequest {
