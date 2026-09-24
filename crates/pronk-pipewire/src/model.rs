@@ -33,6 +33,9 @@ pub(crate) enum BufferReturn {
         buffer_id: NonZeroU32,
         sequence: u64,
     },
+    /// PipeWire can drain a buffer callback after this source has already
+    /// observed its return or unbound it during a format transition.
+    Stale,
 }
 
 #[derive(Debug)]
@@ -137,7 +140,11 @@ impl BufferTracker {
                 sequence,
                 expected_release,
             } => (sequence, expected_release),
-            _ => return Err(VideoSourceRuntimeError::InvalidOwnership(buffer_id.get())),
+            // A buffer may be returned again while PipeWire tears down a
+            // consumer or drains a previous graph iteration. Its ownership
+            // was already returned to this source, so do not publish a second
+            // availability event or treat the cleanup callback as a failure.
+            Ownership::Unbound | Ownership::Available => return Ok(BufferReturn::Stale),
         };
         if expected_release != actual_release {
             return Err(VideoSourceRuntimeError::ReleasePointMismatch {
@@ -316,5 +323,21 @@ mod tests {
             tracker.publish(frame(None)),
             Err(VideoSourceRuntimeError::InvalidOwnership(7))
         ));
+    }
+
+    #[test]
+    fn repeated_or_unbound_return_is_stale_without_regranting_ownership() {
+        let mut tracker = tracker(false);
+        let id = nonzero32(7);
+        tracker
+            .bind(id, PipeWireBufferTransport::ReadyBeforePublish)
+            .unwrap();
+        assert!(matches!(
+            tracker.returned(id, None),
+            Ok(BufferReturn::Initial { .. })
+        ));
+        assert_eq!(tracker.returned(id, None).unwrap(), BufferReturn::Stale);
+        tracker.unbind(id).unwrap();
+        assert_eq!(tracker.returned(id, None).unwrap(), BufferReturn::Stale);
     }
 }
