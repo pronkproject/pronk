@@ -29,6 +29,9 @@ use crate::{
 
 const EVENT_QUEUE_CAPACITY: usize = 128;
 const CORE_OBJECT_ID: u32 = 0;
+// At a 120 Hz driving graph this gives PipeWire about one second to
+// coalesce an activation edge before treating the client connection as lost.
+const MAX_CONSECUTIVE_TRIGGER_FAILURES: u32 = 125;
 
 type StartupSender = oneshot::Sender<Result<VideoNodeIdentity, VideoSourceRuntimeError>>;
 type StartupSlot = Arc<Mutex<Option<StartupSender>>>;
@@ -482,6 +485,10 @@ fn run(
         pw::stream::StreamRc::new(core.clone(), &state.borrow().config.node_name, properties)
             .map_err(|error| pipewire_error("create source stream", error))?;
     let (process_kick_sender, process_kick_receiver) = pw::channel::channel();
+    // `trigger_process` may synchronously invoke the process callback. Keep
+    // its retry state independent of the callback-owned runtime state so no
+    // RefCell borrow crosses that FFI call.
+    let consecutive_trigger_failures = Rc::new(Cell::new(0));
 
     let state_for_state = state.clone();
     let mainloop_for_state = mainloop.clone();
@@ -585,16 +592,22 @@ fn run(
 
     let stream_for_process_kick = stream.clone();
     let state_for_process_kick = state.clone();
+    let mainloop_for_process_kick = mainloop.clone();
+    let trigger_failures_for_process_kick = consecutive_trigger_failures.clone();
     let _process_kick = process_kick_receiver.attach(mainloop.loop_(), move |()| {
         if state_for_process_kick.borrow().shutting_down {
             return;
         }
-        trigger_graph(&stream_for_process_kick);
+        let result = trigger_graph(&stream_for_process_kick, &trigger_failures_for_process_kick);
+        if let Err(error) = result {
+            fail(&state_for_process_kick, &mainloop_for_process_kick, error);
+        }
     });
 
     let state_for_commands = state.clone();
     let mainloop_for_commands = mainloop.clone();
     let stream_for_commands = stream.clone();
+    let trigger_failures_for_commands = consecutive_trigger_failures.clone();
     let _commands = command_receiver.attach(mainloop.loop_(), move |command| match command {
         Command::Publish {
             frame,
@@ -608,18 +621,23 @@ fn run(
             // A driving stream may synchronously invoke `process` here. Keep
             // the RefCell borrow above tightly scoped so that callback can
             // observe the buffer return without a reentrant borrow panic.
-            if result.is_ok() {
-                trigger_graph(&stream_for_commands);
-            }
-            let failed = result.as_ref().err().cloned();
+            let trigger_failure = if result.is_ok() {
+                trigger_graph(&stream_for_commands, &trigger_failures_for_commands).err()
+            } else {
+                None
+            };
+            let failed = result.as_ref().err().cloned().or(trigger_failure);
             let _ = reply.send(result);
             if let Some(error) = failed {
                 fail(&state_for_commands, &mainloop_for_commands, error);
             }
         }
         Command::TriggerProcess { reply } => {
-            trigger_graph(&stream_for_commands);
+            let result = trigger_graph(&stream_for_commands, &trigger_failures_for_commands);
             let _ = reply.send(());
+            if let Err(error) = result {
+                fail(&state_for_commands, &mainloop_for_commands, error);
+            }
         }
         Command::Shutdown => {
             state_for_commands.borrow_mut().shutting_down = true;
@@ -665,15 +683,36 @@ fn run(
     Ok(())
 }
 
-fn trigger_graph(stream: &pw::stream::Stream) {
-    // A trigger is an edge, not a transaction. PipeWire returns an error when
-    // another graph iteration already owns that edge (notably EIO from the
-    // activation-state compare/exchange), while the queued buffer remains
-    // valid and the pending iteration can consume it. PipeWire's own driving
-    // stream examples consequently treat this call as best effort. Actual
-    // stream/core failures arrive through their state listeners above.
-    if let Err(error) = stream.trigger_process() {
-        tracing::trace!(%error, "PipeWire graph trigger was coalesced");
+fn trigger_graph(
+    stream: &pw::stream::Stream,
+    consecutive_failures: &Cell<u32>,
+) -> Result<(), VideoSourceRuntimeError> {
+    // A trigger is an edge, not a transaction. PipeWire may reject one while
+    // another graph iteration owns it (notably EIO from the activation-state
+    // compare/exchange). A working graph clears that condition promptly. If
+    // it persists, the source has lost progress, such as after a PipeWire
+    // daemon restart whose old client connection has not emitted a core error.
+    match stream.trigger_process() {
+        Ok(()) => {
+            consecutive_failures.set(0);
+            Ok(())
+        }
+        Err(error) => {
+            let failures = consecutive_failures.get().saturating_add(1);
+            consecutive_failures.set(failures);
+            if failures >= MAX_CONSECUTIVE_TRIGGER_FAILURES {
+                return Err(VideoSourceRuntimeError::PipeWire(format!(
+                    "PipeWire graph trigger failed {} consecutive times: {error}",
+                    failures
+                )));
+            }
+            tracing::trace!(
+                %error,
+                failures,
+                "PipeWire graph trigger was coalesced"
+            );
+            Ok(())
+        }
     }
 }
 
