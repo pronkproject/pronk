@@ -29,6 +29,8 @@ audio=${PRONK_VM_AUDIO:-false}
 va_render_node=${PRONK_VM_REQUIRE_VA_RENDER_NODE:-}
 core_unit=pronk.service
 socket_unit=pronk-chromiacast.socket
+pipewire_unit=pronk-pipewire.service
+wireplumber_unit=pronk-wireplumber.service
 gate_directory=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 display_id=
 cast_connector=
@@ -306,8 +308,8 @@ wait_for_policy() {
 			grep -Fq 'metadata.name = "pronk-policy-v1"'; then
 			return 0
 		fi
-		if ! systemctl --user is-active --quiet pipewire.service ||
-		   ! systemctl --user is-active --quiet wireplumber.service; then
+		if ! systemctl --user is-active --quiet "$pipewire_unit" ||
+		   ! systemctl --user is-active --quiet "$wireplumber_unit"; then
 			sleep 0.25
 			continue
 		fi
@@ -351,14 +353,14 @@ fail_with_diagnostics() {
 	fi
 	printf '%s\n' '--- pronk-chromiacast instances ---' >&2
 	backend_logs "$initial_cursor" >&2
-	printf '%s\n' '--- pipewire and wireplumber ---' >&2
+	printf '%s\n' '--- Pronk PipeWire and WirePlumber ---' >&2
 	if test -n "$initial_cursor"; then
 		journalctl --user --no-pager -o short-monotonic \
-			-u pipewire.service -u wireplumber.service \
+			-u "$pipewire_unit" -u "$wireplumber_unit" \
 			--after-cursor="$initial_cursor" >&2 || true
 	else
 		journalctl --user --no-pager -o short-monotonic \
-			-u pipewire.service -u wireplumber.service -n 300 >&2 || true
+			-u "$pipewire_unit" -u "$wireplumber_unit" -n 300 >&2 || true
 	fi
 	printf '%s\n' '--- CastKMS kernel messages ---' >&2
 	sudo journalctl -k -b --no-pager -o short-monotonic -n 300 >&2 || true
@@ -395,7 +397,7 @@ for path in \
 		exit 1
 	fi
 done
-if test ! -d /sys/module/castkms; then
+if test ! -d /sys/module/castkms && ! test -d /sys/devices/faux/castkms/drm; then
 	printf '%s\n' 'CastKMS is not loaded in the VM' >&2
 	exit 1
 fi
@@ -418,7 +420,7 @@ fi
 "$gate_directory/ensure-mutter-display-on"
 
 initial_cursor=$(journal_cursor)
-systemctl --user start pipewire.service wireplumber.service
+systemctl --user start "$pipewire_unit" "$wireplumber_unit"
 if ! wait_for_policy; then
 	printf '%s\n' 'the production WirePlumber policy marker did not appear' >&2
 	false
@@ -503,8 +505,8 @@ printf '%s\n' 'whole_daemon_backend_recovery=pass'
 printf '%s\n' 'whole_daemon_attachment_retained_across_backend_restart=pass'
 
 pipewire_cursor=$(journal_cursor)
-systemctl --user restart pipewire.service
-systemctl --user start wireplumber.service
+systemctl --user restart "$pipewire_unit"
+systemctl --user start "$wireplumber_unit"
 if ! wait_for_policy; then
 	printf '%s\n' 'the production policy marker did not return after PipeWire restart' >&2
 	false
