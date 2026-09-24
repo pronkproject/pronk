@@ -9,6 +9,7 @@ mod audio_source;
 mod audio_source_runtime;
 mod model;
 mod policy_gate;
+mod remote_monitor;
 mod remote_provider;
 mod runtime;
 mod types;
