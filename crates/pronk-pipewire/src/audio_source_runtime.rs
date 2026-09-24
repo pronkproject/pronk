@@ -41,6 +41,7 @@ const AUDIO_PERIOD_BYTES: usize = AUDIO_PERIOD_FRAMES * AUDIO_FRAME_BYTES;
 const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 const AUDIO_BUFFER_COUNT: i32 = 8;
 const AUDIO_MAX_BUFFER_COUNT: i32 = 16;
+const MAX_CONSECUTIVE_TRIGGER_FAILURES: u32 = 125;
 
 pub(crate) enum Command {
     Shutdown,
@@ -474,9 +475,20 @@ fn run(
     });
 
     let stream_for_timer = stream.clone();
+    let state_for_timer = state.clone();
+    let mainloop_for_timer = mainloop.clone();
+    // A trigger can synchronously call the process callback, which borrows
+    // `state`. Retain this counter outside that RefCell so no borrow spans the
+    // PipeWire FFI call.
+    let consecutive_trigger_failures = Rc::new(Cell::new(0));
+    let trigger_failures_for_timer = consecutive_trigger_failures.clone();
     let timer = mainloop.loop_().add_timer(move |_| {
-        if let Err(error) = stream_for_timer.trigger_process() {
-            tracing::trace!(%error, "PipeWire audio graph trigger was coalesced");
+        if state_for_timer.borrow().shutting_down {
+            return;
+        }
+        let result = trigger_audio_graph(&stream_for_timer, &trigger_failures_for_timer);
+        if let Err(error) = result {
+            fail(&state_for_timer, &mainloop_for_timer, error);
         }
     });
     timer
@@ -759,6 +771,34 @@ fn drain_audio_tap(fd: std::os::fd::RawFd) -> Result<(), AudioSourceRuntimeError
             Err(Errno::EINTR) => {}
             Err(Errno::EAGAIN) => return Ok(()),
             Err(error) => return Err(AudioSourceRuntimeError::AudioTap(error.to_string())),
+        }
+    }
+}
+
+fn trigger_audio_graph(
+    stream: &pw::stream::Stream,
+    consecutive_failures: &Cell<u32>,
+) -> Result<(), AudioSourceRuntimeError> {
+    match stream.trigger_process() {
+        Ok(()) => {
+            consecutive_failures.set(0);
+            Ok(())
+        }
+        Err(error) => {
+            let failures = consecutive_failures.get().saturating_add(1);
+            consecutive_failures.set(failures);
+            if failures >= MAX_CONSECUTIVE_TRIGGER_FAILURES {
+                return Err(AudioSourceRuntimeError::PipeWire(format!(
+                    "PipeWire audio graph trigger failed {} consecutive times: {error}",
+                    failures
+                )));
+            }
+            tracing::trace!(
+                %error,
+                failures,
+                "PipeWire audio graph trigger was coalesced"
+            );
+            Ok(())
         }
     }
 }
