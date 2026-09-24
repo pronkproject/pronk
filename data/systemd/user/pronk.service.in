@@ -2,7 +2,10 @@
 Description=Pronk remote-display session coordinator
 PartOf=graphical-session.target
 After=graphical-session-pre.target pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service
-BindsTo=pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service
+# Start the private media stack with the coordinator, but keep the coordinator
+# alive while PipeWire reconnects.  A media-service restart must be handled by
+# the backend recovery protocol instead of discarding every configured display.
+Wants=pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service
 
 [Service]
 Type=dbus

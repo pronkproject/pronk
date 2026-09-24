@@ -50,7 +50,7 @@ do
     require_unit_line "$line"
 done
 
-require_unit_line 'BindsTo=pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service'
+require_unit_line 'Wants=pronk-pipewire.socket pronk-pipewire.service pronk-wireplumber.service'
 
 for line in \
     'ListenStream=%t/pronk/media/pipewire-0' \
