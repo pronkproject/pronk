@@ -494,15 +494,27 @@ async fn emit_operation_states(
         .map_err(OperationSignalError::Emitter)?
         .into_owned();
     let mut status = operation.subscribe();
-    while !status.borrow().stage.is_terminal() {
+    // The setup task can reach its terminal state after AddDisplay registers
+    // the object but before this spawned notifier first polls the watch
+    // channel.  The caller may already have read a non-terminal snapshot, so
+    // publish that terminal snapshot once instead of leaving it waiting for a
+    // transition it cannot observe.
+    let mut publish_current = status.borrow().stage.is_terminal();
+    loop {
+        if publish_current {
+            let state = public_operation_state(&status.borrow());
+            OperationInterface::state_changed(&emitter, state)
+                .await
+                .map_err(OperationSignalError::Emit)?;
+        }
+        if status.borrow().stage.is_terminal() {
+            break;
+        }
         status
             .changed()
             .await
             .map_err(|_| OperationSignalError::StatusClosed)?;
-        let state = public_operation_state(&status.borrow());
-        OperationInterface::state_changed(&emitter, state)
-            .await
-            .map_err(OperationSignalError::Emit)?;
+        publish_current = true;
     }
     tokio::time::sleep(TERMINAL_OPERATION_RETENTION).await;
     if manager
