@@ -771,6 +771,28 @@ impl ChromiacastMediaSession {
         media_generation: u64,
         transport: &mut T,
     ) -> Result<(), MediaSessionError> {
+        self.stop_media_inner(media_generation, Some(transport))
+            .await
+    }
+
+    /// Stop local media owners while the containing Device session is leaving.
+    ///
+    /// The following Device shutdown drops the control connection, which
+    /// closes the receiver-side application. Do not make display removal wait
+    /// for a receiver Stop request or its protocol timeout.
+    pub(crate) async fn abort_media(
+        &mut self,
+        media_generation: u64,
+    ) -> Result<(), MediaSessionError> {
+        self.stop_media_inner::<dyn VideoTransportNegotiator>(media_generation, None)
+            .await
+    }
+
+    async fn stop_media_inner<T: VideoTransportNegotiator + ?Sized>(
+        &mut self,
+        media_generation: u64,
+        transport: Option<&mut T>,
+    ) -> Result<(), MediaSessionError> {
         let generation = NonZeroU64::new(media_generation).ok_or_else(|| {
             MediaSessionError::InvalidRequest("media generation must be nonzero".into())
         })?;
@@ -843,10 +865,13 @@ impl ChromiacastMediaSession {
             },
             async {
                 if transport_active {
-                    transport
-                        .stop_video()
-                        .await
-                        .map_err(MediaSessionError::from)
+                    match transport {
+                        Some(transport) => transport
+                            .stop_video()
+                            .await
+                            .map_err(MediaSessionError::from),
+                        None => Ok(()),
+                    }
                 } else {
                     Ok(())
                 }
@@ -1901,6 +1926,33 @@ mod tests {
                 .await,
             Err(MediaSessionError::InvalidRequest(_))
         ));
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_media_releases_local_owners_without_waiting_for_the_receiver() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        media.complete_preparation(capabilities()).unwrap();
+        let mut transport = FakeTransport::default();
+        media
+            .configure(
+                remote(),
+                vec![target(session_id, 1)],
+                configuration(),
+                1,
+                &mut transport,
+            )
+            .await
+            .unwrap();
+        media.start(1).await.unwrap();
+
+        media.abort_media(1).await.unwrap();
+
+        assert_eq!(transport.stops, 0);
         media.shutdown().await.unwrap();
     }
 

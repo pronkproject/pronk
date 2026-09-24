@@ -70,8 +70,6 @@ pub(crate) enum DeviceControlError {
     UnsupportedControl(String),
     #[error("Cast receiver control failed: {0}")]
     Control(String),
-    #[error("Cast control shutdown failed: {0}")]
-    Close(String),
 }
 
 #[async_trait]
@@ -151,14 +149,18 @@ impl VideoTransportNegotiator for ChromiacastDeviceControl {
     }
 
     async fn stop_video(&mut self) -> Result<(), VideoTransportError> {
-        let Some(app) = self.active_app.as_ref() else {
+        // Stopping crosses a network boundary.  Once the request is sent, a
+        // timeout or connection error leaves the receiver's app lifetime
+        // ambiguous: it may already have stopped, or the receiver may retain
+        // it.  Do not retain a stale local handle that would prevent the next
+        // media generation from negotiating a fresh mirroring app.
+        let Some(app) = self.active_app.take() else {
             return Ok(());
         };
-        self.connection.stop(app).await.map_err(|error| {
-            VideoTransportError::new(format!("stop Cast mirroring app: {error}"))
-        })?;
-        self.active_app = None;
-        Ok(())
+        self.connection
+            .stop(&app)
+            .await
+            .map_err(|error| VideoTransportError::new(format!("stop Cast mirroring app: {error}")))
     }
 }
 
@@ -281,27 +283,12 @@ impl DeviceControl for ChromiacastDeviceControl {
     }
 
     async fn close(mut self: Box<Self>) -> Result<(), DeviceControlError> {
-        let stop_result = self.stop_video().await;
-        let close_result = self
-            .connection
-            .close()
-            .await
-            .map_err(|error| DeviceControlError::Close(error.to_string()));
-        combine_control_close_results(stop_result, close_result)
-    }
-}
-
-fn combine_control_close_results(
-    stop_result: Result<(), VideoTransportError>,
-    close_result: Result<(), DeviceControlError>,
-) -> Result<(), DeviceControlError> {
-    match (stop_result, close_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(stop_error), Ok(())) => Err(DeviceControlError::Close(stop_error.to_string())),
-        (Ok(()), Err(close_error)) => Err(close_error),
-        (Err(stop_error), Err(close_error)) => Err(DeviceControlError::Close(format!(
-            "{stop_error}; connection close also failed: {close_error}"
-        ))),
+        // Device shutdown must release its local control owner immediately.
+        // A receiver STOP or graceful Cast connection close can wait on remote
+        // I/O, so leave that best-effort work to the connection task after its
+        // sender is dropped instead of awaiting it in the shutdown path.
+        self.active_app.take();
+        Ok(())
     }
 }
 
@@ -905,15 +892,27 @@ async fn run_actor(
                 reason,
                 reply,
             } => {
-                let _ = reason;
-                let result = match control.as_deref_mut() {
-                    Some(control) => media
-                        .stop_media(media_generation, control)
+                let result = if matches!(
+                    reason,
+                    StopReason::DisplayRemoved | StopReason::BackendShutdown
+                ) {
+                    // The Device session is about to be destroyed. Tear down
+                    // local media owners now; closing the control owner then
+                    // releases the receiver without waiting for its reply.
+                    media
+                        .abort_media(media_generation)
                         .await
-                        .map_err(DeviceActorError::from),
-                    None => Err(DeviceActorError::InvalidRequest(
-                        "StopMedia requires a prepared device connection".into(),
-                    )),
+                        .map_err(DeviceActorError::from)
+                } else {
+                    match control.as_deref_mut() {
+                        Some(control) => media
+                            .stop_media(media_generation, control)
+                            .await
+                            .map_err(DeviceActorError::from),
+                        None => Err(DeviceActorError::InvalidRequest(
+                            "StopMedia requires a prepared device connection".into(),
+                        )),
+                    }
                 };
                 let _ = reply.send(result);
             }
@@ -1742,18 +1741,6 @@ mod tests {
             );
         }
         actor.shutdown().await.unwrap();
-    }
-
-    #[test]
-    fn control_shutdown_preserves_receiver_and_connection_failures() {
-        let stop_error = VideoTransportError::new("receiver stop failed");
-        let close_error = DeviceControlError::Close("connection close failed".into());
-
-        let error = combine_control_close_results(Err(stop_error), Err(close_error)).unwrap_err();
-
-        let text = error.to_string();
-        assert!(text.contains("receiver stop failed"));
-        assert!(text.contains("connection close failed"));
     }
 
     #[tokio::test]
