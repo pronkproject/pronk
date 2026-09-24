@@ -1063,7 +1063,11 @@ fn process_returned_buffers(
                 NonZeroU64::new(unsafe { sync.as_ref().release_point })
             }
             Some(PipeWireBufferTransport::ReadyBeforePublish) => None,
-            None => return Err(VideoSourceRuntimeError::InvalidOwnership(buffer_id.get())),
+            // A late process callback may still contain a buffer that the
+            // remove-buffer callback already unbound during consumer teardown.
+            // It no longer has an exported transport and cannot grant any
+            // ownership back to the capture actor.
+            None => continue,
         };
         let event = match state.tracker.returned(buffer_id, actual_release)? {
             BufferReturn::Initial {
@@ -1080,6 +1084,7 @@ fn process_returned_buffers(
                 buffer_id,
                 sequence,
             },
+            BufferReturn::Stale => continue,
         };
         state.emit(event)?;
     }
