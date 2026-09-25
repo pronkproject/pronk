@@ -455,17 +455,7 @@ impl Drop for DisplaySetupOperation {
 /// teardown begin only after ownership moves through `into_resources`.
 #[derive(Debug)]
 pub struct AddedCastDisplay {
-    display_id: CastDisplayId,
-    state_revision: u64,
-    device: DeviceInfo,
-    prepared: Option<PreparedCastDevice>,
-    slot: Option<ReservedCastDisplaySlot>,
-    media_driver: Option<Box<dyn MediaSessionDriver>>,
-    recovery_factory: Option<Box<dyn DeviceSessionFactoryPort>>,
-    session_replacement: Option<DeviceSessionReplacementHandle>,
-    initial_session_generation: NonZeroU64,
-    session_events: Option<Box<dyn DeviceSessionEventPort>>,
-    kernel: Option<Box<dyn KernelDisplayPort>>,
+    resources: Option<AddedCastDisplayResources>,
 }
 
 /// Bounded read-only projection of a manager-owned added display.
@@ -484,6 +474,7 @@ pub struct AddedCastDisplaySnapshot {
     pub runtime: DisplayRuntimeState,
 }
 
+#[derive(Debug)]
 pub(crate) struct AddedCastDisplayResources {
     pub display_id: CastDisplayId,
     pub state_revision: u64,
@@ -499,77 +490,54 @@ pub(crate) struct AddedCastDisplayResources {
 }
 
 impl AddedCastDisplay {
+    fn resources(&self) -> &AddedCastDisplayResources {
+        self.resources
+            .as_ref()
+            .expect("added display resources are present until transfer")
+    }
+
     pub fn display_id(&self) -> CastDisplayId {
-        self.display_id
+        self.resources().display_id
     }
 
     pub fn device(&self) -> &DeviceInfo {
-        &self.device
+        &self.resources().device
     }
 
     pub(crate) fn update_device(&mut self, device: DeviceInfo) -> bool {
-        debug_assert_eq!(self.device.backend_id, device.backend_id);
-        debug_assert_eq!(self.device.device_id, device.device_id);
-        if self.device == device {
+        let resources = self
+            .resources
+            .as_mut()
+            .expect("added display resources are present until transfer");
+        debug_assert_eq!(resources.device.backend_id, device.backend_id);
+        debug_assert_eq!(resources.device.device_id, device.device_id);
+        if resources.device == device {
             return false;
         }
-        self.state_revision = self
+        resources.state_revision = resources
             .state_revision
             .saturating_add(1)
             .max(device.device_revision);
-        self.device = device;
+        resources.device = device;
         true
     }
 
     pub(crate) fn into_resources(mut self) -> AddedCastDisplayResources {
-        AddedCastDisplayResources {
-            display_id: self.display_id,
-            state_revision: self.state_revision,
-            device: self.device.clone(),
-            prepared: self
-                .prepared
-                .take()
-                .expect("added display owns its prepared Device"),
-            slot: self
-                .slot
-                .take()
-                .expect("added display owns its output slot"),
-            media_driver: self
-                .media_driver
-                .take()
-                .expect("added display owns its media driver"),
-            recovery_factory: self
-                .recovery_factory
-                .take()
-                .expect("added display owns its Device-session recovery factory"),
-            session_replacement: self
-                .session_replacement
-                .take()
-                .expect("added display owns its Device-session replacement handle"),
-            initial_session_generation: self.initial_session_generation,
-            session_events: self
-                .session_events
-                .take()
-                .expect("added display owns its Device-session event source"),
-            kernel: self
-                .kernel
-                .take()
-                .expect("added display owns its kernel display"),
-        }
+        self.resources
+            .take()
+            .expect("added display resources are present until transfer")
     }
 }
 
 impl Drop for AddedCastDisplay {
     fn drop(&mut self) {
-        if self.media_driver.is_some() {
+        if let Some(resources) = self.resources.as_ref() {
             warn!(
-                display_id = %self.display_id,
+                display_id = %resources.display_id,
                 "added cast display dropped without orderly media-driver shutdown"
             );
-        }
-        if self.kernel.is_some() {
             warn!(
-                display_id = %self.display_id,
+                display_id = %resources.display_id,
                 "added cast display dropped without orderly kernel detach"
             );
         }

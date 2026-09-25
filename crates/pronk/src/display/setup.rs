@@ -17,9 +17,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{
-    set_status, AddedCastDisplay, CastDisplayId, DisplaySetupError, DisplaySetupSnapshot,
-    DisplaySetupStage, MediaRuntime, PendingDisplaySelection, INITIAL_SESSION_GENERATION,
-    VIDEO_FRAME_RATE_DENOMINATOR, VIDEO_FRAME_RATE_NUMERATOR,
+    set_status, AddedCastDisplay, AddedCastDisplayResources, CastDisplayId, DisplaySetupError,
+    DisplaySetupSnapshot, DisplaySetupStage, MediaRuntime, PendingDisplaySelection,
+    INITIAL_SESSION_GENERATION, VIDEO_FRAME_RATE_DENOMINATOR, VIDEO_FRAME_RATE_NUMERATOR,
 };
 use crate::device_recovery::{
     DeviceSessionFactoryError, DeviceSessionFactoryPort, PreparedDeviceSession,
@@ -630,17 +630,19 @@ impl AttachedSetup {
         };
         let state_revision = device.device_revision;
         Ok(AddedCastDisplay {
-            display_id: context.display_id,
-            state_revision,
-            device,
-            prepared: Some(prepared),
-            slot: Some(slot),
-            media_driver: Some(Box::new(media_driver)),
-            recovery_factory: Some(Box::new(recovery_factory)),
-            session_replacement: Some(session_replacement),
-            initial_session_generation,
-            session_events: Some(Box::new(session_events)),
-            kernel: Some(kernel),
+            resources: Some(AddedCastDisplayResources {
+                display_id: context.display_id,
+                state_revision,
+                device,
+                prepared,
+                slot,
+                media_driver: Box::new(media_driver),
+                recovery_factory: Box::new(recovery_factory),
+                session_replacement,
+                initial_session_generation,
+                session_events: Box::new(session_events),
+                kernel,
+            }),
         })
     }
 }
