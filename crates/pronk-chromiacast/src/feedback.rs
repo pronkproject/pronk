@@ -62,12 +62,19 @@ struct AdaptivePlayoutDelayController {
     evaluated_nack_count: u64,
     evaluated_transport_drops: u64,
     step_increase_pending: bool,
-    confirmed: bool,
+    update: PlayoutUpdateState,
     stable_since: Option<Instant>,
     last_adjustment: Option<Instant>,
-    last_update_sent: Option<Instant>,
-    update_attempts: u8,
-    updates_enabled: bool,
+}
+
+#[derive(Debug)]
+enum PlayoutUpdateState {
+    Awaiting {
+        last_sent: Option<Instant>,
+        attempts: u8,
+    },
+    Confirmed,
+    Disabled,
 }
 
 impl VideoFeedbackController {
@@ -205,12 +212,12 @@ impl AdaptivePlayoutDelayController {
             evaluated_nack_count: 0,
             evaluated_transport_drops: 0,
             step_increase_pending: false,
-            confirmed: false,
+            update: PlayoutUpdateState::Awaiting {
+                last_sent: None,
+                attempts: 0,
+            },
             stable_since: None,
             last_adjustment: None,
-            last_update_sent: None,
-            update_attempts: 0,
-            updates_enabled: true,
         }
     }
 
@@ -219,7 +226,7 @@ impl AdaptivePlayoutDelayController {
         pressure: VideoTransportPressure,
         now: Instant,
     ) -> Option<VideoFeedbackAction> {
-        if !self.updates_enabled {
+        if matches!(self.update, PlayoutUpdateState::Disabled) {
             return None;
         }
         let new_nack = pressure.nack_count > self.evaluated_nack_count;
@@ -244,31 +251,39 @@ impl AdaptivePlayoutDelayController {
         self.step_increase_pending |= step_pressure;
 
         if pressure.receiver_playout_delay != Some(self.current) {
-            self.confirmed = false;
             self.stable_since = None;
-            let last_update_sent = self.last_update_sent.get_or_insert(now);
+            if matches!(self.update, PlayoutUpdateState::Confirmed) {
+                self.update = PlayoutUpdateState::Awaiting {
+                    last_sent: None,
+                    attempts: 0,
+                };
+            }
+            let PlayoutUpdateState::Awaiting {
+                last_sent,
+                attempts,
+            } = &mut self.update
+            else {
+                unreachable!("disabled updates return before observing feedback");
+            };
+            let last_update_sent = last_sent.get_or_insert(now);
             if now
                 .checked_duration_since(*last_update_sent)
                 .is_some_and(|elapsed| elapsed >= PLAYOUT_UPDATE_RETRY_INTERVAL)
             {
                 *last_update_sent = now;
-                if self.update_attempts >= MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS {
-                    self.updates_enabled = false;
+                if *attempts >= MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS {
+                    self.update = PlayoutUpdateState::Disabled;
                     return Some(VideoFeedbackAction::DisableAdaptivePlayoutDelay {
                         requested: self.current,
                         receiver: pressure.receiver_playout_delay,
                     });
                 }
-                self.update_attempts += 1;
+                *attempts += 1;
                 return Some(VideoFeedbackAction::SetPlayoutDelay(self.current));
             }
             return None;
         }
-        if !self.confirmed {
-            self.confirmed = true;
-            self.last_update_sent = None;
-            self.update_attempts = 0;
-        }
+        self.update = PlayoutUpdateState::Confirmed;
         if !deadline_pressure && !lossy {
             self.stable_since.get_or_insert(now);
         }
@@ -306,11 +321,12 @@ impl AdaptivePlayoutDelayController {
 
     fn set_current(&mut self, requested: Duration, now: Instant) -> VideoFeedbackAction {
         self.current = requested;
-        self.confirmed = false;
+        self.update = PlayoutUpdateState::Awaiting {
+            last_sent: Some(now),
+            attempts: 1,
+        };
         self.stable_since = None;
         self.last_adjustment = Some(now);
-        self.last_update_sent = Some(now);
-        self.update_attempts = 1;
         VideoFeedbackAction::SetPlayoutDelay(requested)
     }
 }
