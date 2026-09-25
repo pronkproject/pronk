@@ -45,6 +45,17 @@ pub(super) struct ReadySession {
     pub(super) event: DeviceSessionRecoveryEvent,
 }
 
+impl PreparedDeviceSession {
+    async fn cleanup(self) -> Option<String> {
+        self.events.shutdown().await;
+        self.session
+            .stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .err()
+            .map(|error| error.to_string())
+    }
+}
+
 impl RecoveryAttempt {
     pub(super) fn reserve(
         request_generation: u64,
@@ -116,14 +127,12 @@ impl<'a> RetiredAttempt<'a> {
                 DeviceSessionFactoryError::Cancelled => AttemptError::Cancelled,
                 other => AttemptError::Failed(other.to_string()),
             })?;
+        if self.attempt.cancellation.is_cancelled() {
+            let _ = recovered.cleanup().await;
+            return Err(AttemptError::Cancelled);
+        }
         if let Err(error) = expected.validate_recovery(&recovered.prepared) {
-            recovered.events.shutdown().await;
-            let cleanup = recovered
-                .session
-                .stop(DeviceSessionStopReason::DaemonShutdown)
-                .await
-                .err()
-                .map(|error| error.to_string());
+            let cleanup = recovered.cleanup().await;
             let diagnostic = match cleanup {
                 Some(cleanup) => format!("recovered Device session is incompatible: {error}; replacement cleanup also failed: {cleanup}"),
                 None => format!("recovered Device session is incompatible: {error}"),

@@ -526,6 +526,13 @@ mod tests {
         release_first: Option<oneshot::Receiver<()>>,
     }
 
+    #[derive(Debug)]
+    struct LateSuccessFactory {
+        first_started: Option<oneshot::Sender<()>>,
+        release_first: Option<oneshot::Receiver<()>>,
+        calls: Arc<StdMutex<Vec<Call>>>,
+    }
+
     #[async_trait]
     impl DeviceSessionFactoryPort for CancellationObservingFactory {
         async fn create_prepared_session(
@@ -542,6 +549,31 @@ mod tests {
                 let _ = release.await;
             }
             Err(DeviceSessionFactoryError::Cancelled)
+        }
+    }
+
+    #[async_trait]
+    impl DeviceSessionFactoryPort for LateSuccessFactory {
+        async fn create_prepared_session(
+            &mut self,
+            device: DeviceInfo,
+            _session_generation: NonZeroU64,
+            _cancellation: CancellationToken,
+        ) -> Result<PreparedDeviceSession, DeviceSessionFactoryError> {
+            let name = if let Some(started) = self.first_started.take() {
+                let _ = started.send(());
+                if let Some(release) = self.release_first.take() {
+                    let _ = release.await;
+                }
+                "stale"
+            } else {
+                "new"
+            };
+            Ok(PreparedDeviceSession {
+                prepared: prepared(device, "Bravia XR"),
+                session: session(name, &self.calls),
+                events: pending_events(),
+            })
         }
     }
 
@@ -861,5 +893,55 @@ mod tests {
             .stop(DeviceSessionStopReason::DaemonShutdown)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_late_success_from_a_cancelled_request_is_cleaned_up() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let baseline = prepared(device(1, 1, 1), "Bravia XR");
+        let (media_port, _control, replacement) =
+            replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
+        let (first_started, started) = oneshot::channel();
+        let (release_first, released) = oneshot::channel();
+        let mut actor = DeviceSessionRecoveryActor::spawn(
+            Box::new(LateSuccessFactory {
+                first_started: Some(first_started),
+                release_first: Some(released),
+                calls: Arc::clone(&calls),
+            }),
+            replacement,
+            baseline,
+            NonZeroU64::new(1).unwrap(),
+            pending_events(),
+        )
+        .unwrap();
+
+        actor.handle().recover(device(2, 2, 2)).await.unwrap();
+        started.await.unwrap();
+        let latest_device = device(3, 3, 3);
+        let request_generation = actor.handle().recover(latest_device.clone()).await.unwrap();
+        release_first.send(()).unwrap();
+        assert_eq!(
+            actor.next_event().await,
+            Some(DeviceSessionRecoveryEvent::Ready {
+                request_generation,
+                device: latest_device,
+                session_generation: NonZeroU64::new(3).unwrap(),
+                retired_session_cleanup_error: None,
+            })
+        );
+        actor.shutdown().await.unwrap();
+        media_port
+            .stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                Call::Stop("old", DeviceSessionStopReason::DaemonShutdown),
+                Call::Stop("stale", DeviceSessionStopReason::DaemonShutdown),
+                Call::Stop("new", DeviceSessionStopReason::DaemonShutdown),
+            ]
+        );
     }
 }
