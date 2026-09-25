@@ -37,7 +37,14 @@ impl ActorRuntime {
     }
 
     pub(super) async fn run(mut self, mut commands: mpsc::Receiver<Command>) {
-        while let Some(command) = commands.recv().await {
+        loop {
+            let command = tokio::select! {
+                _ = self.cancellation.owner_dropped.cancelled() => break,
+                command = commands.recv() => command,
+            };
+            let Some(command) = command else {
+                break;
+            };
             let Command {
                 request_generation,
                 kind,

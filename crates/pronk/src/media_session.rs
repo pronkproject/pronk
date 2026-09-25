@@ -228,6 +228,7 @@ impl Default for MediaSessionPolicy {
 pub struct MediaSessionActor {
     handle: MediaSessionHandle,
     shutdown_cancellation: CancellationToken,
+    owner_dropped: CancellationToken,
     task: Option<JoinHandle<()>>,
 }
 
@@ -304,6 +305,7 @@ impl RequestCoordinator {
 struct ActorCancellation {
     requests: Arc<RequestCoordinator>,
     shutdown: CancellationToken,
+    owner_dropped: CancellationToken,
 }
 
 impl ActorCancellation {
@@ -410,9 +412,11 @@ impl MediaSessionActor {
         let (state_tx, state) = watch::channel(MediaSessionSnapshot::idle());
         let requests = Arc::new(RequestCoordinator::new());
         let shutdown_cancellation = CancellationToken::new();
+        let owner_dropped = CancellationToken::new();
         let actor_cancellation = ActorCancellation {
             requests: Arc::clone(&requests),
             shutdown: shutdown_cancellation.clone(),
+            owner_dropped: owner_dropped.clone(),
         };
         let task = tokio::spawn(
             ActorRuntime::new(state_tx, actor_cancellation, driver, policy).run(command_rx),
@@ -424,6 +428,7 @@ impl MediaSessionActor {
                 requests,
             },
             shutdown_cancellation,
+            owner_dropped,
             task: Some(task),
         })
     }
@@ -456,9 +461,9 @@ impl Drop for MediaSessionActor {
         if let Some(task) = self.task.take() {
             self.shutdown_cancellation.cancel();
             self.handle.interrupt_phase();
-            // `shutdown` is the orderly path. Never orphan a resource-owning
-            // actor merely because its owner was dropped unexpectedly.
-            task.abort();
+            self.owner_dropped.cancel();
+            // The task owns the driver until its bounded shutdown completes.
+            drop(task);
         }
     }
 }
@@ -915,6 +920,37 @@ mod tests {
         assert_eq!(
             driver.calls(),
             vec![Call::Shutdown(MediaStopReason::BackendShutdown)]
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_actor_runs_final_driver_shutdown() {
+        let driver = FakeDriver::default();
+        let actor = MediaSessionActor::spawn(Box::new(driver.clone())).unwrap();
+        actor.handle().activate(route(1, 1920)).await.unwrap();
+
+        drop(actor);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if driver
+                    .calls()
+                    .contains(&Call::Shutdown(MediaStopReason::BackendShutdown))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            driver.calls(),
+            vec![
+                Call::Capture(1),
+                Call::Media(1),
+                Call::Stop(1, MediaStopReason::BackendShutdown),
+                Call::Shutdown(MediaStopReason::BackendShutdown),
+            ]
         );
     }
 
