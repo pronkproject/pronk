@@ -226,16 +226,10 @@ impl PendingSessionRequest {
 }
 
 impl DeviceSessionPolicyState {
-    fn new(device: &DeviceInfo, ready: bool, session_generation: NonZeroU64) -> Self {
-        if ready {
-            Self::Ready {
-                bound_connection_generation: device.connection_generation,
-                session_generation,
-            }
-        } else {
-            Self::Unavailable {
-                last_session_generation: session_generation,
-            }
+    fn new(device: &DeviceInfo, session_generation: NonZeroU64) -> Self {
+        Self::Ready {
+            bound_connection_generation: device.connection_generation,
+            session_generation,
         }
     }
 
@@ -543,7 +537,7 @@ mod tests {
     #[test]
     fn passive_discovery_changes_do_not_replace_a_live_session() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(1));
+        let mut state = DeviceSessionPolicyState::new(&initial, generation(1));
 
         let mut renamed = initial.clone();
         renamed.display_name = "Den TV".into();
@@ -563,9 +557,23 @@ mod tests {
     }
 
     #[test]
+    fn prepared_session_stays_ready_when_discovery_is_unavailable() {
+        let unavailable = device(DeviceAvailability::Unavailable, 1, 2, 3);
+        let mut state = DeviceSessionPolicyState::new(&unavailable, generation(1));
+
+        assert_eq!(state.readiness(&unavailable), DeviceSessionReadiness::Ready);
+        assert!(state.observe_device(&unavailable).is_none());
+        assert!(state.transport_failed(generation(1)));
+        assert_eq!(
+            state.readiness(&unavailable),
+            DeviceSessionReadiness::Unavailable
+        );
+    }
+
+    #[test]
     fn backend_reconnection_replaces_a_live_session() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(1));
+        let mut state = DeviceSessionPolicyState::new(&initial, generation(1));
         let reconnected = device(DeviceAvailability::Available, 2, 3, 4);
 
         assert!(matches!(
@@ -578,7 +586,7 @@ mod tests {
     #[test]
     fn discovery_drives_recovery_after_the_live_session_fails() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(1));
+        let mut state = DeviceSessionPolicyState::new(&initial, generation(1));
         assert!(state.transport_failed(generation(1)));
 
         let unavailable = device(DeviceAvailability::Unavailable, 1, 2, 5);
@@ -602,7 +610,7 @@ mod tests {
     #[test]
     fn withdrawn_device_invalidates_an_in_flight_recovery() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(4));
+        let mut state = DeviceSessionPolicyState::new(&initial, generation(4));
         let reconnected = device(DeviceAvailability::Available, 2, 3, 4);
         assert!(matches!(
             state.observe_device(&reconnected),
@@ -623,7 +631,7 @@ mod tests {
     #[test]
     fn repeated_device_observation_keeps_the_pending_recovery() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(1));
+        let mut state = DeviceSessionPolicyState::new(&initial, generation(1));
         let replacement = device(DeviceAvailability::Available, 2, 3, 4);
         assert!(matches!(
             state.observe_device(&replacement),
@@ -721,7 +729,7 @@ mod tests {
     #[test]
     fn stale_transport_failure_cannot_disrupt_the_replacement_session() {
         let initial = device(DeviceAvailability::Available, 1, 1, 1);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(4));
+        let mut state = DeviceSessionPolicyState::new(&initial, generation(4));
         assert!(!state.transport_failed(generation(3)));
         assert!(state.is_ready());
         assert!(state.transport_failed(generation(4)));

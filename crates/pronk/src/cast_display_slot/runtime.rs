@@ -71,11 +71,8 @@ impl SlotRuntime {
             kernel,
             ..
         } = resources;
-        let device_session = DeviceSessionPolicyState::new(
-            prepared.device(),
-            state.borrow().device.availability == DeviceAvailability::Available,
-            initial_session_generation,
-        );
+        let device_session =
+            DeviceSessionPolicyState::new(prepared.device(), initial_session_generation);
         let recovery = DeviceSessionRecoveryActor::spawn(
             recovery_factory,
             session_replacement,
