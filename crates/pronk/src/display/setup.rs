@@ -33,7 +33,9 @@ use crate::kernel_display_port::KernelDisplayPort;
 use crate::kernel_display_with_capture::KernelDisplayWithCapture;
 use crate::kernel_session::{KernelSession, KernelSessionError};
 use crate::kernel_session_provider::KernelSessionProvider;
-use crate::manager::{DeviceSessionResolver, ManagerHandle, ReservedCastDisplaySlot};
+use crate::manager::{
+    CastDisplaySlotLease, DeviceSessionResolver, ManagerHandle, ReservedCastDisplaySlot,
+};
 use crate::media_driver::ProductionMediaSessionDriver;
 use crate::media_remote::ClassifiedDeviceMediaRemotePort;
 use crate::preparation::PreparedCastDevice;
@@ -215,7 +217,7 @@ struct KernelReadySetup {
 
 /// Backend preparation is complete, but the kernel display is not yet attached.
 struct BackendReadySetup {
-    slot: ReservedCastDisplaySlot,
+    slot: CastDisplaySlotLease,
     context: DisplaySetupContext,
     device: DeviceInfo,
     output: pronk_core::output::CastKmsOutput,
@@ -231,7 +233,7 @@ struct BackendReadySetup {
 
 /// Kernel attachment and capture authority are ready for media construction.
 struct AttachedSetup {
-    slot: ReservedCastDisplaySlot,
+    slot: CastDisplaySlotLease,
     context: DisplaySetupContext,
     device: DeviceInfo,
     output: pronk_core::output::CastKmsOutput,
@@ -331,7 +333,7 @@ impl KernelReadySetup {
 
     async fn prepare_backend(self) -> Result<BackendReadySetup, DisplaySetupError> {
         let Self {
-            mut slot,
+            slot,
             context,
             device,
             output,
@@ -344,9 +346,7 @@ impl KernelReadySetup {
             OperationErrorCode::None,
             None,
         );
-        let selection = slot
-            .take_selection()
-            .ok_or(DisplaySetupError::ReservationConsumed)?;
+        let (slot, selection) = slot.into_lease();
         let mut create_session = Box::pin(selection.create_session(
             context.display_id.to_string(),
             INITIAL_SESSION_GENERATION,

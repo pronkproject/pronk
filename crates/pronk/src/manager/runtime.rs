@@ -12,8 +12,8 @@ use super::display_lifecycle::{
 use super::inventory::{configured_device_update, AggregateInventory, ApplySupervisorOutcome};
 use super::{
     InventoryEvent, LifecycleEvent, ManagerCommand, ManagerEventSinks, ManagerHandle,
-    ManagerShutdownReport, ManagerTaskError, ReservedCastDisplaySlot, ResolveDeviceError,
-    ResolvedDeviceSelection,
+    ManagerShutdownReport, ManagerTaskError, ReservedCastDisplayCore, ReservedCastDisplaySlot,
+    ResolveDeviceError, ResolvedDeviceSelection, SelectionBackend,
 };
 use crate::cast_display_slot::CastDisplaySlotEvent;
 use crate::device_session_port::DeviceSessionStopReason;
@@ -120,7 +120,10 @@ impl ManagerRuntimeState {
                             .ok_or_else(|| ResolveDeviceError::BackendUnavailable {
                                 backend_id: device.backend_id.clone(),
                             })?;
-                        Ok(ResolvedDeviceSelection { device, backend })
+                        Ok(ResolvedDeviceSelection {
+                            device,
+                            backend: SelectionBackend::Live(backend),
+                        })
                     });
                 let _ = response.send(result);
             }
@@ -146,12 +149,17 @@ impl ManagerRuntimeState {
                         |output| manager.kernel_session_provider.may_acquire(output),
                     )?;
                     Ok(ReservedCastDisplaySlot {
-                        device: device.clone(),
-                        selection_token: selection,
-                        selection: Some(ResolvedDeviceSelection { device, backend }),
-                        reservation: Some(reservation),
-                        releases: reservation_releases.clone(),
-                        manager_commands: None,
+                        selection: ResolvedDeviceSelection {
+                            device: device.clone(),
+                            backend: SelectionBackend::Live(backend),
+                        },
+                        core: ReservedCastDisplayCore {
+                            device,
+                            selection_token: selection,
+                            reservation: Some(reservation),
+                            releases: reservation_releases.clone(),
+                            manager_commands: None,
+                        },
                     })
                 })();
                 let _ = response.send(result);

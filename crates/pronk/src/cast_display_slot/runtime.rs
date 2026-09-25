@@ -16,7 +16,7 @@ use crate::display::{
 };
 use crate::display_state::{DisplayTopology, MediaState};
 use crate::kernel_display_port::{KernelDisplayEvent, KernelDisplayPort};
-use crate::manager::ReservedCastDisplaySlot;
+use crate::manager::CastDisplaySlotLease;
 use crate::media_policy::{DisplayMediaPolicyActor, MediaPolicyEvent};
 use crate::media_session::{MediaSessionSnapshot, MediaStopReason};
 
@@ -33,7 +33,7 @@ pub(super) async fn run_slot(
 
 struct SlotRuntime {
     display_id: CastDisplayId,
-    slot: ReservedCastDisplaySlot,
+    slot: CastDisplaySlotLease,
     kernel: Box<dyn KernelDisplayPort>,
     device_session: DeviceSessionPolicyState,
     recovery: DeviceSessionRecoveryActor,

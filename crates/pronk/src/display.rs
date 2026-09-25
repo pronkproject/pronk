@@ -31,7 +31,8 @@ use crate::kernel_display_port::KernelDisplayPort;
 use crate::kernel_session::KernelSessionError;
 use crate::kernel_session_provider::KernelSessionProvider;
 use crate::manager::{
-    ManagerHandle, ReserveDisplaySlotError, ReservedCastDisplaySlot, ResolveDeviceError,
+    CastDisplaySlotLease, ManagerHandle, ReserveDisplaySlotError, ReservedCastDisplaySlot,
+    ResolveDeviceError,
 };
 use crate::media_session::MediaSessionDriver;
 use crate::preparation::{PrepareCastDeviceError, PreparedCastDevice};
@@ -480,7 +481,7 @@ pub(crate) struct AddedCastDisplayResources {
     pub state_revision: u64,
     pub device: DeviceInfo,
     pub prepared: PreparedCastDevice,
-    pub slot: ReservedCastDisplaySlot,
+    pub slot: CastDisplaySlotLease,
     pub media_driver: Box<dyn MediaSessionDriver>,
     pub recovery_factory: Box<dyn DeviceSessionFactoryPort>,
     pub session_replacement: DeviceSessionReplacementHandle,
@@ -588,8 +589,6 @@ pub enum DisplaySetupError {
     CallerMonitor(#[source] io::Error),
     #[error("caller monitor task failed: {0}")]
     CallerTask(tokio::task::JoinError),
-    #[error("pending display reservation was already consumed")]
-    ReservationConsumed,
     #[error("reserve a CastKMS output for the selected Device: {0}")]
     Reserve(#[source] ReserveDisplaySlotError),
     #[error("selected Device changed during display setup: {0}")]
@@ -632,7 +631,6 @@ impl DisplaySetupError {
             Self::KernelAttach(AttachError::Rejected(_)) => OperationErrorCode::AttachmentFailed,
             Self::CallerMonitor(_)
             | Self::CallerTask(_)
-            | Self::ReservationConsumed
             | Self::Reserve(_)
             | Self::KernelAttach(_)
             | Self::KernelAccess(_)

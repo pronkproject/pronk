@@ -201,7 +201,7 @@ impl ManagerHandle {
         let mut slot = response_rx
             .await
             .map_err(|_| ReserveDisplaySlotError::ManagerStopped)??;
-        slot.manager_commands = Some(self.commands.clone());
+        slot.core.manager_commands = Some(self.commands.clone());
         Ok(slot)
     }
 
@@ -369,16 +369,33 @@ impl ManagerHandle {
 #[derive(Debug)]
 pub struct ResolvedDeviceSelection {
     device: DeviceInfo,
-    backend: BackendHandle,
+    backend: SelectionBackend,
+}
+
+#[derive(Debug)]
+enum SelectionBackend {
+    Live(BackendHandle),
+    #[cfg(test)]
+    Unreachable,
 }
 
 /// A generation-validated Device paired with one manager-reserved CastKMS
 /// output, before grant acquisition or any kernel/network side effect.
 #[derive(Debug)]
 pub struct ReservedCastDisplaySlot {
+    selection: ResolvedDeviceSelection,
+    core: ReservedCastDisplayCore,
+}
+
+#[derive(Debug)]
+pub(crate) struct CastDisplaySlotLease {
+    core: ReservedCastDisplayCore,
+}
+
+#[derive(Debug)]
+struct ReservedCastDisplayCore {
     device: DeviceInfo,
     selection_token: DeviceSelection,
-    selection: Option<ResolvedDeviceSelection>,
     reservation: Option<OutputReservation>,
     releases: mpsc::UnboundedSender<OutputReservationRelease>,
     manager_commands: Option<mpsc::Sender<ManagerCommand>>,
@@ -421,24 +438,48 @@ impl DeviceSessionResolver {
 }
 
 impl ReservedCastDisplaySlot {
+    pub(crate) fn into_lease(self) -> (CastDisplaySlotLease, ResolvedDeviceSelection) {
+        (CastDisplaySlotLease { core: self.core }, self.selection)
+    }
+
     pub fn device(&self) -> &DeviceInfo {
-        &self.device
+        &self.core.device
     }
 
     pub fn output(&self) -> &CastKmsOutput {
+        self.core.output()
+    }
+
+    pub(crate) async fn revalidate_device(&self) -> Result<(), ResolveDeviceError> {
+        self.core.revalidate_device().await
+    }
+}
+
+impl CastDisplaySlotLease {
+    pub(crate) fn output(&self) -> &CastKmsOutput {
+        self.core.output()
+    }
+
+    pub(crate) async fn revalidate_device(&self) -> Result<(), ResolveDeviceError> {
+        self.core.revalidate_device().await
+    }
+
+    pub(crate) fn device_session_resolver(
+        &self,
+    ) -> Result<DeviceSessionResolver, ResolveDeviceError> {
+        self.core.device_session_resolver()
+    }
+}
+
+impl ReservedCastDisplayCore {
+    fn output(&self) -> &CastKmsOutput {
         self.reservation
             .as_ref()
             .expect("reserved slot still owns its reservation")
             .output()
     }
 
-    pub(crate) fn take_selection(&mut self) -> Option<ResolvedDeviceSelection> {
-        self.selection.take()
-    }
-
-    pub(crate) fn device_session_resolver(
-        &self,
-    ) -> Result<DeviceSessionResolver, ResolveDeviceError> {
+    fn device_session_resolver(&self) -> Result<DeviceSessionResolver, ResolveDeviceError> {
         Ok(DeviceSessionResolver {
             commands: self
                 .manager_commands
@@ -450,7 +491,7 @@ impl ReservedCastDisplaySlot {
         })
     }
 
-    pub(crate) async fn revalidate_device(&self) -> Result<(), ResolveDeviceError> {
+    async fn revalidate_device(&self) -> Result<(), ResolveDeviceError> {
         let commands = self
             .manager_commands
             .as_ref()
@@ -470,7 +511,7 @@ impl ReservedCastDisplaySlot {
     }
 }
 
-impl Drop for ReservedCastDisplaySlot {
+impl Drop for ReservedCastDisplayCore {
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
             let _ = self.releases.send(reservation.release());
@@ -491,12 +532,17 @@ pub(crate) fn test_reserved_display_slot(
     let (releases, release_rx) = mpsc::unbounded_channel();
     (
         ReservedCastDisplaySlot {
-            selection_token: DeviceSelection::from_device(&device),
-            device,
-            selection: None,
-            reservation: Some(reservation),
-            releases,
-            manager_commands: None,
+            selection: ResolvedDeviceSelection {
+                device: device.clone(),
+                backend: SelectionBackend::Unreachable,
+            },
+            core: ReservedCastDisplayCore {
+                selection_token: DeviceSelection::from_device(&device),
+                device,
+                reservation: Some(reservation),
+                releases,
+                manager_commands: None,
+            },
         },
         release_rx,
     )
@@ -523,7 +569,56 @@ impl ResolvedDeviceSelection {
                 requested_features,
             },
         )?;
-        self.backend.create_session(request).await
+        match self.backend {
+            SelectionBackend::Live(backend) => backend.create_session(request).await,
+            #[cfg(test)]
+            SelectionBackend::Unreachable => unreachable!("test slot never prepares a backend"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod slot_handoff_tests {
+    use std::path::PathBuf;
+
+    use pronk_core::output::{CastKmsOutputId, OutputConnection};
+    use pronk_dbus::DeviceAvailability;
+
+    use super::*;
+
+    #[test]
+    fn selection_handoff_keeps_output_reserved_until_lease_drops() {
+        let device = DeviceInfo {
+            backend_id: "mock".into(),
+            device_id: "living-room".into(),
+            display_name: "Living Room TV".into(),
+            availability: DeviceAvailability::Available,
+            connection_generation: 1,
+            discovery_generation: 2,
+            device_revision: 3,
+            metadata: Vec::new(),
+        };
+        let output = CastKmsOutput {
+            id: CastKmsOutputId {
+                device_path: PathBuf::from("/sys/devices/virtual/castkms"),
+                output_index: 0,
+            },
+            node_path: PathBuf::from("/dev/dri/card9"),
+            device_major: 226,
+            device_minor: 9,
+            crtc_id: 20,
+            connector_id: 40,
+            connector_name: "Virtual-1".into(),
+            connection: OutputConnection::Disconnected,
+        };
+        let (slot, mut releases) = test_reserved_display_slot(device.clone(), output.clone());
+        let (lease, selection) = slot.into_lease();
+        assert_eq!(selection.device(), &device);
+        assert_eq!(lease.output(), &output);
+        assert!(releases.try_recv().is_err());
+        drop(lease);
+        assert!(releases.try_recv().is_ok());
+        assert!(releases.try_recv().is_err());
     }
 }
 
