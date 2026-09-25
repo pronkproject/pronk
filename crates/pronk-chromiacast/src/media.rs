@@ -1,20 +1,17 @@
+mod configuration;
 mod encoder_policy;
 mod graph;
 
 use std::num::{NonZeroU32, NonZeroU64};
-use std::os::fd::OwnedFd as StdOwnedFd;
 use std::time::{Duration, Instant};
 
 use pronk_backend_protocol::{
-    validate_media_configuration, DeviceCapabilities, DisplayMode, MediaConfiguration, MediaKind,
+    validate_media_configuration, DeviceCapabilities, DisplayMode, MediaConfiguration,
     PipeWireTarget, RawVideoLayout, SessionState, SessionStatistics, Validate,
-    SESSION_FEATURE_AUDIO,
 };
 use pronk_media::{
-    DrmVideoFormat, EncodedAudioPacket, EncodedVideoAccessUnit,
-    MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics, PipeWireAudioInput,
-    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence, VideoCodec,
-    VideoInputLayout, OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
+    EncodedAudioPacket, EncodedVideoAccessUnit, MediaGraphError, MediaGraphStatistics,
+    VideoCadence, VideoCodec, OPUS_FRAME_DURATION,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -23,13 +20,11 @@ use zbus::zvariant::OwnedFd;
 use crate::audio_sender_actor::{AudioSenderActor, AudioSenderStatistics};
 use crate::feedback::{
     AdaptivePlayoutDelayConfiguration, VideoFeedbackAction, VideoFeedbackController,
-    INITIAL_PLAYOUT_DELAY, MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS,
+    MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS,
 };
 use crate::sender_actor::{VideoSenderActor, VideoSenderFeedbackSnapshot, VideoSenderStatistics};
-use crate::transport::{
-    AudioTransportConfiguration, NegotiatedVideoTransport, VideoTransportConfiguration,
-    VideoTransportError, VideoTransportNegotiator,
-};
+use crate::transport::{NegotiatedVideoTransport, VideoTransportError, VideoTransportNegotiator};
+use configuration::graph_configuration;
 pub(crate) use encoder_policy::VideoEncoderPolicy;
 use graph::{GStreamerMediaGraph, MediaGraphPort};
 
@@ -65,32 +60,6 @@ fn total_dropped_frames(graph: &MediaGraphStatistics, sender: &VideoSenderStatis
     graph
         .dropped_video_frames()
         .saturating_add(sender.dropped_frames)
-}
-
-#[derive(Debug)]
-struct PendingMediaGraphConfiguration {
-    media_generation: NonZeroU64,
-    video: PipeWireVideoInput,
-    audio: Option<PipeWireAudioInput>,
-    video_cadence: VideoCadence,
-    video_bitrate: NonZeroU64,
-}
-
-impl PendingMediaGraphConfiguration {
-    fn with_encoder(
-        self,
-        policy: &VideoEncoderPolicy,
-        video_codec: VideoCodec,
-    ) -> Result<MediaGraphConfiguration, MediaGraphError> {
-        Ok(MediaGraphConfiguration {
-            media_generation: self.media_generation,
-            video: self.video,
-            audio: self.audio,
-            video_encoder: policy.encoder(video_codec)?,
-            video_cadence: self.video_cadence,
-            video_bitrate: self.video_bitrate,
-        })
-    }
 }
 
 /// Session-local media state machine. It owns generation admission and the
@@ -376,8 +345,20 @@ impl ChromiacastMediaSession {
                 self.generation.completed()
             )));
         }
-        let (graph_configuration, transport_configuration) =
-            self.graph_configuration(remotes, targets, configuration, generation)?;
+        let (graph_configuration, transport_configuration) = graph_configuration(
+            &self.session_id,
+            self.capabilities
+                .as_ref()
+                .ok_or(MediaSessionError::Transition {
+                    operation: "ConfigureMedia",
+                    state: self.state,
+                })?,
+            &self.encoder_policy,
+            remotes,
+            targets,
+            configuration,
+            generation,
+        )?;
         let audio_enabled = graph_configuration.audio.is_some();
         let video_bitrate = graph_configuration.video_bitrate;
 
@@ -846,198 +827,6 @@ impl ChromiacastMediaSession {
         graph_result.and(audio_sender_result).and(sender_result)
     }
 
-    fn graph_configuration(
-        &self,
-        remotes: Vec<OwnedFd>,
-        targets: Vec<PipeWireTarget>,
-        configuration: MediaConfiguration,
-        generation: NonZeroU64,
-    ) -> Result<(PendingMediaGraphConfiguration, VideoTransportConfiguration), MediaSessionError>
-    {
-        let capabilities = self
-            .capabilities
-            .as_ref()
-            .ok_or(MediaSessionError::Transition {
-                operation: "ConfigureMedia",
-                state: self.state,
-            })?;
-        let audio_profile = match configuration.audio_profile_id.as_deref() {
-            Some(profile_id) => {
-                if capabilities.features & SESSION_FEATURE_AUDIO == 0 {
-                    return Err(MediaSessionError::InvalidRequest(
-                        "audio was configured without a negotiated audio capability".into(),
-                    ));
-                }
-                let profile = capabilities
-                    .audio_profiles
-                    .iter()
-                    .find(|profile| profile.profile_id == profile_id)
-                    .ok_or_else(|| {
-                        MediaSessionError::InvalidRequest(
-                            "configured audio profile was not negotiated by Prepare".into(),
-                        )
-                    })?;
-                if profile.codec != "opus"
-                    || profile.max_channels < OPUS_CHANNELS as u8
-                    || !profile.sample_rates.contains(&OPUS_SAMPLE_RATE)
-                {
-                    return Err(MediaSessionError::InvalidRequest(
-                        "negotiated audio profile cannot carry 48 kHz stereo Opus".into(),
-                    ));
-                }
-                Some(profile)
-            }
-            None => None,
-        };
-        let negotiated_mode = capabilities
-            .modes
-            .iter()
-            .find(|mode| mode.matches_realized(&configuration.mode))
-            .ok_or_else(|| {
-                MediaSessionError::InvalidRequest(
-                    "configured mode was not negotiated by Prepare".into(),
-                )
-            })?;
-        let profile = capabilities
-            .video_profiles
-            .iter()
-            .find(|profile| profile.profile_id == configuration.video_profile_id)
-            .ok_or_else(|| {
-                MediaSessionError::InvalidRequest(
-                    "configured video profile was not negotiated by Prepare".into(),
-                )
-            })?;
-        if !profile.supports_mode(negotiated_mode) {
-            return Err(MediaSessionError::InvalidRequest(
-                "configured mode exceeds the negotiated video profile".into(),
-            ));
-        }
-
-        let mut remotes = remotes.into_iter();
-        let video_remote: StdOwnedFd = remotes
-            .next()
-            .expect("wire validation requires video")
-            .into();
-        let mut targets = targets.into_iter();
-        let video_target = targets.next().expect("wire validation requires video");
-        if video_target.kind != MediaKind::Video {
-            return Err(MediaSessionError::InvalidRequest(
-                "the first PipeWire target is not video".into(),
-            ));
-        }
-        if video_target.session_id != self.session_id {
-            return Err(MediaSessionError::InvalidRequest(
-                "PipeWire target belongs to another session".into(),
-            ));
-        }
-        self.encoder_policy
-            .validate_video_target(video_target.render_device)
-            .map_err(MediaSessionError::InvalidRequest)?;
-        let caps = ValidatedVideoCaps::parse(&video_target.caps)?;
-        let raw_layout = raw_layout_from_caps(&caps)?;
-        if !profile.raw_layouts.contains(&raw_layout) {
-            return Err(MediaSessionError::InvalidRequest(
-                "video target does not use a negotiated raw-video layout".into(),
-            ));
-        }
-        if caps.width.get() != configuration.mode.width
-            || caps.height.get() != configuration.mode.height
-        {
-            return Err(MediaSessionError::InvalidRequest(format!(
-                "video caps are {}x{} but configured mode is {}x{}",
-                caps.width, caps.height, configuration.mode.width, configuration.mode.height
-            )));
-        }
-        let audio = match audio_profile {
-            Some(_) => {
-                let remote: StdOwnedFd = remotes
-                    .next()
-                    .expect("wire validation requires audio")
-                    .into();
-                let target = targets.next().expect("wire validation requires audio");
-                if target.kind != MediaKind::Audio {
-                    return Err(MediaSessionError::InvalidRequest(
-                        "the second PipeWire target is not audio".into(),
-                    ));
-                }
-                if target.session_id != video_target.session_id
-                    || target.device_instance != video_target.device_instance
-                    || target.connector_id != video_target.connector_id
-                    || target.output_index != video_target.output_index
-                    || target.media_generation != video_target.media_generation
-                {
-                    return Err(MediaSessionError::InvalidRequest(
-                        "audio target is not paired with the configured video output".into(),
-                    ));
-                }
-                let audio_caps = ValidatedAudioCaps::parse(&target.caps)?;
-                Some((
-                    PipeWireAudioInput {
-                        remote,
-                        node_name: target.node_name,
-                        object_serial: NonZeroU64::new(target.object_serial)
-                            .expect("wire validation rejected zero audio object serial"),
-                        caps: target.caps,
-                    },
-                    AudioTransportConfiguration {
-                        sample_rate: audio_caps.sample_rate.get(),
-                        channels: u8::try_from(audio_caps.channels.get())
-                            .expect("validated audio channel count fits u8"),
-                        bitrate: OPUS_BITRATE,
-                    },
-                ))
-            }
-            None => None,
-        };
-
-        let bitrate = u32::try_from(configuration.video_bitrate).map_err(|_| {
-            MediaSessionError::InvalidRequest("video bitrate exceeds Cast's u32 range".into())
-        })?;
-        self.encoder_policy
-            .validate_bitrate(configuration.video_bitrate)
-            .map_err(MediaSessionError::InvalidRequest)?;
-        let video_cadence = chromecast_video_cadence();
-        if !caps.supports_cadence(video_cadence) {
-            return Err(MediaSessionError::InvalidRequest(format!(
-                "video caps cadence {}/{} is below the required {}/{}",
-                caps.framerate_numerator,
-                caps.framerate_denominator,
-                video_cadence.numerator,
-                video_cadence.denominator
-            )));
-        }
-        let minimum_playout_delay = minimum_playout_delay(
-            video_cadence.numerator.get(),
-            video_cadence.denominator.get(),
-            audio.is_some(),
-        );
-        let transport = VideoTransportConfiguration {
-            width: caps.width.get(),
-            height: caps.height.get(),
-            framerate_numerator: video_cadence.numerator.get(),
-            framerate_denominator: video_cadence.denominator.get(),
-            bitrate,
-            target_playout_delay: INITIAL_PLAYOUT_DELAY.max(minimum_playout_delay),
-            offer: self.encoder_policy.offer(),
-            audio: audio.as_ref().map(|(_, transport)| *transport),
-        };
-        let graph = PendingMediaGraphConfiguration {
-            media_generation: generation,
-            video: PipeWireVideoInput {
-                remote: video_remote,
-                node_name: video_target.node_name,
-                object_serial: NonZeroU64::new(video_target.object_serial)
-                    .expect("wire validation rejected zero object serial"),
-                caps: video_target.caps,
-            },
-            audio: audio.map(|(input, _)| input),
-            video_cadence,
-            video_bitrate: NonZeroU64::new(configuration.video_bitrate)
-                .expect("wire validation rejected zero bitrate"),
-        };
-        Ok((graph, transport))
-    }
-
     async fn wait_for_media_confirmation(
         &mut self,
         generation: NonZeroU64,
@@ -1138,17 +927,6 @@ impl ChromiacastMediaSession {
     }
 }
 
-fn raw_layout_from_caps(caps: &ValidatedVideoCaps) -> Result<RawVideoLayout, MediaSessionError> {
-    Ok(match &caps.layout {
-        VideoInputLayout::SystemMemoryBgrx => {
-            RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"))
-        }
-        VideoInputLayout::DmaBuf {
-            drm_format: DrmVideoFormat { format, modifier },
-        } => RawVideoLayout::dma_buf(*format, *modifier),
-    })
-}
-
 async fn discard_negotiated_transport(negotiated: NegotiatedVideoTransport) {
     let video = negotiated.sender.shutdown();
     let audio = async move {
@@ -1190,6 +968,7 @@ impl From<VideoTransportError> for MediaSessionError {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use std::os::fd::OwnedFd as StdOwnedFd;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1197,15 +976,19 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use pronk_backend_protocol::{
-        AudioProfile, DisplayIdentity, DisplayMode, IdentitySource, RenderDeviceIdentity,
-        VideoProfile, SESSION_FEATURE_AUDIO,
+        AudioProfile, DisplayIdentity, DisplayMode, IdentitySource, MediaKind,
+        RenderDeviceIdentity, VideoProfile, SESSION_FEATURE_AUDIO,
     };
-    use pronk_media::VideoFrameDependency;
+    use pronk_media::{
+        MediaGraphConfiguration, VideoFrameDependency, OPUS_BITRATE, OPUS_SAMPLE_RATE,
+    };
 
     use super::*;
+    use crate::feedback::INITIAL_PLAYOUT_DELAY;
     use crate::transport::{
-        AudioSendOutcome, AudioSenderPort, NegotiatedVideoTransport, VideoOffer, VideoSendOutcome,
-        VideoSenderPort, VideoTransportError, VideoTransportFeedbackSnapshot,
+        AudioSendOutcome, AudioSenderPort, AudioTransportConfiguration, NegotiatedVideoTransport,
+        VideoOffer, VideoSendOutcome, VideoSenderPort, VideoTransportConfiguration,
+        VideoTransportError, VideoTransportFeedbackSnapshot,
     };
 
     #[derive(Debug)]
