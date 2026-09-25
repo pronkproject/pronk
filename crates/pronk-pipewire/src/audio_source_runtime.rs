@@ -126,8 +126,17 @@ struct ThreadState {
 
 #[derive(Debug, Default)]
 struct AudioTimeline {
-    origin_ns: Option<i64>,
-    published_frames: u64,
+    state: AudioTimelineState,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+enum AudioTimelineState {
+    #[default]
+    AwaitingOrigin,
+    Publishing {
+        origin_ns: i64,
+        published_frames: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,24 +147,29 @@ struct AudioBufferTiming {
 }
 
 impl AudioTimeline {
+    fn needs_origin(&self) -> bool {
+        matches!(self.state, AudioTimelineState::AwaitingOrigin)
+    }
+
     fn next(
         &mut self,
         monotonic_now_ns: i64,
     ) -> Result<AudioBufferTiming, AudioSourceRuntimeError> {
-        let discontinuity = self.origin_ns.is_none();
-        let origin_ns = match self.origin_ns {
-            Some(origin_ns) => origin_ns,
-            None if monotonic_now_ns >= 0 => {
-                self.origin_ns = Some(monotonic_now_ns);
-                monotonic_now_ns
+        let (origin_ns, published_frames, discontinuity) = match self.state {
+            AudioTimelineState::AwaitingOrigin if monotonic_now_ns >= 0 => {
+                (monotonic_now_ns, 0, true)
             }
-            None => {
+            AudioTimelineState::AwaitingOrigin => {
                 return Err(AudioSourceRuntimeError::PipeWire(
                     "audio stream reported a negative monotonic time".to_string(),
                 ));
             }
+            AudioTimelineState::Publishing {
+                origin_ns,
+                published_frames,
+            } => (origin_ns, published_frames, false),
         };
-        let elapsed_ns = u128::from(self.published_frames)
+        let elapsed_ns = u128::from(published_frames)
             .checked_mul(1_000_000_000)
             .and_then(|value| value.checked_div(u128::from(AUDIO_RATE)))
             .and_then(|value| i64::try_from(value).ok())
@@ -167,13 +181,16 @@ impl AudioTimeline {
         let presentation_timestamp_ns = origin_ns.checked_add(elapsed_ns).ok_or_else(|| {
             AudioSourceRuntimeError::PipeWire("audio presentation timestamp overflowed".to_string())
         })?;
-        let first_frame = self.published_frames;
-        self.published_frames = self
-            .published_frames
+        let first_frame = published_frames;
+        let published_frames = published_frames
             .checked_add(AUDIO_PERIOD_FRAMES as u64)
             .ok_or_else(|| {
                 AudioSourceRuntimeError::PipeWire("audio frame sequence overflowed".to_string())
             })?;
+        self.state = AudioTimelineState::Publishing {
+            origin_ns,
+            published_frames,
+        };
         Ok(AudioBufferTiming {
             presentation_timestamp_ns,
             first_frame,
@@ -765,7 +782,7 @@ unsafe fn fill_audio_buffer(
     chunk.size = bytes as u32;
     unsafe { raw.as_mut() }.size = AUDIO_PERIOD_FRAMES as u64;
 
-    let monotonic_now_ns = if state.timeline.origin_ns.is_none() {
+    let monotonic_now_ns = if state.timeline.needs_origin() {
         clock_gettime(ClockId::CLOCK_MONOTONIC)
             .map_err(|error| {
                 AudioSourceRuntimeError::PipeWire(format!(
