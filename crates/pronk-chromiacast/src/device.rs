@@ -657,20 +657,20 @@ impl DeviceActor {
         let handle = DeviceActorHandle {
             commands: command_tx,
         };
-        let task = tokio::spawn(run_actor(
+        let task = tokio::spawn(run_actor(DeviceTaskContext {
             device,
             allowed_features,
             connector,
             media,
-            command_rx,
+            commands: command_rx,
             owner_drop_signal,
             feedback,
-            DeviceEventSink {
+            events: DeviceEventSink {
                 events: event_tx,
                 bitrate_requests: bitrate_request_tx,
                 fatal_error: Some(fatal_error_tx),
             },
-        ));
+        }));
         Ok((
             Self {
                 handle: handle.clone(),
@@ -790,16 +790,28 @@ enum NextDeviceInput {
     Feedback(Result<(), watch::error::RecvError>),
 }
 
-async fn run_actor(
+struct DeviceTaskContext {
     device: DeviceRecord,
     allowed_features: u64,
     connector: Arc<dyn DeviceConnector>,
-    mut media: ChromiacastMediaSession,
-    mut commands: mpsc::Receiver<DeviceCommand>,
-    mut owner_drop_signal: oneshot::Receiver<()>,
-    mut feedback: watch::Receiver<crate::sender_actor::VideoSenderFeedbackSnapshot>,
-    mut events: DeviceEventSink,
-) {
+    media: ChromiacastMediaSession,
+    commands: mpsc::Receiver<DeviceCommand>,
+    owner_drop_signal: oneshot::Receiver<()>,
+    feedback: watch::Receiver<crate::sender_actor::VideoSenderFeedbackSnapshot>,
+    events: DeviceEventSink,
+}
+
+async fn run_actor(context: DeviceTaskContext) {
+    let DeviceTaskContext {
+        device,
+        allowed_features,
+        connector,
+        mut media,
+        mut commands,
+        mut owner_drop_signal,
+        mut feedback,
+        mut events,
+    } = context;
     let mut control = None;
     let mut next_control_operation = 1_u64;
     let mut feedback_open = true;
