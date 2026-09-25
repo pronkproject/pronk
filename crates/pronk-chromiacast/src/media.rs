@@ -317,7 +317,7 @@ enum GenerationSlot {
 #[derive(Debug)]
 struct ActiveGeneration {
     id: NonZeroU64,
-    graph_received_generation: bool,
+    graph_may_own_generation: bool,
     sender_may_own_generation: bool,
     audio_sender_may_own_generation: bool,
     configuration_complete: bool,
@@ -331,7 +331,7 @@ impl ActiveGeneration {
     fn new(id: NonZeroU64, audio_enabled: bool, video_bitrate: NonZeroU64) -> Self {
         Self {
             id,
-            graph_received_generation: false,
+            graph_may_own_generation: false,
             sender_may_own_generation: false,
             audio_sender_may_own_generation: false,
             configuration_complete: false,
@@ -576,7 +576,7 @@ impl ChromiacastMediaSession {
                     return Err(error.into());
                 }
             };
-        self.active_generation_mut().graph_received_generation = true;
+        self.active_generation_mut().graph_may_own_generation = true;
         if let Err(error) = self.graph.configure(graph_configuration).await {
             discard_negotiated_transport(negotiated).await;
             return Err(error.into());
@@ -876,7 +876,7 @@ impl ChromiacastMediaSession {
         }
         self.require_matching_generation("StopMedia", generation)?;
         let active = self.active_generation();
-        let graph_received_generation = active.graph_received_generation;
+        let graph_may_own_generation = active.graph_may_own_generation;
         let audio_sender_may_own_generation = active.audio_sender_may_own_generation;
         let sender_may_own_generation = active.sender_may_own_generation;
         let transport_active = active.transport_active;
@@ -888,7 +888,7 @@ impl ChromiacastMediaSession {
         // Cast transport and sender actors until the whole backend is killed.
         let (graph_result, audio_sender_result, sender_result, transport_result) = tokio::join!(
             async {
-                if graph_received_generation {
+                if graph_may_own_generation {
                     graph
                         .stop(generation)
                         .await
