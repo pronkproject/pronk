@@ -80,10 +80,15 @@ async fn run_backend_worker(
                     }
                 }
                 None => {
-                    let _ = events.send(BackendWorkerMessage::Stopped {
+                    let stopped = BackendWorkerMessage::Stopped {
                         backend_id,
                         error: "backend supervisor event stream closed".into(),
-                    }).await;
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = &mut shutdown => return supervisor.shutdown().await,
+                        _ = events.send(stopped) => {}
+                    }
                     return Err(BackendSupervisorError::SupervisorStopped);
                 }
             },
