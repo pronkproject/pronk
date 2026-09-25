@@ -5,6 +5,9 @@
 //! replaceable Device-session port retains exclusive ownership of the active
 //! session transport.
 
+mod transaction;
+use transaction::{AttemptError, RecoveryAttempt};
+
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,11 +20,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::device_session_port::{
-    DeviceSessionEventPort, DeviceSessionPort, DeviceSessionStopReason,
-};
+#[cfg(test)]
+use crate::device_session_port::DeviceSessionStopReason;
+use crate::device_session_port::{DeviceSessionEventPort, DeviceSessionPort};
 use crate::preparation::PreparedCastDevice;
-use crate::replaceable_device_session::{DeviceSessionReplacement, DeviceSessionReplacementHandle};
+use crate::replaceable_device_session::DeviceSessionReplacementHandle;
 
 const RECOVERY_COMMAND_CAPACITY: usize = 4;
 const RECOVERY_EVENT_CAPACITY: usize = 4;
@@ -285,11 +288,12 @@ async fn run_recovery(context: RecoveryTaskContext) {
                 device,
                 cancellation,
             } => {
-                let Some(session_generation) = last_session_generation
-                    .get()
-                    .checked_add(1)
-                    .and_then(NonZeroU64::new)
-                else {
+                let Some(attempt) = RecoveryAttempt::reserve(
+                    request_generation,
+                    device.clone(),
+                    cancellation,
+                    &mut last_session_generation,
+                ) else {
                     send_failure(
                         &events,
                         request_generation,
@@ -299,88 +303,22 @@ async fn run_recovery(context: RecoveryTaskContext) {
                     .await;
                     continue;
                 };
-                // Every creation attempt consumes a generation, including an
-                // attempt whose protocol outcome is ambiguous.
-                last_session_generation = session_generation;
-                if let Some(events) = current_events.take() {
-                    events.shutdown().await;
+                if let Some(source) = current_events.take() {
+                    source.shutdown().await;
                 }
-                let installation = match replacement.retire_current().await {
-                    Ok(installation) => installation,
-                    Err(error) => {
-                        send_failure(
-                            &events,
-                            request_generation,
-                            device,
-                            format!("retire current Device session: {error}"),
-                        )
-                        .await;
-                        continue;
-                    }
-                };
-                let retired_session_cleanup_error = installation.retirement().cleanup_error.clone();
-                let result = factory
-                    .create_prepared_session(device.clone(), session_generation, cancellation)
-                    .await;
-                let recovered = match result {
-                    Ok(recovered) => recovered,
-                    Err(DeviceSessionFactoryError::Cancelled) => continue,
-                    Err(error) => {
-                        send_failure(&events, request_generation, device, error.to_string()).await;
-                        continue;
-                    }
-                };
-
-                let PreparedDeviceSession {
-                    prepared: recovered_prepared,
-                    session: recovered_session,
-                    events: recovered_events,
-                } = recovered;
-                if let Err(error) = prepared.validate_recovery(&recovered_prepared) {
-                    recovered_events.shutdown().await;
-                    let cleanup = recovered_session
-                        .stop(DeviceSessionStopReason::DaemonShutdown)
-                        .await
-                        .err()
-                        .map(|error| error.to_string());
-                    let diagnostic = match cleanup {
-                        Some(cleanup) => format!(
-                            "recovered Device session is incompatible: {error}; replacement cleanup also failed: {cleanup}"
-                        ),
-                        None => format!("recovered Device session is incompatible: {error}"),
-                    };
-                    send_failure(&events, request_generation, device, diagnostic).await;
-                    continue;
-                }
-
-                match installation
-                    .install(DeviceSessionReplacement {
-                        session_generation,
-                        session: recovered_session,
-                    })
+                match attempt
+                    .execute(&mut replacement, factory.as_mut(), &prepared)
                     .await
                 {
-                    Ok(report) => {
-                        current_events = Some(recovered_events);
-                        let event = DeviceSessionRecoveryEvent::Ready {
-                            request_generation,
-                            device,
-                            session_generation: report.installed_session_generation,
-                            retired_session_cleanup_error,
-                        };
-                        if events.send(event).await.is_err() {
+                    Ok(ready) => {
+                        current_events = Some(ready.events);
+                        if events.send(ready.event).await.is_err() {
                             return;
                         }
                     }
-                    Err(error) => {
-                        recovered_events.shutdown().await;
-                        send_failure(
-                            &events,
-                            request_generation,
-                            device,
-                            format!("install recovered Device session: {error}"),
-                        )
-                        .await;
+                    Err(AttemptError::Cancelled) => {}
+                    Err(AttemptError::Failed(error)) => {
+                        send_failure(&events, request_generation, device, error).await;
                     }
                 }
             }
