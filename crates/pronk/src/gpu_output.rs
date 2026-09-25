@@ -21,8 +21,18 @@ use pronk_pipewire::{
 #[derive(Debug)]
 struct TransportSlot {
     id: NonZeroU32,
-    initialized: bool,
-    publication: Option<(u64, Publication)>,
+    phase: TransportSlotPhase,
+}
+
+#[derive(Debug)]
+enum TransportSlotPhase {
+    AwaitingInitial,
+    Ready,
+    Published {
+        sequence: u64,
+        publication: Publication,
+    },
+    Retired,
 }
 
 #[derive(Debug)]
@@ -82,8 +92,7 @@ impl GpuOutput {
                 .into_iter()
                 .map(|id| TransportSlot {
                     id,
-                    initialized: false,
-                    publication: None,
+                    phase: TransportSlotPhase::AwaitingInitial,
                 })
                 .collect(),
             last_sequence: None,
@@ -129,8 +138,7 @@ impl GpuOutput {
         self.running()?;
         let slot = self.index(frame.buffer_id)?;
         if slot != permit.slot()
-            || !self.slots[slot].initialized
-            || self.slots[slot].publication.is_some()
+            || !matches!(self.slots[slot].phase, TransportSlotPhase::Ready)
             || frame.acquire_point.is_some()
             || self
                 .last_sequence
@@ -139,7 +147,10 @@ impl GpuOutput {
             return Err(invalid("invalid GPU output publication"));
         }
         let publication = self.pool.publish(permit)?;
-        self.slots[slot].publication = Some((frame.sequence, publication));
+        self.slots[slot].phase = TransportSlotPhase::Published {
+            sequence: frame.sequence,
+            publication,
+        };
         self.last_sequence = Some(frame.sequence);
         Ok(frame)
     }
@@ -164,14 +175,14 @@ impl GpuOutput {
                 ..
             } => {
                 let slot = self.index(*buffer_id)?;
-                if self.slots[slot].initialized
+                if !matches!(self.slots[slot].phase, TransportSlotPhase::AwaitingInitial)
                     || *transport != PipeWireBufferTransport::ReadyBeforePublish
                 {
                     return Err(invalid(
                         "GPU output requires one ready-before-publish availability event",
                     ));
                 }
-                self.slots[slot].initialized = true;
+                self.slots[slot].phase = TransportSlotPhase::Ready;
                 Ok(OutputEvent::Wait(self.pool.prepare_initial(slot)?))
             }
             VideoSourceActorEvent::BufferReleased {
@@ -180,13 +191,17 @@ impl GpuOutput {
                 ..
             } => {
                 let slot = self.index(*buffer_id)?;
-                if self.slots[slot].publication.as_ref().map(|(seq, _)| seq) != Some(sequence) {
+                if !matches!(
+                    self.slots[slot].phase,
+                    TransportSlotPhase::Published { sequence: current, .. } if current == *sequence
+                ) {
                     return Err(invalid("release does not match the active GPU publication"));
                 }
-                let (_, publication) = self.slots[slot]
-                    .publication
-                    .take()
-                    .expect("checked publication");
+                let TransportSlotPhase::Published { publication, .. } =
+                    std::mem::replace(&mut self.slots[slot].phase, TransportSlotPhase::Ready)
+                else {
+                    unreachable!("matching publication checked above");
+                };
                 Ok(OutputEvent::Wait(self.pool.returned(publication)?))
             }
             VideoSourceActorEvent::GenerationFailed { identity, .. } => {
@@ -215,7 +230,9 @@ impl GpuOutput {
         // consumed yet. Joining the entire source covers every local publication,
         // not only buffers still submitted in the actor's reclaim list.
         for slot in &mut self.slots {
-            if let Some((_, publication)) = slot.publication.take() {
+            if let TransportSlotPhase::Published { publication, .. } =
+                std::mem::replace(&mut slot.phase, TransportSlotPhase::Retired)
+            {
                 match self.pool.returned(publication) {
                     Ok(wait) => retirement.waits.push(wait),
                     Err(error) => retirement.errors.push(error),
@@ -289,7 +306,10 @@ mod tests {
             owner.handle_event(&stale).unwrap(),
             OutputEvent::Ignored
         ));
-        assert!(!owner.slots[0].initialized);
+        assert!(matches!(
+            owner.slots[0].phase,
+            TransportSlotPhase::AwaitingInitial
+        ));
         assert!(owner.claim(id).is_err());
     }
 
@@ -303,7 +323,10 @@ mod tests {
             transport: PipeWireBufferTransport::SyncTimeline,
         };
         assert!(owner.handle_event(&event).is_err());
-        assert!(!owner.slots[0].initialized);
+        assert!(matches!(
+            owner.slots[0].phase,
+            TransportSlotPhase::AwaitingInitial
+        ));
     }
 
     #[test]
@@ -320,6 +343,7 @@ mod tests {
         };
         assert!(retirement.waits.is_empty());
         assert!(retirement.errors.is_empty());
+        assert!(matches!(owner.slots[0].phase, TransportSlotPhase::Retired));
         assert!(owner.claim(id).is_err());
         assert!(matches!(
             owner.handle_event(&event).unwrap(),
