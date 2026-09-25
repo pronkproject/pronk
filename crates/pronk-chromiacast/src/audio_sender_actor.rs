@@ -225,9 +225,35 @@ enum Command {
 
 struct ActiveSender {
     generation: NonZeroU64,
-    state: AudioSenderState,
-    sender: Option<Box<dyn AudioSenderPort>>,
+    phase: AudioPhase,
     statistics: AudioSenderStatistics,
+}
+
+enum AudioPhase {
+    Configured(Box<dyn AudioSenderPort>),
+    Streaming(Box<dyn AudioSenderPort>),
+    Suspended(Box<dyn AudioSenderPort>),
+    Failed,
+}
+
+impl AudioPhase {
+    fn state(&self) -> AudioSenderState {
+        match self {
+            Self::Configured(_) => AudioSenderState::Configured,
+            Self::Streaming(_) => AudioSenderState::Streaming,
+            Self::Suspended(_) => AudioSenderState::Suspended,
+            Self::Failed => AudioSenderState::Failed,
+        }
+    }
+
+    fn take_sender(&mut self) -> Option<Box<dyn AudioSenderPort>> {
+        match std::mem::replace(self, Self::Failed) {
+            Self::Configured(sender) | Self::Streaming(sender) | Self::Suspended(sender) => {
+                Some(sender)
+            }
+            Self::Failed => None,
+        }
+    }
 }
 
 impl GenerationOwned for ActiveSender {
@@ -252,7 +278,7 @@ async fn run_actor(
     loop {
         let streaming = active
             .active()
-            .is_some_and(|current| current.state == AudioSenderState::Streaming);
+            .is_some_and(|current| current.phase.state() == AudioSenderState::Streaming);
         let next = if streaming {
             tokio::select! {
                 biased;
@@ -372,8 +398,7 @@ async fn configure_active(
     while output.try_recv().is_ok() {}
     *active = SenderSlot::Active(ActiveSender {
         generation,
-        state: AudioSenderState::Configured,
-        sender: Some(sender),
+        phase: AudioPhase::Configured(sender),
         statistics: AudioSenderStatistics::default(),
     });
     publish(
@@ -398,13 +423,20 @@ fn transition_active(
         Transition::Suspend => (AudioSenderState::Streaming, AudioSenderState::Suspended),
         Transition::Resume => (AudioSenderState::Suspended, AudioSenderState::Streaming),
     };
-    if active.state != required {
+    if active.phase.state() != required {
         return Err(VideoTransportError::new(format!(
             "audio sender generation {generation} is {:?}; expected {required:?}",
-            active.state
+            active.phase.state()
         )));
     }
-    active.state = desired;
+    let sender = active
+        .phase
+        .take_sender()
+        .expect("validated audio transition owns a transport");
+    active.phase = match transition {
+        Transition::Start | Transition::Resume => AudioPhase::Streaming(sender),
+        Transition::Suspend => AudioPhase::Suspended(sender),
+    };
     publish(
         snapshot,
         Some(generation),
@@ -431,10 +463,9 @@ async fn forward_packet(
     let queue_delay = Instant::now()
         .checked_duration_since(packet.reference_time)
         .unwrap_or_default();
-    let sender = active
-        .sender
-        .as_mut()
-        .ok_or_else(|| VideoTransportError::new("audio sender transport is missing"))?;
+    let AudioPhase::Streaming(sender) = &mut active.phase else {
+        return Err(VideoTransportError::new("audio sender is not streaming"));
+    };
     let outcome = tokio::time::timeout(SEND_TIMEOUT, sender.send(packet))
         .await
         .map_err(|_| VideoTransportError::new("timed out enqueueing encoded audio"))??;
@@ -448,7 +479,7 @@ async fn forward_packet(
     publish(
         snapshot,
         Some(active.generation),
-        active.state,
+        active.phase.state(),
         active.statistics.clone(),
         None,
     );
@@ -463,14 +494,13 @@ async fn fail_active(
     let Some(active) = active.active_mut() else {
         return;
     };
-    active.state = AudioSenderState::Failed;
-    if let Some(sender) = active.sender.take() {
+    if let Some(sender) = active.phase.take_sender() {
         let _ = sender.shutdown().await;
     }
     publish(
         snapshot,
         Some(active.generation),
-        active.state,
+        active.phase.state(),
         active.statistics.clone(),
         Some(error.to_string()),
     );
@@ -495,7 +525,7 @@ async fn stop_active(
         .take_active()
         .expect("active audio sender checked above");
     let statistics = current.statistics.clone();
-    if let Some(sender) = current.sender.take() {
+    if let Some(sender) = current.phase.take_sender() {
         sender.shutdown().await?;
     }
     Ok(statistics)
@@ -505,7 +535,7 @@ async fn shutdown_active(active: &mut SenderSlot) -> Result<(), VideoTransportEr
     let Some(mut active) = active.take_active() else {
         return Ok(());
     };
-    match active.sender.take() {
+    match active.phase.take_sender() {
         Some(sender) => sender.shutdown().await,
         None => Ok(()),
     }
@@ -520,13 +550,15 @@ fn active_statistics(
         Some(active) if active.generation != generation => {
             Err(generation_mismatch(active.generation, generation))
         }
-        Some(active) if active.state == AudioSenderState::Failed => Err(VideoTransportError::new(
-            snapshot
-                .borrow()
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "audio sender failed without diagnostic detail".into()),
-        )),
+        Some(active) if active.phase.state() == AudioSenderState::Failed => {
+            Err(VideoTransportError::new(
+                snapshot
+                    .borrow()
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "audio sender failed without diagnostic detail".into()),
+            ))
+        }
         Some(active) => Ok(active.statistics.clone()),
         None if active.completed() == Some(generation) => Ok(snapshot.borrow().statistics.clone()),
         None => Err(VideoTransportError::new(
@@ -626,6 +658,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(actor.resume(generation).await.is_err());
         actor.start(generation).await.unwrap();
         output.send(packet(generation, 0)).await.unwrap();
         actor
