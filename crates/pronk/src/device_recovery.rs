@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
 use crate::device_session_port::DeviceSessionStopReason;
-use crate::device_session_port::{DeviceSessionEventPort, DeviceSessionPort};
+use crate::device_session_port::{DeviceSessionEvent, DeviceSessionEventPort, DeviceSessionPort};
 use crate::preparation::PreparedCastDevice;
 use crate::replaceable_device_session::DeviceSessionReplacementHandle;
 
@@ -245,29 +245,20 @@ async fn run_recovery(context: RecoveryTaskContext) {
         initial_events,
     } = context;
     let mut last_session_generation = initial_session_generation;
-    let mut current_events = Some(initial_events);
+    let mut event_source = SessionEventSource::Monitoring {
+        generation: initial_session_generation,
+        events: initial_events,
+    };
     loop {
-        let next = match current_events.as_mut() {
-            Some(session_events) => tokio::select! {
-                command = commands.recv() => NextRecoveryInput::Command(command),
-                event = session_events.next_event() => NextRecoveryInput::SessionEvent(event),
-            },
-            None => NextRecoveryInput::Command(commands.recv().await),
-        };
+        let next = event_source.next(&mut commands).await;
         let command = match next {
             NextRecoveryInput::Command(Some(command)) => command,
             NextRecoveryInput::Command(None) => break,
-            NextRecoveryInput::SessionEvent(event) => {
-                let source = current_events
-                    .take()
-                    .expect("session event branch requires an event source");
-                source.shutdown().await;
+            NextRecoveryInput::SessionEvent { event, generation } => {
+                event_source.shutdown().await;
                 let (session_generation, error) = match event {
                     Some(event) => (event.session_generation, event.error),
-                    None => (
-                        last_session_generation,
-                        "Device-session event source stopped".into(),
-                    ),
+                    None => (generation, "Device-session event source stopped".into()),
                 };
                 if events
                     .send(DeviceSessionRecoveryEvent::TransportFailed {
@@ -303,15 +294,16 @@ async fn run_recovery(context: RecoveryTaskContext) {
                     .await;
                     continue;
                 };
-                if let Some(source) = current_events.take() {
-                    source.shutdown().await;
-                }
+                event_source.shutdown().await;
                 match attempt
                     .execute(&mut replacement, factory.as_mut(), &prepared)
                     .await
                 {
                     Ok(ready) => {
-                        current_events = Some(ready.events);
+                        event_source = SessionEventSource::Monitoring {
+                            generation: ready.session_generation,
+                            events: ready.events,
+                        };
                         if events.send(ready.event).await.is_err() {
                             return;
                         }
@@ -323,9 +315,7 @@ async fn run_recovery(context: RecoveryTaskContext) {
                 }
             }
             RecoveryCommand::Shutdown(response) => {
-                if let Some(events) = current_events.take() {
-                    events.shutdown().await;
-                }
+                event_source.shutdown().await;
                 let _ = response.send(());
                 return;
             }
@@ -333,9 +323,41 @@ async fn run_recovery(context: RecoveryTaskContext) {
     }
 }
 
+enum SessionEventSource {
+    Monitoring {
+        generation: NonZeroU64,
+        events: Box<dyn DeviceSessionEventPort>,
+    },
+    AwaitingRecovery,
+}
+
+impl SessionEventSource {
+    async fn next(&mut self, commands: &mut mpsc::Receiver<RecoveryCommand>) -> NextRecoveryInput {
+        match self {
+            Self::Monitoring { generation, events } => tokio::select! {
+                command = commands.recv() => NextRecoveryInput::Command(command),
+                event = events.next_event() => NextRecoveryInput::SessionEvent {
+                    event,
+                    generation: *generation,
+                },
+            },
+            Self::AwaitingRecovery => NextRecoveryInput::Command(commands.recv().await),
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        if let Self::Monitoring { events, .. } = std::mem::replace(self, Self::AwaitingRecovery) {
+            events.shutdown().await;
+        }
+    }
+}
+
 enum NextRecoveryInput {
     Command(Option<RecoveryCommand>),
-    SessionEvent(Option<crate::device_session_port::DeviceSessionEvent>),
+    SessionEvent {
+        event: Option<DeviceSessionEvent>,
+        generation: NonZeroU64,
+    },
 }
 
 async fn send_failure(
@@ -471,6 +493,18 @@ mod tests {
                 Some(event) => Some(event),
                 None => std::future::pending().await,
             }
+        }
+
+        async fn shutdown(self: Box<Self>) {}
+    }
+
+    #[derive(Debug)]
+    struct ClosedEvents;
+
+    #[async_trait]
+    impl DeviceSessionEventPort for ClosedEvents {
+        async fn next_event(&mut self) -> Option<DeviceSessionEvent> {
+            None
         }
 
         async fn shutdown(self: Box<Self>) {}
@@ -659,6 +693,61 @@ mod tests {
                 Call::Stop("new", DeviceSessionStopReason::DaemonShutdown),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn closed_replacement_event_source_reports_the_installed_generation() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let generations = Arc::new(StdMutex::new(Vec::new()));
+        let initial_device = device(1, 1, 1);
+        let recovered_device = device(2, 3, 4);
+        let baseline = prepared(initial_device, "Bravia XR");
+        let recovered = prepared(recovered_device.clone(), "Bravia XR");
+        let (media_port, _control, replacement) =
+            replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
+        let factory = FakeFactory {
+            results: VecDeque::from([Ok(PreparedDeviceSession {
+                prepared: recovered,
+                session: session("new", &calls),
+                events: Box::new(ClosedEvents),
+            })]),
+            generations,
+        };
+        let mut actor = DeviceSessionRecoveryActor::spawn(
+            Box::new(factory),
+            replacement,
+            baseline,
+            NonZeroU64::new(1).unwrap(),
+            pending_events(),
+        )
+        .unwrap();
+
+        let request_generation = actor
+            .handle()
+            .recover(recovered_device.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            actor.next_event().await,
+            Some(DeviceSessionRecoveryEvent::Ready {
+                request_generation,
+                device: recovered_device,
+                session_generation: NonZeroU64::new(2).unwrap(),
+                retired_session_cleanup_error: None,
+            })
+        );
+        assert_eq!(
+            actor.next_event().await,
+            Some(DeviceSessionRecoveryEvent::TransportFailed {
+                session_generation: NonZeroU64::new(2).unwrap(),
+                error: "Device-session event source stopped".into(),
+            })
+        );
+        actor.shutdown().await.unwrap();
+        media_port
+            .stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

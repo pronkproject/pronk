@@ -40,6 +40,7 @@ struct PreparedAttempt<'a> {
 }
 
 pub(super) struct ReadySession {
+    pub(super) session_generation: NonZeroU64,
     pub(super) events: Box<dyn DeviceSessionEventPort>,
     pub(super) event: DeviceSessionRecoveryEvent,
 }
@@ -149,6 +150,7 @@ impl PreparedAttempt<'_> {
             .await
         {
             Ok(report) => Ok(ReadySession {
+                session_generation: report.installed_session_generation,
                 events,
                 event: DeviceSessionRecoveryEvent::Ready {
                     request_generation: self.attempt.request_generation,
