@@ -6,7 +6,7 @@ use nix::unistd::Uid;
 use pronk_backend_host::{
     BackendEndpoint, BackendHandle, BackendReconnectPolicy, BackendRegistrationValidator,
     BackendSessionError, BackendSessionHandle, BackendSessionRequest, BackendShutdownReport,
-    BackendSupervisor, BackendSupervisorError, BackendSupervisorEvent, MAX_INSTALLED_BACKENDS,
+    BackendSupervisor, BackendSupervisorError, MAX_INSTALLED_BACKENDS,
 };
 use pronk_backend_protocol::SessionOptions;
 use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID, SYSTEM_PNP_IDS_PATH};
@@ -18,15 +18,14 @@ use pronk_dbus::{DeviceAvailability, DeviceInfo, DeviceSelection, DeviceSnapshot
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{timeout, timeout_at, Instant};
+use tokio::time::{timeout_at, Instant};
 use tracing::{debug, warn};
 
-use crate::cast_display_slot::{CastDisplaySlotActor, CastDisplaySlotEvent};
+use crate::cast_display_slot::CastDisplaySlotEvent;
 use crate::device_session_port::DeviceSessionStopReason;
 use crate::display::{
-    AddedCastDisplay, AddedCastDisplaySnapshot, CastDisplayId, DisplaySetupDependencies,
-    DisplaySetupHandle, DisplaySetupOperation, DisplaySetupOperationError, DisplaySetupStartError,
-    MediaRuntime, PendingDisplaySelection,
+    AddedCastDisplaySnapshot, CastDisplayId, DisplaySetupDependencies, DisplaySetupHandle,
+    DisplaySetupOperation, DisplaySetupStartError, MediaRuntime, PendingDisplaySelection,
 };
 use crate::kernel_session_provider::KernelSessionProvider;
 use crate::preparation::initial_preparation_offer;
@@ -34,7 +33,14 @@ use crate::slot::{
     OutputReservation, OutputReservationError, OutputReservationRelease, OutputSlotPool,
 };
 
+mod backend_worker;
+mod display_lifecycle;
 mod inventory;
+use backend_worker::{shutdown_workers, BackendWorker, BackendWorkerMessage};
+use display_lifecycle::{
+    handle_removal_join, handle_setup_join, start_managed_display_setup, ManagedDisplayPhase,
+    ManagedDisplayRecord, RemovalCompletion, SetupCompletion,
+};
 use inventory::{
     configured_device_update, AggregateError, AggregateInventory, ApplySupervisorOutcome,
 };
@@ -43,7 +49,6 @@ const MANAGER_COMMAND_QUEUE: usize = 32;
 const MANAGER_EVENT_QUEUE: usize = 256;
 const BACKEND_EVENT_QUEUE: usize = 256;
 const MANAGER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_RETAINED_SETUP_OPERATIONS: usize = 128;
 
 pub struct BackendConfig {
     pub endpoint: BackendEndpoint,
@@ -813,133 +818,6 @@ enum ManagerCommand {
     Shutdown(oneshot::Sender<ManagerShutdownReport>),
 }
 
-#[derive(Debug)]
-struct ManagedDisplayRecord {
-    // This target is claimed while the phase is SettingUp, Active, or Removing.
-    target: DeviceTarget,
-    handle: DisplaySetupHandle,
-    phase: ManagedDisplayPhase,
-}
-
-#[derive(Debug)]
-enum ManagedDisplayPhase {
-    SettingUp,
-    Active(CastDisplaySlotActor),
-    Removing {
-        waiters: Vec<oneshot::Sender<Result<(), RemoveManagedDisplayError>>>,
-    },
-    // Keep the finished setup result visible without retaining target ownership.
-    Terminal,
-}
-
-#[derive(Debug)]
-struct SetupCompletion {
-    display_id: CastDisplayId,
-    result: Result<AddedCastDisplay, DisplaySetupOperationError>,
-}
-
-#[derive(Debug)]
-struct RemovalCompletion {
-    display_id: CastDisplayId,
-    result: Result<(), String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct DeviceTarget {
-    backend_id: String,
-    device_id: String,
-}
-
-impl From<&DeviceSelection> for DeviceTarget {
-    fn from(selection: &DeviceSelection) -> Self {
-        Self {
-            backend_id: selection.backend_id.clone(),
-            device_id: selection.device_id.clone(),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum BackendWorkerMessage {
-    Event {
-        backend_id: String,
-        event: BackendSupervisorEvent,
-    },
-    Stopped {
-        backend_id: String,
-        error: String,
-    },
-}
-
-struct BackendWorker {
-    backend_id: String,
-    handle: BackendHandle,
-    shutdown: Option<oneshot::Sender<()>>,
-    task: JoinHandle<Result<BackendShutdownReport, BackendSupervisorError>>,
-}
-
-impl BackendWorker {
-    fn spawn(
-        backend_id: String,
-        supervisor: BackendSupervisor,
-        events: mpsc::Sender<BackendWorkerMessage>,
-    ) -> Self {
-        let handle = supervisor.handle();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let task_backend_id = backend_id.clone();
-        let task = tokio::spawn(run_backend_worker(
-            task_backend_id,
-            supervisor,
-            events,
-            shutdown_rx,
-        ));
-        Self {
-            backend_id,
-            handle,
-            shutdown: Some(shutdown_tx),
-            task,
-        }
-    }
-}
-
-async fn run_backend_worker(
-    backend_id: String,
-    mut supervisor: BackendSupervisor,
-    events: mpsc::Sender<BackendWorkerMessage>,
-    mut shutdown: oneshot::Receiver<()>,
-) -> Result<BackendShutdownReport, BackendSupervisorError> {
-    loop {
-        tokio::select! {
-            biased;
-            _ = &mut shutdown => return supervisor.shutdown().await,
-            event = supervisor.next_event() => match event {
-                Some(event) => {
-                    let message = BackendWorkerMessage::Event {
-                        backend_id: backend_id.clone(),
-                        event,
-                    };
-                    tokio::select! {
-                        biased;
-                        _ = &mut shutdown => return supervisor.shutdown().await,
-                        result = events.send(message) => {
-                            if result.is_err() {
-                                return supervisor.shutdown().await;
-                            }
-                        }
-                    }
-                }
-                None => {
-                    let _ = events.send(BackendWorkerMessage::Stopped {
-                        backend_id,
-                        error: "backend supervisor event stream closed".into(),
-                    }).await;
-                    return Err(BackendSupervisorError::SupervisorStopped);
-                }
-            },
-        }
-    }
-}
-
 struct ManagerTaskContext {
     commands: mpsc::Receiver<ManagerCommand>,
     events: ManagerEventSinks,
@@ -1266,106 +1144,6 @@ async fn run_manager(
     Ok(report)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn start_managed_display_setup(
-    manager: &ManagerHandle,
-    selection: DeviceSelection,
-    preferred_output: Option<CastKmsOutputId>,
-    caller: PinnedCallerProcess,
-    audio_enabled: bool,
-    records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
-    setup_tasks: &mut JoinSet<SetupCompletion>,
-    setup_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
-) -> Result<DisplaySetupHandle, StartDisplaySetupError> {
-    selection
-        .validate()
-        .map_err(|error| StartDisplaySetupError::InvalidSelection(error.to_string()))?;
-    let target = DeviceTarget::from(&selection);
-    if let Some(record) = records.values().find(|record| {
-        record.target == target && !matches!(record.phase, ManagedDisplayPhase::Terminal)
-    }) {
-        return Ok(record.handle.clone());
-    }
-
-    if records.len() >= MAX_RETAINED_SETUP_OPERATIONS {
-        return Err(StartDisplaySetupError::TooManyOperations);
-    }
-
-    let operation = manager
-        .spawn_display_setup_operation(selection, preferred_output, caller, audio_enabled)
-        .map_err(StartDisplaySetupError::Start)?;
-    let display_id = operation.display_id();
-    let handle = operation.handle();
-    if records.contains_key(&display_id) {
-        return Err(StartDisplaySetupError::IdentityCollision);
-    }
-    records.insert(
-        display_id,
-        ManagedDisplayRecord {
-            target: target.clone(),
-            handle: handle.clone(),
-            phase: ManagedDisplayPhase::SettingUp,
-        },
-    );
-    let abort = setup_tasks.spawn(async move {
-        SetupCompletion {
-            display_id,
-            result: operation.finish().await,
-        }
-    });
-    setup_task_ids.insert(abort.id(), display_id);
-    Ok(handle)
-}
-
-fn handle_setup_join(
-    joined: Result<(tokio::task::Id, SetupCompletion), tokio::task::JoinError>,
-    setup_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
-    records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
-    inventory: &AggregateInventory,
-    slot_events: &mpsc::UnboundedSender<CastDisplaySlotEvent>,
-) -> Option<LifecycleEvent> {
-    let completion = match joined {
-        Ok((task_id, completion)) => {
-            setup_task_ids.remove(&task_id);
-            completion
-        }
-        Err(error) => {
-            let display_id = setup_task_ids.remove(&error.id());
-            if let Some(display_id) = display_id {
-                records.remove(&display_id);
-            }
-            warn!(%error, ?display_id, "manager-owned display setup task failed");
-            return None;
-        }
-    };
-    let Some(record) = records.get_mut(&completion.display_id) else {
-        warn!(display_id = %completion.display_id, "completed display setup has no manager record");
-        return None;
-    };
-    match completion.result {
-        Ok(mut display) => {
-            debug_assert_eq!(display.display_id(), completion.display_id);
-            display.update_device(inventory.configured_device(display.device()));
-            let actor = match CastDisplaySlotActor::spawn(display, slot_events.clone()) {
-                Ok(actor) => actor,
-                Err(error) => {
-                    record.phase = ManagedDisplayPhase::Terminal;
-                    warn!(display_id = %completion.display_id, %error, "failed to start cast-display slot actor");
-                    return None;
-                }
-            };
-            let snapshot = actor.snapshot();
-            record.phase = ManagedDisplayPhase::Active(actor);
-            Some(LifecycleEvent::DisplayAdded(Box::new(snapshot)))
-        }
-        Err(error) => {
-            record.phase = ManagedDisplayPhase::Terminal;
-            debug!(display_id = %completion.display_id, %error, "display setup reached a terminal non-added state");
-            None
-        }
-    }
-}
-
 async fn publish_inventory_changes(
     changes: Vec<InventoryEvent>,
     records: &BTreeMap<CastDisplayId, ManagedDisplayRecord>,
@@ -1398,75 +1176,6 @@ async fn refresh_configured_displays(
         if let Err(error) = handle.update_device(device).await {
             warn!(display_id = %handle.display_id(), %error, "failed to refresh configured Device state");
         }
-    }
-}
-
-fn handle_removal_join(
-    joined: Result<(tokio::task::Id, RemovalCompletion), tokio::task::JoinError>,
-    removal_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
-    records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
-) -> Option<LifecycleEvent> {
-    let (display_id, result) = match joined {
-        Ok((task_id, completion)) => {
-            removal_task_ids.remove(&task_id);
-            (completion.display_id, completion.result)
-        }
-        Err(error) => {
-            let Some(display_id) = removal_task_ids.remove(&error.id()) else {
-                warn!(%error, "unidentified manager-owned display removal task failed");
-                return None;
-            };
-            (display_id, Err(error.to_string()))
-        }
-    };
-    let Some(record) = records.remove(&display_id) else {
-        warn!(%display_id, "completed display removal has no manager record");
-        return None;
-    };
-    let response = result.map_err(RemoveManagedDisplayError::Cleanup);
-    if let ManagedDisplayPhase::Removing { waiters } = record.phase {
-        for waiter in waiters {
-            let _ = waiter.send(response.clone());
-        }
-    }
-    Some(LifecycleEvent::DisplayRemoved { display_id })
-}
-
-async fn shutdown_workers(mut workers: Vec<BackendWorker>) -> ManagerShutdownReport {
-    for worker in &mut workers {
-        if let Some(shutdown) = worker.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-    }
-
-    let mut backend_reports = BTreeMap::new();
-    let mut errors = BTreeMap::new();
-    let wait = async {
-        for worker in &mut workers {
-            match (&mut worker.task).await {
-                Ok(Ok(report)) => {
-                    backend_reports.insert(worker.backend_id.clone(), report);
-                }
-                Ok(Err(error)) => {
-                    errors.insert(worker.backend_id.clone(), error.to_string());
-                }
-                Err(error) => {
-                    errors.insert(worker.backend_id.clone(), error.to_string());
-                }
-            }
-        }
-    };
-    if timeout(MANAGER_SHUTDOWN_TIMEOUT, wait).await.is_err() {
-        for worker in &workers {
-            if !worker.task.is_finished() {
-                worker.task.abort();
-                errors.insert(worker.backend_id.clone(), "shutdown timed out".into());
-            }
-        }
-    }
-    ManagerShutdownReport {
-        backend_reports,
-        errors,
     }
 }
 
