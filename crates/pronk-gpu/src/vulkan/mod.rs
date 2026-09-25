@@ -11,8 +11,8 @@ mod source;
 mod stage;
 mod submission;
 
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-oracle"))]
+pub mod test_support;
 
 pub use copy::CopiedImages;
 pub use destination::{DestinationCopy, DestinationImage};

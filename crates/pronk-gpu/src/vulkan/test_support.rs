@@ -7,7 +7,10 @@ use ash::vk;
 use super::submission::Job;
 use super::Image;
 
-pub(super) fn readback(image: Image) -> (Image, Vec<u8>) {
+/// Copy one initialized image to host memory for a pixel assertion.
+///
+/// This deliberately waits for completion and is only available to tests.
+pub fn readback(image: Image) -> (Image, Vec<u8>) {
     let layout = image.layout();
     let size = u64::from(layout.width.get())
         * u64::from(layout.height.get())

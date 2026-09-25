@@ -1530,6 +1530,7 @@ dependencies = [
  "pronk-capture-receiver-test",
  "pronk-core",
  "pronk-dmabuf",
+ "pronk-gpu",
  "pronk-media",
  "pronk-pipewire",
  "tokio",

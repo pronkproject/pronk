@@ -43,6 +43,10 @@ name = "pronk-capture-mutter-media-live-test"
 path = "src/mutter_media.rs"
 
 [[bin]]
+name = "pronk-capture-mutter-gpu-live-test"
+path = "src/mutter_gpu.rs"
+
+[[bin]]
 name = "pronk-capture-idle-revoke-live-test"
 path = "src/idle_revoke.rs"
 
@@ -59,6 +63,7 @@ nix.workspace = true
 pronk = { path = "../../crates/pronk" }
 pronk-backend-protocol = { path = "../../crates/pronk-backend-protocol" }
 pronk-dmabuf = { path = "../../crates/pronk-dmabuf" }
+pronk-gpu = { path = "../../crates/pronk-gpu", features = ["test-oracle"] }
 pronk-capture = { path = "../../crates/pronk-capture" }
 pronk-capture-broker = { path = "../../crates/pronk-capture-broker" }
 pronk-capture-pipewire = { path = "../../crates/pronk-capture-pipewire" }
