@@ -37,6 +37,7 @@ pub enum CastDisplaySlotEvent {
 
 pub struct CastDisplaySlotActor {
     handle: CastDisplaySlotHandle,
+    owner_dropped: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -85,14 +86,22 @@ impl CastDisplaySlotActor {
         let initial = initial_snapshot(&resources);
         let display_id = resources.display_id;
         let (commands, command_rx) = mpsc::channel(SLOT_COMMAND_CAPACITY);
+        let (owner_dropped, owner_drop_signal) = oneshot::channel();
         let (state_tx, state) = watch::channel(initial);
-        let task = tokio::spawn(run_slot(resources, command_rx, state_tx, events));
+        let task = tokio::spawn(run_slot(
+            resources,
+            command_rx,
+            owner_drop_signal,
+            state_tx,
+            events,
+        ));
         Ok(Self {
             handle: CastDisplaySlotHandle {
                 display_id,
                 commands,
                 state,
             },
+            owner_dropped: Some(owner_dropped),
             task: Some(task),
         })
     }
@@ -129,8 +138,7 @@ impl CastDisplaySlotActor {
     ///
     /// Terminal events are emitted only after the task has released every
     /// owned media, Device-session, kernel, and output-reservation resource.
-    /// Joining here lets the manager reap that completed owner instead of
-    /// relying on the actor's abort-on-drop safety net.
+    /// Joining here lets the manager reap that completed owner.
     pub(crate) async fn join_after_terminal(mut self) -> Result<(), CastDisplaySlotActorError> {
         let task = self.task.take().ok_or(CastDisplaySlotActorError::Stopped)?;
         task.await
@@ -140,12 +148,10 @@ impl CastDisplaySlotActor {
 
 impl Drop for CastDisplaySlotActor {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            // Orderly lifecycle paths consume the actor through `remove`.
-            // Aborting here is the fail-closed fallback: dropping a
-            // JoinHandle would orphan the resource-owning task.
-            task.abort();
-        }
+        self.owner_dropped.take();
+        // The task owns the resources until finish completes, including when
+        // an in-flight remove call loses its waiter.
+        self.task.take();
     }
 }
 

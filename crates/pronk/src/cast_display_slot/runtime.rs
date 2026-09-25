@@ -23,11 +23,12 @@ use crate::media_session::{MediaSessionSnapshot, MediaStopReason};
 pub(super) async fn run_slot(
     resources: AddedCastDisplayResources,
     commands: mpsc::Receiver<SlotCommand>,
+    owner_drop_signal: oneshot::Receiver<()>,
     state: watch::Sender<AddedCastDisplaySnapshot>,
     events: mpsc::UnboundedSender<CastDisplaySlotEvent>,
 ) {
     SlotRuntime::new(resources, state, events)
-        .run(commands)
+        .run(commands, owner_drop_signal)
         .await;
 }
 
@@ -104,9 +105,15 @@ impl SlotRuntime {
         }
     }
 
-    async fn run(mut self, mut commands: mpsc::Receiver<SlotCommand>) {
+    async fn run(
+        mut self,
+        mut commands: mpsc::Receiver<SlotCommand>,
+        mut owner_drop_signal: oneshot::Receiver<()>,
+    ) {
         let exit = loop {
             tokio::select! {
+                biased;
+                _ = &mut owner_drop_signal => break SlotExit::Shutdown,
                 command = commands.recv() => match command {
                     Some(SlotCommand::UpdateDevice { device, response }) => {
                         let recovery_action = self.device_session.observe_device(&device);
@@ -265,6 +272,7 @@ impl SlotRuntime {
             }
         };
 
+        commands.close();
         self.finish(exit).await;
     }
 
