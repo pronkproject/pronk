@@ -23,6 +23,7 @@ use crate::node_registration::NodeRegistration;
 use crate::policy_gate::{
     PolicyGate, PolicyMarkerChange, PRIVATE_NODE_POLICY_VERSION, PRIVATE_NODE_PROPERTY,
 };
+use crate::policy_registry_sync::PolicyRegistrySync;
 use crate::remote_monitor::RemoteDisconnectMonitor;
 use crate::{
     PipeWireBufferTransport, PipeWireRemote, VideoBuffer, VideoFrame, VideoNodeIdentity,
@@ -30,7 +31,6 @@ use crate::{
 };
 
 const EVENT_QUEUE_CAPACITY: usize = 128;
-const CORE_OBJECT_ID: u32 = 0;
 // At a 120 Hz driving graph this gives PipeWire about one second to
 // coalesce an activation edge before treating the client connection as lost.
 const MAX_CONSECUTIVE_TRIGGER_FAILURES: u32 = 125;
@@ -368,8 +368,7 @@ fn run(
         config, buffers, events, startup,
     )));
     let policy_gate = Rc::new(RefCell::new(PolicyGate::new(requires_policy)));
-    let initial_sync_seq = Rc::new(Cell::new(None));
-    let initial_sync_complete = Rc::new(Cell::new(false));
+    let initial_sync = Rc::new(Cell::new(PolicyRegistrySync::Unrequested));
 
     // Startup has protocol work to do before the normal command receiver can
     // safely capture a constructed stream. Keep cancellation independently
@@ -413,15 +412,13 @@ fn run(
 
     let state_for_core = state.clone();
     let mainloop_for_core = mainloop.clone();
-    let sync_seq_for_core = initial_sync_seq.clone();
-    let sync_complete_for_core = initial_sync_complete.clone();
+    let sync_for_core = initial_sync.clone();
     let mainloop_for_sync = mainloop.clone();
     let _core_listener = core
         .add_listener_local()
         .done(move |id, seq| {
-            let sequence = seq.seq();
-            if id == CORE_OBJECT_ID && sync_seq_for_core.get() == Some(sequence) {
-                sync_complete_for_core.set(true);
+            if sync_for_core.get().matches_done(id, seq.seq()) {
+                sync_for_core.set(PolicyRegistrySync::Complete);
                 mainloop_for_sync.quit();
             }
         })
@@ -512,12 +509,12 @@ fn run(
     let sync = core
         .sync(0)
         .map_err(|error| pipewire_error("synchronize policy registry", error))?;
-    initial_sync_seq.set(Some(sync.seq()));
+    initial_sync.set(PolicyRegistrySync::Awaiting(sync.seq()));
     mainloop.run();
     if state.borrow().failed || state.borrow().shutting_down {
         return Ok(());
     }
-    if !initial_sync_complete.get() {
+    if !initial_sync.get().is_complete() {
         return Err(VideoSourceRuntimeError::PipeWire(
             "policy registry synchronization stopped unexpectedly".to_string(),
         ));
