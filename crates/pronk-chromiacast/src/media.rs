@@ -1,22 +1,20 @@
 mod encoder_policy;
+mod graph;
 
-use std::fmt::Debug;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::OwnedFd as StdOwnedFd;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use pronk_backend_protocol::{
     validate_media_configuration, DeviceCapabilities, DisplayMode, MediaConfiguration, MediaKind,
     PipeWireTarget, RawVideoLayout, SessionState, SessionStatistics, Validate,
     SESSION_FEATURE_AUDIO,
 };
 use pronk_media::{
-    DrmVideoFormat, EncodedAudioPacket, EncodedMediaReceivers, EncodedVideoAccessUnit,
-    MediaGraphActor, MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics,
-    PipeWireAudioInput, PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence,
-    VideoCodec, VideoInputLayout, OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION,
-    OPUS_SAMPLE_RATE,
+    DrmVideoFormat, EncodedAudioPacket, EncodedVideoAccessUnit,
+    MediaGraphConfiguration, MediaGraphError, MediaGraphStatistics, PipeWireAudioInput,
+    PipeWireVideoInput, ValidatedAudioCaps, ValidatedVideoCaps, VideoCadence, VideoCodec,
+    VideoInputLayout, OPUS_BITRATE, OPUS_CHANNELS, OPUS_FRAME_DURATION, OPUS_SAMPLE_RATE,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -33,9 +31,8 @@ use crate::transport::{
     VideoTransportError, VideoTransportNegotiator,
 };
 pub(crate) use encoder_policy::VideoEncoderPolicy;
+use graph::{GStreamerMediaGraph, MediaGraphPort};
 
-const ENCODED_OUTPUT_CAPACITY: usize = 8;
-const ENCODED_AUDIO_OUTPUT_CAPACITY: usize = 32;
 const START_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn chromecast_video_cadence() -> VideoCadence {
@@ -68,108 +65,6 @@ fn total_dropped_frames(graph: &MediaGraphStatistics, sender: &VideoSenderStatis
     graph
         .dropped_video_frames()
         .saturating_add(sender.dropped_frames)
-}
-
-#[async_trait]
-trait MediaGraphPort: Debug + Send + 'static {
-    async fn configure(
-        &mut self,
-        configuration: MediaGraphConfiguration,
-    ) -> Result<(), MediaGraphError>;
-    async fn start(&mut self, generation: NonZeroU64) -> Result<(), MediaGraphError>;
-    async fn suspend(&mut self, generation: NonZeroU64) -> Result<(), MediaGraphError>;
-    async fn resume(&mut self, generation: NonZeroU64) -> Result<(), MediaGraphError>;
-    async fn request_key_frame(&mut self, generation: NonZeroU64) -> Result<(), MediaGraphError>;
-    async fn set_video_bitrate(
-        &mut self,
-        generation: NonZeroU64,
-        bitrate: NonZeroU64,
-    ) -> Result<u64, MediaGraphError>;
-    async fn stop(
-        &mut self,
-        generation: NonZeroU64,
-    ) -> Result<MediaGraphStatistics, MediaGraphError>;
-    async fn statistics(
-        &mut self,
-        generation: NonZeroU64,
-    ) -> Result<MediaGraphStatistics, MediaGraphError>;
-    async fn shutdown(&mut self) -> Result<(), MediaGraphError>;
-}
-
-#[derive(Debug)]
-struct GStreamerMediaGraph {
-    actor: Option<MediaGraphActor>,
-}
-
-impl GStreamerMediaGraph {
-    fn spawn() -> Result<(Self, EncodedMediaReceivers), MediaGraphError> {
-        let (actor, outputs) = MediaGraphActor::spawn_with_media_output(
-            ENCODED_OUTPUT_CAPACITY,
-            ENCODED_AUDIO_OUTPUT_CAPACITY,
-        )?;
-        Ok((Self { actor: Some(actor) }, outputs))
-    }
-
-    fn actor(&self) -> Result<&MediaGraphActor, MediaGraphError> {
-        self.actor
-            .as_ref()
-            .ok_or_else(|| MediaGraphError::new("Chromiacast media graph is shut down"))
-    }
-}
-
-#[async_trait]
-impl MediaGraphPort for GStreamerMediaGraph {
-    async fn configure(
-        &mut self,
-        configuration: MediaGraphConfiguration,
-    ) -> Result<(), MediaGraphError> {
-        self.actor()?.configure(configuration).await
-    }
-
-    async fn start(&mut self, generation: NonZeroU64) -> Result<(), MediaGraphError> {
-        self.actor()?.start(generation).await
-    }
-
-    async fn suspend(&mut self, generation: NonZeroU64) -> Result<(), MediaGraphError> {
-        self.actor()?.suspend(generation).await
-    }
-
-    async fn resume(&mut self, generation: NonZeroU64) -> Result<(), MediaGraphError> {
-        self.actor()?.resume(generation).await
-    }
-
-    async fn request_key_frame(&mut self, generation: NonZeroU64) -> Result<(), MediaGraphError> {
-        self.actor()?.request_key_frame(generation).await
-    }
-
-    async fn set_video_bitrate(
-        &mut self,
-        generation: NonZeroU64,
-        bitrate: NonZeroU64,
-    ) -> Result<u64, MediaGraphError> {
-        self.actor()?.set_video_bitrate(generation, bitrate).await
-    }
-
-    async fn stop(
-        &mut self,
-        generation: NonZeroU64,
-    ) -> Result<MediaGraphStatistics, MediaGraphError> {
-        self.actor()?.stop(generation).await
-    }
-
-    async fn statistics(
-        &mut self,
-        generation: NonZeroU64,
-    ) -> Result<MediaGraphStatistics, MediaGraphError> {
-        self.actor()?.statistics(generation).await
-    }
-
-    async fn shutdown(&mut self) -> Result<(), MediaGraphError> {
-        let Some(actor) = self.actor.take() else {
-            return Ok(());
-        };
-        actor.shutdown().await
-    }
 }
 
 #[derive(Debug)]
@@ -1294,6 +1189,7 @@ impl From<VideoTransportError> for MediaSessionError {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
