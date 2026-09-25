@@ -12,8 +12,13 @@ use crate::{invalid, Buffer, Config, Layout};
 pub(crate) struct Native<F> {
     client: Client<F>,
     registration: Registration,
-    stream_closed: bool,
-    next_cleanup: usize,
+    cleanup: CleanupPhase,
+}
+
+enum CleanupPhase {
+    StreamOpen,
+    Destinations { next: usize },
+    Done,
 }
 
 impl<F: AsFd> Native<F> {
@@ -54,8 +59,7 @@ impl<F: AsFd> Native<F> {
             Self {
                 client,
                 registration,
-                stream_closed: false,
-                next_cleanup: 0,
+                cleanup: CleanupPhase::StreamOpen,
             },
             Layout {
                 width: offer.width,
@@ -135,14 +139,17 @@ impl<F: AsFd + Send + 'static> Backend for Native<F> {
     }
 
     fn close(&mut self) -> io::Result<()> {
-        if !self.stream_closed {
+        if matches!(self.cleanup, CleanupPhase::StreamOpen) {
             self.client.close_stream(self.registration.stream)?;
-            self.stream_closed = true;
+            self.cleanup = CleanupPhase::Destinations { next: 0 };
         }
-        while self.next_cleanup < self.registration.destinations {
-            self.client
-                .unregister_destination(self.registration.destination(self.next_cleanup))?;
-            self.next_cleanup += 1;
+        if let CleanupPhase::Destinations { next } = &mut self.cleanup {
+            while *next < self.registration.destinations {
+                self.client
+                    .unregister_destination(self.registration.destination(*next))?;
+                *next += 1;
+            }
+            self.cleanup = CleanupPhase::Done;
         }
         Ok(())
     }
