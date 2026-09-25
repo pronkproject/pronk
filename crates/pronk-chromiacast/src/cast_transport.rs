@@ -255,11 +255,15 @@ fn maximum_playout_delay(answer: &chromiacast::Answer, audio_enabled: bool) -> O
 }
 
 struct ChromiacastVideoSender {
-    session: Option<SenderSession>,
+    owner: Option<SenderOwner>,
     video: StreamHandle,
     maximum_playout_delay: Option<Duration>,
     terminal: watch::Receiver<Option<VideoTransportError>>,
-    event_task: Option<JoinHandle<()>>,
+}
+
+struct SenderOwner {
+    session: SenderSession,
+    event_task: JoinHandle<()>,
 }
 
 impl ChromiacastVideoSender {
@@ -289,11 +293,13 @@ impl ChromiacastVideoSender {
         });
         (
             Self {
-                session: Some(session),
+                owner: Some(SenderOwner {
+                    session,
+                    event_task,
+                }),
                 video,
                 maximum_playout_delay,
                 terminal,
-                event_task: Some(event_task),
             },
             audio_sender,
             feedback,
@@ -307,10 +313,10 @@ impl ChromiacastVideoSender {
 
 impl Drop for ChromiacastVideoSender {
     fn drop(&mut self) {
-        if let Some(task) = self.event_task.take() {
+        if let Some(owner) = self.owner.take() {
             // `shutdown` is the orderly path. A dropped transport must not
             // detach an event pump which still owns session-facing channels.
-            task.abort();
+            owner.event_task.abort();
         }
     }
 }
@@ -496,9 +502,9 @@ impl std::fmt::Debug for ChromiacastVideoSender {
 #[async_trait]
 impl VideoSenderPort for ChromiacastVideoSender {
     fn supports_target_playout_delay_updates(&self) -> bool {
-        self.session
+        self.owner
             .as_ref()
-            .is_some_and(SenderSession::supports_target_playout_delay_updates)
+            .is_some_and(|owner| owner.session.supports_target_playout_delay_updates())
     }
 
     fn maximum_target_playout_delay(&self) -> Option<Duration> {
@@ -509,9 +515,10 @@ impl VideoSenderPort for ChromiacastVideoSender {
         &mut self,
         delay: Duration,
     ) -> Result<(), VideoTransportError> {
-        self.session
+        self.owner
             .as_ref()
             .ok_or_else(|| VideoTransportError::new("Cast sender session is stopped"))?
+            .session
             .set_target_playout_delay(delay)
             .await
             .map_err(|error| {
@@ -543,27 +550,25 @@ impl VideoSenderPort for ChromiacastVideoSender {
 
     async fn shutdown(mut self: Box<Self>) -> Result<(), VideoTransportError> {
         let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
-        let sender_result = match self.session.take() {
-            Some(session) => tokio::time::timeout(SHUTDOWN_TIMEOUT, session.shutdown())
-                .await
-                .map_err(|_| VideoTransportError::new("timed out stopping Cast sender"))
-                .and_then(|result| {
-                    result.map_err(|error| {
-                        VideoTransportError::new(format!("stop Cast sender: {error}"))
-                    })
-                }),
-            None => Ok(()),
-        };
-        let event_result = match self.event_task.take() {
-            Some(task) => {
-                join_sender_event_task(
-                    task,
-                    deadline.saturating_duration_since(tokio::time::Instant::now()),
-                )
-                .await
-            }
-            None => Ok(()),
-        };
+        let SenderOwner {
+            session,
+            event_task,
+        } = self
+            .owner
+            .take()
+            .expect("live Cast sender retains its owner");
+        let sender_result = tokio::time::timeout(SHUTDOWN_TIMEOUT, session.shutdown())
+            .await
+            .map_err(|_| VideoTransportError::new("timed out stopping Cast sender"))
+            .and_then(|result| {
+                result
+                    .map_err(|error| VideoTransportError::new(format!("stop Cast sender: {error}")))
+            });
+        let event_result = join_sender_event_task(
+            event_task,
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await;
         sender_result.and(event_result)
     }
 }
