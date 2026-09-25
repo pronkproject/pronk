@@ -24,11 +24,136 @@ use crate::media_session::{
 pub struct ProductionMediaSessionDriver {
     capture: Box<dyn CapturePipelinePort>,
     remotes: Box<dyn DeviceMediaRemotePort>,
+    // Final shutdown moves the Device owner before awaiting both cleanup
+    // paths. Cancellation can leave capture cleanup pending without a Device.
     device: Option<Box<dyn DeviceSessionPort>>,
-    capture_generation: Option<NonZeroU64>,
-    prepared: Option<PreparedCaptureMedia>,
-    backend_generation: Option<NonZeroU64>,
-    shutdown: bool,
+    lifecycle: DriverLifecycle,
+}
+
+#[derive(Debug)]
+enum DriverLifecycle {
+    Live(DriverMediaPhase),
+    Shutdown,
+}
+
+#[derive(Debug)]
+enum DriverMediaPhase {
+    Idle,
+    StartingCapture(NonZeroU64),
+    Prepared(PreparedCaptureMedia),
+    BackendPending(NonZeroU64),
+    Cleanup {
+        generation: NonZeroU64,
+        remaining: CleanupRemaining,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupRemaining {
+    Capture,
+    Backend,
+    Both,
+}
+
+impl CleanupRemaining {
+    fn capture(self) -> bool {
+        matches!(self, Self::Capture | Self::Both)
+    }
+
+    fn backend(self) -> bool {
+        matches!(self, Self::Backend | Self::Both)
+    }
+
+    fn without_capture(self) -> Option<Self> {
+        match self {
+            Self::Capture => None,
+            Self::Backend | Self::Both => Some(Self::Backend),
+        }
+    }
+
+    fn without_backend(self) -> Option<Self> {
+        match self {
+            Self::Backend => None,
+            Self::Capture | Self::Both => Some(Self::Capture),
+        }
+    }
+}
+
+impl DriverMediaPhase {
+    fn capture_generation(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Idle => None,
+            Self::StartingCapture(generation) | Self::BackendPending(generation) => {
+                Some(*generation)
+            }
+            Self::Prepared(prepared) => Some(prepared.media_generation),
+            Self::Cleanup {
+                generation,
+                remaining,
+            } => remaining.capture().then_some(*generation),
+        }
+    }
+
+    fn backend_generation(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::BackendPending(generation) => Some(*generation),
+            Self::Cleanup {
+                generation,
+                remaining,
+            } => remaining.backend().then_some(*generation),
+            _ => None,
+        }
+    }
+
+    fn begin_cleanup(&mut self) {
+        let previous = std::mem::replace(self, Self::Idle);
+        *self = match previous {
+            Self::Idle => Self::Idle,
+            Self::StartingCapture(generation) => Self::Cleanup {
+                generation,
+                remaining: CleanupRemaining::Capture,
+            },
+            Self::Prepared(prepared) => Self::Cleanup {
+                generation: prepared.media_generation,
+                remaining: CleanupRemaining::Capture,
+            },
+            Self::BackendPending(generation) => Self::Cleanup {
+                generation,
+                remaining: CleanupRemaining::Both,
+            },
+            cleanup @ Self::Cleanup { .. } => cleanup,
+        };
+    }
+
+    fn complete_capture_cleanup(&mut self) {
+        if let Self::Cleanup {
+            generation,
+            remaining,
+        } = *self
+        {
+            *self = remaining
+                .without_capture()
+                .map_or(Self::Idle, |remaining| Self::Cleanup {
+                    generation,
+                    remaining,
+                });
+        }
+    }
+
+    fn complete_backend_cleanup(&mut self) {
+        if let Self::Cleanup {
+            generation,
+            remaining,
+        } = *self
+        {
+            *self = remaining
+                .without_backend()
+                .map_or(Self::Idle, |remaining| Self::Cleanup {
+                    generation,
+                    remaining,
+                });
+        }
+    }
 }
 
 impl ProductionMediaSessionDriver {
@@ -41,15 +166,12 @@ impl ProductionMediaSessionDriver {
             capture,
             remotes,
             device: Some(device),
-            capture_generation: None,
-            prepared: None,
-            backend_generation: None,
-            shutdown: false,
+            lifecycle: DriverLifecycle::Live(DriverMediaPhase::Idle),
         }
     }
 
     fn ensure_live(&self) -> Result<(), MediaDriverError> {
-        if self.shutdown || self.device.is_none() {
+        if matches!(self.lifecycle, DriverLifecycle::Shutdown) || self.device.is_none() {
             Err(MediaDriverError::new("media driver is shut down"))
         } else {
             Ok(())
@@ -72,7 +194,10 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
     ) -> Result<(), MediaDriverError> {
         self.ensure_live()?;
         let generation = nonzero_generation(request.media_generation)?;
-        if self.capture_generation.is_some() || self.backend_generation.is_some() {
+        let DriverLifecycle::Live(media) = &mut self.lifecycle else {
+            return Err(MediaDriverError::new("media driver is shut down"));
+        };
+        if !matches!(media, DriverMediaPhase::Idle) {
             return Err(MediaDriverError::new(
                 "a previous media generation still requires cleanup",
             ));
@@ -80,7 +205,7 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
 
         // Mark the generation before awaiting: cancellation or timeout can be
         // ambiguous after the capture owner observes the command.
-        self.capture_generation = Some(generation);
+        *media = DriverMediaPhase::StartingCapture(generation);
         let prepared = cancellable(
             cancellation.clone(),
             "start capture pipeline",
@@ -88,7 +213,7 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
         )
         .await?;
         validate_prepared_capture(&prepared, request)?;
-        self.prepared = Some(prepared);
+        *media = DriverMediaPhase::Prepared(prepared);
         Ok(())
     }
 
@@ -99,17 +224,21 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
     ) -> Result<(), MediaDriverError> {
         self.ensure_live()?;
         let generation = nonzero_generation(request.media_generation)?;
-        if self.capture_generation != Some(generation) {
+        let DriverLifecycle::Live(media) = &mut self.lifecycle else {
+            return Err(MediaDriverError::new("media driver is shut down"));
+        };
+        if media.capture_generation() != Some(generation) {
             return Err(generation_mismatch(
                 "start backend media",
-                self.capture_generation,
+                media.capture_generation(),
                 generation,
             ));
         }
-        let prepared = self
-            .prepared
-            .as_ref()
-            .ok_or_else(|| MediaDriverError::new("capture did not return media targets"))?;
+        let DriverMediaPhase::Prepared(prepared) = media else {
+            return Err(MediaDriverError::new(
+                "capture did not return media targets",
+            ));
+        };
         let needs_audio = prepared.audio_target.is_some();
         let remote_set = cancellable(
             cancellation.clone(),
@@ -124,10 +253,16 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
             ));
         }
 
-        let prepared = self
-            .prepared
-            .take()
-            .expect("prepared capture was checked above");
+        let prepared = match std::mem::replace(media, DriverMediaPhase::BackendPending(generation))
+        {
+            DriverMediaPhase::Prepared(prepared) => prepared,
+            other => {
+                *media = other;
+                return Err(MediaDriverError::new(
+                    "capture did not return media targets",
+                ));
+            }
+        };
         let mut endpoints = vec![DeviceMediaEndpoint {
             remote: remote_set.video,
             target: prepared.video_target,
@@ -143,7 +278,6 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
 
         // ConfigureMedia transfers authority. Any interrupted/error reply is
         // ambiguous and must be followed by generation-matched StopMedia.
-        self.backend_generation = Some(generation);
         cancellable(
             cancellation.clone(),
             "configure backend media",
@@ -172,12 +306,15 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
     ) -> Result<(), MediaDriverError> {
         self.ensure_live()?;
         let generation = nonzero_generation(media_generation)?;
-        if self.backend_generation != Some(generation)
-            || self.capture_generation != Some(generation)
+        let DriverLifecycle::Live(media) = &self.lifecycle else {
+            return Err(MediaDriverError::new("media driver is shut down"));
+        };
+        if media.backend_generation() != Some(generation)
+            || media.capture_generation() != Some(generation)
         {
             return Err(generation_mismatch(
                 "suspend media",
-                self.backend_generation.or(self.capture_generation),
+                media.backend_generation().or(media.capture_generation()),
                 generation,
             ));
         }
@@ -203,34 +340,38 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
         cancellation: CancellationToken,
     ) -> Result<(), MediaDriverError> {
         let generation = nonzero_generation(media_generation)?;
+        let DriverLifecycle::Live(media) = &mut self.lifecycle else {
+            return Ok(());
+        };
+        // Record every cleanup obligation before awaiting a port. A cancelled
+        // stop leaves the remaining work available for a later attempt.
+        media.begin_cleanup();
         let mut failures = Vec::new();
 
-        if let Some(active) = self.backend_generation {
+        if let Some(active) = media.backend_generation() {
             if active != generation {
                 failures.push(
                     generation_mismatch("stop backend media", Some(active), generation).to_string(),
                 );
-            } else if self.device.is_none() {
-                // Cleanup is best-effort across independent authorities. A
-                // missing backend owner must not skip capture teardown.
-                failures.push("Device session is no longer available".into());
-            } else {
+            } else if let Some(device) = self.device.as_mut() {
                 let result = cancellable(
                     cancellation.clone(),
                     "stop backend media",
-                    self.device()?
-                        .stop_media(generation, map_stop_reason(reason)),
+                    device.stop_media(generation, map_stop_reason(reason)),
                 )
                 .await;
                 match result {
-                    Ok(()) => self.backend_generation = None,
+                    Ok(()) => media.complete_backend_cleanup(),
                     Err(error) => failures.push(error.to_string()),
                 }
+            } else {
+                // The final Device owner may have been moved into a cancelled
+                // shutdown. Capture still owns an independent cleanup path.
+                failures.push("Device session is no longer available".into());
             }
         }
 
-        self.prepared = None;
-        if let Some(active) = self.capture_generation {
+        if let Some(active) = media.capture_generation() {
             if active != generation {
                 failures.push(
                     generation_mismatch("stop capture pipeline", Some(active), generation)
@@ -244,7 +385,7 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
                 )
                 .await;
                 match result {
-                    Ok(()) => self.capture_generation = None,
+                    Ok(()) => media.complete_capture_cleanup(),
                     Err(error) => failures.push(error.to_string()),
                 }
             }
@@ -258,7 +399,7 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
         reason: MediaStopReason,
         cancellation: CancellationToken,
     ) -> Result<(), MediaDriverError> {
-        if self.shutdown {
+        if matches!(self.lifecycle, DriverLifecycle::Shutdown) {
             return Ok(());
         }
         let mut failures = Vec::new();
@@ -294,10 +435,7 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
         if let Err(error) = capture_result {
             failures.push(error.to_string());
         }
-        self.prepared = None;
-        self.backend_generation = None;
-        self.capture_generation = None;
-        self.shutdown = true;
+        self.lifecycle = DriverLifecycle::Shutdown;
         combine_failures(failures)
     }
 }
@@ -745,7 +883,19 @@ mod tests {
     #[tokio::test]
     async fn missing_device_owner_does_not_skip_capture_cleanup() {
         let calls = Calls::default();
-        let mut driver = driver(&calls, 1);
+        let mut driver = ProductionMediaSessionDriver::new(
+            Box::new(FakeCapture {
+                calls: calls.clone(),
+                returned_generation: 1,
+            }),
+            Box::new(FakeRemotes {
+                calls: calls.clone(),
+            }),
+            Box::new(FakeDevice {
+                calls: calls.clone(),
+                block_final_stop: true,
+            }),
+        );
         let cancellation = CancellationToken::new();
         driver
             .start_capture(request(1), cancellation.clone())
@@ -756,7 +906,12 @@ mod tests {
             .await
             .unwrap();
 
-        drop(driver.device.take());
+        assert!(tokio::time::timeout(
+            Duration::from_millis(50),
+            driver.shutdown(MediaStopReason::BackendShutdown, cancellation.clone()),
+        )
+        .await
+        .is_err());
         let error = driver
             .stop(1, MediaStopReason::TransportFailure, cancellation.clone())
             .await
@@ -764,8 +919,13 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Device session is no longer available"));
-        assert_eq!(driver.capture_generation, None);
-        assert_eq!(driver.backend_generation, NonZeroU64::new(1));
+        assert!(matches!(
+            driver.lifecycle,
+            DriverLifecycle::Live(DriverMediaPhase::Cleanup {
+                generation,
+                remaining: CleanupRemaining::Backend,
+            }) if generation.get() == 1
+        ));
         assert_eq!(calls.lock().unwrap().last(), Some(&Call::CaptureStop(1)));
 
         driver
