@@ -112,15 +112,17 @@ struct RecoveryRequestState {
 
 impl DeviceSessionRecoveryHandle {
     pub async fn recover(&self, device: DeviceInfo) -> Result<u64, DeviceSessionRecoveryError> {
-        let (request_generation, cancellation) = self.begin_request()?;
-        self.commands
-            .send(RecoveryCommand::Recover {
-                request_generation,
-                device,
-                cancellation,
-            })
+        let permit = self
+            .commands
+            .reserve()
             .await
             .map_err(|_| DeviceSessionRecoveryError::Stopped)?;
+        let (request_generation, cancellation) = self.begin_request()?;
+        permit.send(RecoveryCommand::Recover {
+            request_generation,
+            device,
+            cancellation,
+        });
         Ok(request_generation)
     }
 
@@ -695,6 +697,41 @@ mod tests {
         Box::new(TestEvents {
             events: VecDeque::new(),
         })
+    }
+
+    #[tokio::test]
+    async fn cancelled_enqueue_preserves_the_current_recovery_request() {
+        let (commands, mut receiver) = mpsc::channel(1);
+        let (response, _reply) = oneshot::channel();
+        commands
+            .send(RecoveryCommand::Shutdown(response))
+            .await
+            .unwrap();
+        let current = CancellationToken::new();
+        let requests = Arc::new(Mutex::new(RecoveryRequestState {
+            generation: 1,
+            cancellation: current.clone(),
+        }));
+        let handle = DeviceSessionRecoveryHandle { commands, requests };
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), handle.recover(device(2, 2, 2)),)
+                .await
+                .is_err()
+        );
+        assert!(!current.is_cancelled());
+        assert_eq!(handle.requests.lock().unwrap().generation, 1);
+
+        receiver.recv().await.unwrap();
+        assert_eq!(handle.recover(device(2, 2, 2)).await.unwrap(), 2);
+        assert!(current.is_cancelled());
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RecoveryCommand::Recover {
+                request_generation: 2,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
