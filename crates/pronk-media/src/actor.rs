@@ -261,8 +261,25 @@ enum Command {
 
 struct ActiveGraph {
     generation: NonZeroU64,
-    state: MediaGraphState,
+    phase: ActiveGraphPhase,
     graph: GStreamerGraph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveGraphPhase {
+    Configured,
+    Streaming,
+    Suspended,
+}
+
+impl From<ActiveGraphPhase> for MediaGraphState {
+    fn from(phase: ActiveGraphPhase) -> Self {
+        match phase {
+            ActiveGraphPhase::Configured => Self::Configured,
+            ActiveGraphPhase::Streaming => Self::Streaming,
+            ActiveGraphPhase::Suspended => Self::Suspended,
+        }
+    }
 }
 
 fn run_worker(
@@ -331,7 +348,7 @@ fn run_worker(
                 let result = if let Some(current) = active.as_ref() {
                     Err(MediaGraphError::new(format!(
                         "media generation {} is still {:?}; cannot configure {requested}",
-                        current.generation, current.state
+                        current.generation, current.phase
                     )))
                 } else if completed_generation.is_some_and(|previous| requested <= previous) {
                     Err(MediaGraphError::new(format!(
@@ -346,7 +363,7 @@ fn run_worker(
                         Ok(graph) => {
                             active = Some(ActiveGraph {
                                 generation: requested,
-                                state: MediaGraphState::Configured,
+                                phase: ActiveGraphPhase::Configured,
                                 graph,
                             });
                             publish(
@@ -374,14 +391,14 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::Start { generation, reply } => {
-                let result = with_active(&mut active, generation, MediaGraphState::Configured)
+                let result = with_active(&mut active, generation, ActiveGraphPhase::Configured)
                     .and_then(|current| {
                         current.graph.start()?;
-                        current.state = MediaGraphState::Streaming;
+                        current.phase = ActiveGraphPhase::Streaming;
                         publish(
                             &state,
                             Some(generation),
-                            current.state,
+                            current.phase.into(),
                             current.graph.statistics(),
                             None,
                         );
@@ -390,14 +407,14 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::Suspend { generation, reply } => {
-                let result = with_active(&mut active, generation, MediaGraphState::Streaming)
+                let result = with_active(&mut active, generation, ActiveGraphPhase::Streaming)
                     .and_then(|current| {
                         current.graph.suspend()?;
-                        current.state = MediaGraphState::Suspended;
+                        current.phase = ActiveGraphPhase::Suspended;
                         publish(
                             &state,
                             Some(generation),
-                            current.state,
+                            current.phase.into(),
                             current.graph.statistics(),
                             None,
                         );
@@ -406,14 +423,14 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::Resume { generation, reply } => {
-                let result = with_active(&mut active, generation, MediaGraphState::Suspended)
+                let result = with_active(&mut active, generation, ActiveGraphPhase::Suspended)
                     .and_then(|current| {
                         current.graph.resume()?;
-                        current.state = MediaGraphState::Streaming;
+                        current.phase = ActiveGraphPhase::Streaming;
                         publish(
                             &state,
                             Some(generation),
-                            current.state,
+                            current.phase.into(),
                             current.graph.statistics(),
                             None,
                         );
@@ -428,7 +445,7 @@ fn run_worker(
                     publish(
                         &state,
                         Some(current.generation),
-                        current.state,
+                        current.phase.into(),
                         current.graph.statistics(),
                         result.as_ref().err().map(ToString::to_string),
                     );
@@ -446,7 +463,7 @@ fn run_worker(
                     publish(
                         &state,
                         Some(current.generation),
-                        current.state,
+                        current.phase.into(),
                         current.graph.statistics(),
                         result.as_ref().err().map(ToString::to_string),
                     );
@@ -536,7 +553,7 @@ fn run_worker(
 fn with_active(
     active: &mut Option<ActiveGraph>,
     requested: NonZeroU64,
-    required: MediaGraphState,
+    required: ActiveGraphPhase,
 ) -> Result<&mut ActiveGraph, MediaGraphError> {
     let current = active
         .as_mut()
@@ -544,10 +561,10 @@ fn with_active(
     if current.generation != requested {
         return Err(generation_mismatch(current.generation, requested));
     }
-    if current.state != required {
+    if current.phase != required {
         return Err(MediaGraphError::new(format!(
             "media generation {requested} is {:?}; expected {required:?}",
-            current.state
+            current.phase
         )));
     }
     Ok(current)
