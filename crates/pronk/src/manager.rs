@@ -813,9 +813,22 @@ enum ManagerCommand {
 }
 
 #[derive(Debug)]
-struct ManagedSetupOperation {
+struct ManagedDisplayRecord {
+    // This target is claimed while the phase is SettingUp, Active, or Removing.
     target: DeviceTarget,
     handle: DisplaySetupHandle,
+    phase: ManagedDisplayPhase,
+}
+
+#[derive(Debug)]
+enum ManagedDisplayPhase {
+    SettingUp,
+    Active(CastDisplaySlotActor),
+    Removing {
+        waiters: Vec<oneshot::Sender<Result<(), RemoveManagedDisplayError>>>,
+    },
+    // Keep the finished setup result visible without retaining target ownership.
+    Terminal,
 }
 
 #[derive(Debug)]
@@ -827,7 +840,6 @@ struct SetupCompletion {
 #[derive(Debug)]
 struct RemovalCompletion {
     display_id: CastDisplayId,
-    target: DeviceTarget,
     result: Result<(), String>,
 }
 
@@ -842,15 +854,6 @@ impl From<&DeviceSelection> for DeviceTarget {
         Self {
             backend_id: selection.backend_id.clone(),
             device_id: selection.device_id.clone(),
-        }
-    }
-}
-
-impl From<&DeviceInfo> for DeviceTarget {
-    fn from(device: &DeviceInfo) -> Self {
-        Self {
-            backend_id: device.backend_id.clone(),
-            device_id: device.device_id.clone(),
         }
     }
 }
@@ -964,17 +967,11 @@ async fn run_manager(
     } = context;
     let mut inventory = AggregateInventory::default();
     let mut output_slots = OutputSlotPool::default();
-    let mut operations = BTreeMap::<CastDisplayId, ManagedSetupOperation>::new();
-    let mut target_owners = BTreeMap::<DeviceTarget, CastDisplayId>::new();
-    let mut displays = BTreeMap::<CastDisplayId, CastDisplaySlotActor>::new();
+    let mut records = BTreeMap::<CastDisplayId, ManagedDisplayRecord>::new();
     let mut setup_tasks = JoinSet::<SetupCompletion>::new();
     let mut setup_task_ids = HashMap::new();
     let mut removal_tasks = JoinSet::<RemovalCompletion>::new();
     let mut removal_task_ids = HashMap::new();
-    let mut removal_waiters = BTreeMap::<
-        CastDisplayId,
-        Vec<oneshot::Sender<Result<(), RemoveManagedDisplayError>>>,
-    >::new();
     let mut shutdown_response = None;
     let mut backend_events_open = true;
 
@@ -993,11 +990,17 @@ async fn run_manager(
                     let _ = response.send(inventory.snapshot());
                 }
                 Some(ManagerCommand::ListDisplays(response)) => {
-                    let snapshots = displays.values().map(CastDisplaySlotActor::snapshot).collect();
+                    let snapshots = records.values().filter_map(|record| match &record.phase {
+                        ManagedDisplayPhase::Active(display) => Some(display.snapshot()),
+                        _ => None,
+                    }).collect();
                     let _ = response.send(snapshots);
                 }
                 Some(ManagerCommand::GetDisplay { display_id, response }) => {
-                    let snapshot = displays.get(&display_id).map(CastDisplaySlotActor::snapshot);
+                    let snapshot = records.get(&display_id).and_then(|record| match &record.phase {
+                        ManagedDisplayPhase::Active(display) => Some(display.snapshot()),
+                        _ => None,
+                    });
                     let _ = response.send(snapshot);
                 }
                 Some(ManagerCommand::ResolveDevice { selection, response }) => {
@@ -1058,62 +1061,63 @@ async fn run_manager(
                         preferred_output,
                         caller,
                         audio_enabled,
-                        &mut operations,
-                        &mut target_owners,
+                        &mut records,
                         &mut setup_tasks,
                         &mut setup_task_ids,
                     );
                     let _ = response.send(result);
                 }
                 Some(ManagerCommand::GetDisplaySetupOperation { display_id, response }) => {
-                    let handle = operations.get(&display_id).map(|operation| operation.handle.clone());
+                    let handle = records.get(&display_id).map(|record| record.handle.clone());
                     let _ = response.send(handle);
                 }
                 Some(ManagerCommand::CancelDisplaySetup { display_id, response }) => {
-                    let cancelled = operations.get(&display_id).is_some_and(|operation| {
-                        if operation.handle.snapshot().stage.is_terminal() {
+                    let cancelled = records.get(&display_id).is_some_and(|record| {
+                        if record.handle.snapshot().stage.is_terminal() {
                             false
                         } else {
-                            operation.handle.cancel();
+                            record.handle.cancel();
                             true
                         }
                     });
                     let _ = response.send(cancelled);
                 }
                 Some(ManagerCommand::ForgetDisplaySetupOperation { display_id, response }) => {
-                    let forgettable = operations.get(&display_id).is_some_and(|operation| {
-                        operation.handle.snapshot().stage.is_terminal()
-                            && target_owners.get(&operation.target) != Some(&display_id)
-                            && !displays.contains_key(&display_id)
-                            && !removal_waiters.contains_key(&display_id)
+                    let forgettable = records.get(&display_id).is_some_and(|record| {
+                        record.handle.snapshot().stage.is_terminal()
+                            && matches!(record.phase, ManagedDisplayPhase::Terminal)
                     });
                     if forgettable {
-                        operations.remove(&display_id);
+                        records.remove(&display_id);
                     }
                     let _ = response.send(forgettable);
                 }
                 Some(ManagerCommand::RemoveDisplay { display_id, response }) => {
-                    if let Some(waiters) = removal_waiters.get_mut(&display_id) {
-                        waiters.push(response);
-                    } else if let Some(display) = displays.remove(&display_id) {
-                        let target = DeviceTarget::from(&display.snapshot().device);
-                        removal_waiters.insert(display_id, vec![response]);
-                        let completion_target = target.clone();
-                        let abort = removal_tasks.spawn(async move {
-                            RemovalCompletion {
-                                display_id,
-                                target: completion_target,
-                                result: display
-                                    .remove(DeviceSessionStopReason::DisplayRemoved)
-                                    .await
-                                    .map_err(|error| error.to_string()),
-                            }
-                        });
-                        removal_task_ids.insert(abort.id(), (display_id, target));
-                    } else {
-                        // Remove is deliberately idempotent, including after a
-                        // previous successful cleanup.
-                        let _ = response.send(Ok(()));
+                    match records.get_mut(&display_id) {
+                        Some(record) if matches!(record.phase, ManagedDisplayPhase::Active(_)) => {
+                            let previous = std::mem::replace(
+                                &mut record.phase,
+                                ManagedDisplayPhase::Removing { waiters: vec![response] },
+                            );
+                            let ManagedDisplayPhase::Active(display) = previous else { unreachable!() };
+                            let abort = removal_tasks.spawn(async move {
+                                RemovalCompletion {
+                                    display_id,
+                                    result: display
+                                        .remove(DeviceSessionStopReason::DisplayRemoved)
+                                        .await
+                                        .map_err(|error| error.to_string()),
+                                }
+                            });
+                            removal_task_ids.insert(abort.id(), display_id);
+                        }
+                        Some(ManagedDisplayRecord { phase: ManagedDisplayPhase::Removing { waiters }, .. }) => {
+                            waiters.push(response);
+                        }
+                        _ => {
+                            // Remove is idempotent, including after successful cleanup.
+                            let _ = response.send(Ok(()));
+                        }
                     }
                 }
                 Some(ManagerCommand::Shutdown(response)) => {
@@ -1126,9 +1130,7 @@ async fn run_manager(
                 if let Some(event) = handle_setup_join(
                     joined.expect("nonempty setup JoinSet returned no task"),
                     &mut setup_task_ids,
-                    &mut operations,
-                    &mut target_owners,
-                    &mut displays,
+                    &mut records,
                     &inventory,
                     &slot_events,
                 ) {
@@ -1139,9 +1141,7 @@ async fn run_manager(
                 if let Some(event) = handle_removal_join(
                     joined.expect("nonempty removal JoinSet returned no task"),
                     &mut removal_task_ids,
-                    &mut removal_waiters,
-                    &mut target_owners,
-                    &mut operations,
+                    &mut records,
                 ) {
                     let _ = events.lifecycle.send(event);
                 }
@@ -1150,7 +1150,7 @@ async fn run_manager(
                 Some(BackendWorkerMessage::Event { backend_id, event }) => {
                     match inventory.apply_supervisor_event(&backend_id, &event) {
                         Ok(ApplySupervisorOutcome::Changed(changes)) => {
-                            publish_inventory_changes(changes, &mut displays, &events).await?;
+                            publish_inventory_changes(changes, &records, &events).await?;
                         }
                         Ok(ApplySupervisorOutcome::IgnoredStale) => {
                             debug!(backend_id, ?event, "ignored stale backend event");
@@ -1163,18 +1163,18 @@ async fn run_manager(
                 Some(BackendWorkerMessage::Stopped { backend_id, error }) => {
                     warn!(backend_id, error, "backend supervisor stopped unexpectedly");
                     let changes = inventory.mark_backend_unavailable(&backend_id)?;
-                    publish_inventory_changes(changes, &mut displays, &events).await?;
+                    publish_inventory_changes(changes, &records, &events).await?;
                 }
                 None => {
                     backend_events_open = false;
                     let changes = inventory.mark_all_unavailable()?;
-                    publish_inventory_changes(changes, &mut displays, &events).await?;
+                    publish_inventory_changes(changes, &records, &events).await?;
                 }
             },
             event = slot_event_rx.recv() => {
                 match event {
                     Some(CastDisplaySlotEvent::StateChanged(snapshot)) => {
-                        if displays.contains_key(&snapshot.display_id) {
+                        if records.get(&snapshot.display_id).is_some_and(|record| matches!(record.phase, ManagedDisplayPhase::Active(_))) {
                             let _ = events.lifecycle.send(LifecycleEvent::DisplayStateChanged(snapshot));
                         }
                     }
@@ -1183,12 +1183,15 @@ async fn run_manager(
                         error,
                         cleanup_error,
                     }) => {
-                        if let Some(display) = displays.remove(&display_id) {
-                            let target = DeviceTarget::from(&display.snapshot().device);
+                        if let Some(record) = records.get_mut(&display_id) {
+                            let previous = std::mem::replace(&mut record.phase, ManagedDisplayPhase::Terminal);
+                            let ManagedDisplayPhase::Active(display) = previous else {
+                                record.phase = previous;
+                                continue;
+                            };
                             if let Err(join_error) = display.join_after_terminal().await {
                                 warn!(%display_id, %join_error, "could not reap terminal cast-display owner");
                             }
-                            release_target_owner(&mut target_owners, &target, display_id);
                             if let Some(cleanup_error) = cleanup_error {
                                 warn!(%display_id, %error, %cleanup_error, "removing cast display after terminal failure left cleanup errors");
                             } else {
@@ -1206,44 +1209,38 @@ async fn run_manager(
     }
 
     commands.close();
-    for operation in operations.values() {
-        if !operation.handle.snapshot().stage.is_terminal() {
-            operation.handle.cancel();
+    for record in records.values() {
+        if !record.handle.snapshot().stage.is_terminal() {
+            record.handle.cancel();
         }
     }
     while let Some(joined) = setup_tasks.join_next_with_id().await {
         handle_setup_join(
             joined,
             &mut setup_task_ids,
-            &mut operations,
-            &mut target_owners,
-            &mut displays,
+            &mut records,
             &inventory,
             &slot_events,
         );
     }
     while let Some(joined) = removal_tasks.join_next_with_id().await {
-        handle_removal_join(
-            joined,
-            &mut removal_task_ids,
-            &mut removal_waiters,
-            &mut target_owners,
-            &mut operations,
-        );
+        handle_removal_join(joined, &mut removal_task_ids, &mut records);
     }
 
     let mut display_cleanup_errors = BTreeMap::new();
     let mut shutdown_removals = JoinSet::new();
-    for (display_id, display) in displays {
-        shutdown_removals.spawn(async move {
-            (
-                display_id,
-                display
-                    .remove(DeviceSessionStopReason::DaemonShutdown)
-                    .await
-                    .map_err(|error| error.to_string()),
-            )
-        });
+    for (display_id, record) in records {
+        if let ManagedDisplayPhase::Active(display) = record.phase {
+            shutdown_removals.spawn(async move {
+                (
+                    display_id,
+                    display
+                        .remove(DeviceSessionStopReason::DaemonShutdown)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            });
+        }
     }
     while let Some(joined) = shutdown_removals.join_next().await {
         match joined {
@@ -1275,8 +1272,7 @@ fn start_managed_display_setup(
     preferred_output: Option<CastKmsOutputId>,
     caller: PinnedCallerProcess,
     audio_enabled: bool,
-    operations: &mut BTreeMap<CastDisplayId, ManagedSetupOperation>,
-    target_owners: &mut BTreeMap<DeviceTarget, CastDisplayId>,
+    records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
     setup_tasks: &mut JoinSet<SetupCompletion>,
     setup_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
 ) -> Result<DisplaySetupHandle, StartDisplaySetupError> {
@@ -1284,14 +1280,13 @@ fn start_managed_display_setup(
         .validate()
         .map_err(|error| StartDisplaySetupError::InvalidSelection(error.to_string()))?;
     let target = DeviceTarget::from(&selection);
-    if let Some(display_id) = target_owners.get(&target) {
-        return operations
-            .get(display_id)
-            .map(|operation| operation.handle.clone())
-            .ok_or(StartDisplaySetupError::InconsistentTarget);
+    if let Some(record) = records.values().find(|record| {
+        record.target == target && !matches!(record.phase, ManagedDisplayPhase::Terminal)
+    }) {
+        return Ok(record.handle.clone());
     }
 
-    if operations.len() >= MAX_RETAINED_SETUP_OPERATIONS {
+    if records.len() >= MAX_RETAINED_SETUP_OPERATIONS {
         return Err(StartDisplaySetupError::TooManyOperations);
     }
 
@@ -1300,20 +1295,17 @@ fn start_managed_display_setup(
         .map_err(StartDisplaySetupError::Start)?;
     let display_id = operation.display_id();
     let handle = operation.handle();
-    if operations.contains_key(&display_id) {
+    if records.contains_key(&display_id) {
         return Err(StartDisplaySetupError::IdentityCollision);
     }
-    if target_owners.contains_key(&target) {
-        return Err(StartDisplaySetupError::InconsistentTarget);
-    }
-    operations.insert(
+    records.insert(
         display_id,
-        ManagedSetupOperation {
+        ManagedDisplayRecord {
             target: target.clone(),
             handle: handle.clone(),
+            phase: ManagedDisplayPhase::SettingUp,
         },
     );
-    target_owners.insert(target, display_id);
     let abort = setup_tasks.spawn(async move {
         SetupCompletion {
             display_id,
@@ -1327,9 +1319,7 @@ fn start_managed_display_setup(
 fn handle_setup_join(
     joined: Result<(tokio::task::Id, SetupCompletion), tokio::task::JoinError>,
     setup_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
-    operations: &mut BTreeMap<CastDisplayId, ManagedSetupOperation>,
-    target_owners: &mut BTreeMap<DeviceTarget, CastDisplayId>,
-    displays: &mut BTreeMap<CastDisplayId, CastDisplaySlotActor>,
+    records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
     inventory: &AggregateInventory,
     slot_events: &mpsc::UnboundedSender<CastDisplaySlotEvent>,
 ) -> Option<LifecycleEvent> {
@@ -1341,15 +1331,13 @@ fn handle_setup_join(
         Err(error) => {
             let display_id = setup_task_ids.remove(&error.id());
             if let Some(display_id) = display_id {
-                if let Some(operation) = operations.remove(&display_id) {
-                    release_target_owner(target_owners, &operation.target, display_id);
-                }
+                records.remove(&display_id);
             }
             warn!(%error, ?display_id, "manager-owned display setup task failed");
             return None;
         }
     };
-    let Some(operation) = operations.get(&completion.display_id) else {
+    let Some(record) = records.get_mut(&completion.display_id) else {
         warn!(display_id = %completion.display_id, "completed display setup has no manager record");
         return None;
     };
@@ -1360,21 +1348,17 @@ fn handle_setup_join(
             let actor = match CastDisplaySlotActor::spawn(display, slot_events.clone()) {
                 Ok(actor) => actor,
                 Err(error) => {
-                    let target = operation.target.clone();
-                    release_target_owner(target_owners, &target, completion.display_id);
+                    record.phase = ManagedDisplayPhase::Terminal;
                     warn!(display_id = %completion.display_id, %error, "failed to start cast-display slot actor");
                     return None;
                 }
             };
             let snapshot = actor.snapshot();
-            if displays.insert(completion.display_id, actor).is_some() {
-                warn!(display_id = %completion.display_id, "replaced duplicate added display");
-            }
+            record.phase = ManagedDisplayPhase::Active(actor);
             Some(LifecycleEvent::DisplayAdded(Box::new(snapshot)))
         }
         Err(error) => {
-            let target = operation.target.clone();
-            release_target_owner(target_owners, &target, completion.display_id);
+            record.phase = ManagedDisplayPhase::Terminal;
             debug!(display_id = %completion.display_id, %error, "display setup reached a terminal non-added state");
             None
         }
@@ -1383,7 +1367,7 @@ fn handle_setup_join(
 
 async fn publish_inventory_changes(
     changes: Vec<InventoryEvent>,
-    displays: &mut BTreeMap<CastDisplayId, CastDisplaySlotActor>,
+    records: &BTreeMap<CastDisplayId, ManagedDisplayRecord>,
     events: &ManagerEventSinks,
 ) -> Result<(), ManagerTaskError> {
     for change in changes {
@@ -1392,16 +1376,19 @@ async fn publish_inventory_changes(
             .send(change.clone())
             .await
             .map_err(|_| ManagerTaskError::EventConsumerStopped)?;
-        refresh_configured_displays(displays, &change).await;
+        refresh_configured_displays(records, &change).await;
     }
     Ok(())
 }
 
 async fn refresh_configured_displays(
-    displays: &BTreeMap<CastDisplayId, CastDisplaySlotActor>,
+    records: &BTreeMap<CastDisplayId, ManagedDisplayRecord>,
     event: &InventoryEvent,
 ) {
-    for display in displays.values() {
+    for display in records.values().filter_map(|record| match &record.phase {
+        ManagedDisplayPhase::Active(display) => Some(display),
+        _ => None,
+    }) {
         let handle = display.handle();
         let current = handle.snapshot().device;
         let Some(device) = configured_device_update(&current, event) else {
@@ -1437,46 +1424,33 @@ fn configured_device_update(current: &DeviceInfo, event: &InventoryEvent) -> Opt
 
 fn handle_removal_join(
     joined: Result<(tokio::task::Id, RemovalCompletion), tokio::task::JoinError>,
-    removal_task_ids: &mut HashMap<tokio::task::Id, (CastDisplayId, DeviceTarget)>,
-    removal_waiters: &mut BTreeMap<
-        CastDisplayId,
-        Vec<oneshot::Sender<Result<(), RemoveManagedDisplayError>>>,
-    >,
-    target_owners: &mut BTreeMap<DeviceTarget, CastDisplayId>,
-    operations: &mut BTreeMap<CastDisplayId, ManagedSetupOperation>,
+    removal_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
+    records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
 ) -> Option<LifecycleEvent> {
-    let (display_id, target, result) = match joined {
+    let (display_id, result) = match joined {
         Ok((task_id, completion)) => {
             removal_task_ids.remove(&task_id);
-            (completion.display_id, completion.target, completion.result)
+            (completion.display_id, completion.result)
         }
         Err(error) => {
-            let Some((display_id, target)) = removal_task_ids.remove(&error.id()) else {
+            let Some(display_id) = removal_task_ids.remove(&error.id()) else {
                 warn!(%error, "unidentified manager-owned display removal task failed");
                 return None;
             };
-            (display_id, target, Err(error.to_string()))
+            (display_id, Err(error.to_string()))
         }
     };
-    release_target_owner(target_owners, &target, display_id);
-    operations.remove(&display_id);
+    let Some(record) = records.remove(&display_id) else {
+        warn!(%display_id, "completed display removal has no manager record");
+        return None;
+    };
     let response = result.map_err(RemoveManagedDisplayError::Cleanup);
-    if let Some(waiters) = removal_waiters.remove(&display_id) {
+    if let ManagedDisplayPhase::Removing { waiters } = record.phase {
         for waiter in waiters {
             let _ = waiter.send(response.clone());
         }
     }
     Some(LifecycleEvent::DisplayRemoved { display_id })
-}
-
-fn release_target_owner(
-    target_owners: &mut BTreeMap<DeviceTarget, CastDisplayId>,
-    target: &DeviceTarget,
-    display_id: CastDisplayId,
-) {
-    if target_owners.get(target) == Some(&display_id) {
-        target_owners.remove(target);
-    }
 }
 
 async fn shutdown_workers(mut workers: Vec<BackendWorker>) -> ManagerShutdownReport {
@@ -1961,8 +1935,6 @@ pub enum StartDisplaySetupError {
     TooManyOperations,
     #[error("generated a duplicate cast-display identity")]
     IdentityCollision,
-    #[error("the manager's Device-to-display ownership table is inconsistent")]
-    InconsistentTarget,
     #[error("start display setup operation: {0}")]
     Start(#[source] DisplaySetupStartError),
 }
