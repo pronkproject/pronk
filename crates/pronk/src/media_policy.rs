@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -66,6 +67,19 @@ impl Default for MediaRecoveryPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaPolicyEvent {
     RecoveryExhausted { error: String },
+}
+
+#[derive(Debug, Error)]
+pub enum MediaPolicyShutdownError {
+    #[error("media policy task failed: {0}")]
+    PolicyTask(#[source] tokio::task::JoinError),
+    #[error("media session shutdown failed: {0}")]
+    Media(#[source] MediaSessionActorError),
+    #[error("media policy task failed: {policy}; media session shutdown also failed: {media}")]
+    Both {
+        policy: tokio::task::JoinError,
+        media: MediaSessionActorError,
+    },
 }
 
 pub struct DisplayMediaPolicyActor {
@@ -161,7 +175,10 @@ impl DisplayMediaPolicyActor {
             .await
     }
 
-    pub async fn shutdown(mut self, reason: MediaStopReason) -> Result<(), MediaSessionActorError> {
+    pub async fn shutdown(
+        mut self,
+        reason: MediaStopReason,
+    ) -> Result<(), MediaPolicyShutdownError> {
         // A policy decision can be awaiting non-supersedable media cleanup.
         // Interrupt that cleanup before joining the policy task so orderly
         // shutdown is bounded by the media actor's single shutdown budget.
@@ -170,15 +187,22 @@ impl DisplayMediaPolicyActor {
             .expect("live media policy owns its media actor")
             .begin_shutdown();
         self.cancellation.cancel();
-        if let Some(task) = self.task.take() {
-            task.await
-                .map_err(|error| MediaSessionActorError::Join(error.to_string()))?;
-        }
-        self.media
+        let policy_result = match self.task.take() {
+            Some(task) => task.await,
+            None => Ok(()),
+        };
+        let media_result = self
+            .media
             .take()
             .expect("live media policy owns its media actor")
             .shutdown(reason)
-            .await
+            .await;
+        match (policy_result, media_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(policy), Ok(())) => Err(MediaPolicyShutdownError::PolicyTask(policy)),
+            (Ok(()), Err(media)) => Err(MediaPolicyShutdownError::Media(media)),
+            (Err(policy), Err(media)) => Err(MediaPolicyShutdownError::Both { policy, media }),
+        }
     }
 }
 
@@ -512,6 +536,23 @@ mod tests {
         assert_eq!(
             driver.calls.lock().unwrap().last(),
             Some(&Call::Shutdown(MediaStopReason::BackendShutdown))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_policy_task_still_shuts_down_the_media_owner() {
+        let driver = FakeDriver::default();
+        let policy = DisplayMediaPolicyActor::spawn(Box::new(driver.clone()), input(None)).unwrap();
+        policy.task.as_ref().unwrap().abort();
+
+        let error = policy
+            .shutdown(MediaStopReason::BackendShutdown)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, MediaPolicyShutdownError::PolicyTask(_)));
+        assert_eq!(
+            driver.calls.lock().unwrap().as_slice(),
+            &[Call::Shutdown(MediaStopReason::BackendShutdown)]
         );
     }
 
