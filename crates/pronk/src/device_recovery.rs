@@ -26,7 +26,6 @@ use crate::preparation::PreparedCastDevice;
 use crate::replaceable_device_session::DeviceSessionReplacementHandle;
 
 const RECOVERY_COMMAND_CAPACITY: usize = 4;
-const RECOVERY_EVENT_CAPACITY: usize = 4;
 const MAX_RECOVERY_ERROR_BYTES: usize = 512;
 
 #[derive(Debug)]
@@ -85,7 +84,7 @@ pub enum DeviceSessionRecoveryEvent {
 
 pub struct DeviceSessionRecoveryActor {
     handle: DeviceSessionRecoveryHandle,
-    events: mpsc::Receiver<DeviceSessionRecoveryEvent>,
+    events: mpsc::UnboundedReceiver<DeviceSessionRecoveryEvent>,
     shutdown: CancellationToken,
     task: Option<JoinHandle<()>>,
 }
@@ -161,7 +160,10 @@ impl DeviceSessionRecoveryActor {
     ) -> Result<Self, DeviceSessionRecoveryError> {
         tokio::runtime::Handle::try_current().map_err(|_| DeviceSessionRecoveryError::NoRuntime)?;
         let (commands, command_rx) = mpsc::channel(RECOVERY_COMMAND_CAPACITY);
-        let (events_tx, events) = mpsc::channel(RECOVERY_EVENT_CAPACITY);
+        // The slot can await a command permit while consuming an inventory
+        // update. Event publication must not wait for that same slot to drain
+        // the event queue, or both actors can hold the other's progress.
+        let (events_tx, events) = mpsc::unbounded_channel();
         let requests = Arc::new(Mutex::new(RecoveryRequestState {
             generation: 0,
             cancellation: CancellationToken::new(),
@@ -224,7 +226,7 @@ enum RecoveryCommand {
 
 struct RecoveryTaskContext {
     commands: mpsc::Receiver<RecoveryCommand>,
-    events: mpsc::Sender<DeviceSessionRecoveryEvent>,
+    events: mpsc::UnboundedSender<DeviceSessionRecoveryEvent>,
     shutdown: CancellationToken,
     factory: Box<dyn DeviceSessionFactoryPort>,
     replacement: DeviceSessionReplacementHandle,
@@ -268,7 +270,6 @@ async fn run_recovery(context: RecoveryTaskContext) {
                         session_generation,
                         error: bounded_text(error, MAX_RECOVERY_ERROR_BYTES),
                     })
-                    .await
                     .is_err()
                 {
                     break;
@@ -296,8 +297,7 @@ async fn run_recovery(context: RecoveryTaskContext) {
                         request_generation,
                         device,
                         "Device-session generation exhausted".into(),
-                    )
-                    .await;
+                    );
                     continue;
                 };
                 event_source.shutdown().await;
@@ -310,13 +310,13 @@ async fn run_recovery(context: RecoveryTaskContext) {
                             generation: ready.session_generation,
                             events: ready.events,
                         };
-                        if events.send(ready.event).await.is_err() {
+                        if events.send(ready.event).is_err() {
                             break;
                         }
                     }
                     Err(AttemptError::Cancelled) => {}
                     Err(AttemptError::Failed(error)) => {
-                        send_failure(&events, request_generation, device, error).await;
+                        send_failure(&events, request_generation, device, error);
                     }
                 }
             }
@@ -362,19 +362,17 @@ enum NextRecoveryInput {
     },
 }
 
-async fn send_failure(
-    events: &mpsc::Sender<DeviceSessionRecoveryEvent>,
+fn send_failure(
+    events: &mpsc::UnboundedSender<DeviceSessionRecoveryEvent>,
     request_generation: u64,
     device: DeviceInfo,
     error: String,
 ) {
-    let _ = events
-        .send(DeviceSessionRecoveryEvent::Failed {
-            request_generation,
-            device,
-            error: bounded_text(error, MAX_RECOVERY_ERROR_BYTES),
-        })
-        .await;
+    let _ = events.send(DeviceSessionRecoveryEvent::Failed {
+        request_generation,
+        device,
+        error: bounded_text(error, MAX_RECOVERY_ERROR_BYTES),
+    });
 }
 
 fn bounded_text(mut value: String, maximum: usize) -> String {
@@ -723,14 +721,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_unblocks_a_full_recovery_event_queue() {
+    async fn delayed_event_consumer_does_not_block_recovery_commands() {
+        const EVENT_BACKLOG: usize = 8;
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let generations = Arc::new(StdMutex::new(Vec::new()));
         let initial = device(1, 1, 1);
         let (media_port, _control, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let factory = FakeFactory {
-            results: (0..=RECOVERY_EVENT_CAPACITY)
+            results: (0..EVENT_BACKLOG)
                 .map(|_| Err(DeviceSessionFactoryError::failed("unavailable")))
                 .collect(),
             generations: Arc::clone(&generations),
@@ -744,7 +743,7 @@ mod tests {
         )
         .unwrap();
         let handle = actor.handle();
-        for count in 1..=RECOVERY_EVENT_CAPACITY {
+        for count in 1..=EVENT_BACKLOG {
             handle.recover(device(2, 2, count as u64)).await.unwrap();
             tokio::time::timeout(Duration::from_secs(1), async {
                 while actor.events.len() < count {
@@ -754,14 +753,7 @@ mod tests {
             .await
             .unwrap();
         }
-        handle.recover(device(2, 2, 9)).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while generations.lock().unwrap().len() < RECOVERY_EVENT_CAPACITY + 1 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        assert_eq!(generations.lock().unwrap().len(), EVENT_BACKLOG);
 
         tokio::time::timeout(Duration::from_secs(1), actor.shutdown())
             .await
