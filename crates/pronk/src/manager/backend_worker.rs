@@ -6,7 +6,7 @@ use pronk_backend_host::{
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 
 use super::{ManagerShutdownReport, MANAGER_SHUTDOWN_TIMEOUT};
 
@@ -98,33 +98,86 @@ pub(super) async fn shutdown_workers(mut workers: Vec<BackendWorker>) -> Manager
         }
     }
 
+    let deadline = Instant::now() + MANAGER_SHUTDOWN_TIMEOUT;
+    let tasks = workers
+        .into_iter()
+        .map(|worker| (worker.backend_id, worker.task))
+        .collect();
+    collect_worker_results(tasks, deadline).await
+}
+
+type WorkerTask = JoinHandle<Result<BackendShutdownReport, BackendSupervisorError>>;
+
+async fn collect_worker_results(
+    mut tasks: Vec<(String, WorkerTask)>,
+    deadline: Instant,
+) -> ManagerShutdownReport {
     let mut backend_reports = BTreeMap::new();
     let mut errors = BTreeMap::new();
-    let wait = async {
-        for worker in &mut workers {
-            match (&mut worker.task).await {
-                Ok(Ok(report)) => {
-                    backend_reports.insert(worker.backend_id.clone(), report);
-                }
-                Ok(Err(error)) => {
-                    errors.insert(worker.backend_id.clone(), error.to_string());
-                }
-                Err(error) => {
-                    errors.insert(worker.backend_id.clone(), error.to_string());
-                }
-            }
-        }
-    };
-    if timeout(MANAGER_SHUTDOWN_TIMEOUT, wait).await.is_err() {
-        for worker in &workers {
-            if !worker.task.is_finished() {
-                worker.task.abort();
-                errors.insert(worker.backend_id.clone(), "shutdown timed out".into());
-            }
+    let mut next_worker = 0;
+    while let Some((backend_id, task)) = tasks.get_mut(next_worker) {
+        let Ok(result) = timeout_at(deadline, task).await else {
+            break;
+        };
+        record_worker_result(backend_id, result, &mut backend_reports, &mut errors);
+        next_worker += 1;
+    }
+    for (backend_id, task) in &mut tasks[next_worker..] {
+        if task.is_finished() {
+            record_worker_result(backend_id, task.await, &mut backend_reports, &mut errors);
+        } else {
+            task.abort();
+            errors.insert(backend_id.clone(), "shutdown timed out".into());
         }
     }
     ManagerShutdownReport {
         backend_reports,
         errors,
+    }
+}
+
+fn record_worker_result(
+    backend_id: &str,
+    result: Result<Result<BackendShutdownReport, BackendSupervisorError>, tokio::task::JoinError>,
+    backend_reports: &mut BTreeMap<String, BackendShutdownReport>,
+    errors: &mut BTreeMap<String, String>,
+) {
+    match result {
+        Ok(Ok(report)) => {
+            backend_reports.insert(backend_id.into(), report);
+        }
+        Ok(Err(error)) => {
+            errors.insert(backend_id.into(), error.to_string());
+        }
+        Err(error) => {
+            errors.insert(backend_id.into(), error.to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_worker_reports_survive_an_earlier_timeout() {
+        let stalled = tokio::spawn(std::future::pending());
+        let completed = tokio::spawn(async {
+            Ok(BackendShutdownReport {
+                last_connection_generation: None,
+                graceful: true,
+                errors: Vec::new(),
+            })
+        });
+        let report = collect_worker_results(
+            vec![("stalled".into(), stalled), ("completed".into(), completed)],
+            Instant::now() + std::time::Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(
+            report.errors.get("stalled").map(String::as_str),
+            Some("shutdown timed out")
+        );
+        assert!(report.backend_reports.contains_key("completed"));
     }
 }
