@@ -39,6 +39,44 @@ struct ActiveSession {
     actor: DeviceActor,
 }
 
+enum SessionSelection {
+    Any,
+    Exact {
+        session_id: String,
+        object_path: OwnedObjectPath,
+    },
+    IfCurrent {
+        session_id: String,
+        object_path: OwnedObjectPath,
+    },
+}
+
+impl SessionSelection {
+    fn accepts(
+        &self,
+        session_id: &str,
+        object_path: &OwnedObjectPath,
+    ) -> Result<bool, SessionLifecycleError> {
+        match self {
+            Self::Any => Ok(true),
+            Self::Exact {
+                session_id: expected_id,
+                object_path: expected_path,
+            } => {
+                if expected_id == session_id && expected_path == object_path {
+                    Ok(true)
+                } else {
+                    Err(SessionLifecycleError::StaleSession)
+                }
+            }
+            Self::IfCurrent {
+                session_id: expected_id,
+                object_path: expected_path,
+            } => Ok(expected_id == session_id && expected_path == object_path),
+        }
+    }
+}
+
 impl ChromiacastBackend {
     pub fn new(
         info: BackendInfo,
@@ -76,44 +114,62 @@ impl ChromiacastBackend {
         }
     }
 
-    pub(crate) async fn stop_session(&self, session_id: &str) -> Result<(), SessionLifecycleError> {
-        let mut active = self.shared.active_session.lock().await;
-        let Some(session) = active.as_ref() else {
-            return Ok(());
-        };
-        if session.session_id != session_id {
-            return Err(SessionLifecycleError::StaleSession);
-        }
-        let session = active
-            .take()
-            .expect("active session disappeared while locked");
-        session.actor.shutdown().await?;
-        Ok(())
+    pub(crate) async fn stop_session(
+        &self,
+        session_id: &str,
+        object_path: &OwnedObjectPath,
+    ) -> Result<(), SessionLifecycleError> {
+        self.stop_owned(SessionSelection::Exact {
+            session_id: session_id.into(),
+            object_path: object_path.clone(),
+        })
+        .await
     }
 
     pub(crate) async fn shutdown_active_session(&self) -> Result<(), SessionLifecycleError> {
-        let mut active = self.shared.active_session.lock().await;
-        let Some(session) = active.take() else {
-            return Ok(());
-        };
-        session.actor.shutdown().await?;
-        Ok(())
+        self.stop_owned(SessionSelection::Any).await
     }
 
     async fn finish_event_forwarder(&self, session_id: &str, object_path: &OwnedObjectPath) {
-        let session = {
-            let mut active = self.shared.active_session.lock().await;
-            let matches = active.as_ref().is_some_and(|session| {
-                session.session_id == session_id && session.object_path == *object_path
-            });
-            matches.then(|| active.take()).flatten()
-        };
-        let Some(session) = session else {
-            return;
-        };
-        if let Err(error) = session.actor.shutdown().await {
+        if let Err(error) = self
+            .stop_owned(SessionSelection::IfCurrent {
+                session_id: session_id.into(),
+                object_path: object_path.clone(),
+            })
+            .await
+        {
             tracing::warn!(%error, %session_id, "failed to clean up Chromiacast session after its event forwarder exited");
         }
+    }
+
+    async fn stop_owned(&self, selection: SessionSelection) -> Result<(), SessionLifecycleError> {
+        let backend = self.clone();
+        tokio::spawn(async move {
+            let mut active = backend.shared.active_session.lock().await;
+            let Some(session) = active.as_ref() else {
+                return Ok(());
+            };
+            if !selection.accepts(&session.session_id, &session.object_path)? {
+                return Ok(());
+            }
+            let session = active
+                .take()
+                .expect("active session disappeared while locked");
+            // Retain the slot lock until this actor finishes final cleanup.
+            // A canceled D-Bus waiter only drops its JoinHandle.
+            let session_id = session.session_id;
+            let result = session
+                .actor
+                .shutdown()
+                .await
+                .map_err(SessionLifecycleError::from);
+            if let Err(error) = &result {
+                tracing::warn!(%error, %session_id, "Chromiacast session cleanup failed");
+            }
+            result
+        })
+        .await
+        .map_err(|error| SessionLifecycleError::Join(error.to_string()))?
     }
 
     pub async fn forward_discovery_events(
@@ -319,6 +375,8 @@ pub(crate) enum SessionLifecycleError {
     StaleSession,
     #[error(transparent)]
     Device(#[from] DeviceActorError),
+    #[error("join backend session cleanup: {0}")]
+    Join(String),
 }
 
 fn discovery_error(error: DiscoveryActorError) -> zbus::fdo::Error {
@@ -327,5 +385,31 @@ fn discovery_error(error: DiscoveryActorError) -> zbus::fdo::Error {
             zbus::fdo::Error::InvalidArgs(error.to_string())
         }
         _ => zbus::fdo::Error::Failed(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_session_object_cannot_stop_a_replacement_with_the_same_id() {
+        let old_path = OwnedObjectPath::try_from("/session/old").unwrap();
+        let new_path = OwnedObjectPath::try_from("/session/new").unwrap();
+        let exact = SessionSelection::Exact {
+            session_id: "display".into(),
+            object_path: old_path.clone(),
+        };
+        assert!(exact.accepts("display", &old_path).unwrap());
+        assert!(matches!(
+            exact.accepts("display", &new_path),
+            Err(SessionLifecycleError::StaleSession)
+        ));
+        assert!(!SessionSelection::IfCurrent {
+            session_id: "display".into(),
+            object_path: old_path,
+        }
+        .accepts("display", &new_path)
+        .unwrap());
     }
 }

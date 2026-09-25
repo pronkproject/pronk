@@ -180,7 +180,7 @@ impl ChromiacastSession {
         #[zbus(connection)] connection: &Connection,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<()>> {
         self.backend
-            .stop_session(&self.session_id)
+            .stop_session(&self.session_id, &self.object_path)
             .await
             .map_err(session_lifecycle_error)?;
         let (reply, dispatched) = ResponseDispatchNotifier::new(());
@@ -289,5 +289,6 @@ fn session_lifecycle_error(error: SessionLifecycleError) -> zbus::fdo::Error {
     match error {
         SessionLifecycleError::StaleSession => zbus::fdo::Error::InvalidArgs(error.to_string()),
         SessionLifecycleError::Device(error) => device_error(error),
+        SessionLifecycleError::Join(error) => zbus::fdo::Error::Failed(error),
     }
 }
