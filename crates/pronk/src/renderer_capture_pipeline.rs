@@ -89,6 +89,25 @@ struct Generation {
     stream: Stream,
 }
 
+impl Generation {
+    async fn shutdown(self) -> Result<(), MediaPipelineError> {
+        match self.stream {
+            Stream::Prepared { renderer, video } => shutdown_prepared(renderer, video).await,
+            Stream::Active {
+                renderer,
+                video,
+                monitors,
+            } => shutdown_active(renderer, video, monitors).await,
+        }
+    }
+}
+
+/// A running generation carries its endpoint lease across a transition.
+struct TakenGeneration {
+    lease: CapabilityLease,
+    generation: Generation,
+}
+
 /// The renderer descriptor and its revocation lease move together.
 enum PipelineState {
     Idle {
@@ -131,12 +150,11 @@ impl RendererCapturePipeline {
         }
     }
 
-    fn take_generation(&mut self) -> Option<Generation> {
+    fn take_generation(&mut self) -> Option<TakenGeneration> {
         let previous = std::mem::replace(&mut self.state, PipelineState::Unavailable);
         match previous {
             PipelineState::Running { lease, generation } => {
-                self.state = PipelineState::Starting { lease };
-                Some(generation)
+                Some(TakenGeneration { lease, generation })
             }
             other => {
                 self.state = other;
@@ -145,21 +163,47 @@ impl RendererCapturePipeline {
         }
     }
 
-    fn restore_generation(&mut self, generation: Generation) {
-        let previous = std::mem::replace(&mut self.state, PipelineState::Unavailable);
-        let PipelineState::Starting { lease } = previous else {
-            unreachable!("a running generation retains its renderer lease")
+    fn restore_generation(&mut self, taken: TakenGeneration) {
+        self.state = PipelineState::Running {
+            lease: taken.lease,
+            generation: taken.generation,
         };
-        self.state = PipelineState::Running { lease, generation };
     }
 
-    fn take_renderer_for_start(&mut self) -> Renderer<OwnedFd> {
+    fn take_renderer_for_start(&mut self) -> Result<Renderer<OwnedFd>, MediaPipelineError> {
         let previous = std::mem::replace(&mut self.state, PipelineState::Unavailable);
-        let PipelineState::Idle { renderer, lease } = previous else {
-            unreachable!("renderer acquisition leaves an idle endpoint")
-        };
-        self.state = PipelineState::Starting { lease };
-        renderer
+        match previous {
+            PipelineState::Idle { renderer, lease } => {
+                self.state = PipelineState::Starting { lease };
+                Ok(renderer)
+            }
+            other => {
+                self.state = other;
+                Err(MediaPipelineError::new("renderer endpoint is not idle"))
+            }
+        }
+    }
+
+    async fn install_started_generation(
+        &mut self,
+        generation: Generation,
+    ) -> Result<(), MediaPipelineError> {
+        match std::mem::replace(&mut self.state, PipelineState::Unavailable) {
+            PipelineState::Starting { lease } => {
+                self.state = PipelineState::Running { lease, generation };
+                Ok(())
+            }
+            other => {
+                self.state = other;
+                let stopped = generation.shutdown().await;
+                combine_cleanup(
+                    Err(MediaPipelineError::new(
+                        "renderer endpoint left its starting phase",
+                    )),
+                    stopped,
+                )
+            }
+        }
     }
 
     fn requested_capture_layout(&self) -> std::io::Result<Option<drm_capture::RequestedLayout>> {
@@ -218,24 +262,19 @@ impl RendererCapturePipeline {
     }
 
     async fn stop_generation(&mut self, id: NonZeroU64) -> Result<(), MediaPipelineError> {
-        let Some(generation) = self.take_generation() else {
+        let Some(taken) = self.take_generation() else {
             return Ok(());
         };
-        if generation.id != id {
-            let actual = generation.id;
-            self.restore_generation(generation);
+        if taken.generation.id != id {
+            let actual = taken.generation.id;
+            self.restore_generation(taken);
             return Err(MediaPipelineError::new(format!(
                 "renderer stop requested generation {id}; active generation is {actual}"
             )));
         }
-        let stopped = match generation.stream {
-            Stream::Prepared { renderer, video } => shutdown_prepared(renderer, video).await,
-            Stream::Active {
-                renderer,
-                video,
-                monitors,
-            } => shutdown_active(renderer, video, monitors).await,
-        };
+        let TakenGeneration { lease, generation } = taken;
+        self.state = PipelineState::Starting { lease };
+        let stopped = generation.shutdown().await;
         let released = self.release_renderer_lease().await;
         combine_cleanup(stopped, released)
     }
@@ -509,7 +548,7 @@ impl CapturePipelinePort for RendererCapturePipeline {
         let output_height = NonZeroU32::new(request.route.mode.height)
             .ok_or_else(|| MediaPipelineError::new("renderer output height is zero"))?;
         let output_format = capture_format(self.config.raw_layout.format)?;
-        let renderer = self.take_renderer_for_start();
+        let renderer = self.take_renderer_for_start()?;
         let preparation = RendererStream::prepare(
             renderer,
             device,
@@ -695,10 +734,11 @@ impl CapturePipelinePort for RendererCapturePipeline {
             );
         }
         let target = self.target(&renderer, &video, generation);
-        self.restore_generation(Generation {
+        self.install_started_generation(Generation {
             id: generation,
             stream: Stream::Prepared { renderer, video },
-        });
+        })
+        .await?;
         Ok(PreparedCaptureMedia {
             media_generation: generation,
             video_target: target,
@@ -717,18 +757,20 @@ impl CapturePipelinePort for RendererCapturePipeline {
         media_generation: NonZeroU64,
         cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        let Some(generation) = self.take_generation() else {
+        let Some(taken) = self.take_generation() else {
             return Err(MediaPipelineError::new(
                 "no renderer generation is prepared",
             ));
         };
-        if generation.id != media_generation {
-            let actual = generation.id;
-            self.restore_generation(generation);
+        if taken.generation.id != media_generation {
+            let actual = taken.generation.id;
+            self.restore_generation(taken);
             return Err(MediaPipelineError::new(format!(
                 "renderer activation requested generation {media_generation}; prepared generation is {actual}"
             )));
         }
+        let TakenGeneration { lease, generation } = taken;
+        self.state = PipelineState::Starting { lease };
         match generation.stream {
             Stream::Active {
                 renderer,
@@ -744,14 +786,15 @@ impl CapturePipelinePort for RendererCapturePipeline {
                         "renderer generation has invalid active state {state:?}"
                     ))),
                 };
-                self.restore_generation(Generation {
+                self.install_started_generation(Generation {
                     id: generation.id,
                     stream: Stream::Active {
                         renderer,
                         video,
                         monitors,
                     },
-                });
+                })
+                .await?;
                 result
             }
             Stream::Prepared { renderer, video } => {
@@ -788,14 +831,15 @@ impl CapturePipelinePort for RendererCapturePipeline {
                         self.events.clone(),
                     ),
                 };
-                self.restore_generation(Generation {
+                self.install_started_generation(Generation {
                     id: generation.id,
                     stream: Stream::Active {
                         renderer,
                         video,
                         monitors,
                     },
-                });
+                })
+                .await?;
                 Ok(())
             }
         }
