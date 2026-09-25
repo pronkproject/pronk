@@ -43,9 +43,8 @@ pub(crate) async fn forward_device_events(
 ) -> zbus::Result<()> {
     let emitter = SignalEmitter::new(&connection, object_path)?;
     let mut events = receivers.events;
-    let mut bitrate_requests = receivers.bitrate_requests;
+    let mut bitrate_requests = Some(receivers.bitrate_requests);
     let mut fatal_error = receivers.fatal_error;
-    let mut bitrate_requests_open = true;
     loop {
         tokio::select! {
             biased;
@@ -61,12 +60,21 @@ pub(crate) async fn forward_device_events(
                 .await?;
                 break;
             }
-            changed = bitrate_requests.changed(), if bitrate_requests_open => {
+            changed = async {
+                match bitrate_requests.as_mut() {
+                    Some(receiver) => receiver.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 if changed.is_err() {
-                    bitrate_requests_open = false;
+                    bitrate_requests = None;
                     continue;
                 }
-                let request = bitrate_requests.borrow_and_update().clone();
+                let request = bitrate_requests
+                    .as_mut()
+                    .expect("open bitrate subscription produced a change")
+                    .borrow_and_update()
+                    .clone();
                 if let Some(request) = request {
                     forward_bitrate_request(&emitter, request).await?;
                 }
