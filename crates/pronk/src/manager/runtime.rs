@@ -249,21 +249,18 @@ impl ManagerRuntimeState {
         &mut self,
         message: Option<BackendWorkerMessage>,
         events: &ManagerEventSinks,
-    ) -> Result<bool, ManagerTaskError> {
-        Ok(match message {
+    ) -> Result<(), ManagerTaskError> {
+        match message {
             Some(BackendWorkerMessage::Event { backend_id, event }) => {
                 match self.inventory.apply_supervisor_event(&backend_id, &event) {
                     Ok(ApplySupervisorOutcome::Changed(changes)) => {
                         publish_inventory_changes(changes, &self.records, events).await?;
-                        true
                     }
                     Ok(ApplySupervisorOutcome::IgnoredStale) => {
                         debug!(backend_id, ?event, "ignored stale backend event");
-                        true
                     }
                     Err(error) => {
                         warn!(backend_id, %error, "rejected backend inventory event");
-                        true
                     }
                 }
             }
@@ -271,14 +268,13 @@ impl ManagerRuntimeState {
                 warn!(backend_id, error, "backend supervisor stopped unexpectedly");
                 let changes = self.inventory.mark_backend_unavailable(&backend_id)?;
                 publish_inventory_changes(changes, &self.records, events).await?;
-                true
             }
             None => {
                 let changes = self.inventory.mark_all_unavailable()?;
                 publish_inventory_changes(changes, &self.records, events).await?;
-                false
             }
-        })
+        }
+        Ok(())
     }
 
     async fn handle_slot_event(
@@ -376,7 +372,7 @@ pub(super) async fn run_manager(
         mut commands,
         shutdown: mut owner_shutdown,
         events,
-        mut backend_events,
+        backend_events,
         reservation_releases,
         reservation_release_events: mut reservation_release_rx,
         slot_events,
@@ -385,7 +381,7 @@ pub(super) async fn run_manager(
         workers,
     } = context;
     let mut state = ManagerRuntimeState::default();
-    let mut backend_events_open = true;
+    let mut backend_events = Some(backend_events);
 
     let shutdown_outcome = loop {
         tokio::select! {
@@ -418,14 +414,21 @@ pub(super) async fn run_manager(
                     let _ = events.lifecycle.send(event);
                 }
             },
-            message = backend_events.recv(), if backend_events_open => {
+            message = async {
+                match backend_events.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let closed = message.is_none();
                 let result = tokio::select! {
                     biased;
                     response = &mut owner_shutdown => break Ok(response.ok()),
                     result = state.handle_backend_message(message, &events) => result,
                 };
                 match result {
-                    Ok(open) => backend_events_open = open,
+                    Ok(()) if closed => backend_events = None,
+                    Ok(()) => {},
                     Err(error) => break Err(error),
                 }
             },
