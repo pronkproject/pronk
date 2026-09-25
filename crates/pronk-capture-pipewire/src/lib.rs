@@ -83,8 +83,9 @@ impl Registration {
                     state: SlotState::AwaitingAvailability,
                 })
                 .collect(),
-            next_sequence: Some(1),
-            stopped: false,
+            phase: OutputPhase::Active {
+                next_sequence: Some(1),
+            },
         }
     }
 }
@@ -140,8 +141,12 @@ pub struct Output {
     identity: VideoNodeIdentity,
     layout: Layout,
     slots: Vec<Slot>,
-    next_sequence: Option<u64>,
-    stopped: bool,
+    phase: OutputPhase,
+}
+
+enum OutputPhase {
+    Active { next_sequence: Option<u64> },
+    Stopped,
 }
 
 impl Output {
@@ -153,9 +158,10 @@ impl Output {
         pts_ns: i64,
         discontinuity: bool,
     ) -> io::Result<VideoFrame> {
-        if self.stopped {
-            return Err(invalid("capture output is stopped"));
-        }
+        let next_sequence = match &mut self.phase {
+            OutputPhase::Active { next_sequence } => next_sequence,
+            OutputPhase::Stopped => return Err(invalid("capture output is stopped")),
+        };
         let index = self
             .slots
             .iter()
@@ -167,11 +173,9 @@ impl Output {
                 "capture destination is not available for publication",
             ));
         }
-        let sequence = self
-            .next_sequence
-            .ok_or_else(|| invalid("publication sequence exhausted"))?;
+        let sequence = next_sequence.ok_or_else(|| invalid("publication sequence exhausted"))?;
         slot.state = SlotState::Published { sequence, frame };
-        self.next_sequence = sequence.checked_add(1);
+        *next_sequence = sequence.checked_add(1);
         Ok(VideoFrame {
             buffer_id: id(index),
             sequence,
@@ -197,7 +201,9 @@ impl Output {
             } => *media_generation,
             VideoSourceActorEvent::GenerationFailed { identity, .. } => identity.media_generation,
         };
-        if generation != self.identity.media_generation || self.stopped {
+        if generation != self.identity.media_generation
+            || matches!(self.phase, OutputPhase::Stopped)
+        {
             return Ok(());
         }
         match event {
@@ -241,7 +247,7 @@ impl Output {
         if *identity != self.identity {
             return Err(invalid("stop report belongs to another capture output"));
         }
-        self.stopped = true;
+        self.phase = OutputPhase::Stopped;
         self.retire();
         Ok(())
     }
