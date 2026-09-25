@@ -172,55 +172,104 @@ fn media_policy_input(
         // reachability than a passive discovery record.  In particular, an
         // mDNS goodbye or expiry must not tear down healthy media.
         device_available: device_session.device_available(&snapshot.device),
-        device_session_ready: device_session.ready,
-        device_session_generation: device_session.session_generation,
+        device_session_ready: device_session.is_ready(),
+        device_session_generation: device_session.session_generation(),
         route: MediaRoute::from_display_state(&snapshot.runtime),
     }
 }
 
 #[derive(Debug)]
-struct DeviceSessionPolicyState {
-    ready: bool,
-    bound_connection_generation: u64,
-    session_generation: u64,
-    pending_request: Option<(u64, u64, u64)>,
+enum DeviceSessionPolicyState {
+    Ready {
+        bound_connection_generation: u64,
+        session_generation: u64,
+    },
+    Recovering {
+        request: PendingSessionRequest,
+        last_session_generation: u64,
+    },
+    Unavailable {
+        last_session_generation: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingSessionRequest {
+    request_generation: u64,
+    connection_generation: u64,
+    discovery_generation: u64,
+}
+
+impl PendingSessionRequest {
+    fn new(request_generation: u64, device: &DeviceInfo) -> Self {
+        Self {
+            request_generation,
+            connection_generation: device.connection_generation,
+            discovery_generation: device.discovery_generation,
+        }
+    }
 }
 
 impl DeviceSessionPolicyState {
     fn new(device: &DeviceInfo, ready: bool, session_generation: u64) -> Self {
-        Self {
-            ready,
-            bound_connection_generation: device.connection_generation,
-            session_generation,
-            pending_request: None,
+        if ready {
+            Self::Ready {
+                bound_connection_generation: device.connection_generation,
+                session_generation,
+            }
+        } else {
+            Self::Unavailable {
+                last_session_generation: session_generation,
+            }
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+
+    fn session_generation(&self) -> u64 {
+        match self {
+            Self::Ready {
+                session_generation, ..
+            } => *session_generation,
+            Self::Recovering {
+                last_session_generation,
+                ..
+            }
+            | Self::Unavailable {
+                last_session_generation,
+            } => *last_session_generation,
         }
     }
 
     fn observe_device(&mut self, device: &DeviceInfo) -> Option<DeviceSessionAction> {
-        // Do not let passive discovery replace a live Device session.  The
+        // Do not let passive discovery replace a live Device session. The
         // existing transport reports its own terminal failure; recovery can
         // then use the freshest discovery record.
-        if self.ready && self.bound_connection_generation == device.connection_generation {
+        if matches!(self, Self::Ready { bound_connection_generation, .. }
+            if *bound_connection_generation == device.connection_generation)
+        {
             return None;
         }
-        self.ready = false;
+        *self = Self::Unavailable {
+            last_session_generation: self.session_generation(),
+        };
         if device.availability != DeviceAvailability::Available {
-            self.pending_request = None;
             return Some(DeviceSessionAction::Cancel);
         }
         Some(DeviceSessionAction::Recover(device.clone()))
     }
 
     fn device_available(&self, device: &DeviceInfo) -> bool {
-        self.ready || device.availability == DeviceAvailability::Available
+        self.is_ready() || device.availability == DeviceAvailability::Available
     }
 
     fn begin_request(&mut self, request_generation: u64, device: &DeviceInfo) {
-        self.pending_request = Some((
-            request_generation,
-            device.connection_generation,
-            device.discovery_generation,
-        ));
+        *self = Self::Recovering {
+            request: PendingSessionRequest::new(request_generation, device),
+            last_session_generation: self.session_generation(),
+        };
     }
 
     fn complete_request(
@@ -230,45 +279,41 @@ impl DeviceSessionPolicyState {
         session_generation: u64,
         current: &DeviceInfo,
     ) -> bool {
-        if self.pending_request
-            != Some((
-                request_generation,
-                recovered.connection_generation,
-                recovered.discovery_generation,
-            ))
+        if !matches!(self, Self::Recovering { request, .. }
+            if *request == PendingSessionRequest::new(request_generation, recovered))
             || recovered != current
             || current.availability != DeviceAvailability::Available
         {
             return false;
         }
-        self.pending_request = None;
-        self.ready = true;
-        self.bound_connection_generation = recovered.connection_generation;
-        self.session_generation = session_generation;
+        *self = Self::Ready {
+            bound_connection_generation: recovered.connection_generation,
+            session_generation,
+        };
         true
     }
 
     fn fail_request(&mut self, request_generation: u64, device: &DeviceInfo) -> bool {
-        if self.pending_request
-            != Some((
-                request_generation,
-                device.connection_generation,
-                device.discovery_generation,
-            ))
+        if !matches!(self, Self::Recovering { request, .. }
+            if *request == PendingSessionRequest::new(request_generation, device))
         {
             return false;
         }
-        self.pending_request = None;
-        self.ready = false;
+        *self = Self::Unavailable {
+            last_session_generation: self.session_generation(),
+        };
         true
     }
 
     fn transport_failed(&mut self, session_generation: u64) -> bool {
-        if !self.ready || self.session_generation != session_generation {
+        if !matches!(self, Self::Ready { session_generation: current, .. }
+            if *current == session_generation)
+        {
             return false;
         }
-        self.ready = false;
-        self.pending_request = None;
+        *self = Self::Unavailable {
+            last_session_generation: session_generation,
+        };
         true
     }
 }
@@ -462,17 +507,17 @@ mod tests {
         renamed.display_name = "Den TV".into();
         renamed.device_revision = 4;
         assert!(state.observe_device(&renamed).is_none());
-        assert!(state.ready);
+        assert!(state.is_ready());
 
         let unavailable = device(DeviceAvailability::Unavailable, 1, 2, 5);
         assert!(state.observe_device(&unavailable).is_none());
-        assert!(state.ready);
+        assert!(state.is_ready());
         assert!(state.device_available(&unavailable));
 
         let recovered = device(DeviceAvailability::Available, 1, 3, 6);
         assert!(state.observe_device(&recovered).is_none());
-        assert!(state.ready);
-        assert_eq!(state.session_generation, 1);
+        assert!(state.is_ready());
+        assert_eq!(state.session_generation(), 1);
     }
 
     #[test]
@@ -485,7 +530,7 @@ mod tests {
             state.observe_device(&reconnected),
             Some(DeviceSessionAction::Recover(_))
         ));
-        assert!(!state.ready);
+        assert!(!state.is_ready());
     }
 
     #[test]
@@ -508,8 +553,29 @@ mod tests {
         state.begin_request(7, &recovered);
         assert!(!state.complete_request(6, &recovered, 2, &recovered));
         assert!(state.complete_request(7, &recovered, 2, &recovered));
-        assert!(state.ready);
-        assert_eq!(state.session_generation, 2);
+        assert!(state.is_ready());
+        assert_eq!(state.session_generation(), 2);
+    }
+
+    #[test]
+    fn withdrawn_device_invalidates_an_in_flight_recovery() {
+        let initial = device(DeviceAvailability::Available, 1, 2, 3);
+        let mut state = DeviceSessionPolicyState::new(&initial, true, 4);
+        let reconnected = device(DeviceAvailability::Available, 2, 3, 4);
+        assert!(matches!(
+            state.observe_device(&reconnected),
+            Some(DeviceSessionAction::Recover(_))
+        ));
+        state.begin_request(7, &reconnected);
+
+        let unavailable = device(DeviceAvailability::Unavailable, 2, 3, 5);
+        assert!(matches!(
+            state.observe_device(&unavailable),
+            Some(DeviceSessionAction::Cancel)
+        ));
+        assert!(!state.complete_request(7, &reconnected, 5, &unavailable));
+        assert_eq!(state.session_generation(), 4);
+        assert!(!state.is_ready());
     }
 
     #[test]
@@ -539,9 +605,9 @@ mod tests {
         let initial = device(DeviceAvailability::Available, 1, 1, 1);
         let mut state = DeviceSessionPolicyState::new(&initial, true, 4);
         assert!(!state.transport_failed(3));
-        assert!(state.ready);
+        assert!(state.is_ready());
         assert!(state.transport_failed(4));
-        assert!(!state.ready);
+        assert!(!state.is_ready());
         assert!(!state.transport_failed(4));
     }
 }
