@@ -18,6 +18,7 @@ use pronk_renderer_service::{
     RendererStreamError, RendererStreamState,
 };
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::capability_lease::CapabilityLease;
@@ -121,15 +122,57 @@ enum PipelineState {
         lease: CapabilityLease,
         generation: Generation,
     },
+    Stopping {
+        generation_id: NonZeroU64,
+        task: JoinHandle<Result<(), MediaPipelineError>>,
+    },
     Unavailable,
 }
 
 impl PipelineState {
+    fn stop_generation(taken: TakenGeneration) -> Self {
+        let TakenGeneration { lease, generation } = taken;
+        let generation_id = generation.id;
+        let task = tokio::spawn(async move {
+            let stopped = generation.shutdown().await;
+            let released = lease.release().await.map_err(|error| {
+                MediaPipelineError::new(format!("release renderer endpoint: {error}"))
+            });
+            combine_cleanup(stopped, released)
+        });
+        Self::Stopping {
+            generation_id,
+            task,
+        }
+    }
+
+    async fn finish_stopping(&mut self, id: NonZeroU64) -> Result<(), MediaPipelineError> {
+        let Self::Stopping {
+            generation_id,
+            task,
+        } = self
+        else {
+            return Err(MediaPipelineError::new(
+                "renderer generation is not stopping",
+            ));
+        };
+        if *generation_id != id {
+            return Err(MediaPipelineError::new(format!(
+                "renderer stop requested generation {id}; stopping generation is {generation_id}"
+            )));
+        }
+        let result = task.await.map_err(|error| {
+            MediaPipelineError::new(format!("renderer generation cleanup task failed: {error}"))
+        });
+        *self = Self::Unavailable;
+        result?
+    }
+
     async fn release_lease(&mut self) -> Result<(), MediaPipelineError> {
         let previous = std::mem::replace(self, Self::Unavailable);
         let lease = match previous {
             Self::Idle { lease, .. } | Self::Starting { lease } => lease,
-            still_active @ Self::Running { .. } => {
+            still_active @ (Self::Running { .. } | Self::Stopping { .. }) => {
                 *self = still_active;
                 return Err(MediaPipelineError::new(
                     "renderer generation must stop before its endpoint is released",
@@ -168,6 +211,7 @@ impl RendererCapturePipeline {
             PipelineState::Running { generation, .. } => Some(generation),
             PipelineState::Idle { .. }
             | PipelineState::Starting { .. }
+            | PipelineState::Stopping { .. }
             | PipelineState::Unavailable => None,
         }
     }
@@ -284,6 +328,9 @@ impl RendererCapturePipeline {
     }
 
     async fn stop_generation(&mut self, id: NonZeroU64) -> Result<(), MediaPipelineError> {
+        if matches!(self.state, PipelineState::Stopping { .. }) {
+            return self.state.finish_stopping(id).await;
+        }
         if matches!(self.state, PipelineState::Starting { .. }) {
             // A cancelled start can drop its descriptor-owning future while
             // leaving the issuer lease here. There is no generation to stop,
@@ -300,11 +347,8 @@ impl RendererCapturePipeline {
                 "renderer stop requested generation {id}; active generation is {actual}"
             )));
         }
-        let TakenGeneration { lease, generation } = taken;
-        self.state = PipelineState::Starting { lease };
-        let stopped = generation.shutdown().await;
-        let released = self.release_renderer_lease().await;
-        combine_cleanup(stopped, released)
+        self.state = PipelineState::stop_generation(taken);
+        self.state.finish_stopping(id).await
     }
 
     fn target(
@@ -456,7 +500,9 @@ impl RendererCapturePipeline {
     ) -> Result<(), MediaPipelineError> {
         match self.state {
             PipelineState::Idle { .. } => return Ok(()),
-            PipelineState::Starting { .. } | PipelineState::Running { .. } => {
+            PipelineState::Starting { .. }
+            | PipelineState::Running { .. }
+            | PipelineState::Stopping { .. } => {
                 return Err(MediaPipelineError::new(
                     "a previous renderer generation still requires cleanup",
                 ));
@@ -894,7 +940,12 @@ impl CapturePipelinePort for RendererCapturePipeline {
         _reason: MediaStopReason,
         _cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        if let Some(generation) = self.generation().map(|generation| generation.id) {
+        let generation = match &self.state {
+            PipelineState::Running { generation, .. } => Some(generation.id),
+            PipelineState::Stopping { generation_id, .. } => Some(*generation_id),
+            _ => None,
+        };
+        if let Some(generation) = generation {
             self.stop_generation(generation).await?;
         }
         if matches!(
@@ -1124,6 +1175,47 @@ mod tests {
 
         assert!(matches!(state, PipelineState::Unavailable));
         wait_released.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_wait_keeps_generation_cleanup_owned() {
+        let id = NonZeroU64::new(7).unwrap();
+        let (entered, wait_entered) = tokio::sync::oneshot::channel();
+        let (resume, wait_resume) = tokio::sync::oneshot::channel();
+        let (released, wait_released) = tokio::sync::oneshot::channel();
+        let lease = CapabilityLease::new(async move {
+            let _ = released.send(());
+            Ok(())
+        });
+        let task = tokio::spawn(async move {
+            let _ = entered.send(());
+            wait_resume.await.unwrap();
+            lease.release().await.map_err(|error| {
+                MediaPipelineError::new(format!("release renderer endpoint: {error}"))
+            })
+        });
+        let mut state = PipelineState::Stopping {
+            generation_id: id,
+            task,
+        };
+
+        let mut wait = Box::pin(state.finish_stopping(id));
+        tokio::select! {
+            _ = &mut wait => panic!("cleanup finished before its gate opened"),
+            _ = wait_entered => {}
+        }
+        drop(wait);
+        assert!(matches!(state, PipelineState::Stopping { .. }));
+        assert!(state.release_lease().await.is_err());
+        assert!(state
+            .finish_stopping(NonZeroU64::new(8).unwrap())
+            .await
+            .is_err());
+
+        resume.send(()).unwrap();
+        state.finish_stopping(id).await.unwrap();
+        wait_released.await.unwrap();
+        assert!(matches!(state, PipelineState::Unavailable));
     }
 
     #[test]
