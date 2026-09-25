@@ -451,30 +451,26 @@ async fn run_actor<F>(
     let mut last_identity: Option<VideoNodeIdentity> = None;
 
     'actor: loop {
-        let input = match active.as_mut() {
-            Some(active) => match active.return_trigger_deadline {
-                Some(deadline) => tokio::select! {
-                    biased;
-                    request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
-                    request = stops.recv() => ActorInput::Stop(request),
-                    command = commands.recv() => ActorInput::Command(command),
-                    event = active.source.next_event() => ActorInput::SourceEvent(event),
-                    _ = tokio::time::sleep_until(deadline) => ActorInput::ReturnTrigger,
-                },
-                None => tokio::select! {
-                    biased;
-                    request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
-                    request = stops.recv() => ActorInput::Stop(request),
-                    command = commands.recv() => ActorInput::Command(command),
-                    event = active.source.next_event() => ActorInput::SourceEvent(event),
-                },
-            },
-            None => tokio::select! {
-                biased;
-                request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
-                request = stops.recv() => ActorInput::Stop(request),
-                command = commands.recv() => ActorInput::Command(command),
-            },
+        let trigger_deadline = active
+            .as_ref()
+            .and_then(|generation| generation.return_trigger_deadline);
+        let input = tokio::select! {
+            biased;
+            request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
+            request = stops.recv() => ActorInput::Stop(request),
+            command = commands.recv() => ActorInput::Command(command),
+            event = async {
+                match active.as_mut() {
+                    Some(generation) => generation.source.next_event().await,
+                    None => std::future::pending().await,
+                }
+            } => ActorInput::SourceEvent(event),
+            _ = async {
+                match trigger_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => ActorInput::ReturnTrigger,
         };
 
         match input {
