@@ -38,6 +38,8 @@ impl<F: AsFd> PreparedRendererConfiguration<F> {
         self,
         ready_fence: Option<BorrowedFd<'_>>,
     ) -> Result<PublishedRenderer<F>, PublicationError<F>> {
-        self.configuration.publish(ready_fence)
+        // SAFETY: Only `prepare` constructs this wrapper, after allocation and
+        // completed private GPU work for the configured output.
+        unsafe { self.configuration.publish_unchecked(ready_fence) }
     }
 }

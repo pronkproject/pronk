@@ -210,8 +210,17 @@ impl<F: AsFd> AsFd for Renderer<F> {
 
 /// One configured renderer whose private resources remain unpublished.
 ///
-/// Publication is a low-level CastKMS operation. Callers must complete any
-/// renderer-private preparation before invoking `publish`.
+/// Publication is a low-level CastKMS operation. Safe callers must use a
+/// prepared renderer facade before making this endpoint selectable.
+///
+/// ```compile_fail
+/// use castkms_renderer::RendererConfiguration;
+/// use std::os::fd::AsFd;
+///
+/// fn publish_without_preparation<F: AsFd>(configuration: RendererConfiguration<F>) {
+///     let _ = configuration.publish_unchecked(None);
+/// }
+/// ```
 #[must_use = "prepare the renderer configuration or close its endpoint"]
 #[derive(Debug)]
 pub struct RendererConfiguration<F: AsFd> {
@@ -225,7 +234,13 @@ impl<F: AsFd> RendererConfiguration<F> {
     }
 
     /// Publish a selectable constraints entry after renderer-private preparation.
-    pub fn publish(
+    ///
+    /// # Safety
+    ///
+    /// The caller must have completed private renderer preparation for this
+    /// configuration's output before publication makes it selectable by KMS.
+    /// The service's prepared renderer facade enforces this transition.
+    pub unsafe fn publish_unchecked(
         self,
         ready_fence: Option<BorrowedFd<'_>>,
     ) -> Result<PublishedRenderer<F>, PublicationError<F>> {
