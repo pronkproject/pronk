@@ -68,10 +68,9 @@ async fn run<B: Backend>(
         tokio::select! {
             _ = stop.cancelled() => break None,
             Some(slot) = returns.recv() => {
-                if !matches!(uses.get(slot), Some(Use::Loaned)) {
-                    break Some(io::Error::other("unexpected capture buffer return"));
+                if let Err(error) = restore_returned_slot(&mut uses, slot) {
+                    break Some(error);
                 }
-                uses[slot] = Use::Available;
             }
             _ = tick.tick() => {
                 if let Err(error) = drain(&mut backend, &buffers, &mut uses, layout, &returned) {
@@ -84,10 +83,9 @@ async fn run<B: Backend>(
                 // Returning a frame makes it eligible before the next capture
                 // command, even when both channels became ready together.
                 while let Ok(slot) = returns.try_recv() {
-                    if !matches!(uses.get(slot), Some(Use::Loaned)) {
-                        break 'active Some(io::Error::other("unexpected capture buffer return"));
+                    if let Err(error) = restore_returned_slot(&mut uses, slot) {
+                        break 'active Some(error);
                     }
-                    uses[slot] = Use::Available;
                 }
                 let writing = uses.iter().filter(|state| matches!(state, Use::Writing { .. })).count();
                 let slot = uses.iter().position(|state| matches!(state, Use::Available));
@@ -152,6 +150,16 @@ async fn run<B: Backend>(
     match failure {
         Some(error) => Err(error),
         None => Ok(backend.into_owner()),
+    }
+}
+
+fn restore_returned_slot(uses: &mut [Use], slot: usize) -> io::Result<()> {
+    match uses.get_mut(slot) {
+        Some(state @ Use::Loaned) => {
+            *state = Use::Available;
+            Ok(())
+        }
+        _ => Err(io::Error::other("unexpected capture buffer return")),
     }
 }
 
