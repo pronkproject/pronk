@@ -67,40 +67,16 @@ fn decide_deactivate(state: MediaState, retry_delay: Option<Duration>) -> Option
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RetryContext {
-    route: Option<MediaRoute>,
-    attachment: AttachmentState,
-    grant: DisplayGrantState,
-    device_available: bool,
-    device_session_ready: bool,
-    device_session_generation: u64,
-}
-
-impl From<MediaPolicyInput> for RetryContext {
-    fn from(input: MediaPolicyInput) -> Self {
-        Self {
-            route: input.route,
-            attachment: input.attachment,
-            grant: input.grant,
-            device_available: input.device_available,
-            device_session_ready: input.device_session_ready,
-            device_session_generation: input.device_session_generation,
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 struct RetryTracker {
-    context: Option<RetryContext>,
+    context: Option<MediaPolicyInput>,
     attempts: u32,
 }
 
 impl RetryTracker {
     fn observe(&mut self, input: MediaPolicyInput, media: &MediaSessionSnapshot) {
-        let context = RetryContext::from(input);
-        if self.context != Some(context) || media.state() == MediaState::Running {
-            self.context = Some(context);
+        if self.context != Some(input) || media.state() == MediaState::Running {
+            self.context = Some(input);
             self.attempts = 0;
         }
     }
