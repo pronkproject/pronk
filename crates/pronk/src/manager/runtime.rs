@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 use super::backend_worker::{shutdown_workers, BackendWorker, BackendWorkerMessage};
 use super::display_lifecycle::{
     handle_removal_join, handle_setup_join, start_managed_display_setup, ManagedDisplayPhase,
-    ManagedDisplayRecord, RemovalCompletion, SetupCompletion,
+    ManagedDisplayRecord, RemovalCompletion, RemovalRequest, SetupCompletion,
 };
 use super::inventory::{configured_device_update, AggregateInventory, ApplySupervisorOutcome};
 use super::{
@@ -216,17 +216,12 @@ impl ManagerRuntimeState {
                 display_id,
                 response,
             }) => {
-                match self.records.get_mut(&display_id) {
-                    Some(record) if matches!(record.phase, ManagedDisplayPhase::Active(_)) => {
-                        let previous = std::mem::replace(
-                            &mut record.phase,
-                            ManagedDisplayPhase::Removing {
-                                waiters: vec![response],
-                            },
-                        );
-                        let ManagedDisplayPhase::Active(display) = previous else {
-                            unreachable!()
-                        };
+                let removal = match self.records.get_mut(&display_id) {
+                    Some(record) => record.request_removal(response),
+                    None => RemovalRequest::Complete(response),
+                };
+                match removal {
+                    RemovalRequest::Start(display) => {
                         let abort = self.removal_tasks.spawn(async move {
                             RemovalCompletion {
                                 display_id,
@@ -238,13 +233,8 @@ impl ManagerRuntimeState {
                         });
                         self.removal_task_ids.insert(abort.id(), display_id);
                     }
-                    Some(ManagedDisplayRecord {
-                        phase: ManagedDisplayPhase::Removing { waiters },
-                        ..
-                    }) => {
-                        waiters.push(response);
-                    }
-                    _ => {
+                    RemovalRequest::Queued => {}
+                    RemovalRequest::Complete(response) => {
                         // Remove is idempotent, including after successful cleanup.
                         let _ = response.send(Ok(()));
                     }
@@ -312,10 +302,7 @@ impl ManagerRuntimeState {
                 cleanup_error,
             }) => {
                 if let Some(record) = self.records.get_mut(&display_id) {
-                    let previous =
-                        std::mem::replace(&mut record.phase, ManagedDisplayPhase::Terminal);
-                    let ManagedDisplayPhase::Active(display) = previous else {
-                        record.phase = previous;
+                    let Some(display) = record.retire_active() else {
                         return None;
                     };
                     if let Err(join_error) = display.join_after_terminal().await {

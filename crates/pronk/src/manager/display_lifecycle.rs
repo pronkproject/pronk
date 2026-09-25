@@ -36,6 +36,47 @@ pub(super) enum ManagedDisplayPhase {
     Terminal,
 }
 
+pub(super) enum RemovalRequest {
+    Start(CastDisplaySlotActor),
+    Queued,
+    Complete(oneshot::Sender<Result<(), RemoveManagedDisplayError>>),
+}
+
+impl ManagedDisplayRecord {
+    pub(super) fn request_removal(
+        &mut self,
+        response: oneshot::Sender<Result<(), RemoveManagedDisplayError>>,
+    ) -> RemovalRequest {
+        match std::mem::replace(&mut self.phase, ManagedDisplayPhase::Terminal) {
+            ManagedDisplayPhase::Active(display) => {
+                self.phase = ManagedDisplayPhase::Removing {
+                    waiters: vec![response],
+                };
+                RemovalRequest::Start(display)
+            }
+            ManagedDisplayPhase::Removing { mut waiters } => {
+                waiters.push(response);
+                self.phase = ManagedDisplayPhase::Removing { waiters };
+                RemovalRequest::Queued
+            }
+            other => {
+                self.phase = other;
+                RemovalRequest::Complete(response)
+            }
+        }
+    }
+
+    pub(super) fn retire_active(&mut self) -> Option<CastDisplaySlotActor> {
+        match std::mem::replace(&mut self.phase, ManagedDisplayPhase::Terminal) {
+            ManagedDisplayPhase::Active(display) => Some(display),
+            other => {
+                self.phase = other;
+                None
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct SetupCompletion {
     display_id: CastDisplayId,
