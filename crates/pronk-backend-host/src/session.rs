@@ -11,7 +11,7 @@ use pronk_backend_protocol::{
     StopReason, SuspendReason, Validate, MAX_DEVICE_TEXT_BYTES,
 };
 use thiserror::Error;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 use zbus::zvariant::{OwnedFd, OwnedObjectPath};
 use zbus::Connection;
 
@@ -286,38 +286,35 @@ impl BackendSessionHandle {
             ));
         }
 
-        let signal = timeout(BACKEND_SESSION_CONTROL_TIMEOUT, completions.next())
-            .await
-            .map_err(|_| BackendSessionError::MethodTimeout("ControlCompleted"))?
-            .ok_or(BackendSessionError::ControlCompletionStreamClosed)?;
-        let args = signal.args().map_err(BackendSessionError::Protocol)?;
-        if *args.session_generation() != self.session_generation {
-            return Err(BackendSessionError::InvalidControlCompletion(format!(
-                "session generation {} differs from {}",
-                args.session_generation(),
-                self.session_generation
-            )));
-        }
-        if *args.operation_id() != operation_id {
-            return Err(BackendSessionError::InvalidControlCompletion(format!(
-                "operation ID {} differs from {operation_id}",
-                args.operation_id()
-            )));
-        }
-        let succeeded = *args.succeeded();
-        let error_text = args.error_text();
-        if succeeded {
-            if !error_text.is_empty() {
-                return Err(BackendSessionError::InvalidControlCompletion(
-                    "successful completion has error text".into(),
-                ));
+        let deadline = Instant::now() + BACKEND_SESSION_CONTROL_TIMEOUT;
+        loop {
+            let signal = timeout_at(deadline, completions.next())
+                .await
+                .map_err(|_| BackendSessionError::MethodTimeout("ControlCompleted"))?
+                .ok_or(BackendSessionError::ControlCompletionStreamClosed)?;
+            let args = signal.args().map_err(BackendSessionError::Protocol)?;
+            if !completion_matches(
+                self.session_generation,
+                operation_id,
+                *args.session_generation(),
+                *args.operation_id(),
+            )? {
+                continue;
             }
-            Ok(())
-        } else {
+            let succeeded = *args.succeeded();
+            let error_text = args.error_text();
+            if succeeded {
+                if !error_text.is_empty() {
+                    return Err(BackendSessionError::InvalidControlCompletion(
+                        "successful completion has error text".into(),
+                    ));
+                }
+                return Ok(());
+            }
             validate_error_text(error_text).map_err(|error| {
                 BackendSessionError::InvalidControlCompletion(error.to_string())
             })?;
-            Err(BackendSessionError::ControlFailed(error_text.clone()))
+            return Err(BackendSessionError::ControlFailed(error_text.clone()));
         }
     }
 
@@ -365,6 +362,23 @@ impl BackendSessionHandle {
             .map_err(|_| BackendSessionError::MethodTimeout("Stop"))?
             .map_err(BackendSessionError::Protocol)
     }
+}
+
+fn completion_matches(
+    expected_session: u64,
+    expected_operation: u64,
+    actual_session: u64,
+    actual_operation: u64,
+) -> Result<bool, BackendSessionError> {
+    if actual_session != expected_session {
+        return Err(BackendSessionError::InvalidControlCompletion(format!(
+            "session generation {actual_session} differs from {expected_session}"
+        )));
+    }
+    // Every listener sees completions for other in-flight operations on the
+    // same session. Only the operation ID returned by our method call belongs
+    // to this request.
+    Ok(actual_operation == expected_operation)
 }
 
 fn validate_capabilities_against_offer(
@@ -600,6 +614,16 @@ mod tests {
         assert!(matches!(
             BackendSessionRequest::new(SESSION_ID, "living-room", zero_generation),
             Err(BackendSessionError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn control_completion_correlation_skips_other_operations() {
+        assert!(!completion_matches(3, 12, 3, 11).unwrap());
+        assert!(completion_matches(3, 12, 3, 12).unwrap());
+        assert!(matches!(
+            completion_matches(3, 12, 4, 12),
+            Err(BackendSessionError::InvalidControlCompletion(_))
         ));
     }
 
