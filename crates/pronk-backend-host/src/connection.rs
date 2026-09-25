@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -242,7 +241,6 @@ struct RegistrationHostShared {
     connection_generation: u64,
     registration_validator: Arc<dyn BackendRegistrationValidator>,
     registration_tx: Mutex<Option<oneshot::Sender<RegistrationOutcome>>>,
-    call_count: AtomicUsize,
 }
 
 impl RegistrationHost {
@@ -258,7 +256,6 @@ impl RegistrationHost {
                 connection_generation,
                 registration_validator,
                 registration_tx: Mutex::new(Some(registration_tx)),
-                call_count: AtomicUsize::new(0),
             }),
         }
     }
@@ -271,12 +268,15 @@ impl RegistrationHost {
         #[zbus(connection)] connection: &Connection,
         info: BackendInfo,
     ) -> zbus::fdo::Result<ResponseDispatchNotifier<RegistrationReply>> {
-        let call_count = self.shared.call_count.fetch_add(1, Ordering::SeqCst) + 1;
-        if call_count != 1 {
-            return Err(zbus::fdo::Error::Failed(
-                "RegisterBackend is callable exactly once".into(),
-            ));
-        }
+        let sender = self
+            .shared
+            .registration_tx
+            .lock()
+            .expect("registration mutex poisoned")
+            .take()
+            .ok_or_else(|| {
+                zbus::fdo::Error::Failed("RegisterBackend is callable exactly once".into())
+            })?;
 
         require_same_uid(connection)
             .await
@@ -299,19 +299,11 @@ impl RegistrationHost {
         )
         .await
         .map_err(|error| error.to_string());
-        let sender = self
-            .shared
-            .registration_tx
-            .lock()
-            .expect("registration mutex poisoned")
-            .take();
         if let Err(error) = validation {
-            if let Some(sender) = sender {
-                let _ = sender.send(RegistrationOutcome {
-                    info,
-                    validation: Err(error.clone()),
-                });
-            }
+            let _ = sender.send(RegistrationOutcome {
+                info,
+                validation: Err(error.clone()),
+            });
             return Err(zbus::fdo::Error::InvalidArgs(error));
         }
         let reply = RegistrationReply {
@@ -319,21 +311,19 @@ impl RegistrationHost {
             connection_generation: self.shared.connection_generation,
         };
         let (reply, dispatched) = ResponseDispatchNotifier::new(reply);
-        if let Some(sender) = sender {
-            connection
-                .executor()
-                .spawn(
-                    async move {
-                        dispatched.await;
-                        let _ = sender.send(RegistrationOutcome {
-                            info,
-                            validation: Ok(()),
-                        });
-                    },
-                    "complete backend registration",
-                )
-                .detach();
-        }
+        connection
+            .executor()
+            .spawn(
+                async move {
+                    dispatched.await;
+                    let _ = sender.send(RegistrationOutcome {
+                        info,
+                        validation: Ok(()),
+                    });
+                },
+                "complete backend registration",
+            )
+            .detach();
         Ok(reply)
     }
 }
