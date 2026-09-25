@@ -322,7 +322,6 @@ struct ActiveGeneration {
     audio_sender_received_generation: bool,
     transport_active: bool,
     audio_enabled: bool,
-    media_ready: bool,
     video_bitrate: u64,
     feedback_controller: Option<VideoFeedbackController>,
 }
@@ -336,10 +335,14 @@ impl ActiveGeneration {
             audio_sender_received_generation: false,
             transport_active: false,
             audio_enabled,
-            media_ready: false,
             video_bitrate: video_bitrate.get(),
             feedback_controller: None,
         }
+    }
+
+    fn is_ready(&self) -> bool {
+        // Video sender configuration is last, after graph and optional audio.
+        self.sender_received_generation
     }
 }
 
@@ -651,7 +654,6 @@ impl ChromiacastMediaSession {
         }
         self.sender()?.configure(generation, negotiated).await?;
         self.active_generation_mut().sender_received_generation = true;
-        self.active_generation_mut().media_ready = true;
         Ok(())
     }
 
@@ -662,7 +664,7 @@ impl ChromiacastMediaSession {
         let Some(generation) = feedback.generation else {
             return Ok(Vec::new());
         };
-        if self.generation.active() != Some(generation) || !self.active_generation().media_ready {
+        if self.generation.active() != Some(generation) || !self.active_generation().is_ready() {
             return Ok(Vec::new());
         }
         if let Some(error) = feedback.terminal_error {
@@ -721,7 +723,7 @@ impl ChromiacastMediaSession {
     pub(crate) async fn start(&mut self, media_generation: u64) -> Result<(), MediaSessionError> {
         let generation =
             self.require_generation("Start", media_generation, SessionState::Configured)?;
-        if !self.active_generation().media_ready {
+        if !self.active_generation().is_ready() {
             return Err(MediaSessionError::Graph(
                 "Start cannot follow a failed media configuration".into(),
             ));
@@ -952,7 +954,7 @@ impl ChromiacastMediaSession {
         if !self
             .generation
             .active_generation()
-            .is_some_and(|active| active.media_ready)
+            .is_some_and(ActiveGeneration::is_ready)
             || !matches!(
                 self.state,
                 SessionState::Configured | SessionState::Streaming | SessionState::Suspended
