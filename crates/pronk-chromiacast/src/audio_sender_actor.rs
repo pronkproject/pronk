@@ -185,9 +185,9 @@ impl AudioSenderActor {
 impl Drop for AudioSenderActor {
     fn drop(&mut self) {
         let _ = self.commands.try_send(Command::Shutdown { reply: None });
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        // Channel closure also wakes a full queue. The actor keeps the
+        // transport until its shutdown command or closure is handled.
+        self.task.take();
     }
 }
 
@@ -590,6 +590,7 @@ mod tests {
     struct RecordingSender {
         timestamps: Arc<Mutex<Vec<Duration>>>,
         fail_shutdown: bool,
+        shutdown_signal: Option<oneshot::Sender<()>>,
     }
 
     #[async_trait]
@@ -606,6 +607,9 @@ mod tests {
         }
 
         async fn shutdown(self: Box<Self>) -> Result<(), VideoTransportError> {
+            if let Some(signal) = self.shutdown_signal {
+                let _ = signal.send(());
+            }
             if self.fail_shutdown {
                 Err(VideoTransportError::new("audio sender shutdown failed"))
             } else {
@@ -626,6 +630,7 @@ mod tests {
                 Box::new(RecordingSender {
                     timestamps: timestamps.clone(),
                     fail_shutdown: false,
+                    shutdown_signal: None,
                 }),
             )
             .await
@@ -657,6 +662,7 @@ mod tests {
                 Box::new(RecordingSender {
                     timestamps: Arc::clone(&timestamps),
                     fail_shutdown: true,
+                    shutdown_signal: None,
                 }),
             )
             .await
@@ -673,6 +679,7 @@ mod tests {
                 Box::new(RecordingSender {
                     timestamps: Arc::clone(&timestamps),
                     fail_shutdown: false,
+                    shutdown_signal: None,
                 }),
             )
             .await
@@ -684,11 +691,36 @@ mod tests {
                 Box::new(RecordingSender {
                     timestamps,
                     fail_shutdown: false,
+                    shutdown_signal: None,
                 }),
             )
             .await
             .unwrap();
         actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_audio_actor_finishes_transport_shutdown() {
+        let (_output, receiver) = mpsc::channel(1);
+        let actor = AudioSenderActor::spawn(receiver);
+        let (shutdown_signal, shutdown_done) = oneshot::channel();
+        actor
+            .configure(
+                NonZeroU64::new(1).unwrap(),
+                Box::new(RecordingSender {
+                    timestamps: Arc::new(Mutex::new(Vec::new())),
+                    fail_shutdown: false,
+                    shutdown_signal: Some(shutdown_signal),
+                }),
+            )
+            .await
+            .unwrap();
+
+        drop(actor);
+        tokio::time::timeout(Duration::from_secs(1), shutdown_done)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     fn packet(generation: NonZeroU64, timestamp_ms: u64) -> EncodedAudioPacket {

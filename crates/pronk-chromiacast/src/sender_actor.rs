@@ -296,11 +296,9 @@ impl VideoSenderActor {
 impl Drop for VideoSenderActor {
     fn drop(&mut self) {
         let _ = self.commands.try_send(Command::Shutdown { reply: None });
-        if let Some(task) = self.task.take() {
-            // Ordered shutdown is explicit. Never detach the task if its
-            // bounded command queue is full or its owner disappears.
-            task.abort();
-        }
+        // Channel closure also wakes a full queue. The actor keeps the
+        // transport until its shutdown command or closure is handled.
+        self.task.take();
     }
 }
 
@@ -926,6 +924,7 @@ mod tests {
     struct AcceptingSender {
         _feedback: tokio::sync::watch::Sender<VideoTransportFeedbackSnapshot>,
         fail_shutdown: bool,
+        shutdown_signal: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
     #[derive(Debug)]
@@ -943,6 +942,9 @@ mod tests {
         }
 
         async fn shutdown(self: Box<Self>) -> Result<(), VideoTransportError> {
+            if let Some(signal) = self.shutdown_signal {
+                let _ = signal.send(());
+            }
             if self.fail_shutdown {
                 Err(VideoTransportError::new("video sender shutdown failed"))
             } else {
@@ -1046,6 +1048,38 @@ mod tests {
         actor.stop(generation).await.unwrap();
         actor.configure(next, accepting_transport()).await.unwrap();
         actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_video_actor_finishes_transport_shutdown() {
+        let (_output, receiver) = tokio::sync::mpsc::channel(1);
+        let actor = VideoSenderActor::spawn(receiver);
+        let (shutdown_signal, shutdown_done) = tokio::sync::oneshot::channel();
+        let (feedback, feedback_receiver) =
+            tokio::sync::watch::channel(VideoTransportFeedbackSnapshot::default());
+        actor
+            .configure(
+                NonZeroU64::new(1).unwrap(),
+                NegotiatedVideoTransport {
+                    video_codec: pronk_media::VideoCodec::Vp8,
+                    sender: Box::new(AcceptingSender {
+                        _feedback: feedback,
+                        fail_shutdown: false,
+                        shutdown_signal: Some(shutdown_signal),
+                    }),
+                    audio_sender: None,
+                    feedback: feedback_receiver,
+                    minimum_bitrate: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        drop(actor);
+        tokio::time::timeout(Duration::from_secs(1), shutdown_done)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1310,6 +1344,7 @@ mod tests {
             sender: Box::new(AcceptingSender {
                 _feedback: feedback,
                 fail_shutdown: false,
+                shutdown_signal: None,
             }),
             audio_sender: None,
             feedback: receiver,
@@ -1325,6 +1360,7 @@ mod tests {
             sender: Box::new(AcceptingSender {
                 _feedback: feedback,
                 fail_shutdown: true,
+                shutdown_signal: None,
             }),
             audio_sender: None,
             feedback: receiver,
@@ -1344,6 +1380,7 @@ mod tests {
                 sender: Box::new(AcceptingSender {
                     _feedback: feedback.clone(),
                     fail_shutdown: false,
+                    shutdown_signal: None,
                 }),
                 audio_sender: None,
                 feedback: receiver,
