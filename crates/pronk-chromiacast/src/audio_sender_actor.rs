@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::generation_slot::{GenerationOwned, GenerationSlot};
+use crate::sender_status::{SenderState as AudioSenderState, SenderStatus as AudioSenderStatus};
 use crate::transport::{AudioSendOutcome, AudioSenderPort, VideoTransportError};
 
 const COMMAND_CAPACITY: usize = 8;
@@ -19,61 +20,10 @@ pub(crate) struct AudioSenderStatistics {
     pub queue_delay: Duration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AudioSenderState {
-    Configured,
-    Streaming,
-    Suspended,
-    Failed,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AudioSenderSnapshot {
     status: AudioSenderStatus,
     statistics: AudioSenderStatistics,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AudioSenderStatus {
-    Empty,
-    Configured(NonZeroU64),
-    Streaming(NonZeroU64),
-    Suspended(NonZeroU64),
-    Failed {
-        generation: NonZeroU64,
-        error: String,
-    },
-    Completed {
-        generation: NonZeroU64,
-        error: Option<String>,
-    },
-    Stopped {
-        generation: Option<NonZeroU64>,
-        error: Option<String>,
-    },
-}
-
-impl AudioSenderStatus {
-    fn generation(&self) -> Option<NonZeroU64> {
-        match self {
-            Self::Empty => None,
-            Self::Configured(generation)
-            | Self::Streaming(generation)
-            | Self::Suspended(generation)
-            | Self::Failed { generation, .. }
-            | Self::Completed { generation, .. } => Some(*generation),
-            Self::Stopped { generation, .. } => *generation,
-        }
-    }
-
-    fn active(generation: NonZeroU64, state: AudioSenderState) -> Self {
-        match state {
-            AudioSenderState::Configured => Self::Configured(generation),
-            AudioSenderState::Streaming => Self::Streaming(generation),
-            AudioSenderState::Suspended => Self::Suspended(generation),
-            AudioSenderState::Failed => unreachable!("failed audio sender needs an error"),
-        }
-    }
 }
 
 pub(crate) struct AudioSenderActor {

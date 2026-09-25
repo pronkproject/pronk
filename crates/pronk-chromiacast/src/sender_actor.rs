@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::generation_slot::{GenerationOwned, GenerationSlot};
+use crate::sender_status::{SenderState as VideoSenderState, SenderStatus as VideoSenderStatus};
 use crate::transport::{
     NegotiatedVideoTransport, VideoSendOutcome, VideoSenderPort, VideoTransportError,
     VideoTransportFeedbackSnapshot, VideoTransportPressure,
@@ -25,61 +26,10 @@ pub(crate) struct VideoSenderStatistics {
     pub queue_delay: Duration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VideoSenderState {
-    Configured,
-    Streaming,
-    Suspended,
-    Failed,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VideoSenderSnapshot {
     status: VideoSenderStatus,
     statistics: VideoSenderStatistics,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VideoSenderStatus {
-    Empty,
-    Configured(NonZeroU64),
-    Streaming(NonZeroU64),
-    Suspended(NonZeroU64),
-    Failed {
-        generation: NonZeroU64,
-        error: String,
-    },
-    Completed {
-        generation: NonZeroU64,
-        error: Option<String>,
-    },
-    Stopped {
-        generation: Option<NonZeroU64>,
-        error: Option<String>,
-    },
-}
-
-impl VideoSenderStatus {
-    fn generation(&self) -> Option<NonZeroU64> {
-        match self {
-            Self::Empty => None,
-            Self::Configured(generation)
-            | Self::Streaming(generation)
-            | Self::Suspended(generation)
-            | Self::Failed { generation, .. }
-            | Self::Completed { generation, .. } => Some(*generation),
-            Self::Stopped { generation, .. } => *generation,
-        }
-    }
-
-    fn active(generation: NonZeroU64, state: VideoSenderState) -> Self {
-        match state {
-            VideoSenderState::Configured => Self::Configured(generation),
-            VideoSenderState::Streaming => Self::Streaming(generation),
-            VideoSenderState::Suspended => Self::Suspended(generation),
-            VideoSenderState::Failed => unreachable!("failed video sender needs an error"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
