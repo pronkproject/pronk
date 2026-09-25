@@ -14,35 +14,41 @@ pub(crate) enum PolicyMarkerChange {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct PolicyGate {
-    required: bool,
-    marker_id: Option<u32>,
+pub(crate) enum PolicyGate {
+    #[default]
+    Ambient,
+    WaitingForMarker,
+    Marked(u32),
 }
 
 impl PolicyGate {
     pub(crate) fn new(required: bool) -> Self {
-        Self {
-            required,
-            marker_id: None,
+        if required {
+            Self::WaitingForMarker
+        } else {
+            Self::Ambient
         }
     }
 
     pub(crate) fn observe_metadata(&mut self, object_id: u32, name: Option<&str>) {
-        if self.required && self.marker_id.is_none() && name == Some(POLICY_METADATA_NAME) {
-            self.marker_id = Some(object_id);
+        if matches!(self, Self::WaitingForMarker) && name == Some(POLICY_METADATA_NAME) {
+            *self = Self::Marked(object_id);
         }
     }
 
     pub(crate) fn is_open(&self) -> bool {
-        !self.required || self.marker_id.is_some()
+        matches!(self, Self::Ambient | Self::Marked(_))
     }
 
     pub(crate) fn remove_object(&mut self, object_id: u32) -> PolicyMarkerChange {
-        if self.marker_id == Some(object_id) {
-            self.marker_id = None;
-            PolicyMarkerChange::Lost
-        } else {
-            PolicyMarkerChange::Unchanged
+        match self {
+            Self::Marked(marker_id) if *marker_id == object_id => {
+                *self = Self::WaitingForMarker;
+                PolicyMarkerChange::Lost
+            }
+            Self::Ambient | Self::WaitingForMarker | Self::Marked(_) => {
+                PolicyMarkerChange::Unchanged
+            }
         }
     }
 }
