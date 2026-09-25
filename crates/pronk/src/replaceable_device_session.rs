@@ -148,11 +148,14 @@ impl DeviceSessionReplacementHandle {
             InstallationDecision::Rejected { reason, session } => {
                 // A rejected backend session still needs a final protocol
                 // teardown attempt before its owner can discard it.
-                let cleanup_error = session
-                    .stop(DeviceSessionStopReason::DaemonShutdown)
-                    .await
-                    .err()
-                    .map(|error| error.to_string());
+                let cleanup_error = spawn_final_stop(
+                    session,
+                    DeviceSessionStopReason::DaemonShutdown,
+                    "rejected Device-session",
+                )
+                .await
+                .unwrap_or_else(|error| Err(format!("join rejected Device-session stop: {error}")))
+                .err();
                 Err(reason.into_error(cleanup_error))
             }
         }
@@ -272,21 +275,30 @@ impl RetiringSession {
             media_generation,
             session,
         } = active;
-        let task = tokio::spawn(async move {
-            tokio::time::timeout(
-                RETIREMENT_STOP_TIMEOUT,
-                session.stop(DeviceSessionStopReason::DaemonShutdown),
-            )
-            .await
-            .map_err(|_| "retired Device-session stop timed out".to_string())?
-            .map_err(|error| error.to_string())
-        });
+        let task = spawn_final_stop(
+            session,
+            DeviceSessionStopReason::DaemonShutdown,
+            "retired Device-session",
+        );
         Self {
             session_generation,
             media_generation,
             task,
         }
     }
+}
+
+fn spawn_final_stop(
+    session: Box<dyn DeviceSessionPort>,
+    reason: DeviceSessionStopReason,
+    label: &'static str,
+) -> JoinHandle<Result<(), String>> {
+    tokio::spawn(async move {
+        tokio::time::timeout(RETIREMENT_STOP_TIMEOUT, session.stop(reason))
+            .await
+            .map_err(|_| format!("{label} stop timed out"))?
+            .map_err(|error| error.to_string())
+    })
 }
 
 impl fmt::Debug for ActiveSession {
@@ -461,7 +473,12 @@ impl DeviceSessionPort for ReplaceableDeviceSessionPort {
             std::mem::replace(&mut shared.slot, SessionSlot::Closed)
         };
         match current {
-            SessionSlot::Active(current) => current.session.stop(reason).await,
+            SessionSlot::Active(current) => {
+                spawn_final_stop(current.session, reason, "final Device-session")
+                    .await
+                    .unwrap_or_else(|error| Err(format!("join final Device-session stop: {error}")))
+                    .map_err(DeviceSessionError::new)
+            }
             SessionSlot::Retiring(retiring) => retiring
                 .task
                 .await
@@ -542,6 +559,7 @@ mod tests {
         calls: Arc<StdMutex<Vec<Call>>>,
         fail_stop: bool,
         stop_gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        stop_completed: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
     #[async_trait]
@@ -617,6 +635,9 @@ mod tests {
             if let Some(gate) = self.stop_gate {
                 let _ = gate.await;
             }
+            if let Some(done) = self.stop_completed {
+                let _ = done.send(());
+            }
             if self.fail_stop {
                 Err(DeviceSessionError::new("stop failed"))
             } else {
@@ -635,6 +656,7 @@ mod tests {
             calls: Arc::clone(calls),
             fail_stop: false,
             stop_gate: None,
+            stop_completed: None,
         })
     }
 
@@ -665,6 +687,7 @@ mod tests {
             calls: Arc::clone(&calls),
             fail_stop: false,
             stop_gate: Some(stop_gate),
+            stop_completed: None,
         });
         let (port, _control, mut replacement) = replaceable_device_session(generation(1), initial);
 
@@ -858,6 +881,7 @@ mod tests {
                     calls: Arc::clone(&calls),
                     fail_stop: true,
                     stop_gate: None,
+                    stop_completed: None,
                 }),
             })
             .await
@@ -878,6 +902,82 @@ mod tests {
                 Call::Stop("current", DeviceSessionStopReason::DaemonShutdown),
                 Call::Stop("stale", DeviceSessionStopReason::DaemonShutdown),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_rejection_keeps_candidate_cleanup_running() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let (port, _control, mut replacement) =
+            replaceable_device_session(generation(3), session("current", &calls));
+        let permit = replacement.retire_current().await.unwrap();
+        let (release_stop, stop_gate) = tokio::sync::oneshot::channel();
+        let (stop_completed, cleanup_done) = tokio::sync::oneshot::channel();
+        let rejected = Box::new(FakeSession {
+            name: "stale",
+            calls: Arc::clone(&calls),
+            fail_stop: false,
+            stop_gate: Some(stop_gate),
+            stop_completed: Some(stop_completed),
+        });
+
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            permit.install(DeviceSessionReplacement {
+                session_generation: generation(3),
+                session: rejected,
+            }),
+        )
+        .await
+        .is_err());
+        release_stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), cleanup_done)
+            .await
+            .unwrap()
+            .unwrap();
+        port.stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                Call::Stop("current", DeviceSessionStopReason::DaemonShutdown),
+                Call::Stop("stale", DeviceSessionStopReason::DaemonShutdown),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_final_stop_keeps_session_cleanup_running() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let (release_stop, stop_gate) = tokio::sync::oneshot::channel();
+        let (stop_completed, cleanup_done) = tokio::sync::oneshot::channel();
+        let initial = Box::new(FakeSession {
+            name: "current",
+            calls: Arc::clone(&calls),
+            fail_stop: false,
+            stop_gate: Some(stop_gate),
+            stop_completed: Some(stop_completed),
+        });
+        let (port, _control, _replacement) = replaceable_device_session(generation(1), initial);
+
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            port.stop(DeviceSessionStopReason::DaemonShutdown),
+        )
+        .await
+        .is_err());
+        release_stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), cleanup_done)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![Call::Stop(
+                "current",
+                DeviceSessionStopReason::DaemonShutdown,
+            )]
         );
     }
 
