@@ -2,8 +2,10 @@
 
 use std::future::Future;
 use std::num::NonZeroU64;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::device_session_port::{
@@ -24,10 +26,44 @@ use crate::media_session::{
 pub struct ProductionMediaSessionDriver {
     capture: Box<dyn CapturePipelinePort>,
     remotes: Box<dyn DeviceMediaRemotePort>,
-    // Final shutdown moves the Device owner before awaiting both cleanup
-    // paths. Cancellation can leave capture cleanup pending without a Device.
-    device: Option<Box<dyn DeviceSessionPort>>,
+    device: DeviceOwner,
     lifecycle: DriverLifecycle,
+}
+
+const FINAL_DEVICE_STOP_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Debug)]
+enum DeviceOwner {
+    Live(Box<dyn DeviceSessionPort>),
+    Stopping(JoinHandle<Result<(), String>>),
+    Stopped,
+}
+
+impl DeviceOwner {
+    fn begin_stop(&mut self, reason: DeviceSessionStopReason) {
+        let previous = std::mem::replace(self, Self::Stopped);
+        *self = match previous {
+            Self::Live(device) => Self::Stopping(tokio::spawn(async move {
+                tokio::time::timeout(FINAL_DEVICE_STOP_TIMEOUT, device.stop(reason))
+                    .await
+                    .map_err(|_| "final Device-session stop timed out".to_string())?
+                    .map_err(|error| format!("final Device-session stop failed: {error}"))
+            })),
+            other => other,
+        };
+    }
+
+    async fn finish_stop(&mut self) -> Result<(), String> {
+        let result = match self {
+            Self::Stopping(task) => task
+                .await
+                .unwrap_or_else(|error| Err(format!("join final Device-session stop: {error}"))),
+            Self::Live(_) => unreachable!("final Device stop was not started"),
+            Self::Stopped => Ok(()),
+        };
+        *self = Self::Stopped;
+        result
+    }
 }
 
 #[derive(Debug)]
@@ -165,13 +201,15 @@ impl ProductionMediaSessionDriver {
         Self {
             capture,
             remotes,
-            device: Some(device),
+            device: DeviceOwner::Live(device),
             lifecycle: DriverLifecycle::Live(DriverMediaPhase::Idle),
         }
     }
 
     fn ensure_live(&self) -> Result<(), MediaDriverError> {
-        if matches!(self.lifecycle, DriverLifecycle::Shutdown) || self.device.is_none() {
+        if matches!(self.lifecycle, DriverLifecycle::Shutdown)
+            || !matches!(self.device, DeviceOwner::Live(_))
+        {
             Err(MediaDriverError::new("media driver is shut down"))
         } else {
             Ok(())
@@ -179,9 +217,12 @@ impl ProductionMediaSessionDriver {
     }
 
     fn device(&mut self) -> Result<&mut Box<dyn DeviceSessionPort>, MediaDriverError> {
-        self.device
-            .as_mut()
-            .ok_or_else(|| MediaDriverError::new("Device session is no longer available"))
+        match &mut self.device {
+            DeviceOwner::Live(device) => Ok(device),
+            DeviceOwner::Stopping(_) | DeviceOwner::Stopped => Err(MediaDriverError::new(
+                "Device session is no longer available",
+            )),
+        }
     }
 }
 
@@ -353,7 +394,7 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
                 failures.push(
                     generation_mismatch("stop backend media", Some(active), generation).to_string(),
                 );
-            } else if let Some(device) = self.device.as_mut() {
+            } else if let DeviceOwner::Live(device) = &mut self.device {
                 let result = cancellable(
                     cancellation.clone(),
                     "stop backend media",
@@ -365,8 +406,8 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
                     Err(error) => failures.push(error.to_string()),
                 }
             } else {
-                // The final Device owner may have been moved into a cancelled
-                // shutdown. Capture still owns an independent cleanup path.
+                // Final Device teardown may still be running after a
+                // cancelled shutdown. Capture remains independently owned.
                 failures.push("Device session is no longer available".into());
             }
         }
@@ -408,21 +449,12 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
             MediaStopReason::DisplayRemoved => DeviceSessionStopReason::DisplayRemoved,
             _ => DeviceSessionStopReason::DaemonShutdown,
         };
-        let device = self.device.take();
-        let stop_device = async move {
-            match device {
-                Some(device) => device
-                    .stop(final_reason)
-                    .await
-                    .map_err(|error| format!("final Device-session stop failed: {error}")),
-                None => Ok(()),
-            }
-        };
+        self.device.begin_stop(final_reason);
         // These are independent resource owners. A wedged backend teardown
         // must not keep the capture/PipeWire owner from beginning its own
         // final cleanup before the outer actor deadline expires.
         let (device_result, capture_result) = tokio::join!(
-            stop_device,
+            self.device.finish_stop(),
             cancellable(
                 cancellation.clone(),
                 "shut down capture pipeline",
@@ -687,6 +719,7 @@ mod tests {
     struct FakeDevice {
         calls: Calls,
         block_final_stop: bool,
+        final_stop_gate: Option<tokio::sync::oneshot::Receiver<()>>,
     }
 
     #[async_trait]
@@ -755,6 +788,9 @@ mod tests {
             if self.block_final_stop {
                 std::future::pending::<()>().await;
             }
+            if let Some(gate) = self.final_stop_gate {
+                let _ = gate.await;
+            }
             Ok(())
         }
     }
@@ -802,6 +838,7 @@ mod tests {
             Box::new(FakeDevice {
                 calls: calls.clone(),
                 block_final_stop: false,
+                final_stop_gate: None,
             }),
         )
     }
@@ -832,9 +869,10 @@ mod tests {
             .await
             .unwrap();
 
+        let calls = calls.lock().unwrap();
         assert_eq!(
-            *calls.lock().unwrap(),
-            vec![
+            &calls[..9],
+            &[
                 Call::CaptureStart(1),
                 Call::Mint(1, false),
                 Call::Configure(1),
@@ -844,10 +882,13 @@ mod tests {
                 Call::CaptureSuspend(1),
                 Call::DeviceStopMedia(1),
                 Call::CaptureStop(1),
-                Call::DeviceFinalStop(DeviceSessionStopReason::DisplayRemoved),
-                Call::CaptureShutdown,
             ]
         );
+        assert_eq!(calls.len(), 11);
+        assert!(calls[9..].contains(&Call::DeviceFinalStop(
+            DeviceSessionStopReason::DisplayRemoved
+        )));
+        assert!(calls[9..].contains(&Call::CaptureShutdown));
     }
 
     #[tokio::test]
@@ -869,20 +910,19 @@ mod tests {
             .shutdown(MediaStopReason::BackendShutdown, cancellation)
             .await
             .unwrap();
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![
-                Call::CaptureStart(1),
-                Call::CaptureStop(1),
-                Call::DeviceFinalStop(DeviceSessionStopReason::DaemonShutdown),
-                Call::CaptureShutdown,
-            ]
-        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(&calls[..2], &[Call::CaptureStart(1), Call::CaptureStop(1)]);
+        assert_eq!(calls.len(), 4);
+        assert!(calls[2..].contains(&Call::DeviceFinalStop(
+            DeviceSessionStopReason::DaemonShutdown
+        )));
+        assert!(calls[2..].contains(&Call::CaptureShutdown));
     }
 
     #[tokio::test]
-    async fn missing_device_owner_does_not_skip_capture_cleanup() {
+    async fn cancelled_shutdown_retains_device_stop_and_capture_cleanup() {
         let calls = Calls::default();
+        let (release_stop, stop_gate) = tokio::sync::oneshot::channel();
         let mut driver = ProductionMediaSessionDriver::new(
             Box::new(FakeCapture {
                 calls: calls.clone(),
@@ -893,7 +933,8 @@ mod tests {
             }),
             Box::new(FakeDevice {
                 calls: calls.clone(),
-                block_final_stop: true,
+                block_final_stop: false,
+                final_stop_gate: Some(stop_gate),
             }),
         );
         let cancellation = CancellationToken::new();
@@ -928,10 +969,20 @@ mod tests {
         ));
         assert_eq!(calls.lock().unwrap().last(), Some(&Call::CaptureStop(1)));
 
+        release_stop.send(()).unwrap();
         driver
             .shutdown(MediaStopReason::BackendShutdown, cancellation)
             .await
             .unwrap();
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| matches!(call, Call::DeviceFinalStop(_)))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -948,6 +999,7 @@ mod tests {
             Box::new(FakeDevice {
                 calls: calls.clone(),
                 block_final_stop: true,
+                final_stop_gate: None,
             }),
         );
 
