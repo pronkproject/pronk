@@ -321,7 +321,7 @@ struct ActiveGeneration {
     sender_may_own_generation: bool,
     audio_sender_may_own_generation: bool,
     configuration_complete: bool,
-    transport_active: bool,
+    transport_may_be_active: bool,
     audio_enabled: bool,
     video_bitrate: u64,
     feedback_controller: Option<VideoFeedbackController>,
@@ -335,7 +335,7 @@ impl ActiveGeneration {
             sender_may_own_generation: false,
             audio_sender_may_own_generation: false,
             configuration_complete: false,
-            transport_active: false,
+            transport_may_be_active: false,
             audio_enabled,
             video_bitrate: video_bitrate.get(),
             feedback_controller: None,
@@ -566,8 +566,9 @@ impl ChromiacastMediaSession {
         )));
         self.state = SessionState::Configured;
 
+        // Negotiation can launch the receiver app before its reply reaches us.
+        self.active_generation_mut().transport_may_be_active = true;
         let mut negotiated = transport.negotiate_video(transport_configuration).await?;
-        self.active_generation_mut().transport_active = true;
         let graph_configuration =
             match graph_configuration.with_encoder(&self.encoder_policy, negotiated.video_codec) {
                 Ok(configuration) => configuration,
@@ -879,7 +880,7 @@ impl ChromiacastMediaSession {
         let graph_may_own_generation = active.graph_may_own_generation;
         let audio_sender_may_own_generation = active.audio_sender_may_own_generation;
         let sender_may_own_generation = active.sender_may_own_generation;
-        let transport_active = active.transport_active;
+        let transport_may_be_active = active.transport_may_be_active;
         let graph = &mut self.graph;
         let audio_sender = self.audio_sender.as_ref();
         let sender = self.sender.as_ref();
@@ -931,7 +932,7 @@ impl ChromiacastMediaSession {
                 }
             },
             async {
-                if transport_active {
+                if transport_may_be_active {
                     match transport {
                         Some(transport) => transport
                             .stop_video()
@@ -1682,6 +1683,28 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct PendingTransport {
+        entered: bool,
+        stops: u32,
+    }
+
+    #[async_trait]
+    impl VideoTransportNegotiator for PendingTransport {
+        async fn negotiate_video(
+            &mut self,
+            _configuration: VideoTransportConfiguration,
+        ) -> Result<NegotiatedVideoTransport, VideoTransportError> {
+            self.entered = true;
+            std::future::pending().await
+        }
+
+        async fn stop_video(&mut self) -> Result<(), VideoTransportError> {
+            self.stops += 1;
+            Ok(())
+        }
+    }
+
     fn fake_transport(
         with_audio: bool,
         video_codec: VideoCodec,
@@ -2406,6 +2429,38 @@ mod tests {
         ));
         media.stop_media(1, &mut transport).await.unwrap();
         media.stop_media(1, &mut transport).await.unwrap();
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_transport_negotiation_still_requests_stop() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        media.complete_preparation(capabilities()).unwrap();
+        let mut transport = PendingTransport::default();
+
+        {
+            let configure = media.configure(
+                remote(),
+                vec![target(session_id, 1)],
+                configuration(),
+                1,
+                &mut transport,
+            );
+            tokio::pin!(configure);
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(configure.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+
+        assert!(transport.entered);
+        media.stop_media(1, &mut transport).await.unwrap();
+        assert_eq!(transport.stops, 1);
         media.shutdown().await.unwrap();
     }
 
