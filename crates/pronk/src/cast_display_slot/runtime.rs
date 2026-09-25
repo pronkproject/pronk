@@ -74,7 +74,7 @@ impl SlotRuntime {
         let device_session = DeviceSessionPolicyState::new(
             prepared.device(),
             state.borrow().device.availability == DeviceAvailability::Available,
-            initial_session_generation.get(),
+            initial_session_generation,
         );
         let recovery = DeviceSessionRecoveryActor::spawn(
             recovery_factory,
@@ -186,7 +186,7 @@ impl SlotRuntime {
                         if self.device_session.complete_request(
                             request_generation,
                             &device,
-                            session_generation.get(),
+                            session_generation,
                             &self.state.borrow().device,
                         ) {
                             if let Some(error) = retired_session_cleanup_error {
@@ -210,7 +210,7 @@ impl SlotRuntime {
                         session_generation,
                         error,
                     }) => {
-                        if self.device_session.transport_failed(session_generation.get()) {
+                        if self.device_session.transport_failed(session_generation) {
                             let diagnostic = format!("Device session transport failed: {error}");
                             publish_media_failure(&self.state, &self.events, &diagnostic);
                             self.media_policy.observe(media_policy_input(&self.state.borrow(), &self.device_session));

@@ -7,6 +7,8 @@
 mod runtime;
 use runtime::run_slot;
 
+use std::num::NonZeroU64;
+
 use pronk_dbus::{DeviceAvailability, DeviceInfo};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -193,14 +195,14 @@ fn media_policy_input(
 enum DeviceSessionPolicyState {
     Ready {
         bound_connection_generation: u64,
-        session_generation: u64,
+        session_generation: NonZeroU64,
     },
     Recovering {
         request: PendingSessionRequest,
-        last_session_generation: u64,
+        last_session_generation: NonZeroU64,
     },
     Unavailable {
-        last_session_generation: u64,
+        last_session_generation: NonZeroU64,
     },
 }
 
@@ -224,7 +226,7 @@ impl PendingSessionRequest {
 }
 
 impl DeviceSessionPolicyState {
-    fn new(device: &DeviceInfo, ready: bool, session_generation: u64) -> Self {
+    fn new(device: &DeviceInfo, ready: bool, session_generation: NonZeroU64) -> Self {
         if ready {
             Self::Ready {
                 bound_connection_generation: device.connection_generation,
@@ -241,7 +243,7 @@ impl DeviceSessionPolicyState {
         matches!(self, Self::Ready { .. })
     }
 
-    fn session_generation(&self) -> u64 {
+    fn session_generation(&self) -> NonZeroU64 {
         match self {
             Self::Ready {
                 session_generation, ..
@@ -303,7 +305,7 @@ impl DeviceSessionPolicyState {
         &mut self,
         request_generation: u64,
         recovered: &DeviceInfo,
-        session_generation: u64,
+        session_generation: NonZeroU64,
         current: &DeviceInfo,
     ) -> bool {
         if !matches!(self, Self::Recovering { request, .. }
@@ -332,7 +334,7 @@ impl DeviceSessionPolicyState {
         true
     }
 
-    fn transport_failed(&mut self, session_generation: u64) -> bool {
+    fn transport_failed(&mut self, session_generation: NonZeroU64) -> bool {
         if !matches!(self, Self::Ready { session_generation: current, .. }
             if *current == session_generation)
         {
@@ -516,6 +518,10 @@ mod tests {
     use super::*;
     use std::num::NonZeroU64;
 
+    fn generation(value: u64) -> NonZeroU64 {
+        NonZeroU64::new(value).unwrap()
+    }
+
     fn device(
         availability: DeviceAvailability,
         connection_generation: u64,
@@ -537,7 +543,7 @@ mod tests {
     #[test]
     fn passive_discovery_changes_do_not_replace_a_live_session() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, 1);
+        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(1));
 
         let mut renamed = initial.clone();
         renamed.display_name = "Den TV".into();
@@ -553,13 +559,13 @@ mod tests {
         let recovered = device(DeviceAvailability::Available, 1, 3, 6);
         assert!(state.observe_device(&recovered).is_none());
         assert!(state.is_ready());
-        assert_eq!(state.session_generation(), 1);
+        assert_eq!(state.session_generation(), generation(1));
     }
 
     #[test]
     fn backend_reconnection_replaces_a_live_session() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, 1);
+        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(1));
         let reconnected = device(DeviceAvailability::Available, 2, 3, 4);
 
         assert!(matches!(
@@ -572,8 +578,8 @@ mod tests {
     #[test]
     fn discovery_drives_recovery_after_the_live_session_fails() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, 1);
-        assert!(state.transport_failed(1));
+        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(1));
+        assert!(state.transport_failed(generation(1)));
 
         let unavailable = device(DeviceAvailability::Unavailable, 1, 2, 5);
         assert!(matches!(
@@ -587,16 +593,16 @@ mod tests {
             Some(DeviceSessionAction::Recover(_))
         ));
         state.begin_request(7, &recovered);
-        assert!(!state.complete_request(6, &recovered, 2, &recovered));
-        assert!(state.complete_request(7, &recovered, 2, &recovered));
+        assert!(!state.complete_request(6, &recovered, generation(2), &recovered));
+        assert!(state.complete_request(7, &recovered, generation(2), &recovered));
         assert!(state.is_ready());
-        assert_eq!(state.session_generation(), 2);
+        assert_eq!(state.session_generation(), generation(2));
     }
 
     #[test]
     fn withdrawn_device_invalidates_an_in_flight_recovery() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, 4);
+        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(4));
         let reconnected = device(DeviceAvailability::Available, 2, 3, 4);
         assert!(matches!(
             state.observe_device(&reconnected),
@@ -609,15 +615,15 @@ mod tests {
             state.observe_device(&unavailable),
             Some(DeviceSessionAction::Cancel)
         ));
-        assert!(!state.complete_request(7, &reconnected, 5, &unavailable));
-        assert_eq!(state.session_generation(), 4);
+        assert!(!state.complete_request(7, &reconnected, generation(5), &unavailable));
+        assert_eq!(state.session_generation(), generation(4));
         assert!(!state.is_ready());
     }
 
     #[test]
     fn repeated_device_observation_keeps_the_pending_recovery() {
         let initial = device(DeviceAvailability::Available, 1, 2, 3);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, 1);
+        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(1));
         let replacement = device(DeviceAvailability::Available, 2, 3, 4);
         assert!(matches!(
             state.observe_device(&replacement),
@@ -715,11 +721,11 @@ mod tests {
     #[test]
     fn stale_transport_failure_cannot_disrupt_the_replacement_session() {
         let initial = device(DeviceAvailability::Available, 1, 1, 1);
-        let mut state = DeviceSessionPolicyState::new(&initial, true, 4);
-        assert!(!state.transport_failed(3));
+        let mut state = DeviceSessionPolicyState::new(&initial, true, generation(4));
+        assert!(!state.transport_failed(generation(3)));
         assert!(state.is_ready());
-        assert!(state.transport_failed(4));
+        assert!(state.transport_failed(generation(4)));
         assert!(!state.is_ready());
-        assert!(!state.transport_failed(4));
+        assert!(!state.transport_failed(generation(4)));
     }
 }

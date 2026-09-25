@@ -1,5 +1,6 @@
 //! Per-display policy that turns observed route/authority state into media commands.
 
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -44,7 +45,7 @@ pub struct MediaPolicyInput {
     pub topology: MediaPolicyTopology,
     pub grant: DisplayGrantState,
     pub device_session: DeviceSessionReadiness,
-    pub device_session_generation: u64,
+    pub device_session_generation: NonZeroU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,7 +247,7 @@ mod tests {
             topology: route.map_or(MediaPolicyTopology::Unrouted, MediaPolicyTopology::Routed),
             grant: DisplayGrantState::Active,
             device_session: DeviceSessionReadiness::Ready,
-            device_session_generation: 1,
+            device_session_generation: NonZeroU64::new(1).unwrap(),
         }
     }
 
@@ -750,7 +751,7 @@ mod tests {
         assert_eq!(planner.plan(first, &failed), Some(PolicyDecision::GiveUp));
 
         let mut replacement = first;
-        replacement.device_session_generation = 2;
+        replacement.device_session_generation = NonZeroU64::new(2).unwrap();
         assert_eq!(
             planner.plan(replacement, &failed),
             action(PolicyAction::Retry(Duration::from_millis(1)))
