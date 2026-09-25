@@ -609,7 +609,7 @@ mod tests {
             .register_session(
                 connection.clone(),
                 "test-session".into(),
-                device,
+                device.clone(),
                 SessionOptions {
                     connection_generation: 1,
                     discovery_generation: 1,
@@ -628,6 +628,53 @@ mod tests {
             .interface::<_, ExistingSession>(&existing_path)
             .await
             .is_ok());
+
+        let accepted_path = OwnedObjectPath::try_from("/session/accepted").unwrap();
+        let (reply, response) = oneshot::channel();
+        let (acknowledge, acknowledged) = oneshot::channel();
+        let registering = {
+            let backend = backend.clone();
+            let connection = connection.clone();
+            let accepted_path = accepted_path.clone();
+            tokio::spawn(async move {
+                backend
+                    .register_session(
+                        connection,
+                        "test-session".into(),
+                        device,
+                        SessionOptions {
+                            connection_generation: 1,
+                            discovery_generation: 1,
+                            session_generation: 4,
+                            requested_features: 0,
+                        },
+                        accepted_path,
+                        reply,
+                        acknowledged,
+                    )
+                    .await;
+            })
+        };
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), response)
+                .await
+                .expect("registration did not return the accepted object path")
+                .unwrap()
+                .unwrap(),
+            accepted_path
+        );
+        acknowledge.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), registering)
+            .await
+            .expect("registration did not publish after acknowledgement")
+            .unwrap();
+        assert!(backend.shared.active_session.lock().await.is_some());
+        assert!(connection
+            .object_server()
+            .interface::<_, ChromiacastSession>(&accepted_path)
+            .await
+            .is_ok());
+        backend.shutdown_active_session().await.unwrap();
         discovery.shutdown().await.unwrap();
     }
 }
