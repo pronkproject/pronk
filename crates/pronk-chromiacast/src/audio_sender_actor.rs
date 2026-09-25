@@ -21,20 +21,59 @@ pub(crate) struct AudioSenderStatistics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AudioSenderState {
-    Empty,
     Configured,
     Streaming,
     Suspended,
     Failed,
-    Stopped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AudioSenderSnapshot {
-    generation: Option<NonZeroU64>,
-    state: AudioSenderState,
+    status: AudioSenderStatus,
     statistics: AudioSenderStatistics,
-    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AudioSenderStatus {
+    Empty,
+    Configured(NonZeroU64),
+    Streaming(NonZeroU64),
+    Suspended(NonZeroU64),
+    Failed {
+        generation: NonZeroU64,
+        error: String,
+    },
+    Completed {
+        generation: NonZeroU64,
+        error: Option<String>,
+    },
+    Stopped {
+        generation: Option<NonZeroU64>,
+        error: Option<String>,
+    },
+}
+
+impl AudioSenderStatus {
+    fn generation(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Empty => None,
+            Self::Configured(generation)
+            | Self::Streaming(generation)
+            | Self::Suspended(generation)
+            | Self::Failed { generation, .. }
+            | Self::Completed { generation, .. } => Some(*generation),
+            Self::Stopped { generation, .. } => *generation,
+        }
+    }
+
+    fn active(generation: NonZeroU64, state: AudioSenderState) -> Self {
+        match state {
+            AudioSenderState::Configured => Self::Configured(generation),
+            AudioSenderState::Streaming => Self::Streaming(generation),
+            AudioSenderState::Suspended => Self::Suspended(generation),
+            AudioSenderState::Failed => unreachable!("failed audio sender needs an error"),
+        }
+    }
 }
 
 pub(crate) struct AudioSenderActor {
@@ -56,10 +95,8 @@ impl AudioSenderActor {
     pub(crate) fn spawn(output: mpsc::Receiver<EncodedAudioPacket>) -> Self {
         let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshot_tx, snapshot) = watch::channel(AudioSenderSnapshot {
-            generation: None,
-            state: AudioSenderState::Empty,
+            status: AudioSenderStatus::Empty,
             statistics: AudioSenderStatistics::default(),
-            last_error: None,
         });
         let task = tokio::spawn(run_actor(command_receiver, output, snapshot_tx));
         Self {
@@ -133,22 +170,22 @@ impl AudioSenderActor {
         tokio::time::timeout(timeout, async {
             loop {
                 let current = snapshot.borrow().clone();
-                if current.generation != Some(generation) {
+                if current.status.generation() != Some(generation) {
                     return Err(VideoTransportError::new(format!(
                         "audio sender generation changed while waiting for {generation}"
                     )));
                 }
-                if current.state == AudioSenderState::Failed {
-                    return Err(VideoTransportError::new(current.last_error.unwrap_or_else(
-                        || "audio sender failed without diagnostic detail".into(),
-                    )));
+                if let AudioSenderStatus::Failed { error, .. } = current.status {
+                    return Err(VideoTransportError::new(error));
                 }
                 if current.statistics.packets > previous {
                     return Ok(());
                 }
                 if matches!(
-                    current.state,
-                    AudioSenderState::Empty | AudioSenderState::Stopped
+                    current.status,
+                    AudioSenderStatus::Empty
+                        | AudioSenderStatus::Completed { .. }
+                        | AudioSenderStatus::Stopped { .. }
                 ) {
                     return Err(VideoTransportError::new(format!(
                         "audio sender generation {generation} stopped before encoded audio delivery"
@@ -315,10 +352,11 @@ async fn run_actor(
             let _ = shutdown_active(&mut active).await;
             publish(
                 &snapshot,
-                active.completed(),
-                AudioSenderState::Stopped,
+                AudioSenderStatus::Stopped {
+                    generation: active.completed(),
+                    error: None,
+                },
                 AudioSenderStatistics::default(),
-                None,
             );
             return;
         };
@@ -354,10 +392,11 @@ async fn run_actor(
                     };
                     publish(
                         &snapshot,
-                        Some(generation),
-                        AudioSenderState::Empty,
+                        AudioSenderStatus::Completed {
+                            generation,
+                            error: result.as_ref().err().map(ToString::to_string),
+                        },
                         statistics,
-                        result.as_ref().err().map(ToString::to_string),
                     );
                 }
                 let _ = reply.send(result);
@@ -369,10 +408,11 @@ async fn run_actor(
                 let result = shutdown_active(&mut active).await;
                 publish(
                     &snapshot,
-                    active.completed(),
-                    AudioSenderState::Stopped,
+                    AudioSenderStatus::Stopped {
+                        generation: active.completed(),
+                        error: result.as_ref().err().map(ToString::to_string),
+                    },
                     AudioSenderStatistics::default(),
-                    result.as_ref().err().map(ToString::to_string),
                 );
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
@@ -411,10 +451,8 @@ async fn configure_active(
     });
     publish(
         snapshot,
-        Some(generation),
-        AudioSenderState::Configured,
+        AudioSenderStatus::Configured(generation),
         AudioSenderStatistics::default(),
-        None,
     );
     Ok(())
 }
@@ -447,10 +485,8 @@ fn transition_active(
     };
     publish(
         snapshot,
-        Some(generation),
-        desired,
+        AudioSenderStatus::active(generation, desired),
         active.statistics.clone(),
-        None,
     );
     Ok(())
 }
@@ -486,10 +522,8 @@ async fn forward_packet(
     active.statistics.queue_delay = queue_delay;
     publish(
         snapshot,
-        Some(active.generation),
-        active.phase.state(),
+        AudioSenderStatus::active(active.generation, active.phase.state()),
         active.statistics.clone(),
-        None,
     );
     Ok(())
 }
@@ -507,10 +541,11 @@ async fn fail_active(
     }
     publish(
         snapshot,
-        Some(active.generation),
-        active.phase.state(),
+        AudioSenderStatus::Failed {
+            generation: active.generation,
+            error: error.to_string(),
+        },
         active.statistics.clone(),
-        Some(error.to_string()),
     );
 }
 
@@ -558,15 +593,13 @@ fn active_statistics(
         Some(active) if active.generation != generation => {
             Err(generation_mismatch(active.generation, generation))
         }
-        Some(active) if active.phase.state() == AudioSenderState::Failed => {
-            Err(VideoTransportError::new(
-                snapshot
-                    .borrow()
-                    .last_error
-                    .clone()
-                    .unwrap_or_else(|| "audio sender failed without diagnostic detail".into()),
-            ))
-        }
+        Some(active) if active.phase.state() == AudioSenderState::Failed => match &snapshot
+            .borrow()
+            .status
+        {
+            AudioSenderStatus::Failed { error, .. } => Err(VideoTransportError::new(error.clone())),
+            _ => unreachable!("failed audio sender has a failed snapshot"),
+        },
         Some(active) => Ok(active.statistics.clone()),
         None if active.completed() == Some(generation) => Ok(snapshot.borrow().statistics.clone()),
         None => Err(VideoTransportError::new(
@@ -596,17 +629,10 @@ fn generation_mismatch(active: NonZeroU64, requested: NonZeroU64) -> VideoTransp
 
 fn publish(
     snapshot: &watch::Sender<AudioSenderSnapshot>,
-    generation: Option<NonZeroU64>,
-    state: AudioSenderState,
+    status: AudioSenderStatus,
     statistics: AudioSenderStatistics,
-    last_error: Option<String>,
 ) {
-    let next = AudioSenderSnapshot {
-        generation,
-        state,
-        statistics,
-        last_error,
-    };
+    let next = AudioSenderSnapshot { status, statistics };
     snapshot.send_if_modified(|current| {
         if *current == next {
             return false;
@@ -718,6 +744,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_audio_source_reports_the_same_error_to_waiters_and_statistics() {
+        let (output, receiver) = mpsc::channel(1);
+        let actor = AudioSenderActor::spawn(receiver);
+        let generation = NonZeroU64::new(9).unwrap();
+        actor
+            .configure(
+                generation,
+                Box::new(RecordingSender {
+                    timestamps: Arc::new(Mutex::new(Vec::new())),
+                    fail_shutdown: false,
+                    shutdown_signal: None,
+                }),
+            )
+            .await
+            .unwrap();
+        actor.start(generation).await.unwrap();
+        drop(output);
+
+        let wait_error = actor
+            .wait_for_packet_after(generation, 0, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(wait_error.to_string().contains("source channel closed"));
+        assert_eq!(
+            actor.statistics(generation).await.unwrap_err().to_string(),
+            wait_error.to_string()
+        );
+        actor.stop(generation).await.unwrap();
+        actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn rejected_stop_preserves_audio_state_and_failed_teardown_consumes_generation() {
         let (_output, receiver) = mpsc::channel(1);
         let actor = AudioSenderActor::spawn(receiver);
@@ -737,10 +795,15 @@ mod tests {
             .unwrap();
 
         assert!(actor.stop(next).await.is_err());
-        assert_eq!(actor.snapshot.borrow().generation, Some(generation));
-        assert_eq!(actor.snapshot.borrow().state, AudioSenderState::Configured);
+        assert_eq!(
+            actor.snapshot.borrow().status,
+            AudioSenderStatus::Configured(generation)
+        );
         assert!(actor.stop(generation).await.is_err());
-        assert_eq!(actor.snapshot.borrow().state, AudioSenderState::Empty);
+        assert!(matches!(
+            actor.snapshot.borrow().status,
+            AudioSenderStatus::Completed { generation: completed, error: Some(_) } if completed == generation
+        ));
         assert!(actor
             .configure(
                 generation,
