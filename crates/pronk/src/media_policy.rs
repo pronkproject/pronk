@@ -24,11 +24,17 @@ use decision::{decide, PolicyAction, PolicyDecision, PolicyPlanner};
 use runtime::run_policy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceSessionReadiness {
+    Ready,
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaPolicyInput {
     pub attachment: AttachmentState,
     pub grant: DisplayGrantState,
-    pub device_available: bool,
-    pub device_session_ready: bool,
+    pub device_session: DeviceSessionReadiness,
     pub device_session_generation: u64,
     pub route: Option<MediaRoute>,
 }
@@ -208,8 +214,7 @@ mod tests {
         MediaPolicyInput {
             attachment: AttachmentState::Attached,
             grant: DisplayGrantState::Active,
-            device_available: true,
-            device_session_ready: true,
+            device_session: DeviceSessionReadiness::Ready,
             device_session_generation: 1,
             route,
         }
@@ -234,7 +239,7 @@ mod tests {
             action(PolicyAction::Activate(route(1)))
         );
         let mut unavailable = input(Some(route(1)));
-        unavailable.device_available = false;
+        unavailable.device_session = DeviceSessionReadiness::Unavailable;
         assert_eq!(
             decide(
                 unavailable,
@@ -244,7 +249,7 @@ mod tests {
             action(PolicyAction::Suspend(MediaSuspendReason::DeviceUnavailable))
         );
         let mut recovering = input(Some(route(1)));
-        recovering.device_session_ready = false;
+        recovering.device_session = DeviceSessionReadiness::Available;
         assert_eq!(
             decide(
                 recovering,

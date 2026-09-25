@@ -20,7 +20,7 @@ use crate::display::{
 };
 use crate::display_state::{DisplayGrantState, DisplayRuntimeState, DisplayTopology, MediaStatus};
 use crate::kernel_display_port::KernelDisplayEvent;
-use crate::media_policy::MediaPolicyInput;
+use crate::media_policy::{DeviceSessionReadiness, MediaPolicyInput};
 use crate::media_session::MediaRoute;
 
 const SLOT_COMMAND_CAPACITY: usize = 8;
@@ -177,8 +177,7 @@ fn media_policy_input(
         // A live, authenticated Device session is stronger evidence of
         // reachability than a passive discovery record.  In particular, an
         // mDNS goodbye or expiry must not tear down healthy media.
-        device_available: device_session.device_available(&snapshot.device),
-        device_session_ready: device_session.is_ready(),
+        device_session: device_session.readiness(&snapshot.device),
         device_session_generation: device_session.session_generation(),
         route: MediaRoute::from_display_state(&snapshot.runtime),
     }
@@ -277,8 +276,14 @@ impl DeviceSessionPolicyState {
         Some(DeviceSessionAction::Recover(device.clone()))
     }
 
-    fn device_available(&self, device: &DeviceInfo) -> bool {
-        self.is_ready() || device.availability == DeviceAvailability::Available
+    fn readiness(&self, device: &DeviceInfo) -> DeviceSessionReadiness {
+        if self.is_ready() {
+            DeviceSessionReadiness::Ready
+        } else if device.availability == DeviceAvailability::Available {
+            DeviceSessionReadiness::Available
+        } else {
+            DeviceSessionReadiness::Unavailable
+        }
     }
 
     fn begin_request(&mut self, request_generation: u64, device: &DeviceInfo) {
@@ -525,7 +530,7 @@ mod tests {
         let unavailable = device(DeviceAvailability::Unavailable, 1, 2, 5);
         assert!(state.observe_device(&unavailable).is_none());
         assert!(state.is_ready());
-        assert!(state.device_available(&unavailable));
+        assert_eq!(state.readiness(&unavailable), DeviceSessionReadiness::Ready);
 
         let recovered = device(DeviceAvailability::Available, 1, 3, 6);
         assert!(state.observe_device(&recovered).is_none());
