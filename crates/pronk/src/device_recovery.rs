@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use pronk_dbus::DeviceInfo;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -195,15 +195,8 @@ impl DeviceSessionRecoveryActor {
 
     pub async fn shutdown(mut self) -> Result<(), DeviceSessionRecoveryError> {
         self.handle.cancel_phase();
-        let (response, reply) = oneshot::channel();
-        self.handle
-            .commands
-            .send(RecoveryCommand::Shutdown(response))
-            .await
-            .map_err(|_| DeviceSessionRecoveryError::Stopped)?;
-        reply
-            .await
-            .map_err(|_| DeviceSessionRecoveryError::Stopped)?;
+        self.events.close();
+        self.shutdown.cancel();
         if let Some(task) = self.task.take() {
             task.await
                 .map_err(|error| DeviceSessionRecoveryError::Join(error.to_string()))?;
@@ -227,7 +220,6 @@ enum RecoveryCommand {
         device: DeviceInfo,
         cancellation: CancellationToken,
     },
-    Shutdown(oneshot::Sender<()>),
 }
 
 struct RecoveryTaskContext {
@@ -257,7 +249,6 @@ async fn run_recovery(context: RecoveryTaskContext) {
         generation: initial_session_generation,
         events: initial_events,
     };
-    let mut shutdown_response = None;
     loop {
         let next = tokio::select! {
             _ = shutdown.cancelled() => break,
@@ -329,16 +320,9 @@ async fn run_recovery(context: RecoveryTaskContext) {
                     }
                 }
             }
-            RecoveryCommand::Shutdown(response) => {
-                shutdown_response = Some(response);
-                break;
-            }
         }
     }
     event_source.shutdown().await;
-    if let Some(response) = shutdown_response {
-        let _ = response.send(());
-    }
 }
 
 enum SessionEventSource {
@@ -429,6 +413,7 @@ mod tests {
     };
     use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID};
     use pronk_dbus::DeviceAvailability;
+    use tokio::sync::oneshot;
 
     use super::*;
     use crate::device_session_port::{
@@ -702,9 +687,12 @@ mod tests {
     #[tokio::test]
     async fn cancelled_enqueue_preserves_the_current_recovery_request() {
         let (commands, mut receiver) = mpsc::channel(1);
-        let (response, _reply) = oneshot::channel();
         commands
-            .send(RecoveryCommand::Shutdown(response))
+            .send(RecoveryCommand::Recover {
+                request_generation: 1,
+                device: device(1, 1, 1),
+                cancellation: CancellationToken::new(),
+            })
             .await
             .unwrap();
         let current = CancellationToken::new();
@@ -732,6 +720,57 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_unblocks_a_full_recovery_event_queue() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let generations = Arc::new(StdMutex::new(Vec::new()));
+        let initial = device(1, 1, 1);
+        let (media_port, _control, replacement) =
+            replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
+        let factory = FakeFactory {
+            results: (0..=RECOVERY_EVENT_CAPACITY)
+                .map(|_| Err(DeviceSessionFactoryError::failed("unavailable")))
+                .collect(),
+            generations: Arc::clone(&generations),
+        };
+        let actor = DeviceSessionRecoveryActor::spawn(
+            Box::new(factory),
+            replacement,
+            prepared(initial, "Bravia XR"),
+            NonZeroU64::new(1).unwrap(),
+            pending_events(),
+        )
+        .unwrap();
+        let handle = actor.handle();
+        for count in 1..=RECOVERY_EVENT_CAPACITY {
+            handle.recover(device(2, 2, count as u64)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while actor.events.len() < count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        handle.recover(device(2, 2, 9)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while generations.lock().unwrap().len() < RECOVERY_EVENT_CAPACITY + 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), actor.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        media_port
+            .stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
