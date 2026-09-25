@@ -404,14 +404,14 @@ impl ActorRuntime {
     }
 
     fn set_phase(&self, phase: MediaPhase, generation: Option<u64>) {
-        self.state.send_modify(|snapshot| {
+        self.state.send_if_modified(|snapshot| {
             let generation = generation.unwrap_or(snapshot.media_generation);
             if snapshot.phase == phase && snapshot.media_generation == generation {
-                return;
+                return false;
             }
-            snapshot.revision = snapshot.revision.saturating_add(1);
             snapshot.phase = phase;
             snapshot.media_generation = generation;
+            true
         });
     }
 }

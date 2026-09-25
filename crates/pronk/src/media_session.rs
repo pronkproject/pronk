@@ -77,7 +77,6 @@ pub enum MediaStopReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaSessionSnapshot {
-    revision: u64,
     media_generation: u64,
     phase: MediaPhase,
 }
@@ -98,15 +97,11 @@ enum MediaPhase {
 }
 
 impl MediaSessionSnapshot {
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
     pub fn media_generation(&self) -> u64 {
         self.media_generation
     }
     fn idle() -> Self {
         Self {
-            revision: 1,
             media_generation: 0,
             phase: MediaPhase::Idle,
         }
@@ -169,7 +164,6 @@ impl MediaSessionSnapshot {
             _ => panic!("invalid test media phase"),
         };
         Self {
-            revision: 1,
             media_generation: u64::from(route.is_some()),
             phase,
         }
