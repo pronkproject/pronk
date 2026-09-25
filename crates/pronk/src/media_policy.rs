@@ -6,9 +6,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::display_state::DisplayGrantState;
 #[cfg(test)]
 use crate::display_state::MediaState;
-use crate::display_state::{AttachmentState, DisplayGrantState};
 #[cfg(test)]
 use crate::media_session::MediaSuspendReason;
 use crate::media_session::{
@@ -31,12 +31,19 @@ pub enum DeviceSessionReadiness {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaPolicyTopology {
+    Routed(MediaRoute),
+    Unrouted,
+    Detached,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaPolicyInput {
-    pub attachment: AttachmentState,
+    pub topology: MediaPolicyTopology,
     pub grant: DisplayGrantState,
     pub device_session: DeviceSessionReadiness,
     pub device_session_generation: u64,
-    pub route: Option<MediaRoute>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,11 +219,10 @@ mod tests {
 
     fn input(route: Option<MediaRoute>) -> MediaPolicyInput {
         MediaPolicyInput {
-            attachment: AttachmentState::Attached,
+            topology: route.map_or(MediaPolicyTopology::Unrouted, MediaPolicyTopology::Routed),
             grant: DisplayGrantState::Active,
             device_session: DeviceSessionReadiness::Ready,
             device_session_generation: 1,
-            route,
         }
     }
 
@@ -268,6 +274,22 @@ mod tests {
             ),
             action(PolicyAction::Suspend(MediaSuspendReason::GrantUnavailable))
         );
+        for topology in [
+            MediaPolicyTopology::Unrouted,
+            MediaPolicyTopology::Detached,
+            MediaPolicyTopology::Unknown,
+        ] {
+            let mut without_route = input(Some(route(1)));
+            without_route.topology = topology;
+            assert_eq!(
+                decide(
+                    without_route,
+                    &snapshot(MediaState::Running, Some(route(1))),
+                    Some(Duration::ZERO)
+                ),
+                action(PolicyAction::Deactivate)
+            );
+        }
     }
 
     #[test]

@@ -18,9 +18,11 @@ use crate::display::{
     AddedCastDisplay, AddedCastDisplayResources, AddedCastDisplaySnapshot, CastDisplayId,
     RemoveCastDisplayError,
 };
-use crate::display_state::{DisplayGrantState, DisplayRuntimeState, DisplayTopology, MediaStatus};
+use crate::display_state::{
+    AttachmentState, DisplayGrantState, DisplayRuntimeState, DisplayTopology, MediaStatus,
+};
 use crate::kernel_display_port::KernelDisplayEvent;
-use crate::media_policy::{DeviceSessionReadiness, MediaPolicyInput};
+use crate::media_policy::{DeviceSessionReadiness, MediaPolicyInput, MediaPolicyTopology};
 use crate::media_session::MediaRoute;
 
 const SLOT_COMMAND_CAPACITY: usize = 8;
@@ -172,14 +174,18 @@ fn media_policy_input(
     device_session: &DeviceSessionPolicyState,
 ) -> MediaPolicyInput {
     MediaPolicyInput {
-        attachment: snapshot.runtime.attachment(),
+        topology: match snapshot.runtime.attachment() {
+            AttachmentState::Attached => MediaRoute::from_display_state(&snapshot.runtime)
+                .map_or(MediaPolicyTopology::Unrouted, MediaPolicyTopology::Routed),
+            AttachmentState::Detached => MediaPolicyTopology::Detached,
+            AttachmentState::Unknown => MediaPolicyTopology::Unknown,
+        },
         grant: snapshot.grant_state,
         // A live, authenticated Device session is stronger evidence of
         // reachability than a passive discovery record.  In particular, an
         // mDNS goodbye or expiry must not tear down healthy media.
         device_session: device_session.readiness(&snapshot.device),
         device_session_generation: device_session.session_generation(),
-        route: MediaRoute::from_display_state(&snapshot.runtime),
     }
 }
 

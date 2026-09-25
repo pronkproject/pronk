@@ -2,10 +2,10 @@
 
 use std::time::Duration;
 
-use crate::display_state::{AttachmentState, DisplayGrantState, MediaState};
+use crate::display_state::{DisplayGrantState, MediaState};
 use crate::media_session::{MediaRoute, MediaSessionSnapshot, MediaSuspendReason};
 
-use super::{DeviceSessionReadiness, MediaPolicyInput, MediaRecoveryPolicy};
+use super::{DeviceSessionReadiness, MediaPolicyInput, MediaPolicyTopology, MediaRecoveryPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PolicyDecision {
@@ -27,12 +27,9 @@ pub(super) fn decide(
     media: &MediaSessionSnapshot,
     retry_delay: Option<Duration>,
 ) -> Option<PolicyDecision> {
-    let Some(route) = input.route else {
+    let MediaPolicyTopology::Routed(route) = input.topology else {
         return decide_deactivate(media.state(), retry_delay);
     };
-    if input.attachment != AttachmentState::Attached {
-        return decide_deactivate(media.state(), retry_delay);
-    }
     if input.device_session != DeviceSessionReadiness::Ready {
         return (media.state() == MediaState::Running).then_some(PolicyDecision::Action(
             PolicyAction::Suspend(MediaSuspendReason::DeviceUnavailable),
