@@ -267,26 +267,26 @@ struct ActiveGraph {
 
 enum GraphSlot {
     Unused,
-    Active(ActiveGraph),
+    Active(Box<ActiveGraph>),
     Completed(NonZeroU64),
 }
 
 impl GraphSlot {
     fn active(&self) -> Option<&ActiveGraph> {
         match self {
-            Self::Active(graph) => Some(graph),
+            Self::Active(graph) => Some(graph.as_ref()),
             Self::Unused | Self::Completed(_) => None,
         }
     }
 
     fn active_mut(&mut self) -> Option<&mut ActiveGraph> {
         match self {
-            Self::Active(graph) => Some(graph),
+            Self::Active(graph) => Some(graph.as_mut()),
             Self::Unused | Self::Completed(_) => None,
         }
     }
 
-    fn take_active(&mut self) -> Option<ActiveGraph> {
+    fn take_active(&mut self) -> Option<Box<ActiveGraph>> {
         match std::mem::replace(self, Self::Unused) {
             Self::Active(graph) => Some(graph),
             other => {
@@ -409,11 +409,11 @@ fn run_worker(
                         output.audio.clone(),
                     ) {
                         Ok(graph) => {
-                            slot = GraphSlot::Active(ActiveGraph {
+                            slot = GraphSlot::Active(Box::new(ActiveGraph {
                                 generation: requested,
                                 phase: ActiveGraphPhase::Configured,
                                 graph,
-                            });
+                            }));
                             publish(
                                 &state,
                                 Some(requested),
