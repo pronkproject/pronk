@@ -9,10 +9,12 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 use crate::device_control_port::{DeviceControlError, DeviceControlOperation, DeviceControlPort};
 use crate::device_session_port::{
@@ -42,6 +44,8 @@ pub struct DeviceSessionReplacementHandle {
     shared: Arc<Mutex<SharedState>>,
 }
 
+const RETIREMENT_STOP_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Proof that the previous Device session has completed its final teardown
 /// attempt and the replacement slot is vacant.
 ///
@@ -70,37 +74,39 @@ impl DeviceSessionReplacementHandle {
     pub async fn retire_current(
         &mut self,
     ) -> Result<DeviceSessionInstallationPermit<'_>, DeviceSessionReplacementError> {
-        let retired = {
-            let mut shared = self.shared.lock().await;
-            let retired = match std::mem::replace(&mut shared.slot, SessionSlot::Vacant) {
-                SessionSlot::Active(session) => Some(session),
-                SessionSlot::Vacant => None,
-                SessionSlot::Closed => {
-                    shared.slot = SessionSlot::Closed;
-                    return Err(DeviceSessionReplacementError::Stopped);
-                }
+        let mut shared = self.shared.lock().await;
+        if let SessionSlot::Active(_) = shared.slot {
+            let SessionSlot::Active(retired) =
+                std::mem::replace(&mut shared.slot, SessionSlot::Vacant)
+            else {
+                unreachable!("active Device session replaced above");
             };
-            if let Some(media_generation) = retired
-                .as_ref()
-                .and_then(|session| session.media_generation)
-            {
+            if let Some(media_generation) = retired.media_generation {
                 shared.retired_media_generations.insert(media_generation);
             }
-            retired
-        };
-        let retired_session_generation = retired.as_ref().map(|session| session.session_generation);
-        let retired_media_generation = retired
-            .as_ref()
-            .and_then(|session| session.media_generation);
-        let cleanup_error = match retired {
-            Some(retired) => retired
-                .session
-                .stop(DeviceSessionStopReason::DaemonShutdown)
-                .await
-                .err()
-                .map(|error| error.to_string()),
-            None => None,
-        };
+            shared.slot = SessionSlot::Retiring(RetiringSession::new(retired));
+        }
+        let (retired_session_generation, retired_media_generation, cleanup_error) =
+            match &mut shared.slot {
+                SessionSlot::Retiring(retiring) => {
+                    let cleanup_error = (&mut retiring.task)
+                        .await
+                        .unwrap_or_else(|error| {
+                            Err(format!("join retired Device-session stop: {error}"))
+                        })
+                        .err();
+                    (
+                        Some(retiring.session_generation),
+                        retiring.media_generation,
+                        cleanup_error,
+                    )
+                }
+                SessionSlot::Vacant => (None, None, None),
+                SessionSlot::Closed => return Err(DeviceSessionReplacementError::Stopped),
+                SessionSlot::Active(_) => unreachable!("active session entered retirement above"),
+            };
+        shared.slot = SessionSlot::Vacant;
+        drop(shared);
         Ok(DeviceSessionInstallationPermit {
             replacement: self,
             retirement: DeviceSessionRetirementReport {
@@ -252,6 +258,37 @@ struct ActiveSession {
     session: Box<dyn DeviceSessionPort>,
 }
 
+#[derive(Debug)]
+struct RetiringSession {
+    session_generation: NonZeroU64,
+    media_generation: Option<NonZeroU64>,
+    task: JoinHandle<Result<(), String>>,
+}
+
+impl RetiringSession {
+    fn new(active: ActiveSession) -> Self {
+        let ActiveSession {
+            session_generation,
+            media_generation,
+            session,
+        } = active;
+        let task = tokio::spawn(async move {
+            tokio::time::timeout(
+                RETIREMENT_STOP_TIMEOUT,
+                session.stop(DeviceSessionStopReason::DaemonShutdown),
+            )
+            .await
+            .map_err(|_| "retired Device-session stop timed out".to_string())?
+            .map_err(|error| error.to_string())
+        });
+        Self {
+            session_generation,
+            media_generation,
+            task,
+        }
+    }
+}
+
 impl fmt::Debug for ActiveSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -272,6 +309,7 @@ struct SharedState {
 #[derive(Debug)]
 enum SessionSlot {
     Active(ActiveSession),
+    Retiring(RetiringSession),
     Vacant,
     Closed,
 }
@@ -281,6 +319,11 @@ impl SharedState {
         match &self.slot {
             SessionSlot::Closed => return Err(InstallRejection::Stopped),
             SessionSlot::Active(current) => {
+                return Err(InstallRejection::Occupied {
+                    current: current.session_generation,
+                });
+            }
+            SessionSlot::Retiring(current) => {
                 return Err(InstallRejection::Occupied {
                     current: current.session_generation,
                 });
@@ -415,14 +458,18 @@ impl DeviceSessionPort for ReplaceableDeviceSessionPort {
         let current = {
             let mut shared = self.shared.lock().await;
             shared.retired_media_generations.clear();
-            match std::mem::replace(&mut shared.slot, SessionSlot::Closed) {
-                SessionSlot::Active(session) => Some(session),
-                SessionSlot::Vacant | SessionSlot::Closed => None,
-            }
+            std::mem::replace(&mut shared.slot, SessionSlot::Closed)
         };
         match current {
-            Some(current) => current.session.stop(reason).await,
-            None => Ok(()),
+            SessionSlot::Active(current) => current.session.stop(reason).await,
+            SessionSlot::Retiring(retiring) => retiring
+                .task
+                .await
+                .map_err(|error| {
+                    DeviceSessionError::new(format!("join retired Device-session stop: {error}"))
+                })?
+                .map_err(DeviceSessionError::new),
+            SessionSlot::Vacant | SessionSlot::Closed => Ok(()),
         }
     }
 }
@@ -432,6 +479,9 @@ fn live_session(shared: &mut SharedState) -> Result<&mut ActiveSession, DeviceSe
         SessionSlot::Active(session) => Ok(session),
         SessionSlot::Vacant => Err(DeviceSessionError::new(
             "no prepared Device session is installed",
+        )),
+        SessionSlot::Retiring(_) => Err(DeviceSessionError::new(
+            "Device-session retirement is in progress",
         )),
         SessionSlot::Closed => Err(DeviceSessionError::new("Device-session owner has stopped")),
     }
@@ -491,6 +541,7 @@ mod tests {
         name: &'static str,
         calls: Arc<StdMutex<Vec<Call>>>,
         fail_stop: bool,
+        stop_gate: Option<tokio::sync::oneshot::Receiver<()>>,
     }
 
     #[async_trait]
@@ -563,6 +614,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(Call::Stop(self.name, reason));
+            if let Some(gate) = self.stop_gate {
+                let _ = gate.await;
+            }
             if self.fail_stop {
                 Err(DeviceSessionError::new("stop failed"))
             } else {
@@ -580,6 +634,7 @@ mod tests {
             name,
             calls: Arc::clone(calls),
             fail_stop: false,
+            stop_gate: None,
         })
     }
 
@@ -599,6 +654,54 @@ mod tests {
                 video_bitrate: NonZeroU64::new(1).unwrap(),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_retirement_keeps_the_stop_owner_until_installation() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let (release_stop, stop_gate) = tokio::sync::oneshot::channel();
+        let initial = Box::new(FakeSession {
+            name: "old",
+            calls: Arc::clone(&calls),
+            fail_stop: false,
+            stop_gate: Some(stop_gate),
+        });
+        let (port, _control, mut replacement) = replaceable_device_session(generation(1), initial);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), replacement.retire_current(),)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            &replacement.shared.lock().await.slot,
+            SessionSlot::Retiring(_)
+        ));
+
+        release_stop.send(()).unwrap();
+        let permit = replacement.retire_current().await.unwrap();
+        assert_eq!(
+            permit.retirement().retired_session_generation,
+            Some(generation(1))
+        );
+        assert_eq!(permit.retirement().cleanup_error, None);
+        permit
+            .install(DeviceSessionReplacement {
+                session_generation: generation(2),
+                session: session("new", &calls),
+            })
+            .await
+            .unwrap();
+        port.stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                Call::Stop("old", DeviceSessionStopReason::DaemonShutdown),
+                Call::Stop("new", DeviceSessionStopReason::DaemonShutdown),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -754,6 +857,7 @@ mod tests {
                     name: "stale",
                     calls: Arc::clone(&calls),
                     fail_stop: true,
+                    stop_gate: None,
                 }),
             })
             .await
