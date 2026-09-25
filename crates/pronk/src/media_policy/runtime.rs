@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::media_session::{MediaSessionActorError, MediaSessionHandle};
 
-use super::decision::{PolicyDecision, PolicyPlanner};
+use super::decision::{PolicyAction, PolicyDecision, PolicyPlanner};
 use super::{MediaPolicyEvent, MediaPolicyInput, MediaRecoveryPolicy};
 
 pub(super) async fn run_policy(
@@ -37,17 +37,20 @@ pub(super) async fn run_policy(
             continue;
         };
 
-        if decision == PolicyDecision::GiveUp {
-            let error = snapshot
-                .last_error()
-                .unwrap_or("media recovery budget exhausted")
-                .to_owned();
-            let _ = events.send(MediaPolicyEvent::RecoveryExhausted { error });
-            return;
-        }
+        let action = match decision {
+            PolicyDecision::Action(action) => action,
+            PolicyDecision::GiveUp => {
+                let error = snapshot
+                    .last_error()
+                    .unwrap_or("media recovery budget exhausted")
+                    .to_owned();
+                let _ = events.send(MediaPolicyEvent::RecoveryExhausted { error });
+                return;
+            }
+        };
 
         let decision_cancellation = CancellationToken::new();
-        let operation = apply_decision(&media, decision, decision_cancellation.child_token());
+        let operation = apply_action(&media, action, decision_cancellation.child_token());
         tokio::pin!(operation);
         tokio::select! {
             _ = cancellation.cancelled() => {
@@ -71,25 +74,22 @@ pub(super) async fn run_policy(
     }
 }
 
-async fn apply_decision(
+async fn apply_action(
     media: &MediaSessionHandle,
-    decision: PolicyDecision,
+    action: PolicyAction,
     cancellation: CancellationToken,
 ) -> Result<(), MediaSessionActorError> {
-    match decision {
-        PolicyDecision::Activate(route) => media.activate(route).await,
-        PolicyDecision::Deactivate => media.deactivate().await,
-        PolicyDecision::GiveUp => {
-            unreachable!("terminal policy decisions are handled by owner notification")
-        }
-        PolicyDecision::RetryDeactivate(delay) => {
+    match action {
+        PolicyAction::Activate(route) => media.activate(route).await,
+        PolicyAction::Deactivate => media.deactivate().await,
+        PolicyAction::RetryDeactivate(delay) => {
             tokio::select! {
                 _ = cancellation.cancelled() => Ok(()),
                 _ = tokio::time::sleep(delay) => media.deactivate().await,
             }
         }
-        PolicyDecision::Suspend(reason) => media.suspend(reason).await,
-        PolicyDecision::Retry(delay) => {
+        PolicyAction::Suspend(reason) => media.suspend(reason).await,
+        PolicyAction::Retry(delay) => {
             tokio::select! {
                 _ = cancellation.cancelled() => Ok(()),
                 _ = tokio::time::sleep(delay) => media.retry().await,

@@ -20,7 +20,7 @@ mod decision;
 mod runtime;
 
 #[cfg(test)]
-use decision::{decide, PolicyDecision, PolicyPlanner};
+use decision::{decide, PolicyAction, PolicyDecision, PolicyPlanner};
 use runtime::run_policy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +227,10 @@ mod tests {
         MediaSessionSnapshot::test_snapshot(state, route)
     }
 
+    fn action(action: PolicyAction) -> Option<PolicyDecision> {
+        Some(PolicyDecision::Action(action))
+    }
+
     #[test]
     fn only_an_authorized_available_active_route_activates_media() {
         assert_eq!(
@@ -235,7 +239,7 @@ mod tests {
                 &snapshot(MediaState::Idle, None),
                 Some(Duration::ZERO)
             ),
-            Some(PolicyDecision::Activate(route(1)))
+            action(PolicyAction::Activate(route(1)))
         );
         let mut unavailable = input(Some(route(1)));
         unavailable.device_available = false;
@@ -245,9 +249,7 @@ mod tests {
                 &snapshot(MediaState::Running, Some(route(1))),
                 Some(Duration::ZERO)
             ),
-            Some(PolicyDecision::Suspend(
-                MediaSuspendReason::DeviceUnavailable
-            ))
+            action(PolicyAction::Suspend(MediaSuspendReason::DeviceUnavailable))
         );
         let mut recovering = input(Some(route(1)));
         recovering.device_session_ready = false;
@@ -257,9 +259,7 @@ mod tests {
                 &snapshot(MediaState::Running, Some(route(1))),
                 Some(Duration::ZERO)
             ),
-            Some(PolicyDecision::Suspend(
-                MediaSuspendReason::DeviceUnavailable
-            ))
+            action(PolicyAction::Suspend(MediaSuspendReason::DeviceUnavailable))
         );
         let mut suspended_grant = input(Some(route(1)));
         suspended_grant.grant = DisplayGrantState::SuspendedOtherMaster;
@@ -269,9 +269,7 @@ mod tests {
                 &snapshot(MediaState::Running, Some(route(1))),
                 Some(Duration::ZERO)
             ),
-            Some(PolicyDecision::Suspend(
-                MediaSuspendReason::GrantUnavailable
-            ))
+            action(PolicyAction::Suspend(MediaSuspendReason::GrantUnavailable))
         );
     }
 
@@ -283,7 +281,7 @@ mod tests {
                 &snapshot(MediaState::Failed, Some(route(1))),
                 Some(Duration::from_millis(250))
             ),
-            Some(PolicyDecision::Retry(Duration::from_millis(250)))
+            action(PolicyAction::Retry(Duration::from_millis(250)))
         );
         assert_eq!(
             decide(
@@ -299,7 +297,7 @@ mod tests {
                 &snapshot(MediaState::Failed, Some(route(1))),
                 None
             ),
-            Some(PolicyDecision::Activate(route(2)))
+            action(PolicyAction::Activate(route(2)))
         );
         assert_eq!(
             decide(
@@ -315,7 +313,7 @@ mod tests {
                 &snapshot(MediaState::Failed, Some(route(1))),
                 Some(Duration::from_millis(250))
             ),
-            Some(PolicyDecision::RetryDeactivate(Duration::from_millis(250)))
+            action(PolicyAction::RetryDeactivate(Duration::from_millis(250)))
         );
     }
 
@@ -683,11 +681,11 @@ mod tests {
         let first = input(Some(route(1)));
         assert_eq!(
             planner.plan(first, &failed),
-            Some(PolicyDecision::Retry(Duration::from_millis(1)))
+            action(PolicyAction::Retry(Duration::from_millis(1)))
         );
         assert_eq!(
             planner.plan(first, &failed),
-            Some(PolicyDecision::Retry(Duration::from_millis(2)))
+            action(PolicyAction::Retry(Duration::from_millis(2)))
         );
         assert_eq!(planner.plan(first, &failed), Some(PolicyDecision::GiveUp));
 
@@ -695,7 +693,7 @@ mod tests {
         replacement.device_session_generation = 2;
         assert_eq!(
             planner.plan(replacement, &failed),
-            Some(PolicyDecision::Retry(Duration::from_millis(1)))
+            action(PolicyAction::Retry(Duration::from_millis(1)))
         );
     }
 }

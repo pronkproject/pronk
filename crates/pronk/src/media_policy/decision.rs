@@ -9,9 +9,14 @@ use super::{MediaPolicyInput, MediaRecoveryPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PolicyDecision {
+    Action(PolicyAction),
+    GiveUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PolicyAction {
     Activate(MediaRoute),
     Deactivate,
-    GiveUp,
     RetryDeactivate(Duration),
     Suspend(MediaSuspendReason),
     Retry(Duration),
@@ -29,21 +34,23 @@ pub(super) fn decide(
         return decide_deactivate(media.state(), retry_delay);
     }
     if !input.device_available || !input.device_session_ready {
-        return (media.state() == MediaState::Running).then_some(PolicyDecision::Suspend(
-            MediaSuspendReason::DeviceUnavailable,
+        return (media.state() == MediaState::Running).then_some(PolicyDecision::Action(
+            PolicyAction::Suspend(MediaSuspendReason::DeviceUnavailable),
         ));
     }
     if input.grant != DisplayGrantState::Active {
-        return (media.state() == MediaState::Running).then_some(PolicyDecision::Suspend(
-            MediaSuspendReason::GrantUnavailable,
+        return (media.state() == MediaState::Running).then_some(PolicyDecision::Action(
+            PolicyAction::Suspend(MediaSuspendReason::GrantUnavailable),
         ));
     }
     match media.state() {
         MediaState::Running if media.route() == Some(route) => None,
         MediaState::Failed if media.route() == Some(route) => {
-            Some(retry_delay.map_or(PolicyDecision::GiveUp, PolicyDecision::Retry))
+            Some(retry_delay.map_or(PolicyDecision::GiveUp, |delay| {
+                PolicyDecision::Action(PolicyAction::Retry(delay))
+            }))
         }
-        _ => Some(PolicyDecision::Activate(route)),
+        _ => Some(PolicyDecision::Action(PolicyAction::Activate(route))),
     }
 }
 
@@ -53,10 +60,10 @@ fn decide_deactivate(state: MediaState, retry_delay: Option<Duration>) -> Option
         // A failed stop remains worth retrying, but it must use the same
         // bounded backoff as failed activation. Otherwise a permanently
         // closed driver port turns the policy actor into a tight loop.
-        MediaState::Failed => {
-            Some(retry_delay.map_or(PolicyDecision::GiveUp, PolicyDecision::RetryDeactivate))
-        }
-        _ => Some(PolicyDecision::Deactivate),
+        MediaState::Failed => Some(retry_delay.map_or(PolicyDecision::GiveUp, |delay| {
+            PolicyDecision::Action(PolicyAction::RetryDeactivate(delay))
+        })),
+        _ => Some(PolicyDecision::Action(PolicyAction::Deactivate)),
     }
 }
 
@@ -140,7 +147,9 @@ impl PolicyPlanner {
         let decision = decide(input, snapshot, self.retry.next_delay(self.recovery));
         if matches!(
             decision,
-            Some(PolicyDecision::Retry(_) | PolicyDecision::RetryDeactivate(_))
+            Some(PolicyDecision::Action(
+                PolicyAction::Retry(_) | PolicyAction::RetryDeactivate(_)
+            ))
         ) {
             self.retry.record_attempt();
         }
