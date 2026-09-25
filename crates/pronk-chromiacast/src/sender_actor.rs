@@ -157,39 +157,13 @@ impl VideoSenderActor {
         previous: u64,
         timeout: Duration,
     ) -> Result<(), VideoTransportError> {
-        let mut snapshot = self.snapshot.clone();
-        tokio::time::timeout(timeout, async {
-            loop {
-                let current = snapshot.borrow().clone();
-                if current.status.generation() != Some(generation) {
-                    return Err(VideoTransportError::new(format!(
-                        "video sender generation changed while waiting for {generation}"
-                    )));
-                }
-                if let VideoSenderStatus::Failed { error, .. } = current.status {
-                    return Err(VideoTransportError::new(error));
-                }
-                if current.statistics.frames > previous {
-                    return Ok(());
-                }
-                if matches!(
-                    current.status,
-                    VideoSenderStatus::Empty
-                        | VideoSenderStatus::Completed { .. }
-                        | VideoSenderStatus::Stopped { .. }
-                ) {
-                    return Err(VideoTransportError::new(format!(
-                        "video sender generation {generation} stopped before encoded video delivery"
-                    )));
-                }
-                snapshot
-                    .changed()
-                    .await
-                    .map_err(|_| VideoTransportError::new("video sender actor stopped"))?;
-            }
-        })
+        self.wait_for_milestone(
+            generation,
+            previous,
+            timeout,
+            DeliveryMilestone::EncodedFrame,
+        )
         .await
-        .map_err(|_| VideoTransportError::new("timed out waiting for encoded video delivery"))?
     }
 
     pub(crate) async fn wait_for_receiver_ack_after(
@@ -198,36 +172,13 @@ impl VideoSenderActor {
         previous: u64,
         timeout: Duration,
     ) -> Result<(), VideoTransportError> {
-        let mut snapshot = self.snapshot.clone();
-        tokio::time::timeout(timeout, async {
-            loop {
-                let current = snapshot.borrow().clone();
-                if current.status.generation() != Some(generation) {
-                    return Err(VideoTransportError::new(format!(
-                        "video sender generation changed while waiting for {generation}"
-                    )));
-                }
-                if let VideoSenderStatus::Failed { error, .. } = current.status {
-                    return Err(VideoTransportError::new(error));
-                }
-                if current.statistics.acknowledged_frames > previous {
-                    return Ok(());
-                }
-                if matches!(current.status, VideoSenderStatus::Empty | VideoSenderStatus::Completed { .. } | VideoSenderStatus::Stopped { .. }) {
-                    return Err(VideoTransportError::new(format!(
-                        "video sender generation {generation} stopped before receiver video acknowledgement"
-                    )));
-                }
-                snapshot
-                    .changed()
-                    .await
-                    .map_err(|_| VideoTransportError::new("video sender actor stopped"))?;
-            }
-        })
+        self.wait_for_milestone(
+            generation,
+            previous,
+            timeout,
+            DeliveryMilestone::ReceiverVideoAck,
+        )
         .await
-        .map_err(|_| {
-            VideoTransportError::new("timed out waiting for Cast receiver video acknowledgement")
-        })?
     }
 
     pub(crate) async fn wait_for_receiver_audio_ack_after(
@@ -236,25 +187,44 @@ impl VideoSenderActor {
         previous: u64,
         timeout: Duration,
     ) -> Result<(), VideoTransportError> {
+        self.wait_for_milestone(
+            generation,
+            previous,
+            timeout,
+            DeliveryMilestone::ReceiverAudioAck,
+        )
+        .await
+    }
+
+    async fn wait_for_milestone(
+        &self,
+        generation: NonZeroU64,
+        previous: u64,
+        timeout: Duration,
+        milestone: DeliveryMilestone,
+    ) -> Result<(), VideoTransportError> {
         let mut snapshot = self.snapshot.clone();
         tokio::time::timeout(timeout, async {
             loop {
                 let current = snapshot.borrow().clone();
                 if current.status.generation() != Some(generation) {
-                    return Err(VideoTransportError::new(format!(
-                        "video sender generation changed while waiting for audio acknowledgement for {generation}"
-                    )));
+                    return Err(VideoTransportError::new(
+                        milestone.generation_changed(generation),
+                    ));
                 }
                 if let VideoSenderStatus::Failed { error, .. } = current.status {
                     return Err(VideoTransportError::new(error));
                 }
-                if current.statistics.acknowledged_audio_packets > previous {
+                if milestone.observed(&current.statistics) > previous {
                     return Ok(());
                 }
-                if matches!(current.status, VideoSenderStatus::Empty | VideoSenderStatus::Completed { .. } | VideoSenderStatus::Stopped { .. }) {
-                    return Err(VideoTransportError::new(format!(
-                        "video sender generation {generation} stopped before receiver audio acknowledgement"
-                    )));
+                if matches!(
+                    current.status,
+                    VideoSenderStatus::Empty
+                        | VideoSenderStatus::Completed { .. }
+                        | VideoSenderStatus::Stopped { .. }
+                ) {
+                    return Err(VideoTransportError::new(milestone.stopped(generation)));
                 }
                 snapshot
                     .changed()
@@ -263,9 +233,7 @@ impl VideoSenderActor {
             }
         })
         .await
-        .map_err(|_| {
-            VideoTransportError::new("timed out waiting for Cast receiver audio acknowledgement")
-        })?
+        .map_err(|_| VideoTransportError::new(milestone.timed_out()))?
     }
 
     pub(crate) async fn shutdown(mut self) -> Result<(), VideoTransportError> {
@@ -301,6 +269,51 @@ impl Drop for VideoSenderActor {
         // Channel closure also wakes a full queue. The actor keeps the
         // transport until its shutdown command or closure is handled.
         self.task.take();
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DeliveryMilestone {
+    EncodedFrame,
+    ReceiverVideoAck,
+    ReceiverAudioAck,
+}
+
+impl DeliveryMilestone {
+    fn observed(self, statistics: &VideoSenderStatistics) -> u64 {
+        match self {
+            Self::EncodedFrame => statistics.frames,
+            Self::ReceiverVideoAck => statistics.acknowledged_frames,
+            Self::ReceiverAudioAck => statistics.acknowledged_audio_packets,
+        }
+    }
+
+    fn generation_changed(self, generation: NonZeroU64) -> String {
+        match self {
+            Self::EncodedFrame | Self::ReceiverVideoAck => {
+                format!("video sender generation changed while waiting for {generation}")
+            }
+            Self::ReceiverAudioAck => format!(
+                "video sender generation changed while waiting for audio acknowledgement for {generation}"
+            ),
+        }
+    }
+
+    fn stopped(self, generation: NonZeroU64) -> String {
+        let milestone = match self {
+            Self::EncodedFrame => "encoded video delivery",
+            Self::ReceiverVideoAck => "receiver video acknowledgement",
+            Self::ReceiverAudioAck => "receiver audio acknowledgement",
+        };
+        format!("video sender generation {generation} stopped before {milestone}")
+    }
+
+    fn timed_out(self) -> &'static str {
+        match self {
+            Self::EncodedFrame => "timed out waiting for encoded video delivery",
+            Self::ReceiverVideoAck => "timed out waiting for Cast receiver video acknowledgement",
+            Self::ReceiverAudioAck => "timed out waiting for Cast receiver audio acknowledgement",
+        }
     }
 }
 
