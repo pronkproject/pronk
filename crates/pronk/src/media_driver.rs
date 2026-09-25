@@ -40,7 +40,7 @@ enum DriverLifecycle {
 enum DriverMediaPhase {
     Idle,
     StartingCapture(NonZeroU64),
-    Prepared(PreparedCaptureMedia),
+    Prepared(Box<PreparedCaptureMedia>),
     BackendPending(NonZeroU64),
     Cleanup {
         generation: NonZeroU64,
@@ -213,7 +213,7 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
         )
         .await?;
         validate_prepared_capture(&prepared, request)?;
-        *media = DriverMediaPhase::Prepared(prepared);
+        *media = DriverMediaPhase::Prepared(Box::new(prepared));
         Ok(())
     }
 
@@ -255,7 +255,7 @@ impl MediaSessionDriver for ProductionMediaSessionDriver {
 
         let prepared = match std::mem::replace(media, DriverMediaPhase::BackendPending(generation))
         {
-            DriverMediaPhase::Prepared(prepared) => prepared,
+            DriverMediaPhase::Prepared(prepared) => *prepared,
             other => {
                 *media = other;
                 return Err(MediaDriverError::new(
