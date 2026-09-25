@@ -29,7 +29,9 @@ impl BackendDeviceSession {
     pub fn new(session: BackendSessionHandle) -> Self {
         Self {
             session: Some(session),
-            media: BackendMediaLifecycle::Prepared { last_completed: 0 },
+            media: BackendMediaLifecycle::Prepared {
+                last_completed: None,
+            },
         }
     }
 
@@ -239,7 +241,7 @@ impl DeviceSessionPort for BackendDeviceSession {
             .map_err(|error| DeviceSessionError::new(error.to_string()));
         if result.is_ok() {
             self.media = BackendMediaLifecycle::Prepared {
-                last_completed: media_generation.get(),
+                last_completed: Some(media_generation),
             };
         }
         result
@@ -308,7 +310,7 @@ fn map_configuration(configuration: DeviceMediaConfiguration) -> MediaConfigurat
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackendMediaLifecycle {
     Prepared {
-        last_completed: u64,
+        last_completed: Option<NonZeroU64>,
     },
     Configured(NonZeroU64),
     Streaming(NonZeroU64),
@@ -328,12 +330,17 @@ enum BackendMediaPhase {
 impl BackendMediaLifecycle {
     fn begin_configure(&mut self, media_generation: NonZeroU64) -> Result<(), DeviceSessionError> {
         match *self {
-            Self::Prepared { last_completed } if media_generation.get() > last_completed => {
+            Self::Prepared { last_completed }
+                if last_completed.is_none_or(|completed| media_generation > completed) =>
+            {
                 *self = Self::Uncertain(media_generation);
                 Ok(())
             }
-            Self::Prepared { last_completed } => Err(DeviceSessionError::new(format!(
-                "media generation {} is not newer than completed generation {last_completed}",
+            Self::Prepared {
+                last_completed: Some(last_completed),
+            } => Err(DeviceSessionError::new(format!(
+                "media generation {} is not newer than completed generation {}",
+                last_completed,
                 media_generation.get()
             ))),
             state => Err(DeviceSessionError::new(format!(
@@ -371,13 +378,15 @@ impl BackendMediaLifecycle {
     /// Returns false when this exact generation was already stopped.
     fn begin_stop(&mut self, media_generation: NonZeroU64) -> Result<bool, DeviceSessionError> {
         match *self {
-            Self::Prepared { last_completed } if media_generation.get() >= last_completed => {
+            Self::Prepared { last_completed }
+                if last_completed.is_none_or(|completed| media_generation >= completed) =>
+            {
                 // ConfigureMedia may reject locally before crossing the D-Bus
                 // boundary. The caller deliberately treats every error as an
                 // ambiguous authority transfer and follows it with StopMedia;
                 // consume that generation without contacting the backend.
                 *self = Self::Prepared {
-                    last_completed: media_generation.get(),
+                    last_completed: Some(media_generation),
                 };
                 Ok(false)
             }
@@ -400,9 +409,10 @@ impl BackendMediaLifecycle {
 
     fn description(self) -> String {
         match self {
-            Self::Prepared { last_completed } => {
-                format!("prepared (last completed generation {last_completed})")
-            }
+            Self::Prepared { last_completed } => match last_completed {
+                Some(generation) => format!("prepared (last completed generation {generation})"),
+                None => "prepared (no completed generation)".into(),
+            },
             Self::Configured(generation) => format!("configured generation {generation}"),
             Self::Streaming(generation) => format!("streaming generation {generation}"),
             Self::Suspended(generation) => format!("suspended generation {generation}"),
@@ -425,7 +435,9 @@ mod tests {
 
     #[test]
     fn lifecycle_rejects_stale_and_overlapping_generations() {
-        let mut lifecycle = BackendMediaLifecycle::Prepared { last_completed: 0 };
+        let mut lifecycle = BackendMediaLifecycle::Prepared {
+            last_completed: None,
+        };
         lifecycle.begin_configure(generation(1)).unwrap();
         assert!(lifecycle.begin_configure(generation(2)).is_err());
 
@@ -444,7 +456,9 @@ mod tests {
         let mut lifecycle = BackendMediaLifecycle::Uncertain(generation(4));
         assert!(lifecycle.begin_stop(generation(3)).is_err());
         assert!(lifecycle.begin_stop(generation(4)).unwrap());
-        lifecycle = BackendMediaLifecycle::Prepared { last_completed: 4 };
+        lifecycle = BackendMediaLifecycle::Prepared {
+            last_completed: Some(generation(4)),
+        };
         assert!(!lifecycle.begin_stop(generation(4)).unwrap());
         assert!(lifecycle.begin_configure(generation(4)).is_err());
         lifecycle.begin_configure(generation(5)).unwrap();
@@ -452,11 +466,15 @@ mod tests {
 
     #[test]
     fn locally_rejected_configuration_can_consume_its_cleanup_generation() {
-        let mut lifecycle = BackendMediaLifecycle::Prepared { last_completed: 0 };
+        let mut lifecycle = BackendMediaLifecycle::Prepared {
+            last_completed: None,
+        };
         assert!(!lifecycle.begin_stop(generation(1)).unwrap());
         assert_eq!(
             lifecycle,
-            BackendMediaLifecycle::Prepared { last_completed: 1 }
+            BackendMediaLifecycle::Prepared {
+                last_completed: Some(generation(1)),
+            }
         );
         assert!(!lifecycle.begin_stop(generation(1)).unwrap());
         assert!(lifecycle.begin_configure(generation(1)).is_err());
