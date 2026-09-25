@@ -30,11 +30,11 @@ use crate::node_registration::NodeRegistration;
 use crate::policy_gate::{
     PolicyGate, PolicyMarkerChange, PRIVATE_NODE_POLICY_VERSION, PRIVATE_NODE_PROPERTY,
 };
+use crate::policy_registry_sync::PolicyRegistrySync;
 use crate::remote_monitor::RemoteDisconnectMonitor;
 use crate::PipeWireRemote;
 
 const EVENT_QUEUE_CAPACITY: usize = 8;
-const CORE_OBJECT_ID: u32 = 0;
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHANNELS: u32 = 2;
 const AUDIO_FRAME_BYTES: usize = 4;
@@ -322,8 +322,7 @@ fn run(
         shutting_down: false,
     }));
     let policy_gate = Rc::new(RefCell::new(PolicyGate::new(requires_policy)));
-    let initial_sync_seq = Rc::new(Cell::new(None));
-    let initial_sync_complete = Rc::new(Cell::new(false));
+    let initial_sync = Rc::new(Cell::new(PolicyRegistrySync::Unrequested));
 
     let state_for_startup_cancel = state.clone();
     let mainloop_for_startup_cancel = mainloop.clone();
@@ -362,14 +361,13 @@ fn run(
 
     let state_for_core = state.clone();
     let mainloop_for_core = mainloop.clone();
-    let sync_seq_for_core = initial_sync_seq.clone();
-    let sync_complete_for_core = initial_sync_complete.clone();
+    let sync_for_core = initial_sync.clone();
     let mainloop_for_sync = mainloop.clone();
     let _core_listener = core
         .add_listener_local()
         .done(move |id, seq| {
-            if id == CORE_OBJECT_ID && sync_seq_for_core.get() == Some(seq.seq()) {
-                sync_complete_for_core.set(true);
+            if sync_for_core.get().matches_done(id, seq.seq()) {
+                sync_for_core.set(PolicyRegistrySync::Complete);
                 mainloop_for_sync.quit();
             }
         })
@@ -455,12 +453,12 @@ fn run(
     let sync = core
         .sync(0)
         .map_err(|error| pipewire_error("synchronize audio policy registry", error))?;
-    initial_sync_seq.set(Some(sync.seq()));
+    initial_sync.set(PolicyRegistrySync::Awaiting(sync.seq()));
     mainloop.run();
     if state.borrow().failed || state.borrow().shutting_down {
         return Ok(());
     }
-    if !initial_sync_complete.get() {
+    if !initial_sync.get().is_complete() {
         return Err(AudioSourceRuntimeError::PipeWire(
             "audio policy registry synchronization stopped unexpectedly".to_string(),
         ));
