@@ -405,7 +405,7 @@ async fn run_supervisor(
             }
         };
         let mut inventory = discovery.initial().clone();
-        emit(
+        let connected_event = emit(
             &events,
             BackendSupervisorEvent::Connected {
                 connection_generation,
@@ -413,7 +413,17 @@ async fn run_supervisor(
                 info: connection.info().clone(),
                 inventory: inventory.clone(),
             },
-        )?;
+        );
+        if let Err(error) = connected_event {
+            let _ = stop_connected(
+                connection,
+                discovery,
+                Some(connection_generation),
+                registration_validator.as_ref(),
+            )
+            .await;
+            return Err(error);
+        }
 
         let terminal_reason = loop {
             tokio::select! {
@@ -459,36 +469,54 @@ async fn run_supervisor(
                 notification = discovery.next_notification() => match notification {
                     Some(DiscoveryNotification::Changed(snapshot)) => {
                         inventory = snapshot.clone();
-                        emit(
+                        if let Err(error) = emit(
                             &events,
                             BackendSupervisorEvent::InventoryChanged {
                                 connection_generation,
                                 inventory: snapshot,
                             },
-                        )?;
+                        ) {
+                            break Err(error);
+                        }
                     }
                     Some(DiscoveryNotification::Resynchronized { reason, snapshot }) => {
                         inventory = snapshot.clone();
-                        emit(
+                        if let Err(error) = emit(
                             &events,
                             BackendSupervisorEvent::InventoryResynchronized {
                                 connection_generation,
                                 reason,
                                 inventory: snapshot,
                             },
-                        )?;
+                        ) {
+                            break Err(error);
+                        }
                     }
                     Some(DiscoveryNotification::FatalError { error_text, .. }) => {
-                        break BackendDisconnectReason::FatalError(error_text);
+                        break Ok(BackendDisconnectReason::FatalError(error_text));
                     }
                     Some(DiscoveryNotification::ConnectionClosed) => {
-                        break BackendDisconnectReason::ConnectionClosed;
+                        break Ok(BackendDisconnectReason::ConnectionClosed);
                     }
                     Some(DiscoveryNotification::Failed(error)) => {
-                        break BackendDisconnectReason::DiscoveryFailed(error);
+                        break Ok(BackendDisconnectReason::DiscoveryFailed(error));
                     }
-                    None => break BackendDisconnectReason::DiscoveryActorStopped,
+                    None => break Ok(BackendDisconnectReason::DiscoveryActorStopped),
                 },
+            }
+        };
+
+        let terminal_reason = match terminal_reason {
+            Ok(reason) => reason,
+            Err(error) => {
+                let _ = stop_connected(
+                    connection,
+                    discovery,
+                    Some(connection_generation),
+                    registration_validator.as_ref(),
+                )
+                .await;
+                return Err(error);
             }
         };
 
