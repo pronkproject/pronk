@@ -233,12 +233,9 @@ impl Drop for VideoSourceActor {
         let _ = self
             .commands
             .try_send(ActorCommand::Shutdown { reply: None });
-        if let Some(task) = self.task.take() {
-            // `shutdown` is the ordered buffer-reclamation path. Unexpected
-            // owner loss must not detach this resource-owning task, especially
-            // when a full command queue made the best-effort request fail.
-            task.abort();
-        }
+        // The task also handles command-channel and event-delivery closure,
+        // so a full queue still leads to generation teardown.
+        self.task.take();
     }
 }
 
@@ -1373,11 +1370,16 @@ mod tests {
     }
 
     #[test]
-    fn dropping_the_owner_aborts_the_actor_instead_of_detaching_it() {
+    fn dropping_the_owner_shuts_down_the_source_generation() {
         test_runtime().block_on(async {
-            let FakeHarness { factory, .. } = fake_factory([]);
+            let FakeHarness { factory, log, .. } = fake_factory([FakeSpec {
+                object_id: 10,
+                object_serial: 100,
+                release: FakeRelease::Never,
+            }]);
             let handle = tokio::runtime::Handle::current();
             let actor = spawn_with_factory(&handle, factory);
+            actor.start(generation(1)).await.unwrap();
             let task = actor
                 .task
                 .as_ref()
@@ -1385,8 +1387,14 @@ mod tests {
                 .abort_handle();
 
             drop(actor);
-            tokio::task::yield_now().await;
-            assert!(task.is_finished());
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !task.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(*log.lock().unwrap(), ["start:1", "shutdown:1"]);
         });
     }
 
