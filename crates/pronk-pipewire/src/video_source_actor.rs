@@ -132,8 +132,12 @@ pub enum VideoSourceActorError {
 pub struct VideoSourceActor {
     commands: mpsc::Sender<ActorCommand>,
     events: mpsc::Receiver<VideoSourceActorEvent>,
+    shutdown: Option<oneshot::Sender<ShutdownReply>>,
     task: Option<JoinHandle<()>>,
 }
+
+type ShutdownReply =
+    Option<oneshot::Sender<Result<Option<VideoSourceStopReport>, VideoSourceActorError>>>;
 
 impl std::fmt::Debug for VideoSourceActor {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -213,9 +217,10 @@ impl VideoSourceActor {
         mut self,
     ) -> Result<Option<VideoSourceStopReport>, VideoSourceActorError> {
         let (reply, response) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::Shutdown { reply: Some(reply) })
-            .await
+        self.shutdown
+            .take()
+            .expect("shutdown signal belongs to the actor owner")
+            .send(Some(reply))
             .map_err(|_| VideoSourceActorError::CommandClosed)?;
         let result = response
             .await
@@ -230,11 +235,9 @@ impl VideoSourceActor {
 
 impl Drop for VideoSourceActor {
     fn drop(&mut self) {
-        let _ = self
-            .commands
-            .try_send(ActorCommand::Shutdown { reply: None });
-        // The task also handles command-channel and event-delivery closure,
-        // so a full queue still leads to generation teardown.
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(None);
+        }
         self.task.take();
     }
 }
@@ -252,10 +255,6 @@ enum ActorCommand {
     Stop {
         media_generation: NonZeroU64,
         reply: oneshot::Sender<Result<VideoSourceStopReport, VideoSourceActorError>>,
-    },
-    Shutdown {
-        reply:
-            Option<oneshot::Sender<Result<Option<VideoSourceStopReport>, VideoSourceActorError>>>,
     },
 }
 
@@ -397,6 +396,7 @@ enum ActorInput {
     Command(Option<ActorCommand>),
     SourceEvent(Option<VideoSourceEvent>),
     ReturnTrigger,
+    Shutdown(ShutdownReply),
 }
 
 fn spawn_with_factory<F>(handle: &tokio::runtime::Handle, factory: F) -> VideoSourceActor
@@ -405,10 +405,17 @@ where
 {
     let (commands, command_receiver) = mpsc::channel(ACTOR_COMMAND_CAPACITY);
     let (event_sender, events) = mpsc::channel(ACTOR_EVENT_CAPACITY);
-    let task = handle.spawn(run_actor(factory, command_receiver, event_sender));
+    let (shutdown, shutdown_receiver) = oneshot::channel();
+    let task = handle.spawn(run_actor(
+        factory,
+        command_receiver,
+        event_sender,
+        shutdown_receiver,
+    ));
     VideoSourceActor {
         commands,
         events,
+        shutdown: Some(shutdown),
         task: Some(task),
     }
 }
@@ -417,29 +424,39 @@ async fn run_actor<F>(
     mut factory: F,
     mut commands: mpsc::Receiver<ActorCommand>,
     events: mpsc::Sender<VideoSourceActorEvent>,
+    mut shutdown: oneshot::Receiver<ShutdownReply>,
 ) where
     F: SourceFactory,
 {
     let mut active: Option<ActiveGeneration<F::Source>> = None;
     let mut last_identity: Option<VideoNodeIdentity> = None;
 
-    loop {
+    'actor: loop {
         let input = match active.as_mut() {
             Some(active) => match active.return_trigger_deadline {
                 Some(deadline) => tokio::select! {
+                    request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
                     command = commands.recv() => ActorInput::Command(command),
                     event = active.source.next_event() => ActorInput::SourceEvent(event),
                     _ = tokio::time::sleep_until(deadline) => ActorInput::ReturnTrigger,
                 },
                 None => tokio::select! {
+                    request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
                     command = commands.recv() => ActorInput::Command(command),
                     event = active.source.next_event() => ActorInput::SourceEvent(event),
                 },
             },
-            None => ActorInput::Command(commands.recv().await),
+            None => tokio::select! {
+                request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
+                command = commands.recv() => ActorInput::Command(command),
+            },
         };
 
         match input {
+            ActorInput::Shutdown(reply) => {
+                finish_shutdown(active.take(), reply).await;
+                break;
+            }
             ActorInput::Command(Some(ActorCommand::Start { generation, reply })) => {
                 let requested = generation.config.media_generation;
                 if let Some(current) = active.as_ref() {
@@ -500,16 +517,6 @@ async fn run_actor<F>(
                 };
                 let _ = reply.send(result);
             }
-            ActorInput::Command(Some(ActorCommand::Shutdown { reply })) => {
-                let result = match active.take() {
-                    Some(current) => stop_generation(current).await.map(Some),
-                    None => Ok(None),
-                };
-                if let Some(reply) = reply {
-                    let _ = reply.send(result);
-                }
-                break;
-            }
             ActorInput::Command(None) => {
                 if let Some(current) = active.take() {
                     let _ = stop_generation(current).await;
@@ -525,16 +532,24 @@ async fn run_actor<F>(
                 );
                 match result {
                     Ok(Some(event)) => {
-                        if events.send(event).await.is_err() {
-                            if let Some(current) = active.take() {
-                                let _ = stop_generation(current).await;
+                        tokio::select! {
+                            result = events.send(event) => {
+                                if result.is_err() {
+                                    finish_shutdown(active.take(), None).await;
+                                    break 'actor;
+                                }
                             }
-                            break;
+                            request = &mut shutdown => {
+                                finish_shutdown(active.take(), request.unwrap_or(None)).await;
+                                break 'actor;
+                            }
                         }
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        if report_generation_failure(&mut active, &events, error).await {
+                        if report_generation_failure(&mut active, &events, &mut shutdown, error)
+                            .await
+                        {
                             break;
                         }
                     }
@@ -548,7 +563,9 @@ async fn run_actor<F>(
                     Ok(()) => current.rearm_return_trigger(),
                     Err(error) => {
                         let error = VideoSourceActorRuntimeError::ProcessTrigger(error.to_string());
-                        if report_generation_failure(&mut active, &events, error).await {
+                        if report_generation_failure(&mut active, &events, &mut shutdown, error)
+                            .await
+                        {
                             break;
                         }
                     }
@@ -686,19 +703,38 @@ fn handle_source_event<S>(
 async fn report_generation_failure<S: ManagedSource>(
     active: &mut Option<ActiveGeneration<S>>,
     events: &mpsc::Sender<VideoSourceActorEvent>,
+    shutdown: &mut oneshot::Receiver<ShutdownReply>,
     error: VideoSourceActorRuntimeError,
 ) -> bool {
     let current = active.take().expect("failed source was active");
     let report = current.stop_report();
     let _ = current.source.shutdown().await;
-    events
-        .send(VideoSourceActorEvent::GenerationFailed {
+    tokio::select! {
+        result = events.send(VideoSourceActorEvent::GenerationFailed {
             identity: report.identity,
             error,
             reclaimed_buffers: report.reclaimed_buffers,
-        })
-        .await
-        .is_err()
+        }) => result.is_err(),
+        request = shutdown => {
+            if let Ok(Some(reply)) = request {
+                let _ = reply.send(Ok(None));
+            }
+            true
+        }
+    }
+}
+
+async fn finish_shutdown<S: ManagedSource>(
+    active: Option<ActiveGeneration<S>>,
+    reply: ShutdownReply,
+) {
+    let result = match active {
+        Some(current) => stop_generation(current).await.map(Some),
+        None => Ok(None),
+    };
+    if let Some(reply) = reply {
+        let _ = reply.send(result);
+    }
 }
 
 fn return_trigger_interval(frame_rate: crate::VideoFrameRate) -> Duration {
@@ -960,6 +996,53 @@ mod tests {
                 Ok(())
             })
         }
+    }
+
+    #[test]
+    fn shutdown_interrupts_full_event_delivery() {
+        test_runtime().block_on(async {
+            let FakeHarness { factory, log, .. } = fake_factory([FakeSpec {
+                object_id: 10,
+                object_serial: 100,
+                release: FakeRelease::Never,
+            }]);
+            let (commands, command_receiver) = mpsc::channel(ACTOR_COMMAND_CAPACITY);
+            let (event_sender, events) = mpsc::channel(1);
+            let (shutdown, shutdown_receiver) = oneshot::channel();
+            let task = tokio::spawn(run_actor(
+                factory,
+                command_receiver,
+                event_sender,
+                shutdown_receiver,
+            ));
+            let actor = VideoSourceActor {
+                commands,
+                events,
+                shutdown: Some(shutdown),
+                task: Some(task),
+            };
+
+            actor.start(generation(1)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while actor.events.len() < 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("first source event was not queued");
+
+            let report = tokio::time::timeout(Duration::from_secs(1), actor.shutdown())
+                .await
+                .expect("shutdown waited for full event queue")
+                .unwrap()
+                .unwrap();
+            assert_eq!(report.identity.media_generation, nonzero64(1));
+            assert!(log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == "shutdown:1"));
+        });
     }
 
     #[test]
