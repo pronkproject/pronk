@@ -7,9 +7,7 @@ use std::os::fd::AsFd;
 use castkms_renderer::Renderer;
 use drm_display_executor::scene::geometry::Extent;
 use pronk_gpu::vulkan::Device;
-use pronk_renderer_worker::{
-    PreparedSceneImages, PrimarySceneProfile, PrivatePreparation, SceneReader,
-};
+use pronk_renderer_worker::{PreparedSceneImages, PrimarySceneProfile, SceneReader};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -122,14 +120,13 @@ fn prepare_generation<F: AsFd>(
         }
     };
     let scene_images = scene_images.register(&mut configuration)?;
-    let preparation = match PrivatePreparation::prepare(device, configuration) {
+    let configuration = match configuration.prepare_private(device) {
         Ok(preparation) => preparation,
         Err(failure) => {
             let (_, error) = failure.into_parts();
             return Err(error);
         }
     };
-    let configuration = preparation.complete();
     let published = match configuration.publish(None) {
         Ok(published) => published,
         Err(failure) => return Err(failure.into_error()),

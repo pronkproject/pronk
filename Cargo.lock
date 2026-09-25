@@ -228,6 +228,7 @@ dependencies = [
  "castkms-sys",
  "drm-display-executor",
  "nix 0.29.0",
+ "pronk-gpu",
 ]
 
 [[package]]
