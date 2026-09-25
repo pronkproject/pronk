@@ -300,8 +300,7 @@ pub(crate) struct ChromiacastMediaSession {
     session_generation: u64,
     state: SessionState,
     capabilities: Option<DeviceCapabilities>,
-    active_generation: Option<NonZeroU64>,
-    completed_generation: Option<NonZeroU64>,
+    generation: GenerationSlot,
     graph_received_generation: bool,
     sender_received_generation: bool,
     audio_sender_received_generation: bool,
@@ -314,6 +313,29 @@ pub(crate) struct ChromiacastMediaSession {
     graph: Box<dyn MediaGraphPort>,
     sender: Option<VideoSenderActor>,
     audio_sender: Option<AudioSenderActor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationSlot {
+    Unused,
+    Active(NonZeroU64),
+    Completed(NonZeroU64),
+}
+
+impl GenerationSlot {
+    fn active(self) -> Option<NonZeroU64> {
+        match self {
+            Self::Active(generation) => Some(generation),
+            Self::Unused | Self::Completed(_) => None,
+        }
+    }
+
+    fn completed(self) -> Option<NonZeroU64> {
+        match self {
+            Self::Completed(generation) => Some(generation),
+            Self::Unused | Self::Active(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,8 +412,7 @@ impl ChromiacastMediaSession {
             session_generation,
             state: SessionState::Created,
             capabilities: None,
-            active_generation: None,
-            completed_generation: None,
+            generation: GenerationSlot::Unused,
             graph_received_generation: false,
             sender_received_generation: false,
             audio_sender_received_generation: false,
@@ -477,12 +498,13 @@ impl ChromiacastMediaSession {
             MediaSessionError::InvalidRequest("media generation must be nonzero".into())
         })?;
         if self
-            .completed_generation
+            .generation
+            .completed()
             .is_some_and(|completed| generation <= completed)
         {
             return Err(MediaSessionError::InvalidRequest(format!(
                 "media generation {generation} is not newer than completed generation {:?}",
-                self.completed_generation
+                self.generation.completed()
             )));
         }
         let (graph_configuration, transport_configuration) =
@@ -493,7 +515,7 @@ impl ChromiacastMediaSession {
         // Once the method has consumed its passed fd, matching StopMedia must
         // remain valid even if negotiation or graph setup fails, or the D-Bus
         // reply is lost.
-        self.active_generation = Some(generation);
+        self.generation = GenerationSlot::Active(generation);
         self.graph_received_generation = false;
         self.sender_received_generation = false;
         self.audio_sender_received_generation = false;
@@ -601,7 +623,7 @@ impl ChromiacastMediaSession {
         let Some(generation) = feedback.generation else {
             return Ok(Vec::new());
         };
-        if self.active_generation != Some(generation) || !self.media_ready {
+        if self.generation.active() != Some(generation) || !self.media_ready {
             return Ok(Vec::new());
         }
         if let Some(error) = feedback.terminal_error {
@@ -708,7 +730,8 @@ impl ChromiacastMediaSession {
             });
         }
         let generation = self
-            .active_generation
+            .generation
+            .active()
             .ok_or_else(|| MediaSessionError::Graph("active media generation is missing".into()))?;
         self.graph.suspend(generation).await?;
         if self.audio_enabled {
@@ -796,7 +819,9 @@ impl ChromiacastMediaSession {
         let generation = NonZeroU64::new(media_generation).ok_or_else(|| {
             MediaSessionError::InvalidRequest("media generation must be nonzero".into())
         })?;
-        if self.state == SessionState::Prepared && self.completed_generation == Some(generation) {
+        if self.state == SessionState::Prepared
+            && self.generation == GenerationSlot::Completed(generation)
+        {
             return Ok(());
         }
         if !matches!(
@@ -877,8 +902,7 @@ impl ChromiacastMediaSession {
                 }
             },
         );
-        self.active_generation = None;
-        self.completed_generation = Some(generation);
+        self.generation = GenerationSlot::Completed(generation);
         self.graph_received_generation = false;
         self.sender_received_generation = false;
         self.audio_sender_received_generation = false;
@@ -907,7 +931,8 @@ impl ChromiacastMediaSession {
             });
         }
         let generation = self
-            .active_generation
+            .generation
+            .active()
             .ok_or_else(|| MediaSessionError::Graph("active media generation is missing".into()))?;
         let graph = self.graph.statistics(generation).await?;
         let sender = self.sender()?.statistics(generation).await?;
@@ -956,7 +981,7 @@ impl ChromiacastMediaSession {
                 }
             },
         );
-        self.active_generation = None;
+        self.generation = GenerationSlot::Unused;
         self.graph_received_generation = false;
         self.sender_received_generation = false;
         self.audio_sender_received_generation = false;
@@ -1238,12 +1263,12 @@ impl ChromiacastMediaSession {
         operation: &'static str,
         generation: NonZeroU64,
     ) -> Result<(), MediaSessionError> {
-        if self.active_generation == Some(generation) {
+        if self.generation == GenerationSlot::Active(generation) {
             Ok(())
         } else {
             Err(MediaSessionError::InvalidRequest(format!(
                 "{operation} generation {generation} does not match active generation {:?}",
-                self.active_generation
+                self.generation.active()
             )))
         }
     }
