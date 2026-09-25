@@ -13,9 +13,8 @@ pub(crate) enum PolicyMarkerChange {
     Lost,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) enum PolicyGate {
-    #[default]
     Ambient,
     WaitingForMarker,
     Marked(u32),
