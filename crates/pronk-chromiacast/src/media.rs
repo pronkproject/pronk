@@ -318,7 +318,8 @@ enum GenerationSlot {
 struct ActiveGeneration {
     id: NonZeroU64,
     graph_received_generation: bool,
-    sender_received_generation: bool,
+    sender_may_own_generation: bool,
+    configuration_complete: bool,
     audio_sender_received_generation: bool,
     transport_active: bool,
     audio_enabled: bool,
@@ -331,7 +332,8 @@ impl ActiveGeneration {
         Self {
             id,
             graph_received_generation: false,
-            sender_received_generation: false,
+            sender_may_own_generation: false,
+            configuration_complete: false,
             audio_sender_received_generation: false,
             transport_active: false,
             audio_enabled,
@@ -341,8 +343,7 @@ impl ActiveGeneration {
     }
 
     fn is_ready(&self) -> bool {
-        // Video sender configuration is last, after graph and optional audio.
-        self.sender_received_generation
+        self.configuration_complete
     }
 }
 
@@ -652,8 +653,9 @@ impl ChromiacastMediaSession {
             }
             (false, None) => {}
         }
+        self.active_generation_mut().sender_may_own_generation = true;
         self.sender()?.configure(generation, negotiated).await?;
-        self.active_generation_mut().sender_received_generation = true;
+        self.active_generation_mut().configuration_complete = true;
         Ok(())
     }
 
@@ -876,7 +878,7 @@ impl ChromiacastMediaSession {
         let active = self.active_generation();
         let graph_received_generation = active.graph_received_generation;
         let audio_sender_received_generation = active.audio_sender_received_generation;
-        let sender_received_generation = active.sender_received_generation;
+        let sender_may_own_generation = active.sender_may_own_generation;
         let transport_active = active.transport_active;
         let graph = &mut self.graph;
         let audio_sender = self.audio_sender.as_ref();
@@ -913,7 +915,7 @@ impl ChromiacastMediaSession {
                 }
             },
             async {
-                if sender_received_generation {
+                if sender_may_own_generation {
                     match sender {
                         Some(sender) => sender
                             .stop(generation)
@@ -2005,6 +2007,49 @@ mod tests {
         media.abort_media(1).await.unwrap();
 
         assert_eq!(transport.stops, 0);
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_video_configuration_still_stops_the_sender() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (output, receiver) = mpsc::channel(4);
+        let graph = FakeGraph::video(output);
+        let mut media =
+            ChromiacastMediaSession::with_graph(session_id.into(), 7, Box::new(graph), receiver);
+        media.complete_preparation(capabilities()).unwrap();
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let mut transport = FakeTransport {
+            sender_shutdowns: Some(shutdowns.clone()),
+            ..FakeTransport::default()
+        };
+
+        // Poll on this task so the actor cannot reply before ConfigureMedia
+        // is cancelled after sending it the generation.
+        {
+            let configure = media.configure(
+                remote(),
+                vec![target(session_id, 1)],
+                configuration(),
+                1,
+                &mut transport,
+            );
+            tokio::pin!(configure);
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(configure.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+
+        assert!(media.active_generation().sender_may_own_generation);
+        assert!(!media.active_generation().is_ready());
+        assert!(matches!(
+            media.start(1).await,
+            Err(MediaSessionError::Graph(_))
+        ));
+        media.stop_media(1, &mut transport).await.unwrap();
+        assert_eq!(shutdowns.load(Ordering::Relaxed), 1);
         media.shutdown().await.unwrap();
     }
 
