@@ -319,8 +319,8 @@ struct ActiveGeneration {
     id: NonZeroU64,
     graph_received_generation: bool,
     sender_may_own_generation: bool,
+    audio_sender_may_own_generation: bool,
     configuration_complete: bool,
-    audio_sender_received_generation: bool,
     transport_active: bool,
     audio_enabled: bool,
     video_bitrate: u64,
@@ -333,8 +333,8 @@ impl ActiveGeneration {
             id,
             graph_received_generation: false,
             sender_may_own_generation: false,
+            audio_sender_may_own_generation: false,
             configuration_complete: false,
-            audio_sender_received_generation: false,
             transport_active: false,
             audio_enabled,
             video_bitrate: video_bitrate.get(),
@@ -627,6 +627,8 @@ impl ChromiacastMediaSession {
 
         match (audio_enabled, negotiated.audio_sender.take()) {
             (true, Some(audio_sender)) => {
+                // The actor can accept the sender before this request returns.
+                self.active_generation_mut().audio_sender_may_own_generation = true;
                 if let Err(error) = self
                     .audio_sender()?
                     .configure(generation, audio_sender)
@@ -635,8 +637,6 @@ impl ChromiacastMediaSession {
                     let _ = negotiated.sender.shutdown().await;
                     return Err(error.into());
                 }
-                self.active_generation_mut()
-                    .audio_sender_received_generation = true;
             }
             (true, None) => {
                 let _ = negotiated.sender.shutdown().await;
@@ -877,7 +877,7 @@ impl ChromiacastMediaSession {
         self.require_matching_generation("StopMedia", generation)?;
         let active = self.active_generation();
         let graph_received_generation = active.graph_received_generation;
-        let audio_sender_received_generation = active.audio_sender_received_generation;
+        let audio_sender_may_own_generation = active.audio_sender_may_own_generation;
         let sender_may_own_generation = active.sender_may_own_generation;
         let transport_active = active.transport_active;
         let graph = &mut self.graph;
@@ -899,7 +899,7 @@ impl ChromiacastMediaSession {
                 }
             },
             async {
-                if audio_sender_received_generation {
+                if audio_sender_may_own_generation {
                     match audio_sender {
                         Some(sender) => sender
                             .stop(generation)
@@ -2050,6 +2050,46 @@ mod tests {
         ));
         media.stop_media(1, &mut transport).await.unwrap();
         assert_eq!(shutdowns.load(Ordering::Relaxed), 1);
+        media.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_audio_configuration_still_stops_the_sender() {
+        let session_id = "12345678-1234-1234-1234-123456789abc";
+        let (video_output, video_receiver) = mpsc::channel(4);
+        let (audio_output, audio_receiver) = mpsc::channel(4);
+        let graph = FakeGraph::audio(video_output, audio_output);
+        let mut media = ChromiacastMediaSession::with_graph_outputs(
+            session_id.into(),
+            7,
+            VideoEncoderPolicy::Software,
+            Box::new(graph),
+            video_receiver,
+            audio_receiver,
+        );
+        media.complete_preparation(audio_capabilities()).unwrap();
+        let mut transport = FakeTransport::default();
+
+        {
+            let configure = media.configure(
+                audio_remotes(),
+                vec![target(session_id, 1), audio_target(session_id, 1)],
+                audio_configuration(),
+                1,
+                &mut transport,
+            );
+            tokio::pin!(configure);
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(configure.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+
+        assert!(media.active_generation().audio_sender_may_own_generation);
+        assert!(!media.active_generation().sender_may_own_generation);
+        assert!(!media.active_generation().is_ready());
+        media.stop_media(1, &mut transport).await.unwrap();
         media.shutdown().await.unwrap();
     }
 
