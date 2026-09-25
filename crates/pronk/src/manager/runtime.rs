@@ -158,7 +158,7 @@ impl ManagerRuntimeState {
                             selection_token: selection,
                             reservation: Some(reservation),
                             releases: reservation_releases.clone(),
-                            manager_commands: None,
+                            manager_commands: manager.commands.clone(),
                         },
                     })
                 })();

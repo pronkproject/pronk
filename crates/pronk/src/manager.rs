@@ -198,11 +198,9 @@ impl ManagerHandle {
             })
             .await
             .map_err(|_| ReserveDisplaySlotError::ManagerStopped)?;
-        let mut slot = response_rx
+        response_rx
             .await
-            .map_err(|_| ReserveDisplaySlotError::ManagerStopped)??;
-        slot.core.manager_commands = Some(self.commands.clone());
-        Ok(slot)
+            .map_err(|_| ReserveDisplaySlotError::ManagerStopped)?
     }
 
     pub async fn list_displays(
@@ -398,7 +396,7 @@ struct ReservedCastDisplayCore {
     selection_token: DeviceSelection,
     reservation: Option<OutputReservation>,
     releases: mpsc::UnboundedSender<OutputReservationRelease>,
-    manager_commands: Option<mpsc::Sender<ManagerCommand>>,
+    manager_commands: mpsc::Sender<ManagerCommand>,
 }
 
 /// Cloneable, target-bound route back to the manager's current exact Device.
@@ -464,9 +462,7 @@ impl CastDisplaySlotLease {
         self.core.revalidate_device().await
     }
 
-    pub(crate) fn device_session_resolver(
-        &self,
-    ) -> Result<DeviceSessionResolver, ResolveDeviceError> {
+    pub(crate) fn device_session_resolver(&self) -> DeviceSessionResolver {
         self.core.device_session_resolver()
     }
 }
@@ -479,25 +475,17 @@ impl ReservedCastDisplayCore {
             .output()
     }
 
-    fn device_session_resolver(&self) -> Result<DeviceSessionResolver, ResolveDeviceError> {
-        Ok(DeviceSessionResolver {
-            commands: self
-                .manager_commands
-                .as_ref()
-                .ok_or(ResolveDeviceError::ManagerStopped)?
-                .clone(),
+    fn device_session_resolver(&self) -> DeviceSessionResolver {
+        DeviceSessionResolver {
+            commands: self.manager_commands.clone(),
             backend_id: self.device.backend_id.clone(),
             device_id: self.device.device_id.clone(),
-        })
+        }
     }
 
     async fn revalidate_device(&self) -> Result<(), ResolveDeviceError> {
-        let commands = self
-            .manager_commands
-            .as_ref()
-            .ok_or(ResolveDeviceError::ManagerStopped)?;
         let (response_tx, response_rx) = oneshot::channel();
-        commands
+        self.manager_commands
             .send(ManagerCommand::ResolveDevice {
                 selection: self.selection_token.clone(),
                 response: response_tx,
@@ -530,6 +518,7 @@ pub(crate) fn test_reserved_display_slot(
     let mut pool = OutputSlotPool::default();
     let reservation = pool.reserve(&device, &[output], None).unwrap();
     let (releases, release_rx) = mpsc::unbounded_channel();
+    let (manager_commands, _manager_rx) = mpsc::channel(1);
     (
         ReservedCastDisplaySlot {
             selection: ResolvedDeviceSelection {
@@ -541,7 +530,7 @@ pub(crate) fn test_reserved_display_slot(
                 device,
                 reservation: Some(reservation),
                 releases,
-                manager_commands: None,
+                manager_commands,
             },
         },
         release_rx,

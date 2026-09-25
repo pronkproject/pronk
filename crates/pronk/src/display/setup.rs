@@ -423,13 +423,7 @@ impl KernelReadySetup {
             stop_partial_backend(backend_session).await;
             return Err(error);
         }
-        let session_resolver = match slot.device_session_resolver() {
-            Ok(resolver) => resolver,
-            Err(error) => {
-                stop_partial_backend(backend_session).await;
-                return Err(DisplaySetupError::Device(error));
-            }
-        };
+        let session_resolver = slot.device_session_resolver();
         let mut start_event_monitor = Box::pin(BackendDeviceSessionEvents::start(&backend_session));
         let session_events = tokio::select! {
             biased;
