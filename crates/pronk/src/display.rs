@@ -251,9 +251,55 @@ impl DisplaySetupStage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplaySetupSnapshot {
     pub display_id: CastDisplayId,
-    pub stage: DisplaySetupStage,
-    pub error_code: OperationErrorCode,
-    pub error: Option<String>,
+    phase: DisplaySetupPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DisplaySetupPhase {
+    Validating,
+    Authorizing,
+    PreparingDevice,
+    Attaching,
+    Added,
+    Cancelled {
+        code: OperationErrorCode,
+        error: String,
+    },
+    Failed {
+        code: OperationErrorCode,
+        error: String,
+    },
+}
+
+impl DisplaySetupSnapshot {
+    pub fn stage(&self) -> DisplaySetupStage {
+        match self.phase {
+            DisplaySetupPhase::Validating => DisplaySetupStage::Validating,
+            DisplaySetupPhase::Authorizing => DisplaySetupStage::Authorizing,
+            DisplaySetupPhase::PreparingDevice => DisplaySetupStage::PreparingDevice,
+            DisplaySetupPhase::Attaching => DisplaySetupStage::Attaching,
+            DisplaySetupPhase::Added => DisplaySetupStage::Added,
+            DisplaySetupPhase::Cancelled { .. } => DisplaySetupStage::Cancelled,
+            DisplaySetupPhase::Failed { .. } => DisplaySetupStage::Failed,
+        }
+    }
+
+    pub fn error_code(&self) -> OperationErrorCode {
+        match self.phase {
+            DisplaySetupPhase::Cancelled { code, .. } | DisplaySetupPhase::Failed { code, .. } => {
+                code
+            }
+            _ => OperationErrorCode::None,
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match &self.phase {
+            DisplaySetupPhase::Cancelled { error, .. }
+            | DisplaySetupPhase::Failed { error, .. } => Some(error),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) struct PendingDisplaySelection {
@@ -286,9 +332,7 @@ impl DisplaySetupHandle {
         let cancellation = CancellationToken::new();
         let (_status_tx, status) = watch::channel(DisplaySetupSnapshot {
             display_id,
-            stage: DisplaySetupStage::Validating,
-            error_code: OperationErrorCode::None,
-            error: None,
+            phase: DisplaySetupPhase::Validating,
         });
         (
             Self {
@@ -328,7 +372,7 @@ impl DisplaySetupOperation {
             DisplayReservation::Pending { manager, pending },
             DisplaySetupCaller::from(caller),
             dependencies,
-            DisplaySetupStage::Validating,
+            DisplaySetupPhase::Validating,
         )
     }
 
@@ -336,7 +380,7 @@ impl DisplaySetupOperation {
         reservation: DisplayReservation,
         caller: DisplaySetupCaller,
         dependencies: DisplaySetupDependencies,
-        initial_stage: DisplaySetupStage,
+        initial_phase: DisplaySetupPhase,
     ) -> Result<Self, DisplaySetupStartError> {
         dependencies
             .offer
@@ -346,9 +390,7 @@ impl DisplaySetupOperation {
         let cancellation = CancellationToken::new();
         let (status_tx, status) = watch::channel(DisplaySetupSnapshot {
             display_id,
-            stage: initial_stage,
-            error_code: OperationErrorCode::None,
-            error: None,
+            phase: initial_phase,
         });
         let task_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
@@ -368,26 +410,23 @@ impl DisplaySetupOperation {
             )
             .await;
             match &result {
-                Ok(_) => set_status(
-                    &status_tx,
-                    DisplaySetupStage::Added,
-                    OperationErrorCode::None,
-                    None,
-                ),
+                Ok(_) => set_status(&status_tx, DisplaySetupPhase::Added),
                 Err(error @ (DisplaySetupError::Cancelled | DisplaySetupError::CallerExited)) => {
                     set_status(
                         &status_tx,
-                        DisplaySetupStage::Cancelled,
-                        error.operation_error_code(),
-                        Some(error.to_string()),
+                        DisplaySetupPhase::Cancelled {
+                            code: error.operation_error_code(),
+                            error: error.to_string(),
+                        },
                     );
                 }
                 Err(error) => {
                     set_status(
                         &status_tx,
-                        DisplaySetupStage::Failed,
-                        error.operation_error_code(),
-                        Some(error.to_string()),
+                        DisplaySetupPhase::Failed {
+                            code: error.operation_error_code(),
+                            error: error.to_string(),
+                        },
                     );
                 }
             }
@@ -543,17 +582,18 @@ impl Drop for AddedCastDisplay {
     }
 }
 
-fn set_status(
-    status: &watch::Sender<DisplaySetupSnapshot>,
-    stage: DisplaySetupStage,
-    error_code: OperationErrorCode,
-    error: Option<String>,
-) {
-    let error = error.map(|value| bounded_text(value, MAX_OPERATION_ERROR_BYTES));
-    status.send_modify(|snapshot| {
-        snapshot.stage = stage;
-        snapshot.error_code = error_code;
-        snapshot.error = error;
+fn set_status(status: &watch::Sender<DisplaySetupSnapshot>, mut phase: DisplaySetupPhase) {
+    if let DisplaySetupPhase::Cancelled { error, .. } | DisplaySetupPhase::Failed { error, .. } =
+        &mut phase
+    {
+        *error = bounded_text(std::mem::take(error), MAX_OPERATION_ERROR_BYTES);
+    }
+    status.send_if_modified(|snapshot| {
+        if snapshot.phase == phase {
+            return false;
+        }
+        snapshot.phase = phase;
+        true
     });
 }
 
@@ -815,11 +855,11 @@ mod tests {
                 ),
                 false,
             ),
-            DisplaySetupStage::Validating,
+            DisplaySetupPhase::Validating,
         )
         .unwrap();
         let status = operation.subscribe();
-        assert_eq!(operation.snapshot().stage, DisplaySetupStage::Validating);
+        assert_eq!(operation.snapshot().stage(), DisplaySetupStage::Validating);
         assert!(matches!(
             operation.finish().await,
             Err(DisplaySetupOperationError::Setup(
@@ -828,9 +868,9 @@ mod tests {
                 ))
             ))
         ));
-        assert_eq!(status.borrow().stage, DisplaySetupStage::Failed);
+        assert_eq!(status.borrow().stage(), DisplaySetupStage::Failed);
         assert_eq!(
-            status.borrow().error_code,
+            status.borrow().error_code(),
             OperationErrorCode::DeviceNotFound
         );
         manager.shutdown().await.unwrap();
@@ -889,14 +929,14 @@ mod tests {
                 ),
                 false,
             ),
-            DisplaySetupStage::Authorizing,
+            DisplaySetupPhase::Authorizing,
         )
         .unwrap();
         let status = operation.subscribe();
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
             .unwrap();
-        assert_eq!(operation.snapshot().stage, DisplaySetupStage::Authorizing);
+        assert_eq!(operation.snapshot().stage(), DisplaySetupStage::Authorizing);
         operation.cancel();
         assert!(matches!(
             operation.finish().await,
@@ -905,8 +945,8 @@ mod tests {
             ))
         ));
         assert!(observed_cancellation.load(Ordering::SeqCst));
-        assert_eq!(status.borrow().stage, DisplaySetupStage::Cancelled);
-        assert_eq!(status.borrow().error_code, OperationErrorCode::Cancelled);
+        assert_eq!(status.borrow().stage(), DisplaySetupStage::Cancelled);
+        assert_eq!(status.borrow().error_code(), OperationErrorCode::Cancelled);
         assert!(
             tokio::time::timeout(Duration::from_secs(1), releases.recv())
                 .await

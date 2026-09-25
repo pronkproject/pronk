@@ -161,7 +161,7 @@ impl ManagerInterface {
 
 async fn retire_unpublished_operation(manager: ManagerHandle, operation: DisplaySetupHandle) {
     let mut status = operation.subscribe();
-    while !status.borrow().stage.is_terminal() {
+    while !status.borrow().stage().is_terminal() {
         if status.changed().await.is_err() {
             return;
         }

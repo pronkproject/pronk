@@ -33,7 +33,7 @@ pub(super) async fn emit_operation_states(
     // channel.  The caller may already have read a non-terminal snapshot, so
     // publish that terminal snapshot once instead of leaving it waiting for a
     // transition it cannot observe.
-    let mut publish_current = status.borrow().stage.is_terminal();
+    let mut publish_current = status.borrow().stage().is_terminal();
     loop {
         if publish_current {
             let state = public_operation_state(&status.borrow());
@@ -41,7 +41,7 @@ pub(super) async fn emit_operation_states(
                 .await
                 .map_err(OperationSignalError::Emit)?;
         }
-        if status.borrow().stage.is_terminal() {
+        if status.borrow().stage().is_terminal() {
             break;
         }
         status

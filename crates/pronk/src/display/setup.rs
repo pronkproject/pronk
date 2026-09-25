@@ -10,7 +10,7 @@ use pronk_backend_protocol::{PreparationRequest, StopReason};
 use pronk_core::edid::{EdidMode, ValidatedEdid};
 use pronk_core::identity::PnpIdResolver;
 use pronk_core::session::PinnedCallerProcess;
-use pronk_dbus::{DeviceInfo, OperationErrorCode};
+use pronk_dbus::DeviceInfo;
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider, VideoFrameRate};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -18,7 +18,7 @@ use tracing::warn;
 
 use super::{
     set_status, AddedCastDisplay, AddedCastDisplayResources, CastDisplayId, DisplaySetupError,
-    DisplaySetupSnapshot, DisplaySetupStage, MediaRuntime, PendingDisplaySelection,
+    DisplaySetupPhase, DisplaySetupSnapshot, MediaRuntime, PendingDisplaySelection,
     INITIAL_SESSION_GENERATION, VIDEO_FRAME_RATE_DENOMINATOR, VIDEO_FRAME_RATE_NUMERATOR,
 };
 use crate::device_recovery::{
@@ -181,12 +181,7 @@ pub(super) async fn run_display_setup(
                 }
             };
             if result.is_ok() {
-                set_status(
-                    &context.status,
-                    DisplaySetupStage::Authorizing,
-                    OperationErrorCode::None,
-                    None,
-                );
+                set_status(&context.status, DisplaySetupPhase::Authorizing);
             }
             result
         }
@@ -342,12 +337,7 @@ impl KernelReadySetup {
             kernel_session,
             offer,
         } = self;
-        set_status(
-            &context.status,
-            DisplaySetupStage::PreparingDevice,
-            OperationErrorCode::None,
-            None,
-        );
+        set_status(&context.status, DisplaySetupPhase::PreparingDevice);
         let (slot, selection) = slot.into_lease();
         let mut create_session = Box::pin(selection.create_session(
             context.display_id.to_string(),
@@ -481,12 +471,7 @@ impl BackendReadySetup {
             session_resolver,
             session_events,
         } = self;
-        set_status(
-            &context.status,
-            DisplaySetupStage::Attaching,
-            OperationErrorCode::None,
-            None,
-        );
+        set_status(&context.status, DisplaySetupPhase::Attaching);
         let edid = prepared.generated_edid().edid().clone();
         let crtc_id = match NonZeroU32::new(output.crtc_id) {
             Some(crtc_id) => crtc_id,

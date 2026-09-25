@@ -9,7 +9,7 @@ use crate::display::{DisplaySetupSnapshot, DisplaySetupStage};
 pub(super) fn public_operation_state(snapshot: &DisplaySetupSnapshot) -> OperationState {
     OperationState {
         display_id: snapshot.display_id.to_string(),
-        stage: match snapshot.stage {
+        stage: match snapshot.stage() {
             DisplaySetupStage::Validating => OperationStage::Validating,
             DisplaySetupStage::Authorizing => OperationStage::Authorizing,
             DisplaySetupStage::PreparingDevice => OperationStage::PreparingDevice,
@@ -18,8 +18,8 @@ pub(super) fn public_operation_state(snapshot: &DisplaySetupSnapshot) -> Operati
             DisplaySetupStage::Cancelled => OperationStage::Cancelled,
             DisplaySetupStage::Failed => OperationStage::Failed,
         },
-        error_code: snapshot.error_code,
-        error: snapshot.error.clone().unwrap_or_default(),
+        error_code: snapshot.error_code(),
+        error: snapshot.error().unwrap_or_default().to_owned(),
     }
 }
 

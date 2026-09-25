@@ -203,7 +203,7 @@ impl ManagerRuntimeState {
                 response,
             }) => {
                 let cancelled = self.records.get(&display_id).is_some_and(|record| {
-                    if record.handle.snapshot().stage.is_terminal() {
+                    if record.handle.snapshot().stage().is_terminal() {
                         false
                     } else {
                         record.handle.cancel();
@@ -217,7 +217,7 @@ impl ManagerRuntimeState {
                 response,
             }) => {
                 let forgettable = self.records.get(&display_id).is_some_and(|record| {
-                    record.handle.snapshot().stage.is_terminal()
+                    record.handle.snapshot().stage().is_terminal()
                         && matches!(record.phase, ManagedDisplayPhase::Terminal)
                 });
                 if forgettable {
@@ -329,7 +329,7 @@ impl ManagerRuntimeState {
         slot_events: &mpsc::UnboundedSender<CastDisplaySlotEvent>,
     ) -> BTreeMap<String, String> {
         for record in self.records.values() {
-            if !record.handle.snapshot().stage.is_terminal() {
+            if !record.handle.snapshot().stage().is_terminal() {
                 record.handle.cancel();
             }
         }
