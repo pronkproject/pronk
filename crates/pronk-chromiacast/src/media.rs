@@ -310,7 +310,7 @@ pub(crate) struct ChromiacastMediaSession {
 #[derive(Debug)]
 enum GenerationSlot {
     Unused,
-    Active(ActiveGeneration),
+    Active(Box<ActiveGeneration>),
     Completed(NonZeroU64),
 }
 
@@ -353,14 +353,14 @@ impl GenerationSlot {
 
     fn active_generation(&self) -> Option<&ActiveGeneration> {
         match self {
-            Self::Active(generation) => Some(generation),
+            Self::Active(generation) => Some(generation.as_ref()),
             Self::Unused | Self::Completed(_) => None,
         }
     }
 
     fn active_generation_mut(&mut self) -> Option<&mut ActiveGeneration> {
         match self {
-            Self::Active(generation) => Some(generation),
+            Self::Active(generation) => Some(generation.as_mut()),
             Self::Unused | Self::Completed(_) => None,
         }
     }
@@ -555,11 +555,11 @@ impl ChromiacastMediaSession {
         // Once the method has consumed its passed fd, matching StopMedia must
         // remain valid even if negotiation or graph setup fails, or the D-Bus
         // reply is lost.
-        self.generation = GenerationSlot::Active(ActiveGeneration::new(
+        self.generation = GenerationSlot::Active(Box::new(ActiveGeneration::new(
             generation,
             audio_enabled,
             video_bitrate,
-        ));
+        )));
         self.state = SessionState::Configured;
 
         let mut negotiated = transport.negotiate_video(transport_configuration).await?;
