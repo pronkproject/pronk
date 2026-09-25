@@ -393,13 +393,6 @@ impl<S> ActiveGeneration<S> {
     }
 }
 
-#[derive(Default)]
-struct ActorHistory {
-    generation: Option<NonZeroU64>,
-    node_name: Option<String>,
-    object_serial: Option<NonZeroU64>,
-}
-
 enum ActorInput {
     Command(Option<ActorCommand>),
     SourceEvent(Option<VideoSourceEvent>),
@@ -428,7 +421,7 @@ async fn run_actor<F>(
     F: SourceFactory,
 {
     let mut active: Option<ActiveGeneration<F::Source>> = None;
-    let mut history = ActorHistory::default();
+    let mut last_identity: Option<VideoNodeIdentity> = None;
 
     loop {
         let input = match active.as_mut() {
@@ -456,12 +449,10 @@ async fn run_actor<F>(
                     }));
                     continue;
                 }
-                match start_generation(&mut factory, generation, &history).await {
+                match start_generation(&mut factory, generation, last_identity.as_ref()).await {
                     Ok(started) => {
                         let identity = started.identity.clone();
-                        history.generation = Some(identity.media_generation);
-                        history.node_name = Some(identity.node_name.clone());
-                        history.object_serial = Some(identity.object_serial);
+                        last_identity = Some(identity.clone());
                         active = Some(started);
                         let _ = reply.send(Ok(identity));
                     }
@@ -570,22 +561,22 @@ async fn run_actor<F>(
 async fn start_generation<F: SourceFactory>(
     factory: &mut F,
     generation: VideoSourceGeneration,
-    history: &ActorHistory,
+    last_identity: Option<&VideoNodeIdentity>,
 ) -> Result<ActiveGeneration<F::Source>, VideoSourceActorError> {
     generation
         .config
         .validate(&generation.buffers)
         .map_err(VideoSourceError::from)?;
     let requested_generation = generation.config.media_generation;
-    if let Some(previous) = history.generation {
-        if requested_generation <= previous {
+    if let Some(previous) = last_identity {
+        if requested_generation <= previous.media_generation {
             return Err(VideoSourceActorError::NonMonotonicGeneration {
-                previous: previous.get(),
+                previous: previous.media_generation.get(),
                 requested: requested_generation.get(),
             });
         }
     }
-    if history.node_name.as_deref() == Some(generation.config.node_name.as_str()) {
+    if last_identity.is_some_and(|identity| identity.node_name == generation.config.node_name) {
         return Err(VideoSourceActorError::ReusedNodeName(
             generation.config.node_name,
         ));
@@ -594,7 +585,7 @@ async fn start_generation<F: SourceFactory>(
     let buffer_ids = generation.buffers.iter().map(|buffer| buffer.id).collect();
     let source = factory.start(generation).await?;
     let identity = source.identity().clone();
-    if history.object_serial == Some(identity.object_serial) {
+    if last_identity.is_some_and(|previous| previous.object_serial == identity.object_serial) {
         let serial = identity.object_serial.get();
         source.shutdown().await?;
         return Err(VideoSourceActorError::ReusedObjectSerial(serial));
