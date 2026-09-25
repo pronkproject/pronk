@@ -29,7 +29,7 @@ enum AudioSenderState {
     Stopped,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AudioSenderSnapshot {
     generation: Option<NonZeroU64>,
     state: AudioSenderState,
@@ -593,11 +593,18 @@ fn publish(
     statistics: AudioSenderStatistics,
     last_error: Option<String>,
 ) {
-    snapshot.send_modify(|current| {
-        current.generation = generation;
-        current.state = state;
-        current.statistics = statistics;
-        current.last_error = last_error;
+    let next = AudioSenderSnapshot {
+        generation,
+        state,
+        statistics,
+        last_error,
+    };
+    snapshot.send_if_modified(|current| {
+        if *current == next {
+            return false;
+        }
+        *current = next;
+        true
     });
 }
 

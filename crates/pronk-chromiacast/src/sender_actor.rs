@@ -35,7 +35,7 @@ enum VideoSenderState {
     Stopped,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct VideoSenderSnapshot {
     generation: Option<NonZeroU64>,
     state: VideoSenderState,
@@ -926,11 +926,18 @@ fn publish(
     statistics: VideoSenderStatistics,
     last_error: Option<String>,
 ) {
-    snapshot.send_modify(|current| {
-        current.generation = generation;
-        current.state = state;
-        current.statistics = statistics;
-        current.last_error = last_error;
+    let next = VideoSenderSnapshot {
+        generation,
+        state,
+        statistics,
+        last_error,
+    };
+    snapshot.send_if_modified(|current| {
+        if *current == next {
+            return false;
+        }
+        *current = next;
+        true
     });
 }
 
