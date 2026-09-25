@@ -20,24 +20,18 @@ use crate::device_session_port::{
 
 #[derive(Debug)]
 pub struct BackendDeviceSession {
-    session: Option<BackendSessionHandle>,
+    session: BackendSessionHandle,
     media: BackendMediaLifecycle,
 }
 
 impl BackendDeviceSession {
     pub fn new(session: BackendSessionHandle) -> Self {
         Self {
-            session: Some(session),
+            session,
             media: BackendMediaLifecycle::Prepared {
                 last_completed: None,
             },
         }
-    }
-
-    fn session(&self) -> &BackendSessionHandle {
-        self.session
-            .as_ref()
-            .expect("live backend Device-session adapter owns its handle")
     }
 }
 
@@ -124,7 +118,7 @@ impl DeviceSessionPort for BackendDeviceSession {
 
         self.media.begin_configure(media_generation)?;
         let result = self
-            .session()
+            .session
             .configure_media(remotes, targets, configuration, media_generation)
             .await
             .map_err(|error| DeviceSessionError::new(error.to_string()));
@@ -141,7 +135,7 @@ impl DeviceSessionPort for BackendDeviceSession {
         self.media
             .begin_transition(media_generation, BackendMediaPhase::Configured, "start")?;
         let result = self
-            .session()
+            .session
             .start_media(media_generation)
             .await
             .map_err(|error| DeviceSessionError::new(error.to_string()));
@@ -165,7 +159,7 @@ impl DeviceSessionPort for BackendDeviceSession {
             DeviceMediaSuspendReason::SessionInactive => SuspendReason::SessionInactive,
         };
         let result = self
-            .session()
+            .session
             .suspend_media(reason)
             .await
             .map_err(|error| DeviceSessionError::new(error.to_string()));
@@ -182,7 +176,7 @@ impl DeviceSessionPort for BackendDeviceSession {
         self.media
             .begin_transition(media_generation, BackendMediaPhase::Suspended, "resume")?;
         let result = self
-            .session()
+            .session
             .resume_media(media_generation)
             .await
             .map_err(|error| DeviceSessionError::new(error.to_string()));
@@ -209,7 +203,7 @@ impl DeviceSessionPort for BackendDeviceSession {
             DeviceMediaStopReason::TransportFailure => StopReason::TransportFailure,
         };
         let result = self
-            .session()
+            .session
             .stop_media(media_generation, reason)
             .await
             .map_err(|error| DeviceSessionError::new(error.to_string()));
@@ -222,13 +216,10 @@ impl DeviceSessionPort for BackendDeviceSession {
     }
 
     async fn stop(
-        mut self: Box<Self>,
+        self: Box<Self>,
         reason: DeviceSessionStopReason,
     ) -> Result<(), DeviceSessionError> {
-        let session = self
-            .session
-            .take()
-            .expect("live backend Device-session adapter owns its handle");
+        let Self { session, .. } = *self;
         let reason = match reason {
             DeviceSessionStopReason::DisplayRemoved => StopReason::DisplayRemoved,
             DeviceSessionStopReason::DaemonShutdown => StopReason::BackendShutdown,
