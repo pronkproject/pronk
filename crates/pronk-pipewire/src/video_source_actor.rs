@@ -19,6 +19,7 @@ use crate::{
 
 pub const DEFAULT_VIDEO_SOURCE_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const ACTOR_COMMAND_CAPACITY: usize = 8;
+const ACTOR_STOP_CAPACITY: usize = 1;
 const ACTOR_EVENT_CAPACITY: usize = MAX_VIDEO_BUFFERS * 2 + 8;
 // A non-driving consumer may push RequestProcess, which the runtime handles
 // immediately. Stock pipewiresrc instead only queues a shared buffer when its
@@ -131,6 +132,7 @@ pub enum VideoSourceActorError {
 /// `start()` with a strictly newer generation.
 pub struct VideoSourceActor {
     commands: mpsc::Sender<ActorCommand>,
+    stops: mpsc::Sender<StopRequest>,
     events: mpsc::Receiver<VideoSourceActorEvent>,
     shutdown: Option<oneshot::Sender<ShutdownReply>>,
     task: Option<JoinHandle<()>>,
@@ -197,8 +199,8 @@ impl VideoSourceActor {
         media_generation: NonZeroU64,
     ) -> Result<VideoSourceStopReport, VideoSourceActorError> {
         let (reply, response) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::Stop {
+        self.stops
+            .send(StopRequest {
                 media_generation,
                 reply,
             })
@@ -252,10 +254,11 @@ enum ActorCommand {
         frame: VideoFrame,
         reply: oneshot::Sender<Result<(), VideoSourceActorError>>,
     },
-    Stop {
-        media_generation: NonZeroU64,
-        reply: oneshot::Sender<Result<VideoSourceStopReport, VideoSourceActorError>>,
-    },
+}
+
+struct StopRequest {
+    media_generation: NonZeroU64,
+    reply: oneshot::Sender<Result<VideoSourceStopReport, VideoSourceActorError>>,
 }
 
 trait ManagedSource: Send + 'static {
@@ -394,6 +397,7 @@ impl<S> ActiveGeneration<S> {
 
 enum ActorInput {
     Command(Option<ActorCommand>),
+    Stop(Option<StopRequest>),
     SourceEvent(Option<VideoSourceEvent>),
     ReturnTrigger,
     Shutdown(ShutdownReply),
@@ -403,17 +407,31 @@ fn spawn_with_factory<F>(handle: &tokio::runtime::Handle, factory: F) -> VideoSo
 where
     F: SourceFactory,
 {
+    spawn_with_factory_capacity(handle, factory, ACTOR_EVENT_CAPACITY)
+}
+
+fn spawn_with_factory_capacity<F>(
+    handle: &tokio::runtime::Handle,
+    factory: F,
+    event_capacity: usize,
+) -> VideoSourceActor
+where
+    F: SourceFactory,
+{
     let (commands, command_receiver) = mpsc::channel(ACTOR_COMMAND_CAPACITY);
-    let (event_sender, events) = mpsc::channel(ACTOR_EVENT_CAPACITY);
+    let (stops, stop_receiver) = mpsc::channel(ACTOR_STOP_CAPACITY);
+    let (event_sender, events) = mpsc::channel(event_capacity);
     let (shutdown, shutdown_receiver) = oneshot::channel();
     let task = handle.spawn(run_actor(
         factory,
         command_receiver,
+        stop_receiver,
         event_sender,
         shutdown_receiver,
     ));
     VideoSourceActor {
         commands,
+        stops,
         events,
         shutdown: Some(shutdown),
         task: Some(task),
@@ -423,6 +441,7 @@ where
 async fn run_actor<F>(
     mut factory: F,
     mut commands: mpsc::Receiver<ActorCommand>,
+    mut stops: mpsc::Receiver<StopRequest>,
     events: mpsc::Sender<VideoSourceActorEvent>,
     mut shutdown: oneshot::Receiver<ShutdownReply>,
 ) where
@@ -435,19 +454,25 @@ async fn run_actor<F>(
         let input = match active.as_mut() {
             Some(active) => match active.return_trigger_deadline {
                 Some(deadline) => tokio::select! {
+                    biased;
                     request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
+                    request = stops.recv() => ActorInput::Stop(request),
                     command = commands.recv() => ActorInput::Command(command),
                     event = active.source.next_event() => ActorInput::SourceEvent(event),
                     _ = tokio::time::sleep_until(deadline) => ActorInput::ReturnTrigger,
                 },
                 None => tokio::select! {
+                    biased;
                     request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
+                    request = stops.recv() => ActorInput::Stop(request),
                     command = commands.recv() => ActorInput::Command(command),
                     event = active.source.next_event() => ActorInput::SourceEvent(event),
                 },
             },
             None => tokio::select! {
+                biased;
                 request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
+                request = stops.recv() => ActorInput::Stop(request),
                 command = commands.recv() => ActorInput::Command(command),
             },
         };
@@ -455,6 +480,13 @@ async fn run_actor<F>(
         match input {
             ActorInput::Shutdown(reply) => {
                 finish_shutdown(active.take(), reply).await;
+                break;
+            }
+            ActorInput::Stop(Some(request)) => {
+                stop_requested(&mut active, request, None).await;
+            }
+            ActorInput::Stop(None) => {
+                finish_shutdown(active.take(), None).await;
                 break;
             }
             ActorInput::Command(Some(ActorCommand::Start { generation, reply })) => {
@@ -495,28 +527,6 @@ async fn run_actor<F>(
                 };
                 let _ = reply.send(result);
             }
-            ActorInput::Command(Some(ActorCommand::Stop {
-                media_generation,
-                reply,
-            })) => {
-                let active_generation = active
-                    .as_ref()
-                    .map(|current| current.identity.media_generation);
-                let result = match active_generation {
-                    Some(current) if current != media_generation => {
-                        Err(VideoSourceActorError::GenerationMismatch {
-                            active: current.get(),
-                            requested: media_generation.get(),
-                        })
-                    }
-                    Some(_) => {
-                        let current = active.take().expect("active generation checked");
-                        stop_generation(current).await
-                    }
-                    None => Err(VideoSourceActorError::NoActiveGeneration),
-                };
-                let _ = reply.send(result);
-            }
             ActorInput::Command(None) => {
                 if let Some(current) = active.take() {
                     let _ = stop_generation(current).await;
@@ -531,24 +541,43 @@ async fn run_actor<F>(
                     event,
                 );
                 match result {
-                    Ok(Some(event)) => {
+                    Ok(Some(event)) => loop {
                         tokio::select! {
-                            result = events.send(event) => {
-                                if result.is_err() {
-                                    finish_shutdown(active.take(), None).await;
-                                    break 'actor;
-                                }
-                            }
+                            biased;
                             request = &mut shutdown => {
                                 finish_shutdown(active.take(), request.unwrap_or(None)).await;
                                 break 'actor;
                             }
+                                request = stops.recv() => match request {
+                                    Some(request) => {
+                                        if stop_requested(&mut active, request, Some(&event)).await {
+                                        continue 'actor;
+                                    }
+                                }
+                                None => {
+                                    finish_shutdown(active.take(), None).await;
+                                    break 'actor;
+                                }
+                            },
+                            permit = events.reserve() => match permit {
+                                Ok(permit) => { permit.send(event); break; }
+                                Err(_) => {
+                                    finish_shutdown(active.take(), None).await;
+                                    break 'actor;
+                                }
+                            },
                         }
-                    }
+                    },
                     Ok(None) => {}
                     Err(error) => {
-                        if report_generation_failure(&mut active, &events, &mut shutdown, error)
-                            .await
+                        if report_generation_failure(
+                            &mut active,
+                            &events,
+                            &mut stops,
+                            &mut shutdown,
+                            error,
+                        )
+                        .await
                         {
                             break;
                         }
@@ -563,8 +592,14 @@ async fn run_actor<F>(
                     Ok(()) => current.rearm_return_trigger(),
                     Err(error) => {
                         let error = VideoSourceActorRuntimeError::ProcessTrigger(error.to_string());
-                        if report_generation_failure(&mut active, &events, &mut shutdown, error)
-                            .await
+                        if report_generation_failure(
+                            &mut active,
+                            &events,
+                            &mut stops,
+                            &mut shutdown,
+                            error,
+                        )
+                        .await
                         {
                             break;
                         }
@@ -703,25 +738,85 @@ fn handle_source_event<S>(
 async fn report_generation_failure<S: ManagedSource>(
     active: &mut Option<ActiveGeneration<S>>,
     events: &mpsc::Sender<VideoSourceActorEvent>,
+    stops: &mut mpsc::Receiver<StopRequest>,
     shutdown: &mut oneshot::Receiver<ShutdownReply>,
     error: VideoSourceActorRuntimeError,
 ) -> bool {
     let current = active.take().expect("failed source was active");
     let report = current.stop_report();
     let _ = current.source.shutdown().await;
-    tokio::select! {
-        result = events.send(VideoSourceActorEvent::GenerationFailed {
-            identity: report.identity,
-            error,
-            reclaimed_buffers: report.reclaimed_buffers,
-        }) => result.is_err(),
-        request = shutdown => {
-            if let Ok(Some(reply)) = request {
-                let _ = reply.send(Ok(None));
+    let event = VideoSourceActorEvent::GenerationFailed {
+        identity: report.identity,
+        error,
+        reclaimed_buffers: report.reclaimed_buffers,
+    };
+    loop {
+        tokio::select! {
+            biased;
+            request = &mut *shutdown => {
+                if let Ok(Some(reply)) = request {
+                    let _ = reply.send(Ok(None));
+                }
+                return true;
             }
-            true
+            request = stops.recv() => match request {
+                Some(request) => {
+                    let _ = request.reply.send(Err(VideoSourceActorError::NoActiveGeneration));
+                }
+                None => return true,
+            },
+            permit = events.reserve() => match permit {
+                Ok(permit) => {
+                    permit.send(event);
+                    return false;
+                }
+                Err(_) => return true,
+            },
         }
     }
+}
+
+async fn stop_requested<S: ManagedSource>(
+    active: &mut Option<ActiveGeneration<S>>,
+    request: StopRequest,
+    pending_event: Option<&VideoSourceActorEvent>,
+) -> bool {
+    let active_generation = active
+        .as_ref()
+        .map(|current| current.identity.media_generation);
+    let stopped = active_generation == Some(request.media_generation);
+    let result = match active_generation {
+        Some(current) if current != request.media_generation => {
+            Err(VideoSourceActorError::GenerationMismatch {
+                active: current.get(),
+                requested: request.media_generation.get(),
+            })
+        }
+        Some(_) => {
+            if let (
+                Some(active),
+                Some(VideoSourceActorEvent::BufferReleased {
+                    buffer_id,
+                    sequence,
+                    ..
+                }),
+            ) = (active.as_mut(), pending_event)
+            {
+                // The owner never received this release. Keep it in the
+                // reclaim report as an uncertain submitted handoff.
+                *active
+                    .buffers
+                    .get_mut(buffer_id)
+                    .expect("a pending release belongs to the active buffer pool") =
+                    ActorBufferState::Submitted(*sequence);
+            }
+            let current = active.take().expect("active generation checked");
+            stop_generation(current).await
+        }
+        None => Err(VideoSourceActorError::NoActiveGeneration),
+    };
+    let _ = request.reply.send(result);
+    stopped
 }
 
 async fn finish_shutdown<S: ManagedSource>(
@@ -1006,21 +1101,7 @@ mod tests {
                 object_serial: 100,
                 release: FakeRelease::Never,
             }]);
-            let (commands, command_receiver) = mpsc::channel(ACTOR_COMMAND_CAPACITY);
-            let (event_sender, events) = mpsc::channel(1);
-            let (shutdown, shutdown_receiver) = oneshot::channel();
-            let task = tokio::spawn(run_actor(
-                factory,
-                command_receiver,
-                event_sender,
-                shutdown_receiver,
-            ));
-            let actor = VideoSourceActor {
-                commands,
-                events,
-                shutdown: Some(shutdown),
-                task: Some(task),
-            };
+            let actor = spawn_with_factory_capacity(&tokio::runtime::Handle::current(), factory, 1);
 
             actor.start(generation(1)).await.unwrap();
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -1042,6 +1123,96 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|entry| entry == "shutdown:1"));
+        });
+    }
+
+    #[test]
+    fn stop_interrupts_full_event_delivery_and_rejects_mismatched_generation() {
+        test_runtime().block_on(async {
+            let FakeHarness { factory, log, .. } = fake_factory([FakeSpec {
+                object_id: 10,
+                object_serial: 100,
+                release: FakeRelease::Never,
+            }]);
+            let actor = spawn_with_factory_capacity(&tokio::runtime::Handle::current(), factory, 1);
+
+            actor.start(generation(1)).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while actor.events.len() < 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("first source event was not queued");
+
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(1), actor.stop(nonzero64(2)))
+                    .await
+                    .expect("mismatched stop waited for full event queue"),
+                Err(VideoSourceActorError::GenerationMismatch {
+                    active: 1,
+                    requested: 2
+                })
+            ));
+            let report = tokio::time::timeout(Duration::from_secs(1), actor.stop(nonzero64(1)))
+                .await
+                .expect("stop waited for full event queue")
+                .unwrap();
+            assert_eq!(report.identity.media_generation, nonzero64(1));
+            assert!(report.reclaimed_buffers.is_empty());
+            assert!(actor.shutdown().await.unwrap().is_none());
+            assert_eq!(
+                log.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|entry| *entry == "shutdown:1")
+                    .count(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn stop_reclaims_a_release_that_could_not_reach_the_owner() {
+        test_runtime().block_on(async {
+            let FakeHarness {
+                factory, controls, ..
+            } = fake_factory([FakeSpec {
+                object_id: 10,
+                object_serial: 100,
+                release: FakeRelease::OnPublish,
+            }]);
+            let mut actor =
+                spawn_with_factory_capacity(&tokio::runtime::Handle::current(), factory, 1);
+            actor.start(generation(1)).await.unwrap();
+            drain_initial(&mut actor, nonzero64(1)).await;
+
+            actor
+                .publish(nonzero64(1), frame(nonzero32(1)))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while actor.events.len() < 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("first release did not fill the owner event queue");
+            actor
+                .publish(nonzero64(1), frame(nonzero32(2)))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while controls.lock().unwrap()[0].capacity() < 16 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("second release was not handled by the actor");
+
+            let report = actor.stop(nonzero64(1)).await.unwrap();
+            assert_eq!(report.reclaimed_buffers.as_ref(), &[nonzero32(2)]);
+            assert!(actor.shutdown().await.unwrap().is_none());
         });
     }
 
