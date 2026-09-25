@@ -14,7 +14,7 @@ use crate::device_session_port::DeviceSessionStopReason;
 use crate::display::{
     AddedCastDisplayResources, AddedCastDisplaySnapshot, CastDisplayId, RemoveCastDisplayError,
 };
-use crate::display_state::{DisplayTopology, MediaState};
+use crate::display_state::{DisplayTopology, MediaStatus};
 use crate::kernel_display_port::{KernelDisplayEvent, KernelDisplayPort};
 use crate::manager::CastDisplaySlotLease;
 use crate::media_policy::{DisplayMediaPolicyActor, MediaPolicyEvent};
@@ -170,8 +170,7 @@ impl SlotRuntime {
                             let media_generation = snapshot.runtime.media_generation();
                             snapshot.runtime.observe_media(
                                 media_generation,
-                                MediaState::Failed,
-                                Some(diagnostic.clone()),
+                                MediaStatus::Failed(diagnostic.clone()),
                             );
                             snapshot.state_revision = snapshot.runtime.revision();
                         });
@@ -251,8 +250,7 @@ impl SlotRuntime {
                     let changed = self.state.send_if_modified(|snapshot| {
                         if !snapshot.runtime.observe_media(
                             media.media_generation(),
-                            media.state(),
-                            media.last_error().map(str::to_owned),
+                            media.status(),
                         ) {
                             return false;
                         }

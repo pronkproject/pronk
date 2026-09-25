@@ -1,4 +1,3 @@
-
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -17,7 +16,7 @@ use zbus::connection::{AuthMechanism, Builder};
 use zbus::Guid;
 
 use super::*;
-use crate::display_state::{ActiveRoute, DisplayTopology, MediaState, RouteTarget, RoutedMode};
+use crate::display_state::{ActiveRoute, DisplayTopology, MediaStatus, RouteTarget, RoutedMode};
 use crate::manager::ManagerActor;
 use crate::preparation::PreparedCastDevice;
 use crate::test_support::UnreachableKernelSessionProvider;
@@ -124,22 +123,22 @@ fn public_media_projection_coalesces_internal_phases() {
     let display_id = CastDisplayId::generate().unwrap();
     let mut snapshot = added_display_snapshot_with_audio(display_id, true);
     let cases = [
-        (MediaState::Idle, MediaSessionPhase::Inactive, 0),
-        (MediaState::StartingCapture, MediaSessionPhase::Starting, 1),
-        (MediaState::StartingMedia, MediaSessionPhase::Starting, 1),
-        (MediaState::Running, MediaSessionPhase::Running, 1),
-        (MediaState::Suspended, MediaSessionPhase::Suspended, 1),
-        (MediaState::Reconfiguring, MediaSessionPhase::Recovering, 1),
-        (MediaState::Reconnecting, MediaSessionPhase::Recovering, 1),
-        (MediaState::Stopping, MediaSessionPhase::Stopping, 1),
-        (MediaState::Failed, MediaSessionPhase::Failed, 1),
+        (MediaStatus::Idle, MediaSessionPhase::Inactive, 0),
+        (MediaStatus::StartingCapture, MediaSessionPhase::Starting, 1),
+        (MediaStatus::StartingMedia, MediaSessionPhase::Starting, 1),
+        (MediaStatus::Running, MediaSessionPhase::Running, 1),
+        (MediaStatus::Suspended, MediaSessionPhase::Suspended, 1),
+        (MediaStatus::Reconfiguring, MediaSessionPhase::Recovering, 1),
+        (MediaStatus::Reconnecting, MediaSessionPhase::Recovering, 1),
+        (MediaStatus::Stopping, MediaSessionPhase::Stopping, 1),
+        (
+            MediaStatus::Failed("transport failed".into()),
+            MediaSessionPhase::Failed,
+            1,
+        ),
     ];
     for (internal, public, generation) in cases {
-        snapshot.runtime.observe_media(
-            generation,
-            internal,
-            (internal == MediaState::Failed).then(|| "transport failed".into()),
-        );
+        snapshot.runtime.observe_media(generation, internal);
         snapshot.state_revision = snapshot.runtime.revision();
         let projected = public_media_session_state(&snapshot);
         projected.validate().unwrap();
@@ -150,8 +149,7 @@ fn public_media_projection_coalesces_internal_phases() {
 
     snapshot.runtime.observe_media(
         1,
-        MediaState::Failed,
-        Some(format!(
+        MediaStatus::Failed(format!(
             "\n{}é",
             "x".repeat(pronk_dbus::MAX_MEDIA_ERROR_BYTES)
         )),
@@ -164,7 +162,7 @@ fn public_media_projection_coalesces_internal_phases() {
 
     snapshot
         .runtime
-        .observe_media(1, MediaState::Failed, Some("\n\t".into()));
+        .observe_media(1, MediaStatus::Failed("\n\t".into()));
     snapshot.state_revision = snapshot.runtime.revision();
     let missing = public_media_session_state(&snapshot);
     missing.validate().unwrap();
@@ -390,7 +388,7 @@ async fn lifecycle_events_register_signal_and_remove_cast_display_objects() {
 
     changed_snapshot
         .runtime
-        .observe_media(1, crate::display_state::MediaState::Running, None);
+        .observe_media(1, MediaStatus::Running);
     changed_snapshot.state_revision = changed_snapshot.runtime.revision();
     let expected_running = public_media_session_state(&changed_snapshot);
     event_tx

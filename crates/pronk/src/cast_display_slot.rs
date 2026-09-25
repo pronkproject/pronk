@@ -18,7 +18,7 @@ use crate::display::{
     AddedCastDisplay, AddedCastDisplayResources, AddedCastDisplaySnapshot, CastDisplayId,
     RemoveCastDisplayError,
 };
-use crate::display_state::{DisplayGrantState, DisplayRuntimeState, DisplayTopology, MediaState};
+use crate::display_state::{DisplayGrantState, DisplayRuntimeState, DisplayTopology, MediaStatus};
 use crate::kernel_display_port::KernelDisplayEvent;
 use crate::media_policy::MediaPolicyInput;
 use crate::media_session::MediaRoute;
@@ -347,11 +347,9 @@ fn publish_media_failure(
 ) {
     state.send_modify(|snapshot| {
         let media_generation = snapshot.runtime.media_generation();
-        snapshot.runtime.observe_media(
-            media_generation,
-            MediaState::Failed,
-            Some(diagnostic.into()),
-        );
+        snapshot
+            .runtime
+            .observe_media(media_generation, MediaStatus::Failed(diagnostic.into()));
         snapshot.state_revision = snapshot.runtime.revision();
     });
     publish(state, events);
@@ -413,8 +411,7 @@ fn apply_kernel_event(
             let media_generation = snapshot.runtime.media_generation();
             snapshot.runtime.observe_media(
                 media_generation,
-                MediaState::Failed,
-                Some("CastKMS grant was revoked".into()),
+                MediaStatus::Failed("CastKMS grant was revoked".into()),
             );
             snapshot.state_revision = snapshot.runtime.revision();
             true
@@ -427,7 +424,7 @@ fn apply_kernel_event(
             if media_generation.is_none_or(|generation| generation.get() == current) {
                 snapshot
                     .runtime
-                    .observe_media(current, MediaState::Failed, Some(error));
+                    .observe_media(current, MediaStatus::Failed(error));
                 snapshot.state_revision = snapshot.runtime.revision();
                 true
             } else {

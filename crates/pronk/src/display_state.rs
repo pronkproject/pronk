@@ -81,14 +81,49 @@ pub enum MediaState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaStatus {
+    Idle,
+    StartingCapture,
+    StartingMedia,
+    Running,
+    Suspended,
+    Reconfiguring,
+    Reconnecting,
+    Stopping,
+    Failed(String),
+}
+
+impl MediaStatus {
+    pub fn state(&self) -> MediaState {
+        match self {
+            Self::Idle => MediaState::Idle,
+            Self::StartingCapture => MediaState::StartingCapture,
+            Self::StartingMedia => MediaState::StartingMedia,
+            Self::Running => MediaState::Running,
+            Self::Suspended => MediaState::Suspended,
+            Self::Reconfiguring => MediaState::Reconfiguring,
+            Self::Reconnecting => MediaState::Reconnecting,
+            Self::Stopping => MediaState::Stopping,
+            Self::Failed(_) => MediaState::Failed,
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayRuntimeState {
     revision: u64,
     route_generation: u64,
     attachment: AttachmentState,
     route: RouteState,
     media_generation: u64,
-    media: MediaState,
-    last_error: Option<String>,
+    media: MediaStatus,
 }
 
 impl DisplayRuntimeState {
@@ -108,10 +143,10 @@ impl DisplayRuntimeState {
         self.media_generation
     }
     pub fn media(&self) -> MediaState {
-        self.media
+        self.media.state()
     }
     pub fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
+        self.media.error()
     }
 
     pub fn attached(initial_revision: u64) -> Self {
@@ -121,8 +156,7 @@ impl DisplayRuntimeState {
             attachment: AttachmentState::Attached,
             route: RouteState::Disabled,
             media_generation: 0,
-            media: MediaState::Idle,
-            last_error: None,
+            media: MediaStatus::Idle,
         }
     }
 
@@ -151,24 +185,15 @@ impl DisplayRuntimeState {
         true
     }
 
-    pub fn observe_media(
-        &mut self,
-        generation: u64,
-        state: MediaState,
-        last_error: Option<String>,
-    ) -> bool {
+    pub fn observe_media(&mut self, generation: u64, status: MediaStatus) -> bool {
         if generation < self.media_generation {
             return false;
         }
-        if self.media_generation == generation
-            && self.media == state
-            && self.last_error == last_error
-        {
+        if self.media_generation == generation && self.media == status {
             return false;
         }
         self.media_generation = generation;
-        self.media = state;
-        self.last_error = last_error;
+        self.media = status;
         self.advance();
         true
     }
@@ -251,14 +276,14 @@ mod tests {
     fn detachment_clears_an_active_route_but_not_child_media_by_fiat() {
         let mut state = DisplayRuntimeState::attached(1);
         state.observe_topology(active_topology(1920));
-        state.observe_media(1, MediaState::Running, None);
+        state.observe_media(1, MediaStatus::Running);
         let revision = state.revision;
 
         assert!(state.observe_topology(DisplayTopology::Detached));
         assert_eq!(state.attachment, AttachmentState::Detached);
         assert_eq!(state.route, RouteState::Disabled);
         assert_eq!(state.media_generation, 1);
-        assert_eq!(state.media, MediaState::Running);
+        assert_eq!(state.media(), MediaState::Running);
         assert_eq!(state.revision, revision + 1);
         assert_eq!(state.route_generation, 2);
     }
@@ -266,20 +291,20 @@ mod tests {
     #[test]
     fn media_errors_are_cleared_by_a_successful_transition() {
         let mut state = DisplayRuntimeState::attached(1);
-        assert!(state.observe_media(1, MediaState::Failed, Some("network lost".into())));
-        assert!(state.observe_media(2, MediaState::StartingCapture, None));
+        assert!(state.observe_media(1, MediaStatus::Failed("network lost".into())));
+        assert!(state.observe_media(2, MediaStatus::StartingCapture));
         assert_eq!(state.media_generation, 2);
-        assert_eq!(state.last_error, None);
-        assert!(!state.observe_media(2, MediaState::StartingCapture, None));
+        assert_eq!(state.last_error(), None);
+        assert!(!state.observe_media(2, MediaStatus::StartingCapture));
     }
 
     #[test]
     fn older_media_generations_cannot_replace_a_newer_projection() {
         let mut state = DisplayRuntimeState::attached(1);
-        state.observe_media(2, MediaState::Running, None);
+        state.observe_media(2, MediaStatus::Running);
         let revision = state.revision();
 
-        assert!(!state.observe_media(1, MediaState::Failed, Some("stale".into())));
+        assert!(!state.observe_media(1, MediaStatus::Failed("stale".into())));
         assert_eq!(state.media_generation(), 2);
         assert_eq!(state.media(), MediaState::Running);
         assert_eq!(state.revision(), revision);

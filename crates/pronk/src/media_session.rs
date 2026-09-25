@@ -17,7 +17,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::display_state::{DisplayRuntimeState, MediaState, RouteState, RouteTarget, RoutedMode};
+use crate::display_state::{
+    DisplayRuntimeState, MediaState, MediaStatus, RouteState, RouteTarget, RoutedMode,
+};
 
 // Bounds queued control work to a small, explicit amount while leaving room
 // for concurrent policy, route, and user-control edges.
@@ -120,6 +122,19 @@ impl MediaSessionSnapshot {
             MediaPhase::Reconfiguring(_) => MediaState::Reconfiguring,
             MediaPhase::Stopping => MediaState::Stopping,
             MediaPhase::Failed { .. } => MediaState::Failed,
+        }
+    }
+
+    pub fn status(&self) -> MediaStatus {
+        match &self.phase {
+            MediaPhase::Idle => MediaStatus::Idle,
+            MediaPhase::StartingCapture(_) => MediaStatus::StartingCapture,
+            MediaPhase::StartingMedia(_) => MediaStatus::StartingMedia,
+            MediaPhase::Running(_) => MediaStatus::Running,
+            MediaPhase::Suspended(_) => MediaStatus::Suspended,
+            MediaPhase::Reconfiguring(_) => MediaStatus::Reconfiguring,
+            MediaPhase::Stopping => MediaStatus::Stopping,
+            MediaPhase::Failed { error, .. } => MediaStatus::Failed(error.clone()),
         }
     }
 
