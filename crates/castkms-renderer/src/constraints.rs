@@ -19,22 +19,19 @@ const FIXED_SCALE: u32 = 1 << 16;
 
 /// Storage provenance accepted for one exact format tuple.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StorageProvenance {
-    native: bool,
-    imported: bool,
+pub enum StorageProvenance {
+    Native,
+    Imported,
+    Both,
 }
 
 impl StorageProvenance {
-    pub const fn new(native: bool, imported: bool) -> Self {
-        Self { native, imported }
-    }
-
     pub const fn native(self) -> bool {
-        self.native
+        matches!(self, Self::Native | Self::Both)
     }
 
     pub const fn imported(self) -> bool {
-        self.imported
+        matches!(self, Self::Imported | Self::Both)
     }
 }
 
@@ -66,7 +63,6 @@ impl ConstraintsFormat {
     ) -> io::Result<Self> {
         if fourcc == 0
             || memory_plane_count.get() > 4
-            || (!provenance.native && !provenance.imported)
             || !pitch_alignment.get().is_power_of_two()
             || !offset_alignment.get().is_power_of_two()
             || max_pitch < pitch_alignment
@@ -144,7 +140,7 @@ impl RendererConstraints {
             DRM_FORMAT_XRGB8888,
             FormatModifier::Explicit(DRM_FORMAT_MOD_LINEAR),
             NonZeroU32::new(1).expect("one memory plane is nonzero"),
-            StorageProvenance::new(true, true),
+            StorageProvenance::Both,
             NonZeroU32::new(1).expect("unit pitch alignment is nonzero"),
             NonZeroU32::new(1).expect("unit offset alignment is nonzero"),
             NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
@@ -283,8 +279,8 @@ fn put_format(bytes: &mut Vec<u8>, format: ConstraintsFormat) {
         FormatModifier::Explicit(modifier) => (modifier, true),
     };
     put_u64(bytes, modifier);
-    let flags = (u32::from(format.provenance.native) * RENDERER_CONSTRAINTS_FORMAT_NATIVE)
-        | (u32::from(format.provenance.imported) * RENDERER_CONSTRAINTS_FORMAT_IMPORTED)
+    let flags = (u32::from(format.provenance.native()) * RENDERER_CONSTRAINTS_FORMAT_NATIVE)
+        | (u32::from(format.provenance.imported()) * RENDERER_CONSTRAINTS_FORMAT_IMPORTED)
         | (u32::from(explicit) * RENDERER_CONSTRAINTS_FORMAT_EXPLICIT_MODIFIER);
     put_u32(bytes, flags);
     put_u32(bytes, format.roles);
@@ -319,7 +315,7 @@ mod tests {
             DRM_FORMAT_XRGB8888,
             FormatModifier::Explicit(DRM_FORMAT_MOD_LINEAR),
             NonZeroU32::new(1).unwrap(),
-            StorageProvenance::new(true, true),
+            StorageProvenance::Both,
             NonZeroU32::new(4).unwrap(),
             NonZeroU32::new(4).unwrap(),
             NonZeroU32::new(65_536).unwrap(),
@@ -360,6 +356,35 @@ mod tests {
     }
 
     #[test]
+    fn storage_provenance_encodes_each_supported_origin() {
+        let output = Extent::new(1920, 1080).unwrap();
+        for (provenance, expected_flags) in [
+            (
+                StorageProvenance::Native,
+                RENDERER_CONSTRAINTS_FORMAT_NATIVE,
+            ),
+            (
+                StorageProvenance::Imported,
+                RENDERER_CONSTRAINTS_FORMAT_IMPORTED,
+            ),
+            (
+                StorageProvenance::Both,
+                RENDERER_CONSTRAINTS_FORMAT_NATIVE | RENDERER_CONSTRAINTS_FORMAT_IMPORTED,
+            ),
+        ] {
+            let mut format = format();
+            format.provenance = provenance;
+            let bytes = RendererConstraints::single_primary(output, format).encode();
+            let offset = RENDERER_CONSTRAINTS_HEADER_BYTES + 16;
+            let flags = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            assert_eq!(
+                flags & (RENDERER_CONSTRAINTS_FORMAT_NATIVE | RENDERER_CONSTRAINTS_FORMAT_IMPORTED),
+                expected_flags
+            );
+        }
+    }
+
+    #[test]
     fn output_color_constraints_are_bounded() {
         let constraints =
             RendererConstraints::single_primary(Extent::new(1920, 1080).unwrap(), format())
@@ -389,22 +414,12 @@ mod tests {
     }
 
     #[test]
-    fn storage_constraints_reject_unusable_tuples() {
+    fn storage_constraints_reject_invalid_modifier() {
         assert!(ConstraintsFormat::new(
             DRM_FORMAT_XRGB8888,
             FormatModifier::Explicit(DRM_FORMAT_MOD_INVALID),
             NonZeroU32::new(1).unwrap(),
-            StorageProvenance::new(true, false),
-            NonZeroU32::new(1).unwrap(),
-            NonZeroU32::new(1).unwrap(),
-            NonZeroU32::new(1).unwrap(),
-        )
-        .is_err());
-        assert!(ConstraintsFormat::new(
-            DRM_FORMAT_XRGB8888,
-            FormatModifier::Unspecified,
-            NonZeroU32::new(1).unwrap(),
-            StorageProvenance::new(false, false),
+            StorageProvenance::Native,
             NonZeroU32::new(1).unwrap(),
             NonZeroU32::new(1).unwrap(),
             NonZeroU32::new(1).unwrap(),
@@ -416,7 +431,7 @@ mod tests {
     fn primary_constraints_require_unique_storage_alternatives() {
         let output = Extent::new(1920, 1080).unwrap();
         let mut duplicate = format();
-        duplicate.provenance = StorageProvenance::new(true, false);
+        duplicate.provenance = StorageProvenance::Native;
         duplicate.pitch_alignment = NonZeroU32::new(8).unwrap();
         assert!(RendererConstraints::single_primary_formats(output, Box::new([])).is_err());
         assert!(RendererConstraints::single_primary_formats(

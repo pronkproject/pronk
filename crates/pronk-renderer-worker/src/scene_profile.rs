@@ -139,7 +139,7 @@ fn append_source_layout(
             fourcc,
             FormatModifier::Explicit(modifier),
             NonZeroU32::new(1).expect("one source plane is nonzero"),
-            StorageProvenance::new(false, true),
+            StorageProvenance::Imported,
             pixel_bytes,
             pixel_bytes,
             NonZeroU32::new(u32::MAX).expect("maximum pitch is nonzero"),
