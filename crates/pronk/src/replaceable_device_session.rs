@@ -72,10 +72,14 @@ impl DeviceSessionReplacementHandle {
     ) -> Result<DeviceSessionInstallationPermit<'_>, DeviceSessionReplacementError> {
         let retired = {
             let mut shared = self.shared.lock().await;
-            if shared.closed {
-                return Err(DeviceSessionReplacementError::Stopped);
-            }
-            let retired = shared.current.take();
+            let retired = match std::mem::replace(&mut shared.slot, SessionSlot::Vacant) {
+                SessionSlot::Active(session) => Some(session),
+                SessionSlot::Vacant => None,
+                SessionSlot::Closed => {
+                    shared.slot = SessionSlot::Closed;
+                    return Err(DeviceSessionReplacementError::Stopped);
+                }
+            };
             if let Some(media_generation) = retired
                 .as_ref()
                 .and_then(|session| session.media_generation)
@@ -119,7 +123,7 @@ impl DeviceSessionReplacementHandle {
             let mut shared = self.shared.lock().await;
             match shared.validate_install(session_generation) {
                 Ok(()) => {
-                    shared.current = Some(ActiveSession {
+                    shared.slot = SessionSlot::Active(ActiveSession {
                         session_generation,
                         media_generation: None,
                         session,
@@ -173,14 +177,13 @@ pub fn replaceable_device_session(
     DeviceSessionReplacementHandle,
 ) {
     let shared = Arc::new(Mutex::new(SharedState {
-        current: Some(ActiveSession {
+        slot: SessionSlot::Active(ActiveSession {
             session_generation: initial_session_generation,
             media_generation: None,
             session: initial_session,
         }),
         last_session_generation: initial_session_generation,
         retired_media_generations: BTreeSet::new(),
-        closed: false,
     }));
     (
         Box::new(ReplaceableDeviceSessionPort {
@@ -261,21 +264,28 @@ impl fmt::Debug for ActiveSession {
 
 #[derive(Debug)]
 struct SharedState {
-    current: Option<ActiveSession>,
+    slot: SessionSlot,
     last_session_generation: NonZeroU64,
     retired_media_generations: BTreeSet<NonZeroU64>,
-    closed: bool,
+}
+
+#[derive(Debug)]
+enum SessionSlot {
+    Active(ActiveSession),
+    Vacant,
+    Closed,
 }
 
 impl SharedState {
     fn validate_install(&self, generation: NonZeroU64) -> Result<(), InstallRejection> {
-        if self.closed {
-            return Err(InstallRejection::Stopped);
-        }
-        if let Some(current) = self.current.as_ref() {
-            return Err(InstallRejection::Occupied {
-                current: current.session_generation,
-            });
+        match &self.slot {
+            SessionSlot::Closed => return Err(InstallRejection::Stopped),
+            SessionSlot::Active(current) => {
+                return Err(InstallRejection::Occupied {
+                    current: current.session_generation,
+                });
+            }
+            SessionSlot::Vacant => {}
         }
         if generation <= self.last_session_generation {
             return Err(InstallRejection::StaleGeneration {
@@ -404,12 +414,11 @@ impl DeviceSessionPort for ReplaceableDeviceSessionPort {
     ) -> Result<(), DeviceSessionError> {
         let current = {
             let mut shared = self.shared.lock().await;
-            if shared.closed {
-                return Ok(());
-            }
-            shared.closed = true;
             shared.retired_media_generations.clear();
-            shared.current.take()
+            match std::mem::replace(&mut shared.slot, SessionSlot::Closed) {
+                SessionSlot::Active(session) => Some(session),
+                SessionSlot::Vacant | SessionSlot::Closed => None,
+            }
         };
         match current {
             Some(current) => current.session.stop(reason).await,
@@ -419,13 +428,13 @@ impl DeviceSessionPort for ReplaceableDeviceSessionPort {
 }
 
 fn live_session(shared: &mut SharedState) -> Result<&mut ActiveSession, DeviceSessionError> {
-    if shared.closed {
-        return Err(DeviceSessionError::new("Device-session owner has stopped"));
+    match &mut shared.slot {
+        SessionSlot::Active(session) => Ok(session),
+        SessionSlot::Vacant => Err(DeviceSessionError::new(
+            "no prepared Device session is installed",
+        )),
+        SessionSlot::Closed => Err(DeviceSessionError::new("Device-session owner has stopped")),
     }
-    shared
-        .current
-        .as_mut()
-        .ok_or_else(|| DeviceSessionError::new("no prepared Device session is installed"))
 }
 
 fn matching_session<'a>(
@@ -670,6 +679,37 @@ mod tests {
                 Call::Start("new", 5),
                 Call::StopMedia("new", 5),
                 Call::Stop("new", DeviceSessionStopReason::DisplayRemoved),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_owner_rejects_an_outstanding_installation_permit() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let (port, _control, mut replacement) =
+            replaceable_device_session(generation(1), session("old", &calls));
+        let permit = replacement.retire_current().await.unwrap();
+        port.stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .unwrap();
+
+        let error = permit
+            .install(DeviceSessionReplacement {
+                session_generation: generation(2),
+                session: session("new", &calls),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DeviceSessionReplacementError::Stopped));
+        assert!(matches!(
+            replacement.retire_current().await,
+            Err(DeviceSessionReplacementError::Stopped)
+        ));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                Call::Stop("old", DeviceSessionStopReason::DaemonShutdown),
+                Call::Stop("new", DeviceSessionStopReason::DaemonShutdown),
             ]
         );
     }
