@@ -51,6 +51,15 @@ pub enum DisplayTopology {
     Unknown,
 }
 
+impl DisplayTopology {
+    fn route(self) -> RouteState {
+        match self {
+            Self::Attached { route: Some(route) } => RouteState::Active(route),
+            Self::Attached { route: None } | Self::Detached | Self::Unknown => RouteState::Disabled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteState {
     Disabled,
@@ -120,8 +129,7 @@ impl MediaStatus {
 pub struct DisplayRuntimeState {
     revision: u64,
     route_generation: u64,
-    attachment: AttachmentState,
-    route: RouteState,
+    topology: DisplayTopology,
     media_generation: u64,
     media: MediaStatus,
 }
@@ -134,10 +142,14 @@ impl DisplayRuntimeState {
         self.route_generation
     }
     pub fn attachment(&self) -> AttachmentState {
-        self.attachment
+        match self.topology {
+            DisplayTopology::Attached { .. } => AttachmentState::Attached,
+            DisplayTopology::Detached => AttachmentState::Detached,
+            DisplayTopology::Unknown => AttachmentState::Unknown,
+        }
     }
     pub fn route(&self) -> RouteState {
-        self.route
+        self.topology.route()
     }
     pub fn media_generation(&self) -> u64 {
         self.media_generation
@@ -153,8 +165,7 @@ impl DisplayRuntimeState {
         Self {
             revision: initial_revision.max(1),
             route_generation: 0,
-            attachment: AttachmentState::Attached,
-            route: RouteState::Disabled,
+            topology: DisplayTopology::Attached { route: None },
             media_generation: 0,
             media: MediaStatus::Idle,
         }
@@ -165,22 +176,13 @@ impl DisplayRuntimeState {
     /// A non-attached connector can never retain an active route. Media is a
     /// separate child-actor projection and is not guessed from topology.
     pub fn observe_topology(&mut self, topology: DisplayTopology) -> bool {
-        let (attachment, route) = match topology {
-            DisplayTopology::Attached { route } => (
-                AttachmentState::Attached,
-                route.map_or(RouteState::Disabled, RouteState::Active),
-            ),
-            DisplayTopology::Detached => (AttachmentState::Detached, RouteState::Disabled),
-            DisplayTopology::Unknown => (AttachmentState::Unknown, RouteState::Disabled),
-        };
-        if self.attachment == attachment && self.route == route {
+        if self.topology == topology {
             return false;
         }
-        self.attachment = attachment;
-        if self.route != route {
+        if self.route() != topology.route() {
             self.route_generation = self.route_generation.saturating_add(1);
         }
-        self.route = route;
+        self.topology = topology;
         self.advance();
         true
     }
@@ -237,7 +239,7 @@ mod tests {
         assert!(state.observe_topology(active_topology(1920)));
         assert_eq!(state.revision, 11);
         assert_eq!(
-            state.route,
+            state.route(),
             RouteState::Active(ActiveRoute {
                 target: RouteTarget::new(NonZeroU32::new(7).unwrap()),
                 mode: RoutedMode {
@@ -280,12 +282,27 @@ mod tests {
         let revision = state.revision;
 
         assert!(state.observe_topology(DisplayTopology::Detached));
-        assert_eq!(state.attachment, AttachmentState::Detached);
-        assert_eq!(state.route, RouteState::Disabled);
+        assert_eq!(state.attachment(), AttachmentState::Detached);
+        assert_eq!(state.route(), RouteState::Disabled);
         assert_eq!(state.media_generation, 1);
         assert_eq!(state.media(), MediaState::Running);
         assert_eq!(state.revision, revision + 1);
         assert_eq!(state.route_generation, 2);
+    }
+
+    #[test]
+    fn attachment_changes_without_a_route_do_not_advance_route_generation() {
+        let mut state = DisplayRuntimeState::attached(1);
+        for topology in [
+            DisplayTopology::Detached,
+            DisplayTopology::Unknown,
+            DisplayTopology::Attached { route: None },
+        ] {
+            assert!(state.observe_topology(topology));
+            assert_eq!(state.route(), RouteState::Disabled);
+            assert_eq!(state.route_generation(), 0);
+        }
+        assert_eq!(state.attachment(), AttachmentState::Attached);
     }
 
     #[test]
