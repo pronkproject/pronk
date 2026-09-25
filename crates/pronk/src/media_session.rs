@@ -378,15 +378,17 @@ impl MediaSessionHandle {
         &self,
         make: impl FnOnce(oneshot::Sender<Result<(), MediaSessionActorError>>) -> CommandKind,
     ) -> Result<(), MediaSessionActorError> {
-        let request_generation = self.requests.begin_request()?;
-        let (response, reply) = oneshot::channel();
-        self.commands
-            .send(Command {
-                request_generation,
-                kind: make(response),
-            })
+        let permit = self
+            .commands
+            .reserve()
             .await
             .map_err(|_| MediaSessionActorError::Stopped)?;
+        let request_generation = self.requests.begin_request()?;
+        let (response, reply) = oneshot::channel();
+        permit.send(Command {
+            request_generation,
+            kind: make(response),
+        });
         reply.await.map_err(|_| MediaSessionActorError::Stopped)?
     }
 
@@ -961,6 +963,51 @@ mod tests {
         assert_eq!(requests.begin_request().unwrap(), 2);
         let stale = requests.install_phase(1);
         assert!(stale.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancelled_enqueue_preserves_the_installed_media_phase() {
+        let (commands, mut receiver) = mpsc::channel(1);
+        let (_state, snapshot) = watch::channel(MediaSessionSnapshot::idle());
+        let requests = Arc::new(RequestCoordinator::new());
+        assert_eq!(requests.begin_request().unwrap(), 1);
+        let installed = requests.install_phase(1);
+        let handle = MediaSessionHandle {
+            commands,
+            state: snapshot,
+            requests: Arc::clone(&requests),
+        };
+        let (response, _reply) = oneshot::channel();
+        handle
+            .commands
+            .send(Command {
+                request_generation: 1,
+                kind: CommandKind::Retry { response },
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), handle.deactivate())
+                .await
+                .is_err()
+        );
+        assert!(!installed.is_cancelled());
+        assert!(requests.is_current(1));
+
+        receiver.recv().await.unwrap();
+        let request = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.deactivate().await }
+        });
+        let queued = receiver.recv().await.unwrap();
+        assert_eq!(queued.request_generation, 2);
+        let CommandKind::Deactivate { response } = queued.kind else {
+            panic!("expected deactivate request");
+        };
+        response.send(Ok(())).unwrap();
+        request.await.unwrap().unwrap();
+        assert!(installed.is_cancelled());
     }
 
     #[tokio::test]
