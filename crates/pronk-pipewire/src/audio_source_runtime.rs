@@ -86,12 +86,12 @@ pub(crate) fn spawn(
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     send_startup(&supervisor_startup, Err(error.clone()));
-                    let _ = supervisor_events.blocking_send(AudioSourceEvent::Failed(error));
+                    report_terminal_error(&supervisor_events, error);
                 }
                 Err(_) => {
                     let error = AudioSourceRuntimeError::ThreadPanicked;
                     send_startup(&supervisor_startup, Err(error.clone()));
-                    let _ = supervisor_events.blocking_send(AudioSourceEvent::Failed(error));
+                    report_terminal_error(&supervisor_events, error);
                 }
             }
         })?;
@@ -103,6 +103,12 @@ pub(crate) fn spawn(
         startup,
         thread,
     })
+}
+
+fn report_terminal_error(events: &mpsc::Sender<AudioSourceEvent>, error: AudioSourceRuntimeError) {
+    // Shutdown joins this thread while retaining the receiver. A full queue
+    // still reports termination through channel closure after the thread exits.
+    let _ = events.try_send(AudioSourceEvent::Failed(error));
 }
 
 struct ThreadState {
@@ -898,6 +904,19 @@ fn pipewire_error(operation: &'static str, error: pw::Error) -> AudioSourceRunti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_error_does_not_wait_for_a_full_event_queue() {
+        let (events, _receiver) = mpsc::channel(1);
+        events.try_send(AudioSourceEvent::Stopped).unwrap();
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            report_terminal_error(&events, AudioSourceRuntimeError::ThreadPanicked);
+            let _ = done.send(());
+        });
+        wait.recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+    }
 
     #[test]
     fn audio_timeline_uses_monotonic_origin_and_sample_sequence() {

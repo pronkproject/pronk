@@ -87,12 +87,12 @@ pub(crate) fn spawn(
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     send_startup(&supervisor_startup, Err(error.clone()));
-                    let _ = supervisor_events.blocking_send(VideoSourceEvent::Failed(error));
+                    report_terminal_error(&supervisor_events, error);
                 }
                 Err(_) => {
                     let error = VideoSourceRuntimeError::ThreadPanicked;
                     send_startup(&supervisor_startup, Err(error.clone()));
-                    let _ = supervisor_events.blocking_send(VideoSourceEvent::Failed(error));
+                    report_terminal_error(&supervisor_events, error);
                 }
             }
         })?;
@@ -104,6 +104,12 @@ pub(crate) fn spawn(
         startup,
         thread,
     })
+}
+
+fn report_terminal_error(events: &mpsc::Sender<VideoSourceEvent>, error: VideoSourceRuntimeError) {
+    // Shutdown joins this thread while retaining the receiver. A full queue
+    // still reports termination through channel closure after the thread exits.
+    let _ = events.try_send(VideoSourceEvent::Failed(error));
 }
 
 struct RuntimeBuffer {
@@ -1336,6 +1342,19 @@ fn pipewire_error(operation: &'static str, error: pw::Error) -> VideoSourceRunti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_error_does_not_wait_for_a_full_event_queue() {
+        let (events, _receiver) = mpsc::channel(1);
+        events.try_send(VideoSourceEvent::Stopped).unwrap();
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            report_terminal_error(&events, VideoSourceRuntimeError::ThreadPanicked);
+            let _ = done.send(());
+        });
+        wait.recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+    }
 
     #[test]
     fn video_identity_does_not_require_a_kernel_grant_number() {
