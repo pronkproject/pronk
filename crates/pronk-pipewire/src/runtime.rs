@@ -115,8 +115,13 @@ fn report_terminal_error(events: &mpsc::Sender<VideoSourceEvent>, error: VideoSo
 
 struct RuntimeBuffer {
     descriptor: VideoBuffer,
-    pipewire_buffer: Option<NonNull<pw::sys::pw_buffer>>,
-    transport: Option<PipeWireBufferTransport>,
+    binding: Option<BufferBinding>,
+}
+
+#[derive(Clone, Copy)]
+struct BufferBinding {
+    raw: NonNull<pw::sys::pw_buffer>,
+    transport: PipeWireBufferTransport,
 }
 
 struct ThreadState {
@@ -149,8 +154,7 @@ impl ThreadState {
                 .into_iter()
                 .map(|descriptor| RuntimeBuffer {
                     descriptor,
-                    pipewire_buffer: None,
-                    transport: None,
+                    binding: None,
                 })
                 .collect(),
             tracker,
@@ -176,7 +180,7 @@ impl ThreadState {
 
     fn buffer_id_for_raw(&self, raw: *mut pw::sys::pw_buffer) -> Option<NonZeroU32> {
         self.buffers.iter().find_map(|buffer| {
-            (buffer.pipewire_buffer.map(NonNull::as_ptr) == Some(raw))
+            (buffer.binding.map(|binding| binding.raw.as_ptr()) == Some(raw))
                 .then_some(buffer.descriptor.id)
         })
     }
@@ -1021,9 +1025,12 @@ fn add_buffer(
     };
 
     unsafe { configure_spa_data(spa_buffer.as_ptr(), &runtime.descriptor, transport)? };
-    runtime.pipewire_buffer = Some(raw);
-    runtime.transport = Some(transport);
-    state.tracker.bind(buffer_id, transport)
+    state.tracker.bind(buffer_id, transport)?;
+    state
+        .buffer_mut(buffer_id)
+        .expect("descriptor exists for an unbound buffer")
+        .binding = Some(BufferBinding { raw, transport });
+    Ok(())
 }
 
 fn remove_buffer(
@@ -1040,8 +1047,7 @@ fn remove_buffer(
     let runtime = state
         .buffer_mut(buffer_id)
         .ok_or(VideoSourceRuntimeError::UnknownBuffer(buffer_id.get()))?;
-    runtime.pipewire_buffer = None;
-    runtime.transport = None;
+    runtime.binding = None;
     Ok(())
 }
 
@@ -1133,8 +1139,13 @@ fn process_returned_buffers(
         let runtime = state
             .buffer(buffer_id)
             .ok_or(VideoSourceRuntimeError::UnknownBuffer(buffer_id.get()))?;
-        let actual_release = match runtime.transport {
-            Some(PipeWireBufferTransport::SyncTimeline) => {
+        let binding = runtime
+            .binding
+            .ok_or(VideoSourceRuntimeError::InvalidPipeWireBuffer(
+                "dequeued unbound pw_buffer",
+            ))?;
+        let actual_release = match binding.transport {
+            PipeWireBufferTransport::SyncTimeline => {
                 let spa_buffer = unsafe { raw.as_ref().buffer };
                 let sync = unsafe { sync_meta(spa_buffer) }.ok_or(
                     VideoSourceRuntimeError::InvalidPipeWireBuffer(
@@ -1143,12 +1154,7 @@ fn process_returned_buffers(
                 )?;
                 NonZeroU64::new(unsafe { sync.as_ref().release_point })
             }
-            Some(PipeWireBufferTransport::ReadyBeforePublish) => None,
-            // A late process callback may still contain a buffer that the
-            // remove-buffer callback already unbound during consumer teardown.
-            // It no longer has an exported transport and cannot grant any
-            // ownership back to the capture actor.
-            None => continue,
+            PipeWireBufferTransport::ReadyBeforePublish => None,
         };
         let event = match state.tracker.returned(buffer_id, actual_release)? {
             BufferReturn::Initial {
@@ -1183,13 +1189,21 @@ fn publish_frame(
         .ok_or(VideoSourceRuntimeError::UnknownBuffer(
             frame.buffer_id.get(),
         ))?;
-    let raw = runtime
-        .pipewire_buffer
+    let binding = runtime
+        .binding
         .ok_or(VideoSourceRuntimeError::InvalidOwnership(
             frame.buffer_id.get(),
         ))?;
-    unsafe { fill_frame(raw.as_ptr(), &runtime.descriptor, runtime.transport, frame)? };
-    let result = unsafe { pw::sys::pw_stream_queue_buffer(stream.as_raw_ptr(), raw.as_ptr()) };
+    unsafe {
+        fill_frame(
+            binding.raw.as_ptr(),
+            &runtime.descriptor,
+            binding.transport,
+            frame,
+        )?
+    };
+    let result =
+        unsafe { pw::sys::pw_stream_queue_buffer(stream.as_raw_ptr(), binding.raw.as_ptr()) };
     if result < 0 {
         return Err(VideoSourceRuntimeError::PipeWire(format!(
             "queue PipeWire buffer returned {result}"
@@ -1201,7 +1215,7 @@ fn publish_frame(
 unsafe fn fill_frame(
     raw: *mut pw::sys::pw_buffer,
     descriptor: &VideoBuffer,
-    transport: Option<PipeWireBufferTransport>,
+    transport: PipeWireBufferTransport,
     frame: VideoFrame,
 ) -> Result<(), VideoSourceRuntimeError> {
     let pipewire_buffer = unsafe { raw.as_mut() }.ok_or(
@@ -1213,7 +1227,7 @@ unsafe fn fill_frame(
     )?;
     unsafe { fill_optional_frame_metadata(spa_buffer, frame)? };
 
-    if transport == Some(PipeWireBufferTransport::SyncTimeline) {
+    if transport == PipeWireBufferTransport::SyncTimeline {
         let point = frame
             .acquire_point
             .ok_or(VideoSourceRuntimeError::MissingAcquirePoint(
@@ -1572,7 +1586,7 @@ mod tests {
                 fill_frame(
                     &mut raw,
                     &descriptor,
-                    Some(PipeWireBufferTransport::ReadyBeforePublish),
+                    PipeWireBufferTransport::ReadyBeforePublish,
                     frame,
                 )
             }
