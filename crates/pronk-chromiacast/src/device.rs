@@ -463,32 +463,33 @@ async fn run_actor(context: DeviceTaskContext) {
         mut media,
         mut commands,
         mut owner_drop_signal,
-        mut feedback,
+        feedback,
         mut events,
     } = context;
     let mut control = None;
     let mut next_control_operation = 1_u64;
-    let mut feedback_open = true;
+    let mut feedback = Some(feedback);
     loop {
-        let next = if feedback_open {
-            tokio::select! {
-                biased;
-                _ = &mut owner_drop_signal => break,
-                command = commands.recv() => NextDeviceInput::Command(command),
-                changed = feedback.changed() => NextDeviceInput::Feedback(changed),
-            }
-        } else {
-            tokio::select! {
-                biased;
-                _ = &mut owner_drop_signal => break,
-                command = commands.recv() => NextDeviceInput::Command(command),
-            }
+        let next = tokio::select! {
+            biased;
+            _ = &mut owner_drop_signal => break,
+            command = commands.recv() => NextDeviceInput::Command(command),
+            changed = async {
+                match feedback.as_mut() {
+                    Some(receiver) => receiver.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => NextDeviceInput::Feedback(changed),
         };
         let command = match next {
             NextDeviceInput::Command(command) => command,
             NextDeviceInput::Feedback(Ok(())) => {
-                let feedback = feedback.borrow_and_update().clone();
-                match media.handle_feedback(feedback).await {
+                let snapshot = feedback
+                    .as_mut()
+                    .expect("open feedback subscription produced a change")
+                    .borrow_and_update()
+                    .clone();
+                match media.handle_feedback(snapshot).await {
                     Ok(media_events) => forward_media_events(&events, media_events),
                     Err(error) => {
                         events.send_fatal_error(DeviceFatalError {
@@ -502,7 +503,7 @@ async fn run_actor(context: DeviceTaskContext) {
                 continue;
             }
             NextDeviceInput::Feedback(Err(_)) => {
-                feedback_open = false;
+                feedback = None;
                 continue;
             }
         };
