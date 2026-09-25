@@ -572,29 +572,14 @@ async fn wait_for_retry(
             },
         )?;
         loop {
-            match commands.recv().await {
-                Some(SupervisorCommand::Retry(response)) => {
-                    let next_generation = next_generation(failed_generation)?;
-                    *reconnect_attempts = 0;
-                    let _ = response.send(Ok(()));
-                    return Ok(RetryAction::Retry(next_generation));
-                }
-                Some(SupervisorCommand::CreateSession { response, .. }) => {
-                    let _ = response.send(Err(BackendSessionError::BackendUnavailable));
-                }
-                Some(SupervisorCommand::Shutdown(response)) => {
-                    let report = BackendShutdownReport {
-                        last_connection_generation: last_connected_generation,
-                        graceful: true,
-                        errors: Vec::new(),
-                    };
-                    let _ = response.send(report);
-                    let _ = events.try_send(BackendSupervisorEvent::Stopped {
-                        last_connection_generation: last_connected_generation,
-                    });
-                    return Ok(RetryAction::Stop);
-                }
-                None => return Ok(RetryAction::Stop),
+            if let Some(action) = handle_waiting_command(
+                commands.recv().await,
+                RetryWaitPhase::Exhausted { failed_generation },
+                reconnect_attempts,
+                last_connected_generation,
+                events,
+            )? {
+                return Ok(action);
             }
         }
     }
@@ -616,30 +601,63 @@ async fn wait_for_retry(
     loop {
         tokio::select! {
             () = &mut retry_delay => return Ok(RetryAction::Retry(next_generation)),
-            command = commands.recv() => match command {
-                Some(SupervisorCommand::Retry(response)) => {
-                    *reconnect_attempts = 0;
-                    let _ = response.send(Ok(()));
-                    return Ok(RetryAction::Retry(next_generation));
+            command = commands.recv() => {
+                if let Some(action) = handle_waiting_command(
+                    command,
+                    RetryWaitPhase::Scheduled { next_generation },
+                    reconnect_attempts,
+                    last_connected_generation,
+                    events,
+                )? {
+                    return Ok(action);
                 }
-                Some(SupervisorCommand::CreateSession { response, .. }) => {
-                    let _ = response.send(Err(BackendSessionError::BackendUnavailable));
-                }
-                Some(SupervisorCommand::Shutdown(response)) => {
-                    let report = BackendShutdownReport {
-                        last_connection_generation: last_connected_generation,
-                        graceful: true,
-                        errors: Vec::new(),
-                    };
-                    let _ = response.send(report);
-                    let _ = events.try_send(BackendSupervisorEvent::Stopped {
-                        last_connection_generation: last_connected_generation,
-                    });
-                    return Ok(RetryAction::Stop);
-                }
-                None => return Ok(RetryAction::Stop),
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RetryWaitPhase {
+    Exhausted { failed_generation: u64 },
+    Scheduled { next_generation: u64 },
+}
+
+fn handle_waiting_command(
+    command: Option<SupervisorCommand>,
+    phase: RetryWaitPhase,
+    reconnect_attempts: &mut u32,
+    last_connected_generation: Option<u64>,
+    events: &mpsc::Sender<BackendSupervisorEvent>,
+) -> Result<Option<RetryAction>, SupervisorTaskError> {
+    match command {
+        Some(SupervisorCommand::Retry(response)) => {
+            let next_generation = match phase {
+                RetryWaitPhase::Exhausted { failed_generation } => {
+                    next_generation(failed_generation)?
+                }
+                RetryWaitPhase::Scheduled { next_generation } => next_generation,
+            };
+            *reconnect_attempts = 0;
+            let _ = response.send(Ok(()));
+            Ok(Some(RetryAction::Retry(next_generation)))
+        }
+        Some(SupervisorCommand::CreateSession { response, .. }) => {
+            let _ = response.send(Err(BackendSessionError::BackendUnavailable));
+            Ok(None)
+        }
+        Some(SupervisorCommand::Shutdown(response)) => {
+            let report = BackendShutdownReport {
+                last_connection_generation: last_connected_generation,
+                graceful: true,
+                errors: Vec::new(),
+            };
+            let _ = response.send(report);
+            let _ = events.try_send(BackendSupervisorEvent::Stopped {
+                last_connection_generation: last_connected_generation,
+            });
+            Ok(Some(RetryAction::Stop))
+        }
+        None => Ok(Some(RetryAction::Stop)),
     }
 }
 
