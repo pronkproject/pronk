@@ -370,7 +370,7 @@ fn public_display(display: &crate::display::AddedCastDisplaySnapshot) -> CastDis
         output_index: display.output.id.output_index,
         product_code: numeric_identity.product_code,
         serial: numeric_identity.serial,
-        attachment_state: public_attachment_state(display.runtime.attachment),
+        attachment_state: public_attachment_state(display.runtime.attachment()),
     }
 }
 
@@ -378,12 +378,12 @@ fn public_display_state(display: &crate::display::AddedCastDisplaySnapshot) -> C
     CastDisplayState {
         revision: display.state_revision,
         device: display.device.clone(),
-        attachment_state: public_attachment_state(display.runtime.attachment),
-        route_state: match display.runtime.route {
+        attachment_state: public_attachment_state(display.runtime.attachment()),
+        route_state: match display.runtime.route() {
             crate::display_state::RouteState::Disabled => DisplayRouteState::Disabled,
             crate::display_state::RouteState::Active(_) => DisplayRouteState::Active,
         },
-        routed_mode: match display.runtime.route {
+        routed_mode: match display.runtime.route() {
             crate::display_state::RouteState::Disabled => None,
             crate::display_state::RouteState::Active(route) => Some(RoutedDisplayMode {
                 width: route.mode.width,
@@ -398,7 +398,7 @@ fn public_display_state(display: &crate::display::AddedCastDisplaySnapshot) -> C
 fn public_media_session_state(
     display: &crate::display::AddedCastDisplaySnapshot,
 ) -> MediaSessionState {
-    let phase = match display.runtime.media {
+    let phase = match display.runtime.media() {
         crate::display_state::MediaState::Idle => MediaSessionPhase::Inactive,
         crate::display_state::MediaState::StartingCapture
         | crate::display_state::MediaState::StartingMedia => MediaSessionPhase::Starting,
@@ -410,14 +410,14 @@ fn public_media_session_state(
         crate::display_state::MediaState::Failed => MediaSessionPhase::Failed,
     };
     let error = if phase == MediaSessionPhase::Failed {
-        public_media_error(display.runtime.last_error.as_deref())
+        public_media_error(display.runtime.last_error())
     } else {
         String::new()
     };
     let state = MediaSessionState {
         revision: display.state_revision,
         phase,
-        media_generation: display.runtime.media_generation,
+        media_generation: display.runtime.media_generation(),
         audio_enabled: display.prepared.audio_enabled(),
         error,
     };
@@ -765,9 +765,7 @@ mod tests {
     use zbus::Guid;
 
     use super::*;
-    use crate::display_state::{
-        ActiveRoute, AttachmentState, DisplayTopology, MediaState, RouteTarget, RoutedMode,
-    };
+    use crate::display_state::{ActiveRoute, DisplayTopology, MediaState, RouteTarget, RoutedMode};
     use crate::manager::ManagerActor;
     use crate::preparation::PreparedCastDevice;
     use crate::test_support::UnreachableKernelSessionProvider;
@@ -887,11 +885,12 @@ mod tests {
             (MediaState::Failed, MediaSessionPhase::Failed, 1),
         ];
         for (internal, public, generation) in cases {
-            snapshot.runtime.media = internal;
-            snapshot.runtime.media_generation = generation;
-            snapshot.runtime.last_error =
-                (internal == MediaState::Failed).then(|| "transport failed".into());
-            snapshot.state_revision = snapshot.state_revision.saturating_add(1);
+            snapshot.runtime.observe_media(
+                generation,
+                internal,
+                (internal == MediaState::Failed).then(|| "transport failed".into()),
+            );
+            snapshot.state_revision = snapshot.runtime.revision();
             let projected = public_media_session_state(&snapshot);
             projected.validate().unwrap();
             assert_eq!(projected.phase, public);
@@ -899,20 +898,24 @@ mod tests {
             assert!(projected.audio_enabled);
         }
 
-        snapshot.runtime.media = MediaState::Failed;
-        snapshot.runtime.media_generation = 0;
-        snapshot.runtime.last_error = Some(format!(
-            "\n{}é",
-            "x".repeat(pronk_dbus::MAX_MEDIA_ERROR_BYTES)
-        ));
-        snapshot.state_revision = snapshot.state_revision.saturating_add(1);
+        snapshot.runtime.observe_media(
+            1,
+            MediaState::Failed,
+            Some(format!(
+                "\n{}é",
+                "x".repeat(pronk_dbus::MAX_MEDIA_ERROR_BYTES)
+            )),
+        );
+        snapshot.state_revision = snapshot.runtime.revision();
         let bounded = public_media_session_state(&snapshot);
         bounded.validate().unwrap();
         assert_eq!(bounded.error.len(), pronk_dbus::MAX_MEDIA_ERROR_BYTES);
         assert!(!bounded.error.chars().any(char::is_control));
 
-        snapshot.runtime.last_error = Some("\n\t".into());
-        snapshot.state_revision = snapshot.state_revision.saturating_add(1);
+        snapshot
+            .runtime
+            .observe_media(1, MediaState::Failed, Some("\n\t".into()));
+        snapshot.state_revision = snapshot.runtime.revision();
         let missing = public_media_session_state(&snapshot);
         missing.validate().unwrap();
         assert_eq!(
@@ -1101,19 +1104,20 @@ mod tests {
         changed_snapshot.device.display_name = "Living Room TV renamed".into();
         changed_snapshot.device.availability = DeviceAvailability::Unavailable;
         changed_snapshot.device.device_revision = 2;
-        changed_snapshot.runtime.observe_topology(DisplayTopology {
-            attachment: AttachmentState::Attached,
-            route: Some(ActiveRoute {
-                target: RouteTarget::new(std::num::NonZeroU32::new(19).unwrap()),
-                mode: RoutedMode {
-                    width: 1920,
-                    height: 1080,
-                    refresh_millihz: 60_000,
-                    flags: 0,
-                },
-            }),
-        });
-        changed_snapshot.state_revision = changed_snapshot.runtime.revision;
+        changed_snapshot
+            .runtime
+            .observe_topology(DisplayTopology::Attached {
+                route: Some(ActiveRoute {
+                    target: RouteTarget::new(std::num::NonZeroU32::new(19).unwrap()),
+                    mode: RoutedMode {
+                        width: 1920,
+                        height: 1080,
+                        refresh_millihz: 60_000,
+                        flags: 0,
+                    },
+                }),
+            });
+        changed_snapshot.state_revision = changed_snapshot.runtime.revision();
         let changed_info = public_display(&changed_snapshot);
         let changed_state = public_display_state(&changed_snapshot);
         event_tx
@@ -1137,7 +1141,7 @@ mod tests {
         changed_snapshot
             .runtime
             .observe_media(1, crate::display_state::MediaState::Running, None);
-        changed_snapshot.state_revision = changed_snapshot.runtime.revision;
+        changed_snapshot.state_revision = changed_snapshot.runtime.revision();
         let expected_running = public_media_session_state(&changed_snapshot);
         event_tx
             .send(LifecycleEvent::DisplayStateChanged(Box::new(

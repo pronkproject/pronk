@@ -723,16 +723,12 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
                 .into_iter()
                 .find(|display| display.display_id == operation.display_id())
             {
-                match display.runtime.media {
+                match display.runtime.media() {
                     MediaState::Running => break Ok(display),
                     MediaState::Failed => {
                         bail!(
                             "production media failed: {}",
-                            display
-                                .runtime
-                                .last_error
-                                .as_deref()
-                                .unwrap_or("no diagnostic")
+                            display.runtime.last_error().unwrap_or("no diagnostic")
                         );
                     }
                     _ => {}

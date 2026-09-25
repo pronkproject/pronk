@@ -12,7 +12,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::display_state::{
-    ActiveRoute, AttachmentState, DisplayGrantState, DisplayTopology, RouteTarget, RoutedMode,
+    ActiveRoute, DisplayGrantState, DisplayTopology, RouteTarget, RoutedMode,
 };
 use crate::kernel_display_port::{
     KernelDisplayError, KernelDisplayEvent, KernelDisplayMetadata, KernelDisplayObservation,
@@ -208,10 +208,7 @@ fn classify_capture_error(
 
 fn unavailable_observation() -> KernelDisplayObservation {
     KernelDisplayObservation {
-        topology: DisplayTopology {
-            attachment: AttachmentState::Attached,
-            route: None,
-        },
+        topology: DisplayTopology::Attached { route: None },
         grant_state: DisplayGrantState::Pending,
     }
 }
@@ -234,8 +231,7 @@ fn active_observation(
         ));
     }
     Ok(KernelDisplayObservation {
-        topology: DisplayTopology {
-            attachment: AttachmentState::Attached,
+        topology: DisplayTopology::Attached {
             route: Some(ActiveRoute {
                 target: RouteTarget::new(crtc_id),
                 mode: RoutedMode {
@@ -336,7 +332,9 @@ mod tests {
             active_observation(&modes(), NonZeroU32::new(17).unwrap(), 1280, 720, 59_940, 5)
                 .unwrap();
         assert_eq!(observation.grant_state, DisplayGrantState::Active);
-        let route = observation.topology.route.unwrap();
+        let DisplayTopology::Attached { route: Some(route) } = observation.topology else {
+            panic!("active observation must have a route");
+        };
         assert_eq!(route.target.get(), 17);
         assert_eq!(route.mode.refresh_millihz, 59_940);
         assert_eq!(route.mode.flags, 5);

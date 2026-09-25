@@ -39,11 +39,11 @@ pub struct MediaRoute {
 
 impl MediaRoute {
     pub fn from_display_state(state: &DisplayRuntimeState) -> Option<Self> {
-        let RouteState::Active(route) = state.route else {
+        let RouteState::Active(route) = state.route() else {
             return None;
         };
-        (state.route_generation != 0).then_some(Self {
-            route_generation: state.route_generation,
+        (state.route_generation() != 0).then_some(Self {
+            route_generation: state.route_generation(),
             target: route.target,
             mode: route.mode,
         })
@@ -74,21 +74,88 @@ pub enum MediaStopReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaSessionSnapshot {
-    pub revision: u64,
-    pub media_generation: u64,
-    pub state: MediaState,
-    pub route: Option<MediaRoute>,
-    pub last_error: Option<String>,
+    revision: u64,
+    media_generation: u64,
+    phase: MediaPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaPhase {
+    Idle,
+    StartingCapture(MediaRoute),
+    StartingMedia(MediaRoute),
+    Running(MediaRoute),
+    Suspended(MediaRoute),
+    Reconfiguring(MediaRoute),
+    Stopping,
+    Failed {
+        route: Option<MediaRoute>,
+        error: String,
+    },
 }
 
 impl MediaSessionSnapshot {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn media_generation(&self) -> u64 {
+        self.media_generation
+    }
     fn idle() -> Self {
         Self {
             revision: 1,
             media_generation: 0,
-            state: MediaState::Idle,
-            route: None,
-            last_error: None,
+            phase: MediaPhase::Idle,
+        }
+    }
+
+    pub fn state(&self) -> MediaState {
+        match self.phase {
+            MediaPhase::Idle => MediaState::Idle,
+            MediaPhase::StartingCapture(_) => MediaState::StartingCapture,
+            MediaPhase::StartingMedia(_) => MediaState::StartingMedia,
+            MediaPhase::Running(_) => MediaState::Running,
+            MediaPhase::Suspended(_) => MediaState::Suspended,
+            MediaPhase::Reconfiguring(_) => MediaState::Reconfiguring,
+            MediaPhase::Stopping => MediaState::Stopping,
+            MediaPhase::Failed { .. } => MediaState::Failed,
+        }
+    }
+
+    pub fn route(&self) -> Option<MediaRoute> {
+        match self.phase {
+            MediaPhase::StartingCapture(route)
+            | MediaPhase::StartingMedia(route)
+            | MediaPhase::Running(route)
+            | MediaPhase::Suspended(route)
+            | MediaPhase::Reconfiguring(route) => Some(route),
+            MediaPhase::Failed { route, .. } => route,
+            MediaPhase::Idle | MediaPhase::Stopping => None,
+        }
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        match &self.phase {
+            MediaPhase::Failed { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(state: MediaState, route: Option<MediaRoute>) -> Self {
+        let phase = match (state, route) {
+            (MediaState::Idle, None) => MediaPhase::Idle,
+            (MediaState::Running, Some(route)) => MediaPhase::Running(route),
+            (MediaState::Failed, route) => MediaPhase::Failed {
+                route,
+                error: "test failure".into(),
+            },
+            _ => panic!("invalid test media phase"),
+        };
+        Self {
+            revision: 1,
+            media_generation: u64::from(route.is_some()),
+            phase,
         }
     }
 }
@@ -466,8 +533,10 @@ async fn run_actor(
             }
             CommandKind::Retry { response } => {
                 let snapshot = state.borrow().clone();
-                let result = match (snapshot.state, snapshot.route) {
-                    (MediaState::Failed, Some(route)) => {
+                let result = match snapshot.phase {
+                    MediaPhase::Failed {
+                        route: Some(route), ..
+                    } => {
                         activate(
                             &state,
                             &cancellation,
@@ -478,7 +547,7 @@ async fn run_actor(
                         )
                         .await
                     }
-                    _ => Err(MediaSessionActorError::RetryUnavailable(snapshot.state)),
+                    _ => Err(MediaSessionActorError::RetryUnavailable(snapshot.state())),
                 };
                 let _ = response.send(result);
             }
@@ -528,12 +597,13 @@ async fn report_external_failure(
             MAX_ERROR_BYTES,
         ),
     };
-    set_state(
+    set_phase(
         state,
-        MediaState::Failed,
-        snapshot.route,
+        MediaPhase::Failed {
+            route: snapshot.route(),
+            error: diagnostic,
+        },
         None,
-        Some(diagnostic),
     );
     cleanup
 }
@@ -589,14 +659,14 @@ async fn activate(
         return Err(MediaSessionActorError::InvalidRouteGeneration);
     }
     let current = state.borrow().clone();
-    if current.state == MediaState::Running && current.route == Some(route) {
+    if current.phase == MediaPhase::Running(route) {
         return Ok(());
     }
-    if current.state == MediaState::Failed {
+    if current.state() == MediaState::Failed {
         // A failed phase may have left protocol authority ambiguous even when
         // its first rollback also failed.  Retry the generation-matched
         // idempotent cleanup before minting a fresh media generation.
-        set_state(state, MediaState::Reconfiguring, Some(route), None, None);
+        set_phase(state, MediaPhase::Reconfiguring(route), None);
         if let Err(error) = run_stop(
             state,
             driver,
@@ -609,8 +679,8 @@ async fn activate(
             fail(state, Some(route), &error);
             return Err(error);
         }
-    } else if current.state != MediaState::Idle {
-        set_state(state, MediaState::Reconfiguring, Some(route), None, None);
+    } else if current.state() != MediaState::Idle {
+        set_phase(state, MediaPhase::Reconfiguring(route), None);
         if let Err(error) = run_stop(
             state,
             driver,
@@ -634,13 +704,7 @@ async fn activate(
         media_generation: generation,
         route,
     };
-    set_state(
-        state,
-        MediaState::StartingCapture,
-        Some(route),
-        Some(generation),
-        None,
-    );
+    set_phase(state, MediaPhase::StartingCapture(route), Some(generation));
     let phase_cancellation = cancellation.requests.install_phase(request_generation);
     if let Err(error) = run_phase(
         policy,
@@ -654,7 +718,7 @@ async fn activate(
         return Err(error);
     }
 
-    set_state(state, MediaState::StartingMedia, Some(route), None, None);
+    set_phase(state, MediaPhase::StartingMedia(route), None);
     let phase_cancellation = cancellation.requests.install_phase(request_generation);
     if let Err(error) = run_phase(
         policy,
@@ -668,7 +732,7 @@ async fn activate(
         return Err(error);
     }
 
-    set_state(state, MediaState::Running, Some(route), None, None);
+    set_phase(state, MediaPhase::Running(route), None);
     Ok(())
 }
 
@@ -681,12 +745,11 @@ async fn suspend(
     reason: MediaSuspendReason,
 ) -> Result<(), MediaSessionActorError> {
     let snapshot = state.borrow().clone();
-    if snapshot.state == MediaState::Suspended {
-        return Ok(());
-    }
-    if snapshot.state != MediaState::Running {
-        return Err(MediaSessionActorError::SuspendUnavailable(snapshot.state));
-    }
+    let route = match snapshot.phase {
+        MediaPhase::Suspended(_) => return Ok(()),
+        MediaPhase::Running(route) => route,
+        _ => return Err(MediaSessionActorError::SuspendUnavailable(snapshot.state())),
+    };
     let phase_cancellation = cancellation.requests.install_phase(request_generation);
     let result = run_phase(
         policy,
@@ -697,11 +760,11 @@ async fn suspend(
     .await;
     match result {
         Ok(()) => {
-            set_state(state, MediaState::Suspended, snapshot.route, None, None);
+            set_phase(state, MediaPhase::Suspended(route), None);
             Ok(())
         }
         Err(error) => {
-            fail(state, snapshot.route, &error);
+            fail(state, Some(route), &error);
             Err(error)
         }
     }
@@ -714,14 +777,14 @@ async fn stop_to_idle(
     reason: MediaStopReason,
     cancellation: CancellationToken,
 ) -> Result<(), MediaSessionActorError> {
-    if state.borrow().state == MediaState::Idle {
-        set_state(state, MediaState::Idle, None, None, None);
+    if state.borrow().state() == MediaState::Idle {
+        set_phase(state, MediaPhase::Idle, None);
         return Ok(());
     }
-    set_state(state, MediaState::Stopping, None, None, None);
+    set_phase(state, MediaPhase::Stopping, None);
     match run_stop(state, driver, policy, reason, cancellation).await {
         Ok(()) => {
-            set_state(state, MediaState::Idle, None, None, None);
+            set_phase(state, MediaPhase::Idle, None);
             Ok(())
         }
         Err(error) => {
@@ -778,12 +841,13 @@ async fn rollback_after_start_failure(
             MAX_ERROR_BYTES,
         ),
     };
-    set_state(
+    set_phase(
         state,
-        MediaState::Failed,
-        Some(request.route),
+        MediaPhase::Failed {
+            route: Some(request.route),
+            error: diagnostic,
+        },
         None,
-        Some(diagnostic),
     );
 }
 
@@ -826,36 +890,29 @@ fn fail(
     route: Option<MediaRoute>,
     error: &MediaSessionActorError,
 ) {
-    set_state(
+    set_phase(
         state,
-        MediaState::Failed,
-        route,
+        MediaPhase::Failed {
+            route,
+            error: bounded_text(error.to_string(), MAX_ERROR_BYTES),
+        },
         None,
-        Some(bounded_text(error.to_string(), MAX_ERROR_BYTES)),
     );
 }
 
-fn set_state(
+fn set_phase(
     state: &watch::Sender<MediaSessionSnapshot>,
-    media: MediaState,
-    route: Option<MediaRoute>,
+    phase: MediaPhase,
     generation: Option<u64>,
-    last_error: Option<String>,
 ) {
     state.send_modify(|snapshot| {
         let generation = generation.unwrap_or(snapshot.media_generation);
-        if snapshot.state == media
-            && snapshot.route == route
-            && snapshot.media_generation == generation
-            && snapshot.last_error == last_error
-        {
+        if snapshot.phase == phase && snapshot.media_generation == generation {
             return;
         }
         snapshot.revision = snapshot.revision.saturating_add(1);
-        snapshot.state = media;
-        snapshot.route = route;
+        snapshot.phase = phase;
         snapshot.media_generation = generation;
-        snapshot.last_error = last_error;
     });
 }
 
@@ -1023,12 +1080,11 @@ mod tests {
 
     #[test]
     fn active_display_state_becomes_a_generation_bound_media_route() {
-        use crate::display_state::{ActiveRoute, AttachmentState, DisplayTopology};
+        use crate::display_state::{ActiveRoute, DisplayTopology};
 
         let mut state = DisplayRuntimeState::attached(1);
         assert_eq!(MediaRoute::from_display_state(&state), None);
-        state.observe_topology(DisplayTopology {
-            attachment: AttachmentState::Attached,
+        state.observe_topology(DisplayTopology::Attached {
             route: Some(ActiveRoute {
                 target: RouteTarget::new(std::num::NonZeroU32::new(7).unwrap()),
                 mode: route(1, 1920).mode,
@@ -1045,10 +1101,10 @@ mod tests {
         let handle = actor.handle();
 
         handle.activate(route(1, 1920)).await.unwrap();
-        assert_eq!(handle.snapshot().state, MediaState::Running);
+        assert_eq!(handle.snapshot().state(), MediaState::Running);
         assert_eq!(handle.snapshot().media_generation, 1);
         handle.deactivate().await.unwrap();
-        assert_eq!(handle.snapshot().state, MediaState::Idle);
+        assert_eq!(handle.snapshot().state(), MediaState::Idle);
         assert_eq!(
             driver.calls(),
             vec![
@@ -1076,9 +1132,9 @@ mod tests {
         handle.activate(route(1, 1920)).await.unwrap();
         handle.activate(route(2, 1280)).await.unwrap();
 
-        assert_eq!(handle.snapshot().state, MediaState::Running);
+        assert_eq!(handle.snapshot().state(), MediaState::Running);
         assert_eq!(handle.snapshot().media_generation, 2);
-        assert_eq!(handle.snapshot().route, Some(route(2, 1280)));
+        assert_eq!(handle.snapshot().route(), Some(route(2, 1280)));
         assert_eq!(
             driver.calls(),
             vec![
@@ -1112,16 +1168,15 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(handle.snapshot().state, MediaState::Failed);
+        assert_eq!(handle.snapshot().state(), MediaState::Failed);
         assert!(handle
             .snapshot()
-            .last_error
-            .as_deref()
+            .last_error()
             .unwrap()
             .contains("encoder refused"));
 
         handle.retry().await.unwrap();
-        assert_eq!(handle.snapshot().state, MediaState::Running);
+        assert_eq!(handle.snapshot().state(), MediaState::Running);
         assert_eq!(handle.snapshot().media_generation, 2);
         assert_eq!(
             driver.calls(),
@@ -1159,7 +1214,7 @@ mod tests {
             let handle = handle.clone();
             tokio::spawn(async move { handle.activate(route(1, 1920)).await })
         };
-        while handle.snapshot().state != MediaState::StartingCapture {
+        while handle.snapshot().state() != MediaState::StartingCapture {
             tokio::task::yield_now().await;
         }
 
@@ -1175,7 +1230,7 @@ mod tests {
             })
         ));
         deactivating.await.unwrap().unwrap();
-        assert_eq!(handle.snapshot().state, MediaState::Idle);
+        assert_eq!(handle.snapshot().state(), MediaState::Idle);
 
         actor
             .shutdown(MediaStopReason::BackendShutdown)
@@ -1194,9 +1249,9 @@ mod tests {
             .await
             .unwrap();
         let snapshot = handle.snapshot();
-        assert_eq!(snapshot.state, MediaState::Suspended);
+        assert_eq!(snapshot.state(), MediaState::Suspended);
         assert_eq!(snapshot.media_generation, 1);
-        assert_eq!(snapshot.route, Some(route(1, 1920)));
+        assert_eq!(snapshot.route(), Some(route(1, 1920)));
         assert_eq!(
             driver.calls().last(),
             Some(&Call::Suspend(1, MediaSuspendReason::GrantUnavailable))
@@ -1310,7 +1365,7 @@ mod tests {
             let handle = handle.clone();
             tokio::spawn(async move { handle.deactivate().await })
         };
-        while handle.snapshot().state != MediaState::Stopping {
+        while handle.snapshot().state() != MediaState::Stopping {
             tokio::task::yield_now().await;
         }
 

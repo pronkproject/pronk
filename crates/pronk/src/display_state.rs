@@ -45,9 +45,10 @@ pub struct ActiveRoute {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DisplayTopology {
-    pub attachment: AttachmentState,
-    pub route: Option<ActiveRoute>,
+pub enum DisplayTopology {
+    Attached { route: Option<ActiveRoute> },
+    Detached,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,16 +82,38 @@ pub enum MediaState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayRuntimeState {
-    pub revision: u64,
-    pub route_generation: u64,
-    pub attachment: AttachmentState,
-    pub route: RouteState,
-    pub media_generation: u64,
-    pub media: MediaState,
-    pub last_error: Option<String>,
+    revision: u64,
+    route_generation: u64,
+    attachment: AttachmentState,
+    route: RouteState,
+    media_generation: u64,
+    media: MediaState,
+    last_error: Option<String>,
 }
 
 impl DisplayRuntimeState {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn route_generation(&self) -> u64 {
+        self.route_generation
+    }
+    pub fn attachment(&self) -> AttachmentState {
+        self.attachment
+    }
+    pub fn route(&self) -> RouteState {
+        self.route
+    }
+    pub fn media_generation(&self) -> u64 {
+        self.media_generation
+    }
+    pub fn media(&self) -> MediaState {
+        self.media
+    }
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
     pub fn attached(initial_revision: u64) -> Self {
         Self {
             revision: initial_revision.max(1),
@@ -108,13 +131,13 @@ impl DisplayRuntimeState {
     /// A non-attached connector can never retain an active route. Media is a
     /// separate child-actor projection and is not guessed from topology.
     pub fn observe_topology(&mut self, topology: DisplayTopology) -> bool {
-        let attachment = topology.attachment;
-        let route = if attachment == AttachmentState::Attached {
-            topology
-                .route
-                .map_or(RouteState::Disabled, RouteState::Active)
-        } else {
-            RouteState::Disabled
+        let (attachment, route) = match topology {
+            DisplayTopology::Attached { route } => (
+                AttachmentState::Attached,
+                route.map_or(RouteState::Disabled, RouteState::Active),
+            ),
+            DisplayTopology::Detached => (AttachmentState::Detached, RouteState::Disabled),
+            DisplayTopology::Unknown => (AttachmentState::Unknown, RouteState::Disabled),
         };
         if self.attachment == attachment && self.route == route {
             return false;
@@ -134,6 +157,9 @@ impl DisplayRuntimeState {
         state: MediaState,
         last_error: Option<String>,
     ) -> bool {
+        if generation < self.media_generation {
+            return false;
+        }
         if self.media_generation == generation
             && self.media == state
             && self.last_error == last_error
@@ -153,6 +179,10 @@ impl DisplayRuntimeState {
         }
     }
 
+    pub fn advance_for_external_change(&mut self, minimum_revision: u64) {
+        self.revision = self.revision.saturating_add(1).max(minimum_revision);
+    }
+
     fn advance(&mut self) {
         self.revision = self.revision.saturating_add(1);
     }
@@ -163,8 +193,7 @@ mod tests {
     use super::*;
 
     fn active_topology(width: u32) -> DisplayTopology {
-        DisplayTopology {
-            attachment: AttachmentState::Attached,
+        DisplayTopology::Attached {
             route: Some(ActiveRoute {
                 target: RouteTarget::new(NonZeroU32::new(7).unwrap()),
                 mode: RoutedMode {
@@ -209,7 +238,10 @@ mod tests {
         let mut state = DisplayRuntimeState::attached(1);
         state.observe_topology(active_topology(1920));
         let mut moved = active_topology(1920);
-        moved.route.as_mut().unwrap().target = RouteTarget::new(NonZeroU32::new(8).unwrap());
+        let DisplayTopology::Attached { route: Some(route) } = &mut moved else {
+            unreachable!("test topology is active");
+        };
+        route.target = RouteTarget::new(NonZeroU32::new(8).unwrap());
 
         assert!(state.observe_topology(moved));
         assert_eq!(state.route_generation, 2);
@@ -222,10 +254,7 @@ mod tests {
         state.observe_media(1, MediaState::Running, None);
         let revision = state.revision;
 
-        assert!(state.observe_topology(DisplayTopology {
-            attachment: AttachmentState::Detached,
-            route: Some(active_topology(1920).route.unwrap()),
-        }));
+        assert!(state.observe_topology(DisplayTopology::Detached));
         assert_eq!(state.attachment, AttachmentState::Detached);
         assert_eq!(state.route, RouteState::Disabled);
         assert_eq!(state.media_generation, 1);
@@ -242,5 +271,17 @@ mod tests {
         assert_eq!(state.media_generation, 2);
         assert_eq!(state.last_error, None);
         assert!(!state.observe_media(2, MediaState::StartingCapture, None));
+    }
+
+    #[test]
+    fn older_media_generations_cannot_replace_a_newer_projection() {
+        let mut state = DisplayRuntimeState::attached(1);
+        state.observe_media(2, MediaState::Running, None);
+        let revision = state.revision();
+
+        assert!(!state.observe_media(1, MediaState::Failed, Some("stale".into())));
+        assert_eq!(state.media_generation(), 2);
+        assert_eq!(state.media(), MediaState::Running);
+        assert_eq!(state.revision(), revision);
     }
 }

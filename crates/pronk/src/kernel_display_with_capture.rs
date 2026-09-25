@@ -76,7 +76,7 @@ mod tests {
     use std::num::NonZeroU64;
 
     use super::*;
-    use crate::display_state::{AttachmentState, DisplayGrantState, DisplayTopology};
+    use crate::display_state::{DisplayGrantState, DisplayTopology};
     use tokio::sync::mpsc;
 
     #[derive(Debug)]
@@ -94,10 +94,7 @@ mod tests {
 
         fn initial_observation(&self) -> KernelDisplayObservation {
             KernelDisplayObservation {
-                topology: DisplayTopology {
-                    attachment: AttachmentState::Detached,
-                    route: None,
-                },
+                topology: DisplayTopology::Detached,
                 grant_state: DisplayGrantState::Active,
             }
         }

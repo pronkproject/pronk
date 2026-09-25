@@ -218,8 +218,9 @@ async fn run_policy(
 
         if decision == PolicyDecision::GiveUp {
             let error = snapshot
-                .last_error
-                .unwrap_or_else(|| "media recovery budget exhausted".into());
+                .last_error()
+                .unwrap_or("media recovery budget exhausted")
+                .to_owned();
             let _ = events.send(MediaPolicyEvent::RecoveryExhausted { error });
             return;
         }
@@ -289,24 +290,24 @@ fn decide(
     retry_delay: Option<Duration>,
 ) -> Option<PolicyDecision> {
     let Some(route) = input.route else {
-        return decide_deactivate(media.state, retry_delay);
+        return decide_deactivate(media.state(), retry_delay);
     };
     if input.attachment != AttachmentState::Attached {
-        return decide_deactivate(media.state, retry_delay);
+        return decide_deactivate(media.state(), retry_delay);
     }
     if !input.device_available || !input.device_session_ready {
-        return (media.state == MediaState::Running).then_some(PolicyDecision::Suspend(
+        return (media.state() == MediaState::Running).then_some(PolicyDecision::Suspend(
             MediaSuspendReason::DeviceUnavailable,
         ));
     }
     if input.grant != DisplayGrantState::Active {
-        return (media.state == MediaState::Running).then_some(PolicyDecision::Suspend(
+        return (media.state() == MediaState::Running).then_some(PolicyDecision::Suspend(
             MediaSuspendReason::GrantUnavailable,
         ));
     }
-    match media.state {
-        MediaState::Running if media.route == Some(route) => None,
-        MediaState::Failed if media.route == Some(route) => {
+    match media.state() {
+        MediaState::Running if media.route() == Some(route) => None,
+        MediaState::Failed if media.route() == Some(route) => {
             Some(retry_delay.map_or(PolicyDecision::GiveUp, PolicyDecision::Retry))
         }
         _ => Some(PolicyDecision::Activate(route)),
@@ -358,7 +359,7 @@ struct RetryTracker {
 impl RetryTracker {
     fn observe(&mut self, input: MediaPolicyInput, media: &MediaSessionSnapshot) {
         let context = RetryContext::from(input);
-        if self.context != Some(context) || media.state == MediaState::Running {
+        if self.context != Some(context) || media.state() == MediaState::Running {
             self.context = Some(context);
             self.attempts = 0;
         }
@@ -420,13 +421,7 @@ mod tests {
     }
 
     fn snapshot(state: MediaState, route: Option<MediaRoute>) -> MediaSessionSnapshot {
-        MediaSessionSnapshot {
-            revision: 1,
-            media_generation: u64::from(route.is_some()),
-            state,
-            route,
-            last_error: None,
-        }
+        MediaSessionSnapshot::test_snapshot(state, route)
     }
 
     #[test]
@@ -627,7 +622,7 @@ mod tests {
         expected: MediaState,
     ) {
         timeout(Duration::from_secs(1), async {
-            while state.borrow().state != expected {
+            while state.borrow().state() != expected {
                 state.changed().await.unwrap();
             }
         })
@@ -651,7 +646,7 @@ mod tests {
 
         policy.observe(input(Some(route(1))));
         wait_for_state(&mut state, MediaState::Running).await;
-        assert_eq!(state.borrow().media_generation, 2);
+        assert_eq!(state.borrow().media_generation(), 2);
 
         policy.observe(input(None));
         wait_for_state(&mut state, MediaState::Idle).await;
@@ -720,7 +715,7 @@ mod tests {
 
         policy.observe(input(Some(route(1))));
         wait_for_state(&mut state, MediaState::Running).await;
-        assert_eq!(state.borrow().media_generation, 3);
+        assert_eq!(state.borrow().media_generation(), 3);
         policy
             .shutdown(MediaStopReason::DisplayRemoved)
             .await
@@ -764,11 +759,11 @@ mod tests {
         transferred.grant = DisplayGrantState::SuspendedOtherMaster;
         policy.observe(transferred);
         tokio::time::sleep(Duration::from_millis(30)).await;
-        assert_eq!(state.borrow().media_generation, 1);
+        assert_eq!(state.borrow().media_generation(), 1);
 
         policy.observe(input(Some(route(1))));
         wait_for_state(&mut state, MediaState::Running).await;
-        assert_eq!(state.borrow().media_generation, 2);
+        assert_eq!(state.borrow().media_generation(), 2);
         policy
             .shutdown(MediaStopReason::DisplayRemoved)
             .await
@@ -812,7 +807,7 @@ mod tests {
             .expect("media recovery never reached its retry limit")
             .expect("media policy stopped without reporting terminal failure");
         assert!(matches!(event, MediaPolicyEvent::RecoveryExhausted { .. }));
-        assert_eq!(policy.snapshot().state, MediaState::Failed);
+        assert_eq!(policy.snapshot().state(), MediaState::Failed);
         assert_eq!(
             driver
                 .calls

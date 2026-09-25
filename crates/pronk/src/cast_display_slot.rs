@@ -16,9 +16,7 @@ use crate::display::{
     AddedCastDisplay, AddedCastDisplayResources, AddedCastDisplaySnapshot, CastDisplayId,
     RemoveCastDisplayError,
 };
-use crate::display_state::{
-    AttachmentState, DisplayGrantState, DisplayRuntimeState, DisplayTopology, MediaState,
-};
+use crate::display_state::{DisplayGrantState, DisplayRuntimeState, DisplayTopology, MediaState};
 use crate::kernel_display_port::KernelDisplayEvent;
 use crate::media_policy::{DisplayMediaPolicyActor, MediaPolicyEvent, MediaPolicyInput};
 use crate::media_session::{MediaRoute, MediaStopReason};
@@ -244,7 +242,7 @@ async fn run_slot(
                 Ok(event) => {
                     let revoked = event == KernelDisplayEvent::Revoked;
                     let media_failure = current_media_failure(
-                        state.borrow().runtime.media_generation,
+                        state.borrow().runtime.media_generation(),
                         &event,
                     );
                     apply_kernel_event(&state, &events, event);
@@ -260,17 +258,14 @@ async fn run_slot(
                 Err(error) => {
                     let diagnostic = error.to_string();
                     state.send_modify(|snapshot| {
-                        snapshot.runtime.observe_topology(DisplayTopology {
-                            attachment: AttachmentState::Unknown,
-                            route: None,
-                        });
-                        let media_generation = snapshot.runtime.media_generation;
+                        snapshot.runtime.observe_topology(DisplayTopology::Unknown);
+                        let media_generation = snapshot.runtime.media_generation();
                         snapshot.runtime.observe_media(
                             media_generation,
                             MediaState::Failed,
                             Some(diagnostic.clone()),
                         );
-                        snapshot.state_revision = snapshot.runtime.revision;
+                        snapshot.state_revision = snapshot.runtime.revision();
                     });
                     publish(&state, &events);
                     terminal_error = Some(diagnostic);
@@ -351,13 +346,13 @@ async fn run_slot(
                 let media = media_state.borrow_and_update().clone();
                 let changed = state.send_if_modified(|snapshot| {
                     if !snapshot.runtime.observe_media(
-                        media.media_generation,
-                        media.state,
-                        media.last_error.clone(),
+                        media.media_generation(),
+                        media.state(),
+                        media.last_error().map(str::to_owned),
                     ) {
                         return false;
                     }
-                    snapshot.state_revision = snapshot.runtime.revision;
+                    snapshot.state_revision = snapshot.runtime.revision();
                     true
                 });
                 if changed {
@@ -432,7 +427,7 @@ fn media_policy_input(
     device_session: &DeviceSessionPolicyState,
 ) -> MediaPolicyInput {
     MediaPolicyInput {
-        attachment: snapshot.runtime.attachment,
+        attachment: snapshot.runtime.attachment(),
         grant: snapshot.grant_state,
         // A live, authenticated Device session is stronger evidence of
         // reachability than a passive discovery record.  In particular, an
@@ -551,13 +546,13 @@ fn publish_media_failure(
     diagnostic: &str,
 ) {
     state.send_modify(|snapshot| {
-        let media_generation = snapshot.runtime.media_generation;
+        let media_generation = snapshot.runtime.media_generation();
         snapshot.runtime.observe_media(
             media_generation,
             MediaState::Failed,
             Some(diagnostic.into()),
         );
-        snapshot.state_revision = snapshot.runtime.revision;
+        snapshot.state_revision = snapshot.runtime.revision();
     });
     publish(state, events);
 }
@@ -569,7 +564,7 @@ fn initial_snapshot(resources: &AddedCastDisplayResources) -> AddedCastDisplaySn
     runtime.observe_topology(observation.topology);
     AddedCastDisplaySnapshot {
         display_id: resources.display_id,
-        state_revision: runtime.revision,
+        state_revision: runtime.revision(),
         device: resources.device.clone(),
         prepared: resources.prepared.clone(),
         output: resources.slot.output().clone(),
@@ -587,12 +582,10 @@ fn update_device(state: &watch::Sender<AddedCastDisplaySnapshot>, device: Device
         return false;
     }
     state.send_modify(|snapshot| {
-        snapshot.runtime.revision = snapshot
+        snapshot
             .runtime
-            .revision
-            .saturating_add(1)
-            .max(device.device_revision);
-        snapshot.state_revision = snapshot.runtime.revision;
+            .advance_for_external_change(device.device_revision);
+        snapshot.state_revision = snapshot.runtime.revision();
         snapshot.device = device;
     });
     true
@@ -609,36 +602,33 @@ fn apply_kernel_event(
             let topology_changed = snapshot.runtime.observe_topology(observation.topology);
             snapshot.grant_state = observation.grant_state;
             if grant_changed && !topology_changed {
-                snapshot.runtime.revision = snapshot.runtime.revision.saturating_add(1);
+                snapshot.runtime.advance_for_external_change(0);
             }
-            snapshot.state_revision = snapshot.runtime.revision;
+            snapshot.state_revision = snapshot.runtime.revision();
             true
         }
         KernelDisplayEvent::Revoked => {
             snapshot.grant_state = DisplayGrantState::Revoked;
-            snapshot.runtime.observe_topology(DisplayTopology {
-                attachment: AttachmentState::Detached,
-                route: None,
-            });
-            let media_generation = snapshot.runtime.media_generation;
+            snapshot.runtime.observe_topology(DisplayTopology::Detached);
+            let media_generation = snapshot.runtime.media_generation();
             snapshot.runtime.observe_media(
                 media_generation,
                 MediaState::Failed,
                 Some("CastKMS grant was revoked".into()),
             );
-            snapshot.state_revision = snapshot.runtime.revision;
+            snapshot.state_revision = snapshot.runtime.revision();
             true
         }
         KernelDisplayEvent::MediaFailed {
             media_generation,
             error,
         } => {
-            let current = snapshot.runtime.media_generation;
+            let current = snapshot.runtime.media_generation();
             if media_generation.is_none_or(|generation| generation.get() == current) {
                 snapshot
                     .runtime
                     .observe_media(current, MediaState::Failed, Some(error));
-                snapshot.state_revision = snapshot.runtime.revision;
+                snapshot.state_revision = snapshot.runtime.revision();
                 true
             } else {
                 false
@@ -671,13 +661,13 @@ fn publish(
         event = "cast_display_state",
         display_id = %snapshot.display_id,
         state_revision = snapshot.state_revision,
-        route_generation = snapshot.runtime.route_generation,
-        attachment = ?snapshot.runtime.attachment,
+        route_generation = snapshot.runtime.route_generation(),
+        attachment = ?snapshot.runtime.attachment(),
         grant = ?snapshot.grant_state,
-        route = ?snapshot.runtime.route,
-        media_generation = snapshot.runtime.media_generation,
-        media = ?snapshot.runtime.media,
-        last_error = ?snapshot.runtime.last_error,
+        route = ?snapshot.runtime.route(),
+        media_generation = snapshot.runtime.media_generation(),
+        media = ?snapshot.runtime.media(),
+        last_error = ?snapshot.runtime.last_error(),
         "cast-display state changed"
     );
     let _ = events.send(CastDisplaySlotEvent::StateChanged(Box::new(snapshot)));
