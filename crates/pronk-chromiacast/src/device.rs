@@ -584,6 +584,7 @@ impl DeviceActorHandle {
 #[derive(Debug)]
 pub(crate) struct DeviceActor {
     handle: DeviceActorHandle,
+    owner_dropped: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -651,6 +652,7 @@ impl DeviceActor {
         let (event_tx, event_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
         let (bitrate_request_tx, bitrate_request_rx) = watch::channel(None);
         let (fatal_error_tx, fatal_error_rx) = oneshot::channel();
+        let (owner_dropped, owner_drop_signal) = oneshot::channel();
         let handle = DeviceActorHandle {
             commands: command_tx,
         };
@@ -660,6 +662,7 @@ impl DeviceActor {
             connector,
             media,
             command_rx,
+            owner_drop_signal,
             feedback,
             DeviceEventSink {
                 events: event_tx,
@@ -670,6 +673,7 @@ impl DeviceActor {
         Ok((
             Self {
                 handle: handle.clone(),
+                owner_dropped: Some(owner_dropped),
                 task: Some(task),
             },
             handle,
@@ -695,9 +699,10 @@ impl DeviceActor {
 
 impl Drop for DeviceActor {
     fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.owner_dropped.take();
+        // Let the task run shutdown_device even when another handle keeps
+        // the command channel open after its owner disappears.
+        self.task.take();
     }
 }
 
@@ -790,6 +795,7 @@ async fn run_actor(
     connector: Arc<dyn DeviceConnector>,
     mut media: ChromiacastMediaSession,
     mut commands: mpsc::Receiver<DeviceCommand>,
+    mut owner_drop_signal: oneshot::Receiver<()>,
     mut feedback: watch::Receiver<crate::sender_actor::VideoSenderFeedbackSnapshot>,
     mut events: DeviceEventSink,
 ) {
@@ -800,11 +806,16 @@ async fn run_actor(
         let next = if feedback_open {
             tokio::select! {
                 biased;
+                _ = &mut owner_drop_signal => break,
                 command = commands.recv() => NextDeviceInput::Command(command),
                 changed = feedback.changed() => NextDeviceInput::Feedback(changed),
             }
         } else {
-            NextDeviceInput::Command(commands.recv().await)
+            tokio::select! {
+                biased;
+                _ = &mut owner_drop_signal => break,
+                command = commands.recv() => NextDeviceInput::Command(command),
+            }
         };
         let command = match next {
             NextDeviceInput::Command(command) => command,
@@ -987,6 +998,7 @@ async fn run_actor(
             }
         }
     }
+    commands.close();
     let _ = shutdown_device(&mut media, &mut control).await;
 }
 
@@ -1547,6 +1559,16 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[derive(Debug)]
+    struct CloseReportingConnector {
+        close_calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct CloseReportingControl {
+        close_calls: Arc<AtomicUsize>,
+    }
+
     #[async_trait]
     impl DeviceConnector for CountingConnector {
         async fn connect(
@@ -1555,6 +1577,54 @@ mod tests {
         ) -> Result<Box<dyn DeviceControl>, DeviceControlError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FixtureDeviceControl))
+        }
+    }
+
+    #[async_trait]
+    impl DeviceConnector for CloseReportingConnector {
+        async fn connect(
+            &self,
+            _endpoint: SocketAddr,
+        ) -> Result<Box<dyn DeviceControl>, DeviceControlError> {
+            Ok(Box::new(CloseReportingControl {
+                close_calls: Arc::clone(&self.close_calls),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl VideoTransportNegotiator for CloseReportingControl {
+        async fn negotiate_video(
+            &mut self,
+            configuration: VideoTransportConfiguration,
+        ) -> Result<NegotiatedVideoTransport, VideoTransportError> {
+            FixtureDeviceControl.negotiate_video(configuration).await
+        }
+
+        async fn stop_video(&mut self) -> Result<(), VideoTransportError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl DeviceControl for CloseReportingControl {
+        async fn get_device_info(&self) -> Result<ControlDeviceInfo, DeviceControlError> {
+            FixtureDeviceControl.get_device_info().await
+        }
+
+        async fn get_setup_info(&self) -> Result<ControlSetupInfo, DeviceControlError> {
+            FixtureDeviceControl.get_setup_info().await
+        }
+
+        async fn get_mirroring_availability(
+            &self,
+        ) -> Result<MirroringAvailability, DeviceControlError> {
+            FixtureDeviceControl.get_mirroring_availability().await
+        }
+
+        async fn close(self: Box<Self>) -> Result<(), DeviceControlError> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -1688,6 +1758,33 @@ mod tests {
         handle.prepare(request()).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_owner_closes_prepared_control_with_live_command_handle() {
+        let close_calls = Arc::new(AtomicUsize::new(0));
+        let (actor, handle, receivers) = DeviceActor::spawn(
+            device(),
+            "12345678-1234-1234-1234-123456789abc".into(),
+            1,
+            0,
+            Arc::new(CloseReportingConnector {
+                close_calls: Arc::clone(&close_calls),
+            }),
+            VideoEncoderPolicy::Software,
+        )
+        .unwrap();
+        handle.prepare(request()).await.unwrap();
+
+        drop(actor);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), receivers.fatal_error)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.statistics().await, Err(DeviceActorError::Stopped));
     }
 
     #[tokio::test]
