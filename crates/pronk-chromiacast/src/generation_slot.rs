@@ -4,6 +4,13 @@ pub(crate) trait GenerationOwned {
     fn generation(&self) -> NonZeroU64;
 }
 
+impl<T: GenerationOwned + ?Sized> GenerationOwned for Box<T> {
+    fn generation(&self) -> NonZeroU64 {
+        self.as_ref().generation()
+    }
+}
+
+#[derive(Debug)]
 pub(crate) enum GenerationSlot<T> {
     Empty { completed: Option<NonZeroU64> },
     Active(T),

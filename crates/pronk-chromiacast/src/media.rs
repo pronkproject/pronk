@@ -22,6 +22,7 @@ use crate::feedback::{
     AdaptivePlayoutDelayConfiguration, VideoFeedbackAction, VideoFeedbackController,
     MAXIMUM_PLAYOUT_UPDATE_ATTEMPTS,
 };
+use crate::generation_slot::{GenerationOwned, GenerationSlot};
 use crate::sender_actor::{VideoSenderActor, VideoSenderFeedbackSnapshot, VideoSenderStatistics};
 use crate::transport::{NegotiatedVideoTransport, VideoTransportError, VideoTransportNegotiator};
 use configuration::graph_configuration;
@@ -70,18 +71,11 @@ pub(crate) struct ChromiacastMediaSession {
     session_generation: u64,
     state: SessionState,
     capabilities: Option<DeviceCapabilities>,
-    generation: GenerationSlot,
+    generation: GenerationSlot<Box<ActiveGeneration>>,
     encoder_policy: VideoEncoderPolicy,
     graph: Box<dyn MediaGraphPort>,
     sender: Option<VideoSenderActor>,
     audio_sender: Option<AudioSenderActor>,
-}
-
-#[derive(Debug)]
-enum GenerationSlot {
-    Unused,
-    Active(Box<ActiveGeneration>),
-    Completed(NonZeroU64),
 }
 
 #[derive(Debug)]
@@ -139,33 +133,9 @@ impl ActiveGeneration {
     }
 }
 
-impl GenerationSlot {
-    fn active(&self) -> Option<NonZeroU64> {
-        match self {
-            Self::Active(generation) => Some(generation.id),
-            Self::Unused | Self::Completed(_) => None,
-        }
-    }
-
-    fn active_generation(&self) -> Option<&ActiveGeneration> {
-        match self {
-            Self::Active(generation) => Some(generation.as_ref()),
-            Self::Unused | Self::Completed(_) => None,
-        }
-    }
-
-    fn active_generation_mut(&mut self) -> Option<&mut ActiveGeneration> {
-        match self {
-            Self::Active(generation) => Some(generation.as_mut()),
-            Self::Unused | Self::Completed(_) => None,
-        }
-    }
-
-    fn completed(&self) -> Option<NonZeroU64> {
-        match self {
-            Self::Completed(generation) => Some(*generation),
-            Self::Unused | Self::Active(_) => None,
-        }
+impl GenerationOwned for ActiveGeneration {
+    fn generation(&self) -> NonZeroU64 {
+        self.id
     }
 }
 
@@ -185,13 +155,13 @@ pub(crate) enum MediaSessionEvent {
 impl ChromiacastMediaSession {
     fn active_generation(&self) -> &ActiveGeneration {
         self.generation
-            .active_generation()
+            .active()
             .expect("configured media session owns an active generation")
     }
 
     fn active_generation_mut(&mut self) -> &mut ActiveGeneration {
         self.generation
-            .active_generation_mut()
+            .active_mut()
             .expect("configured media session owns an active generation")
     }
 
@@ -258,7 +228,7 @@ impl ChromiacastMediaSession {
             session_generation,
             state: SessionState::Created,
             capabilities: None,
-            generation: GenerationSlot::Unused,
+            generation: GenerationSlot::empty(),
             encoder_policy,
             graph,
             sender: Some(VideoSenderActor::spawn(video_output)),
@@ -475,7 +445,9 @@ impl ChromiacastMediaSession {
         let Some(generation) = feedback.generation else {
             return Ok(Vec::new());
         };
-        if self.generation.active() != Some(generation) || !self.active_generation().is_ready() {
+        if self.generation.active().map(|active| active.id) != Some(generation)
+            || !self.active_generation().is_ready()
+        {
             return Ok(Vec::new());
         }
         if let Some(error) = feedback.terminal_error {
@@ -584,6 +556,7 @@ impl ChromiacastMediaSession {
         let generation = self
             .generation
             .active()
+            .map(|active| active.id)
             .ok_or_else(|| MediaSessionError::Graph("active media generation is missing".into()))?;
         self.graph.suspend(generation).await?;
         if self.active_generation().audio_enabled {
@@ -748,7 +721,9 @@ impl ChromiacastMediaSession {
                 }
             },
         );
-        self.generation = GenerationSlot::Completed(generation);
+        self.generation
+            .take_active()
+            .expect("StopMedia checked the active generation");
         self.state = SessionState::Prepared;
         graph_result
             .and(audio_sender_result)
@@ -759,8 +734,8 @@ impl ChromiacastMediaSession {
     pub(crate) async fn statistics(&mut self) -> Result<SessionStatistics, MediaSessionError> {
         if !self
             .generation
-            .active_generation()
-            .is_some_and(ActiveGeneration::is_ready)
+            .active()
+            .is_some_and(|active| active.is_ready())
             || !matches!(
                 self.state,
                 SessionState::Configured | SessionState::Streaming | SessionState::Suspended
@@ -774,6 +749,7 @@ impl ChromiacastMediaSession {
         let generation = self
             .generation
             .active()
+            .map(|active| active.id)
             .ok_or_else(|| MediaSessionError::Graph("active media generation is missing".into()))?;
         let graph = self.graph.statistics(generation).await?;
         let sender = self.sender()?.statistics(generation).await?;
@@ -822,7 +798,7 @@ impl ChromiacastMediaSession {
                 }
             },
         );
-        self.generation = GenerationSlot::Unused;
+        self.generation = GenerationSlot::empty();
         self.state = SessionState::Stopped;
         graph_result.and(audio_sender_result).and(sender_result)
     }
@@ -904,12 +880,12 @@ impl ChromiacastMediaSession {
         operation: &'static str,
         generation: NonZeroU64,
     ) -> Result<(), MediaSessionError> {
-        if self.generation.active() == Some(generation) {
+        if self.generation.active().map(|active| active.id) == Some(generation) {
             Ok(())
         } else {
             Err(MediaSessionError::InvalidRequest(format!(
                 "{operation} generation {generation} does not match active generation {:?}",
-                self.generation.active()
+                self.generation.active().map(|active| active.id)
             )))
         }
     }
