@@ -19,6 +19,7 @@ use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTy
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit};
 
 use crate::model::{BufferReturn, BufferTracker};
+use crate::node_registration::NodeRegistration;
 use crate::policy_gate::{
     PolicyGate, PolicyMarkerChange, PRIVATE_NODE_POLICY_VERSION, PRIVATE_NODE_PROPERTY,
 };
@@ -124,8 +125,7 @@ struct ThreadState {
     tracker: BufferTracker,
     events: mpsc::Sender<VideoSourceEvent>,
     startup: StartupSlot,
-    identity: Option<VideoNodeIdentity>,
-    stream_node_id: Option<NonZeroU32>,
+    node: NodeRegistration<VideoNodeIdentity>,
     failed: bool,
     shutting_down: bool,
 }
@@ -156,8 +156,7 @@ impl ThreadState {
             tracker,
             events,
             startup,
-            identity: None,
-            stream_node_id: None,
+            node: NodeRegistration::AwaitingBoth,
             failed: false,
             shutting_down: false,
         }
@@ -212,35 +211,35 @@ impl ThreadState {
                     "source node has invalid object.serial".to_string(),
                 )
             })?;
-        self.identity = Some(VideoNodeIdentity {
+        let identity = VideoNodeIdentity {
             node_name: self.config.node_name.clone(),
             object_id,
             object_serial,
             media_generation: self.config.media_generation,
-        });
-        self.maybe_complete_startup()
+        };
+        if let Some(identity) = self.node.observe_registry(identity).map_err(|_| {
+            VideoSourceRuntimeError::PipeWire(
+                "registry node identity differs from stream node ID".to_string(),
+            )
+        })? {
+            send_startup(&self.startup, Ok(identity));
+        }
+        Ok(())
     }
 
     fn observe_stream_node(&mut self, object_id: u32) -> Result<(), VideoSourceRuntimeError> {
-        self.stream_node_id = NonZeroU32::new(object_id);
-        if self.stream_node_id.is_none() || object_id == pw::constants::ID_ANY {
-            return Err(VideoSourceRuntimeError::PipeWire(
-                "source stream has no node ID".to_string(),
-            ));
-        }
-        self.maybe_complete_startup()
-    }
-
-    fn maybe_complete_startup(&mut self) -> Result<(), VideoSourceRuntimeError> {
-        let (Some(identity), Some(stream_node_id)) = (&self.identity, self.stream_node_id) else {
-            return Ok(());
-        };
-        if identity.object_id != stream_node_id {
-            return Err(VideoSourceRuntimeError::PipeWire(
+        let stream_id = NonZeroU32::new(object_id)
+            .filter(|_| object_id != pw::constants::ID_ANY)
+            .ok_or_else(|| {
+                VideoSourceRuntimeError::PipeWire("source stream has no node ID".to_string())
+            })?;
+        if let Some(identity) = self.node.observe_stream(stream_id).map_err(|_| {
+            VideoSourceRuntimeError::PipeWire(
                 "registry node identity differs from stream node ID".to_string(),
-            ));
+            )
+        })? {
+            send_startup(&self.startup, Ok(identity));
         }
-        send_startup(&self.startup, Ok(identity.clone()));
         Ok(())
     }
 
@@ -489,8 +488,8 @@ fn run(
             }
             let removed = state_for_remove
                 .borrow()
-                .identity
-                .as_ref()
+                .node
+                .identity()
                 .is_some_and(|identity| identity.object_id.get() == id);
             if removed && !state_for_remove.borrow().shutting_down {
                 fail(
