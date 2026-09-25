@@ -301,6 +301,22 @@ pub(crate) struct ChromiacastMediaSession {
     state: SessionState,
     capabilities: Option<DeviceCapabilities>,
     generation: GenerationSlot,
+    encoder_policy: VideoEncoderPolicy,
+    graph: Box<dyn MediaGraphPort>,
+    sender: Option<VideoSenderActor>,
+    audio_sender: Option<AudioSenderActor>,
+}
+
+#[derive(Debug)]
+enum GenerationSlot {
+    Unused,
+    Active(ActiveGeneration),
+    Completed(NonZeroU64),
+}
+
+#[derive(Debug)]
+struct ActiveGeneration {
+    id: NonZeroU64,
     graph_received_generation: bool,
     sender_received_generation: bool,
     audio_sender_received_generation: bool,
@@ -309,30 +325,49 @@ pub(crate) struct ChromiacastMediaSession {
     media_ready: bool,
     video_bitrate: u64,
     feedback_controller: Option<VideoFeedbackController>,
-    encoder_policy: VideoEncoderPolicy,
-    graph: Box<dyn MediaGraphPort>,
-    sender: Option<VideoSenderActor>,
-    audio_sender: Option<AudioSenderActor>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GenerationSlot {
-    Unused,
-    Active(NonZeroU64),
-    Completed(NonZeroU64),
+impl ActiveGeneration {
+    fn new(id: NonZeroU64, audio_enabled: bool, video_bitrate: NonZeroU64) -> Self {
+        Self {
+            id,
+            graph_received_generation: false,
+            sender_received_generation: false,
+            audio_sender_received_generation: false,
+            transport_active: false,
+            audio_enabled,
+            media_ready: false,
+            video_bitrate: video_bitrate.get(),
+            feedback_controller: None,
+        }
+    }
 }
 
 impl GenerationSlot {
-    fn active(self) -> Option<NonZeroU64> {
+    fn active(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Active(generation) => Some(generation.id),
+            Self::Unused | Self::Completed(_) => None,
+        }
+    }
+
+    fn active_generation(&self) -> Option<&ActiveGeneration> {
         match self {
             Self::Active(generation) => Some(generation),
             Self::Unused | Self::Completed(_) => None,
         }
     }
 
-    fn completed(self) -> Option<NonZeroU64> {
+    fn active_generation_mut(&mut self) -> Option<&mut ActiveGeneration> {
         match self {
-            Self::Completed(generation) => Some(generation),
+            Self::Active(generation) => Some(generation),
+            Self::Unused | Self::Completed(_) => None,
+        }
+    }
+
+    fn completed(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Completed(generation) => Some(*generation),
             Self::Unused | Self::Active(_) => None,
         }
     }
@@ -352,6 +387,18 @@ pub(crate) enum MediaSessionEvent {
 }
 
 impl ChromiacastMediaSession {
+    fn active_generation(&self) -> &ActiveGeneration {
+        self.generation
+            .active_generation()
+            .expect("configured media session owns an active generation")
+    }
+
+    fn active_generation_mut(&mut self) -> &mut ActiveGeneration {
+        self.generation
+            .active_generation_mut()
+            .expect("configured media session owns an active generation")
+    }
+
     pub(crate) fn raw_video_layouts(&self) -> &[RawVideoLayout] {
         self.encoder_policy.raw_layouts()
     }
@@ -413,14 +460,6 @@ impl ChromiacastMediaSession {
             state: SessionState::Created,
             capabilities: None,
             generation: GenerationSlot::Unused,
-            graph_received_generation: false,
-            sender_received_generation: false,
-            audio_sender_received_generation: false,
-            transport_active: false,
-            audio_enabled: false,
-            media_ready: false,
-            video_bitrate: 0,
-            feedback_controller: None,
             encoder_policy,
             graph,
             sender: Some(VideoSenderActor::spawn(video_output)),
@@ -510,23 +549,21 @@ impl ChromiacastMediaSession {
         let (graph_configuration, transport_configuration) =
             self.graph_configuration(remotes, targets, configuration, generation)?;
         let audio_enabled = graph_configuration.audio.is_some();
+        let video_bitrate = graph_configuration.video_bitrate;
 
         // Admit ownership before crossing an asynchronous service boundary.
         // Once the method has consumed its passed fd, matching StopMedia must
         // remain valid even if negotiation or graph setup fails, or the D-Bus
         // reply is lost.
-        self.generation = GenerationSlot::Active(generation);
-        self.graph_received_generation = false;
-        self.sender_received_generation = false;
-        self.audio_sender_received_generation = false;
-        self.transport_active = false;
-        self.audio_enabled = audio_enabled;
-        self.media_ready = false;
-        self.video_bitrate = graph_configuration.video_bitrate.get();
+        self.generation = GenerationSlot::Active(ActiveGeneration::new(
+            generation,
+            audio_enabled,
+            video_bitrate,
+        ));
         self.state = SessionState::Configured;
 
         let mut negotiated = transport.negotiate_video(transport_configuration).await?;
-        self.transport_active = true;
+        self.active_generation_mut().transport_active = true;
         let graph_configuration =
             match graph_configuration.with_encoder(&self.encoder_policy, negotiated.video_codec) {
                 Ok(configuration) => configuration,
@@ -535,7 +572,7 @@ impl ChromiacastMediaSession {
                     return Err(error.into());
                 }
             };
-        self.graph_received_generation = true;
+        self.active_generation_mut().graph_received_generation = true;
         if let Err(error) = self.graph.configure(graph_configuration).await {
             discard_negotiated_transport(negotiated).await;
             return Err(error.into());
@@ -576,10 +613,11 @@ impl ChromiacastMediaSession {
                 .map(|delay| delay.as_millis()),
             "negotiated adaptive Cast playout delay"
         );
-        self.feedback_controller = Some(VideoFeedbackController::new(
-            NonZeroU64::new(self.video_bitrate).expect("validated bitrate is nonzero"),
+        let encoder_minimum_bitrate = self.encoder_policy.minimum_bitrate();
+        self.active_generation_mut().feedback_controller = Some(VideoFeedbackController::new(
+            video_bitrate,
             negotiated.minimum_bitrate,
-            self.encoder_policy.minimum_bitrate(),
+            encoder_minimum_bitrate,
             adaptive_playout_delay,
         ));
 
@@ -593,7 +631,8 @@ impl ChromiacastMediaSession {
                     let _ = negotiated.sender.shutdown().await;
                     return Err(error.into());
                 }
-                self.audio_sender_received_generation = true;
+                self.active_generation_mut()
+                    .audio_sender_received_generation = true;
             }
             (true, None) => {
                 let _ = negotiated.sender.shutdown().await;
@@ -611,8 +650,8 @@ impl ChromiacastMediaSession {
             (false, None) => {}
         }
         self.sender()?.configure(generation, negotiated).await?;
-        self.sender_received_generation = true;
-        self.media_ready = true;
+        self.active_generation_mut().sender_received_generation = true;
+        self.active_generation_mut().media_ready = true;
         Ok(())
     }
 
@@ -623,13 +662,13 @@ impl ChromiacastMediaSession {
         let Some(generation) = feedback.generation else {
             return Ok(Vec::new());
         };
-        if self.generation.active() != Some(generation) || !self.media_ready {
+        if self.generation.active() != Some(generation) || !self.active_generation().media_ready {
             return Ok(Vec::new());
         }
         if let Some(error) = feedback.terminal_error {
             return Err(error.into());
         }
-        let Some(controller) = self.feedback_controller.as_mut() else {
+        let Some(controller) = self.active_generation_mut().feedback_controller.as_mut() else {
             return Ok(Vec::new());
         };
         let actions = controller.observe(feedback, Instant::now());
@@ -645,7 +684,7 @@ impl ChromiacastMediaSession {
                 }
                 VideoFeedbackAction::SetBitrate(bitrate) => {
                     let bitrate = self.graph.set_video_bitrate(generation, bitrate).await?;
-                    self.video_bitrate = bitrate;
+                    self.active_generation_mut().video_bitrate = bitrate;
                     events.push(MediaSessionEvent::BitrateRequested {
                         session_generation: self.session_generation,
                         media_generation: generation.get(),
@@ -682,19 +721,19 @@ impl ChromiacastMediaSession {
     pub(crate) async fn start(&mut self, media_generation: u64) -> Result<(), MediaSessionError> {
         let generation =
             self.require_generation("Start", media_generation, SessionState::Configured)?;
-        if !self.media_ready {
+        if !self.active_generation().media_ready {
             return Err(MediaSessionError::Graph(
                 "Start cannot follow a failed media configuration".into(),
             ));
         }
         let previous_video = self.sender()?.statistics(generation).await?;
-        let previous_audio = if self.audio_enabled {
+        let previous_audio = if self.active_generation().audio_enabled {
             Some(self.audio_sender()?.statistics(generation).await?)
         } else {
             None
         };
         self.sender()?.start(generation).await?;
-        if self.audio_enabled {
+        if self.active_generation().audio_enabled {
             if let Err(error) = self.audio_sender()?.start(generation).await {
                 let _ = self.sender()?.suspend(generation).await;
                 return Err(error.into());
@@ -734,14 +773,14 @@ impl ChromiacastMediaSession {
             .active()
             .ok_or_else(|| MediaSessionError::Graph("active media generation is missing".into()))?;
         self.graph.suspend(generation).await?;
-        if self.audio_enabled {
+        if self.active_generation().audio_enabled {
             if let Err(error) = self.audio_sender()?.suspend(generation).await {
                 let _ = self.graph.resume(generation).await;
                 return Err(error.into());
             }
         }
         if let Err(error) = self.sender()?.suspend(generation).await {
-            if self.audio_enabled {
+            if self.active_generation().audio_enabled {
                 let _ = self.audio_sender()?.resume(generation).await;
             }
             let _ = self.graph.resume(generation).await;
@@ -755,13 +794,13 @@ impl ChromiacastMediaSession {
         let generation =
             self.require_generation("Resume", media_generation, SessionState::Suspended)?;
         let previous_video = self.sender()?.statistics(generation).await?;
-        let previous_audio = if self.audio_enabled {
+        let previous_audio = if self.active_generation().audio_enabled {
             Some(self.audio_sender()?.statistics(generation).await?)
         } else {
             None
         };
         self.sender()?.resume(generation).await?;
-        if self.audio_enabled {
+        if self.active_generation().audio_enabled {
             if let Err(error) = self.audio_sender()?.resume(generation).await {
                 let _ = self.sender()?.suspend(generation).await;
                 return Err(error.into());
@@ -819,9 +858,7 @@ impl ChromiacastMediaSession {
         let generation = NonZeroU64::new(media_generation).ok_or_else(|| {
             MediaSessionError::InvalidRequest("media generation must be nonzero".into())
         })?;
-        if self.state == SessionState::Prepared
-            && self.generation == GenerationSlot::Completed(generation)
-        {
+        if self.state == SessionState::Prepared && self.generation.completed() == Some(generation) {
             return Ok(());
         }
         if !matches!(
@@ -834,10 +871,11 @@ impl ChromiacastMediaSession {
             });
         }
         self.require_matching_generation("StopMedia", generation)?;
-        let graph_received_generation = self.graph_received_generation;
-        let audio_sender_received_generation = self.audio_sender_received_generation;
-        let sender_received_generation = self.sender_received_generation;
-        let transport_active = self.transport_active;
+        let active = self.active_generation();
+        let graph_received_generation = active.graph_received_generation;
+        let audio_sender_received_generation = active.audio_sender_received_generation;
+        let sender_received_generation = active.sender_received_generation;
+        let transport_active = active.transport_active;
         let graph = &mut self.graph;
         let audio_sender = self.audio_sender.as_ref();
         let sender = self.sender.as_ref();
@@ -903,14 +941,6 @@ impl ChromiacastMediaSession {
             },
         );
         self.generation = GenerationSlot::Completed(generation);
-        self.graph_received_generation = false;
-        self.sender_received_generation = false;
-        self.audio_sender_received_generation = false;
-        self.transport_active = false;
-        self.audio_enabled = false;
-        self.media_ready = false;
-        self.video_bitrate = 0;
-        self.feedback_controller = None;
         self.state = SessionState::Prepared;
         graph_result
             .and(audio_sender_result)
@@ -919,7 +949,10 @@ impl ChromiacastMediaSession {
     }
 
     pub(crate) async fn statistics(&mut self) -> Result<SessionStatistics, MediaSessionError> {
-        if !self.media_ready
+        if !self
+            .generation
+            .active_generation()
+            .is_some_and(|active| active.media_ready)
             || !matches!(
                 self.state,
                 SessionState::Configured | SessionState::Streaming | SessionState::Suspended
@@ -936,7 +969,7 @@ impl ChromiacastMediaSession {
             .ok_or_else(|| MediaSessionError::Graph("active media generation is missing".into()))?;
         let graph = self.graph.statistics(generation).await?;
         let sender = self.sender()?.statistics(generation).await?;
-        let audio = if self.audio_enabled {
+        let audio = if self.active_generation().audio_enabled {
             Some(self.audio_sender()?.statistics(generation).await?)
         } else {
             None
@@ -950,7 +983,7 @@ impl ChromiacastMediaSession {
         let statistics = SessionStatistics {
             session_generation: self.session_generation,
             media_generation: generation.get(),
-            video_bitrate: self.video_bitrate,
+            video_bitrate: self.active_generation().video_bitrate,
             // Start/Resume wait for this transport-side count, so success
             // means chromiacast accepted a validated access unit.
             encoded_frames: sender.frames,
@@ -982,14 +1015,6 @@ impl ChromiacastMediaSession {
             },
         );
         self.generation = GenerationSlot::Unused;
-        self.graph_received_generation = false;
-        self.sender_received_generation = false;
-        self.audio_sender_received_generation = false;
-        self.transport_active = false;
-        self.audio_enabled = false;
-        self.media_ready = false;
-        self.video_bitrate = 0;
-        self.feedback_controller = None;
         self.state = SessionState::Stopped;
         graph_result.and(audio_sender_result).and(sender_result)
     }
@@ -1229,7 +1254,7 @@ impl ChromiacastMediaSession {
     }
 
     async fn suspend_senders_best_effort(&mut self, generation: NonZeroU64) {
-        if self.audio_enabled {
+        if self.active_generation().audio_enabled {
             if let Ok(sender) = self.audio_sender() {
                 let _ = sender.suspend(generation).await;
             }
@@ -1263,7 +1288,7 @@ impl ChromiacastMediaSession {
         operation: &'static str,
         generation: NonZeroU64,
     ) -> Result<(), MediaSessionError> {
-        if self.generation == GenerationSlot::Active(generation) {
+        if self.generation.active() == Some(generation) {
             Ok(())
         } else {
             Err(MediaSessionError::InvalidRequest(format!(
