@@ -74,8 +74,13 @@ pub(crate) struct ChromiacastMediaSession {
     generation: GenerationSlot<Box<ActiveGeneration>>,
     encoder_policy: VideoEncoderPolicy,
     graph: Box<dyn MediaGraphPort>,
-    sender: Option<VideoSenderActor>,
-    audio_sender: Option<AudioSenderActor>,
+    senders: Option<SenderActors>,
+}
+
+#[derive(Debug)]
+struct SenderActors {
+    video: VideoSenderActor,
+    audio: AudioSenderActor,
 }
 
 #[derive(Debug)]
@@ -231,8 +236,10 @@ impl ChromiacastMediaSession {
             generation: GenerationSlot::empty(),
             encoder_policy,
             graph,
-            sender: Some(VideoSenderActor::spawn(video_output)),
-            audio_sender: Some(AudioSenderActor::spawn(audio_output)),
+            senders: Some(SenderActors {
+                video: VideoSenderActor::spawn(video_output),
+                audio: AudioSenderActor::spawn(audio_output),
+            }),
         }
     }
 
@@ -662,8 +669,8 @@ impl ChromiacastMediaSession {
         let audio_sender_may_own_generation = active.audio_sender_may_own_generation();
         let sender_may_own_generation = active.video_sender_may_own_generation();
         let graph = &mut self.graph;
-        let audio_sender = self.audio_sender.as_ref();
-        let sender = self.sender.as_ref();
+        let audio_sender = self.senders.as_ref().map(|senders| &senders.audio);
+        let sender = self.senders.as_ref().map(|senders| &senders.video);
         // These owners can all make teardown progress independently. Waiting
         // for one before touching the next would let a wedged graph strand the
         // Cast transport and sender actors until the whole backend is killed.
@@ -781,8 +788,10 @@ impl ChromiacastMediaSession {
     }
 
     pub(crate) async fn shutdown(&mut self) -> Result<(), MediaSessionError> {
-        let audio_sender = self.audio_sender.take();
-        let sender = self.sender.take();
+        let (audio_sender, sender) = match self.senders.take() {
+            Some(senders) => (Some(senders.audio), Some(senders.video)),
+            None => (None, None),
+        };
         let (graph_result, audio_sender_result, sender_result) = tokio::join!(
             async { self.graph.shutdown().await.map_err(MediaSessionError::from) },
             async move {
@@ -891,14 +900,16 @@ impl ChromiacastMediaSession {
     }
 
     fn sender(&self) -> Result<&VideoSenderActor, MediaSessionError> {
-        self.sender
+        self.senders
             .as_ref()
+            .map(|senders| &senders.video)
             .ok_or_else(|| MediaSessionError::Transport("video sender actor is shut down".into()))
     }
 
     fn audio_sender(&self) -> Result<&AudioSenderActor, MediaSessionError> {
-        self.audio_sender
+        self.senders
             .as_ref()
+            .map(|senders| &senders.audio)
             .ok_or_else(|| MediaSessionError::Transport("audio sender actor is shut down".into()))
     }
 }
