@@ -79,7 +79,6 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         let mut starting = Starting {
             stop: stop.clone(),
             task: Some(task),
-            armed: true,
         };
         let response = tokio::select! {
             biased;
@@ -280,12 +279,10 @@ impl<F> std::error::Error for RendererStreamError<F> {}
 struct Starting<F> {
     stop: CancellationToken,
     task: Option<JoinHandle<(Option<F>, io::Result<()>)>>,
-    armed: bool,
 }
 
 impl<F> Starting<F> {
     fn take_task(&mut self) -> JoinHandle<(Option<F>, io::Result<()>)> {
-        self.armed = false;
         self.task
             .take()
             .expect("starting renderer stream owns task")
@@ -322,7 +319,7 @@ impl<F> Starting<F> {
 
 impl<F> Drop for Starting<F> {
     fn drop(&mut self) {
-        if self.armed {
+        if self.task.is_some() {
             self.stop.cancel();
         }
     }
@@ -407,7 +404,6 @@ mod tests {
         drop(Starting {
             stop: stop.clone(),
             task: Some(task),
-            armed: true,
         });
         tokio::time::timeout(Duration::from_secs(1), async {
             while !stop.is_cancelled() {
@@ -425,7 +421,6 @@ mod tests {
         let mut starting = Starting {
             stop: stop.clone(),
             task: Some(task),
-            armed: true,
         };
         let task = starting.take_task();
         drop(starting);
@@ -513,7 +508,6 @@ mod tests {
         let starting = Starting {
             stop: stop.clone(),
             task: Some(task),
-            armed: true,
         };
 
         let error = starting.cancel().await;
