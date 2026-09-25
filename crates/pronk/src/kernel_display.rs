@@ -44,7 +44,18 @@ pub enum AttachError {
 
 #[derive(Debug)]
 pub struct KernelDisplay {
-    session: Option<KernelSession>,
+    session: KernelSession,
+    core: KernelDisplayCore,
+}
+
+#[derive(Debug)]
+struct PreparedKernelDisplay {
+    session: KernelSession,
+    core: KernelDisplayCore,
+}
+
+#[derive(Debug)]
+struct KernelDisplayCore {
     capture: CaptureAccess,
     crtc_id: NonZeroU32,
     modes: Vec<EdidMode>,
@@ -52,7 +63,7 @@ pub struct KernelDisplay {
     poll: tokio::time::Interval,
 }
 
-impl KernelDisplay {
+impl PreparedKernelDisplay {
     fn prepare(
         session: KernelSession,
         config: KernelDisplayConfig,
@@ -75,15 +86,26 @@ impl KernelDisplay {
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
         poll.reset();
         Ok(Self {
-            session: Some(session),
-            capture,
-            crtc_id,
-            modes,
-            current: unavailable_observation(),
-            poll,
+            session,
+            core: KernelDisplayCore {
+                capture,
+                crtc_id,
+                modes,
+                current: unavailable_observation(),
+                poll,
+            },
         })
     }
 
+    fn into_attached(self) -> KernelDisplay {
+        KernelDisplay {
+            session: self.session,
+            core: self.core,
+        }
+    }
+}
+
+impl KernelDisplay {
     /// Attach a monitor while retaining responsibility for a late completion.
     ///
     /// Observation is configured before the monitor changes. Queued work checks
@@ -103,12 +125,13 @@ impl KernelDisplay {
             }
             return Err(AttachError::Cancelled);
         }
-        let display = Self::prepare(session, config).map_err(AttachError::Configuration)?;
+        let display =
+            PreparedKernelDisplay::prepare(session, config).map_err(AttachError::Configuration)?;
         let before_attach = cancellation.clone();
         let mut task = tokio::task::spawn_blocking(move || {
             let result = (!before_attach.is_cancelled()).then(|| {
                 display
-                    .session()
+                    .session
                     .attach_monitor(edid.as_ref().map(ValidatedEdid::as_bytes))
             });
             (display, result)
@@ -118,21 +141,17 @@ impl KernelDisplay {
             _ = cancellation.cancelled() => (&mut task).await,
             joined = &mut task => joined,
         };
-        let (mut display, result) = joined.map_err(AttachError::Worker)?;
+        let (display, result) = joined.map_err(AttachError::Worker)?;
         match result {
-            Some(Ok(())) if !cancellation.is_cancelled() => Ok(display),
+            Some(Ok(())) if !cancellation.is_cancelled() => Ok(display.into_attached()),
             Some(Ok(())) => {
-                if let Err(error) = Box::new(display).detach().await {
+                if let Err(error) = Box::new(display.into_attached()).detach().await {
                     tracing::warn!(%error, "cancelled attachment could not retire its monitor");
                 }
                 Err(AttachError::Cancelled)
             }
             result => {
-                let session = display
-                    .session
-                    .take()
-                    .expect("prepared display owns its session");
-                if let Err(error) = session.release().await {
+                if let Err(error) = display.session.release().await {
                     tracing::warn!(%error, "unsuccessful attachment could not release its session");
                 }
                 match result {
@@ -145,33 +164,24 @@ impl KernelDisplay {
         }
     }
 
-    fn session(&self) -> &KernelSession {
-        self.session
-            .as_ref()
-            .expect("live kernel display owns its display session")
-    }
-
     /// Transfer media authority without transferring the display lifetime.
     pub fn take_renderer_access(&mut self) -> io::Result<RendererAccess> {
-        self.session
-            .as_mut()
-            .expect("live kernel display owns its session")
-            .take_renderer_access()
+        self.session.take_renderer_access()
     }
 
     /// Retain final-image capture without transferring monitor or renderer control.
     pub fn capture_access(&self) -> io::Result<CaptureAccess> {
-        self.capture.try_clone()
+        self.core.capture.try_clone()
     }
 
     fn observe(&self) -> Result<Observation, KernelDisplayError> {
-        let description = match self.capture.describe() {
+        let description = match self.core.capture.describe() {
             Ok(description) => description,
-            Err(error) => return classify_capture_error(error, self.current),
+            Err(error) => return classify_capture_error(error, self.core.current),
         };
         active_observation(
-            &self.modes,
-            self.crtc_id,
+            &self.core.modes,
+            self.core.crtc_id,
             description.width.get(),
             description.height.get(),
             description.refresh_millihz.get(),
@@ -250,21 +260,21 @@ fn active_observation(
 impl KernelDisplayPort for KernelDisplay {
     fn metadata(&self) -> KernelDisplayMetadata {
         KernelDisplayMetadata {
-            session_id: self.session().id(),
+            session_id: self.session.id(),
         }
     }
 
     fn initial_observation(&self) -> KernelDisplayObservation {
-        self.current
+        self.core.current
     }
 
     async fn next_event(&mut self) -> Result<KernelDisplayEvent, KernelDisplayError> {
         loop {
-            self.poll.tick().await;
+            self.core.poll.tick().await;
             match self.observe()? {
                 Observation::Revoked => return Ok(KernelDisplayEvent::Revoked),
-                Observation::State(observation) if observation != self.current => {
-                    self.current = observation;
+                Observation::State(observation) if observation != self.core.current => {
+                    self.core.current = observation;
                     return Ok(KernelDisplayEvent::Changed(observation));
                 }
                 Observation::State(_) => {}
@@ -272,11 +282,8 @@ impl KernelDisplayPort for KernelDisplay {
         }
     }
 
-    async fn detach(mut self: Box<Self>) -> Result<(), KernelDisplayError> {
-        let session = self
-            .session
-            .take()
-            .expect("live kernel display owns its display session");
+    async fn detach(self: Box<Self>) -> Result<(), KernelDisplayError> {
+        let KernelDisplay { session, .. } = *self;
         let (session, detach) = tokio::task::spawn_blocking(move || {
             let result = normalize_detach(session.detach_monitor());
             (session, result)
