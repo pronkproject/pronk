@@ -306,18 +306,28 @@ async fn run_actor(
                 let _ = reply.send(result);
             }
             Command::Stop { generation, reply } => {
+                let stopping_active = active
+                    .as_ref()
+                    .is_some_and(|current| current.generation == generation);
+                let previous_statistics = snapshot.borrow().statistics.clone();
                 let result = stop_active(&mut active, generation, completed_generation).await;
-                if result.is_ok() {
+                if stopping_active {
                     completed_generation = Some(generation);
                 }
-                let statistics = result.as_ref().cloned().unwrap_or_default();
-                publish(
-                    &snapshot,
-                    Some(generation),
-                    AudioSenderState::Empty,
-                    statistics,
-                    result.as_ref().err().map(ToString::to_string),
-                );
+                if stopping_active || result.is_ok() {
+                    let statistics = if stopping_active {
+                        result.as_ref().cloned().unwrap_or(previous_statistics)
+                    } else {
+                        previous_statistics
+                    };
+                    publish(
+                        &snapshot,
+                        Some(generation),
+                        AudioSenderState::Empty,
+                        statistics,
+                        result.as_ref().err().map(ToString::to_string),
+                    );
+                }
                 let _ = reply.send(result);
             }
             Command::Statistics { generation, reply } => {
@@ -579,6 +589,7 @@ mod tests {
     #[derive(Debug)]
     struct RecordingSender {
         timestamps: Arc<Mutex<Vec<Duration>>>,
+        fail_shutdown: bool,
     }
 
     #[async_trait]
@@ -595,7 +606,11 @@ mod tests {
         }
 
         async fn shutdown(self: Box<Self>) -> Result<(), VideoTransportError> {
-            Ok(())
+            if self.fail_shutdown {
+                Err(VideoTransportError::new("audio sender shutdown failed"))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -610,6 +625,7 @@ mod tests {
                 generation,
                 Box::new(RecordingSender {
                     timestamps: timestamps.clone(),
+                    fail_shutdown: false,
                 }),
             )
             .await
@@ -623,6 +639,55 @@ mod tests {
         assert_eq!(timestamps.lock().unwrap().as_slice(), [Duration::ZERO]);
         let statistics = actor.stop(generation).await.unwrap();
         assert_eq!(statistics.packets, 1);
+        actor.stop(generation).await.unwrap();
+        assert_eq!(actor.snapshot.borrow().statistics.packets, 1);
+        actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_stop_preserves_audio_state_and_failed_teardown_consumes_generation() {
+        let (_output, receiver) = mpsc::channel(1);
+        let actor = AudioSenderActor::spawn(receiver);
+        let generation = NonZeroU64::new(7).unwrap();
+        let next = NonZeroU64::new(8).unwrap();
+        let timestamps = Arc::new(Mutex::new(Vec::new()));
+        actor
+            .configure(
+                generation,
+                Box::new(RecordingSender {
+                    timestamps: Arc::clone(&timestamps),
+                    fail_shutdown: true,
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(actor.stop(next).await.is_err());
+        assert_eq!(actor.snapshot.borrow().generation, Some(generation));
+        assert_eq!(actor.snapshot.borrow().state, AudioSenderState::Configured);
+        assert!(actor.stop(generation).await.is_err());
+        assert_eq!(actor.snapshot.borrow().state, AudioSenderState::Empty);
+        assert!(actor
+            .configure(
+                generation,
+                Box::new(RecordingSender {
+                    timestamps: Arc::clone(&timestamps),
+                    fail_shutdown: false,
+                }),
+            )
+            .await
+            .is_err());
+        actor.stop(generation).await.unwrap();
+        actor
+            .configure(
+                next,
+                Box::new(RecordingSender {
+                    timestamps,
+                    fail_shutdown: false,
+                }),
+            )
+            .await
+            .unwrap();
         actor.shutdown().await.unwrap();
     }
 
