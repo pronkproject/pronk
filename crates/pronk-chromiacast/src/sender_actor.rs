@@ -187,6 +187,14 @@ impl VideoSenderActor {
                 if current.statistics.frames > previous {
                     return Ok(());
                 }
+                if matches!(
+                    current.state,
+                    VideoSenderState::Empty | VideoSenderState::Stopped
+                ) {
+                    return Err(VideoTransportError::new(format!(
+                        "video sender generation {generation} stopped before encoded video delivery"
+                    )));
+                }
                 snapshot
                     .changed()
                     .await
@@ -219,6 +227,11 @@ impl VideoSenderActor {
                 }
                 if current.statistics.acknowledged_frames > previous {
                     return Ok(());
+                }
+                if matches!(current.state, VideoSenderState::Empty | VideoSenderState::Stopped) {
+                    return Err(VideoTransportError::new(format!(
+                        "video sender generation {generation} stopped before receiver video acknowledgement"
+                    )));
                 }
                 snapshot
                     .changed()
@@ -254,6 +267,11 @@ impl VideoSenderActor {
                 }
                 if current.statistics.acknowledged_audio_packets > previous {
                     return Ok(());
+                }
+                if matches!(current.state, VideoSenderState::Empty | VideoSenderState::Stopped) {
+                    return Err(VideoTransportError::new(format!(
+                        "video sender generation {generation} stopped before receiver audio acknowledgement"
+                    )));
                 }
                 snapshot
                     .changed()
@@ -1082,6 +1100,42 @@ mod tests {
             .is_err());
         actor.stop(generation).await.unwrap();
         actor.configure(next, accepting_transport()).await.unwrap();
+        actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_generation_ends_delivery_and_acknowledgement_waits() {
+        let (_output, receiver) = tokio::sync::mpsc::channel(1);
+        let actor = VideoSenderActor::spawn(receiver);
+        let generation = NonZeroU64::new(9).unwrap();
+        actor
+            .configure(generation, accepting_transport())
+            .await
+            .unwrap();
+        actor.stop(generation).await.unwrap();
+
+        for result in [
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                actor.wait_for_frame_after(generation, 0, Duration::from_secs(2)),
+            )
+            .await,
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                actor.wait_for_receiver_ack_after(generation, 0, Duration::from_secs(2)),
+            )
+            .await,
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                actor.wait_for_receiver_audio_ack_after(generation, 0, Duration::from_secs(2)),
+            )
+            .await,
+        ] {
+            let error = result
+                .expect("stopped sender left a waiter pending")
+                .unwrap_err();
+            assert!(error.to_string().contains("stopped before"));
+        }
         actor.shutdown().await.unwrap();
     }
 
