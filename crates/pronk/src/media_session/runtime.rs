@@ -42,6 +42,10 @@ impl ActorRuntime {
                 request_generation,
                 kind,
             } = command;
+            if !kind.is_shutdown() && !self.cancellation.requests.is_current(request_generation) {
+                kind.reject_superseded();
+                continue;
+            }
             match kind {
                 CommandKind::Activate { route, response } => {
                     let result = self.activate(request_generation, route).await;

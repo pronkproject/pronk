@@ -8,7 +8,6 @@ mod runtime;
 use runtime::ActorRuntime;
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -234,50 +233,70 @@ pub struct MediaSessionActor {
 
 #[derive(Debug)]
 struct RequestCoordinator {
-    installed_phase: Mutex<CancellationToken>,
-    latest_generation: AtomicU64,
+    state: Mutex<RequestState>,
+}
+
+#[derive(Debug)]
+struct RequestState {
+    installed_phase: CancellationToken,
+    latest_generation: u64,
 }
 
 impl RequestCoordinator {
     fn new() -> Self {
         Self {
-            installed_phase: Mutex::new(CancellationToken::new()),
-            latest_generation: AtomicU64::new(0),
+            state: Mutex::new(RequestState {
+                installed_phase: CancellationToken::new(),
+                latest_generation: 0,
+            }),
         }
     }
 
-    fn next_generation(&self) -> Result<u64, MediaSessionActorError> {
-        self.latest_generation
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| MediaSessionActorError::ControlGenerationExhausted)?
+    fn begin_request(&self) -> Result<u64, MediaSessionActorError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("media request coordinator mutex poisoned");
+        let generation = state
+            .latest_generation
             .checked_add(1)
-            .ok_or(MediaSessionActorError::ControlGenerationExhausted)
+            .ok_or(MediaSessionActorError::ControlGenerationExhausted)?;
+        state.installed_phase.cancel();
+        state.latest_generation = generation;
+        Ok(generation)
     }
 
     fn interrupt_phase(&self) {
-        self.installed_phase
+        self.state
             .lock()
-            .expect("media phase cancellation mutex poisoned")
+            .expect("media request coordinator mutex poisoned")
+            .installed_phase
             .cancel();
     }
 
     fn install_phase(&self, request_generation: u64) -> CancellationToken {
         let token = CancellationToken::new();
-        let mut current = self
-            .installed_phase
+        let mut state = self
+            .state
             .lock()
-            .expect("media phase cancellation mutex poisoned");
-        current.cancel();
-        *current = token.clone();
-        if self.latest_generation.load(Ordering::SeqCst) != request_generation {
+            .expect("media request coordinator mutex poisoned");
+        state.installed_phase.cancel();
+        state.installed_phase = token.clone();
+        if state.latest_generation != request_generation {
             // A newer command was queued before this phase was installed. Without
             // this check, that command's earlier interrupt would be lost and the
             // stale phase could block the queue for a full timeout.
             token.cancel();
         }
         token
+    }
+
+    fn is_current(&self, request_generation: u64) -> bool {
+        self.state
+            .lock()
+            .expect("media request coordinator mutex poisoned")
+            .latest_generation
+            == request_generation
     }
 }
 
@@ -357,12 +376,7 @@ impl MediaSessionHandle {
         &self,
         make: impl FnOnce(oneshot::Sender<Result<(), MediaSessionActorError>>) -> CommandKind,
     ) -> Result<(), MediaSessionActorError> {
-        // Advance the request identity before cancelling the installed phase.
-        // If the actor installs an older queued request concurrently, it will
-        // either observe this newer generation or be cancelled under the same
-        // mutex immediately afterward.
-        let request_generation = self.requests.next_generation()?;
-        self.interrupt_phase();
+        let request_generation = self.requests.begin_request()?;
         let (response, reply) = oneshot::channel();
         self.commands
             .send(Command {
@@ -481,6 +495,24 @@ enum CommandKind {
     },
 }
 
+impl CommandKind {
+    fn is_shutdown(&self) -> bool {
+        matches!(self, Self::Shutdown { .. })
+    }
+
+    fn reject_superseded(self) {
+        let response = match self {
+            Self::Activate { response, .. }
+            | Self::Deactivate { response }
+            | Self::Suspend { response, .. }
+            | Self::Retry { response }
+            | Self::ReportFailure { response, .. }
+            | Self::Shutdown { response, .. } => response,
+        };
+        let _ = response.send(Err(MediaSessionActorError::Superseded));
+    }
+}
+
 fn bounded_text(mut value: String, maximum: usize) -> String {
     if value.len() <= maximum {
         return value;
@@ -509,6 +541,8 @@ pub enum MediaSessionActorError {
     GenerationExhausted,
     #[error("media control-request generation is exhausted")]
     ControlGenerationExhausted,
+    #[error("media control request was superseded")]
+    Superseded,
     #[error("cannot suspend media from {0:?}")]
     SuspendUnavailable(MediaState),
     #[error("cannot retry media from {0:?}")]
@@ -689,6 +723,48 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_queued_stale_command_cannot_undo_a_newer_route() {
+        let driver = FakeDriver::default();
+        let actor = MediaSessionActor::spawn(Box::new(driver.clone())).unwrap();
+        let handle = actor.handle();
+        let stale_generation = handle.requests.begin_request().unwrap();
+        let current_generation = handle.requests.begin_request().unwrap();
+        let (current_response, current_reply) = oneshot::channel();
+        let (stale_response, stale_reply) = oneshot::channel();
+        handle
+            .commands
+            .try_send(Command {
+                request_generation: current_generation,
+                kind: CommandKind::Activate {
+                    route: route(1, 1920),
+                    response: current_response,
+                },
+            })
+            .unwrap();
+        handle
+            .commands
+            .try_send(Command {
+                request_generation: stale_generation,
+                kind: CommandKind::Deactivate {
+                    response: stale_response,
+                },
+            })
+            .unwrap();
+
+        current_reply.await.unwrap().unwrap();
+        assert_eq!(
+            stale_reply.await.unwrap(),
+            Err(MediaSessionActorError::Superseded)
+        );
+        assert_eq!(handle.snapshot().state(), MediaState::Running);
+        assert_eq!(driver.calls(), vec![Call::Capture(1), Call::Media(1)]);
+        actor
+            .shutdown(MediaStopReason::BackendShutdown)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn mode_change_stops_before_starting_a_new_generation() {
         let driver = FakeDriver::default();
@@ -844,10 +920,9 @@ mod tests {
 
     #[test]
     fn a_queued_newer_request_pre_cancels_an_older_phase() {
-        let requests = RequestCoordinator {
-            installed_phase: Mutex::new(CancellationToken::new()),
-            latest_generation: AtomicU64::new(2),
-        };
+        let requests = RequestCoordinator::new();
+        assert_eq!(requests.begin_request().unwrap(), 1);
+        assert_eq!(requests.begin_request().unwrap(), 2);
         let stale = requests.install_phase(1);
         assert!(stale.is_cancelled());
     }
