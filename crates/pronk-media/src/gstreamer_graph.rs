@@ -101,11 +101,61 @@ pub(crate) struct GStreamerGraph {
     raw_frames_dropped: Arc<AtomicU64>,
     video_output: Option<EncodedVideoOutput>,
     audio_output: Option<EncodedAudioOutput>,
-    timeline: Option<GenerationMediaTimeline>,
-    timeline_needs_reanchor: bool,
+    timeline: TimelineState,
     needs_segment_key_frame: bool,
     pending_video: Option<gst::Sample>,
     pending_audio: Option<RawEncodedAudioPacket>,
+}
+
+enum TimelineState {
+    AwaitingInitial,
+    Active(GenerationMediaTimeline),
+    Reanchoring(GenerationMediaTimeline),
+}
+
+impl TimelineState {
+    fn needs_anchor(&self) -> bool {
+        !matches!(self, Self::Active(_))
+    }
+
+    fn suspend(&mut self) {
+        let previous = std::mem::replace(self, Self::AwaitingInitial);
+        *self = match previous {
+            Self::AwaitingInitial => Self::AwaitingInitial,
+            Self::Active(timeline) | Self::Reanchoring(timeline) => Self::Reanchoring(timeline),
+        };
+    }
+
+    fn anchor(
+        &mut self,
+        video_pts: u64,
+        audio_pts: Option<u64>,
+        reference_origin: Instant,
+    ) -> Result<(), MediaGraphError> {
+        match self {
+            Self::AwaitingInitial => {
+                *self = Self::Active(GenerationMediaTimeline::new(
+                    video_pts,
+                    audio_pts,
+                    reference_origin,
+                ));
+            }
+            Self::Reanchoring(timeline) => {
+                let mut updated = *timeline;
+                updated.reanchor(video_pts, audio_pts, reference_origin)?;
+                *self = Self::Active(updated);
+            }
+            Self::Active(_) => {}
+        }
+        Ok(())
+    }
+
+    fn active_mut(&mut self) -> Option<&mut GenerationMediaTimeline> {
+        match self {
+            Self::Active(timeline) => Some(timeline),
+            Self::AwaitingInitial | Self::Reanchoring(_) => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for GStreamerGraph {
@@ -364,8 +414,7 @@ impl GStreamerGraph {
             audio_output: has_audio
                 .then(|| audio_output.map(EncodedAudioOutput::new))
                 .flatten(),
-            timeline: None,
-            timeline_needs_reanchor: false,
+            timeline: TimelineState::AwaitingInitial,
             needs_segment_key_frame: true,
             pending_video: None,
             pending_audio: None,
@@ -400,7 +449,7 @@ impl GStreamerGraph {
         if let Some(audio) = &mut self.audio {
             audio.begin_segment();
         }
-        self.timeline_needs_reanchor = self.timeline.is_some();
+        self.timeline.suspend();
         self.needs_segment_key_frame = true;
         Ok(())
     }
@@ -572,7 +621,7 @@ impl GStreamerGraph {
     }
 
     fn pull_available_samples(&mut self) -> Result<(), MediaGraphError> {
-        if self.timeline.is_none() || self.timeline_needs_reanchor {
+        if self.timeline.needs_anchor() {
             if self.pending_video.is_none() {
                 self.pending_video = self.pull_timeline_anchor_sample()?;
             }
@@ -594,16 +643,8 @@ impl GStreamerGraph {
                 None
             };
             let reference_origin = Instant::now();
-            if let Some(timeline) = &mut self.timeline {
-                timeline.reanchor(video_pts, audio_pts, reference_origin)?;
-            } else {
-                self.timeline = Some(GenerationMediaTimeline::new(
-                    video_pts,
-                    audio_pts,
-                    reference_origin,
-                ));
-            }
-            self.timeline_needs_reanchor = false;
+            self.timeline
+                .anchor(video_pts, audio_pts, reference_origin)?;
         }
 
         if let Some(sample) = self.pending_video.take() {
@@ -707,7 +748,7 @@ impl GStreamerGraph {
 
         let (media_timestamp, reference_time) = self
             .timeline
-            .as_mut()
+            .active_mut()
             .ok_or_else(|| MediaGraphError::new("generation media timeline is absent"))?
             .timing(
                 MediaStreamKind::Video,
@@ -752,7 +793,7 @@ impl GStreamerGraph {
     ) -> Result<(), MediaGraphError> {
         let (media_timestamp, reference_time) = self
             .timeline
-            .as_mut()
+            .active_mut()
             .ok_or_else(|| MediaGraphError::new("generation media timeline is absent"))?
             .timing(MediaStreamKind::Audio, packet.pts, packet.duration)?;
         let encoded_bytes = packet.data.len() as u64;
@@ -906,13 +947,46 @@ pub(crate) fn validate_remote_socket(fd: BorrowedFd<'_>) -> Result<(), MediaGrap
 mod tests {
     use std::os::fd::AsFd;
     use std::os::unix::net::{UnixDatagram, UnixStream};
+    use std::time::{Duration, Instant};
 
     use gstreamer::prelude::*;
 
     use super::{
         configure_encoded_video_sink, is_segment_anchor, observe_raw_frame_drops,
-        validate_remote_socket, video_stream_properties, RAW_QUEUE_BUFFERS,
+        validate_remote_socket, video_stream_properties, MediaStreamKind, TimelineState,
+        RAW_QUEUE_BUFFERS,
     };
+
+    #[test]
+    fn timeline_phase_reanchors_only_after_a_matching_segment_arrives() {
+        let reference = Instant::now();
+        let mut state = TimelineState::AwaitingInitial;
+        assert!(state.needs_anchor());
+        assert!(state.active_mut().is_none());
+
+        state.anchor(1_000, Some(900), reference).unwrap();
+        assert!(!state.needs_anchor());
+        let timing = state
+            .active_mut()
+            .unwrap()
+            .timing(MediaStreamKind::Video, 1_000, Duration::from_nanos(20))
+            .unwrap();
+        assert_eq!(timing.0, Duration::ZERO);
+
+        state.suspend();
+        assert!(state.needs_anchor());
+        assert!(state.active_mut().is_none());
+        assert!(state.anchor(2_000, None, reference).is_err());
+        assert!(state.needs_anchor());
+        state.anchor(2_000, Some(1_900), reference).unwrap();
+        assert!(!state.needs_anchor());
+        let timing = state
+            .active_mut()
+            .unwrap()
+            .timing(MediaStreamKind::Video, 2_000, Duration::from_nanos(20))
+            .unwrap();
+        assert_eq!(timing.0, Duration::from_nanos(20));
+    }
 
     #[test]
     fn video_stream_is_non_live_while_using_the_pipeline_system_clock() {
