@@ -39,6 +39,16 @@ struct ActiveSession {
     actor: DeviceActor,
 }
 
+struct PendingSessionRegistration {
+    connection: Connection,
+    session_id: String,
+    device: DeviceRecord,
+    options: SessionOptions,
+    path: OwnedObjectPath,
+    reply: oneshot::Sender<zbus::fdo::Result<OwnedObjectPath>>,
+    acknowledged: oneshot::Receiver<()>,
+}
+
 enum SessionSelection {
     Any,
     Exact {
@@ -172,16 +182,16 @@ impl ChromiacastBackend {
         .map_err(|error| SessionLifecycleError::Join(error.to_string()))?
     }
 
-    async fn register_session(
-        &self,
-        connection: Connection,
-        session_id: String,
-        device: DeviceRecord,
-        options: SessionOptions,
-        path: OwnedObjectPath,
-        reply: oneshot::Sender<zbus::fdo::Result<OwnedObjectPath>>,
-        acknowledged: oneshot::Receiver<()>,
-    ) {
+    async fn register_session(&self, registration: PendingSessionRegistration) {
+        let PendingSessionRegistration {
+            connection,
+            session_id,
+            device,
+            options,
+            path,
+            reply,
+            acknowledged,
+        } = registration;
         let mut active = self.shared.active_session.lock().await;
         if active.is_some() {
             let _ = reply.send(Err(zbus::fdo::Error::Failed(
@@ -393,7 +403,7 @@ impl ChromiacastBackend {
         let connection = connection.clone();
         tokio::spawn(async move {
             backend
-                .register_session(
+                .register_session(PendingSessionRegistration {
                     connection,
                     session_id,
                     device,
@@ -401,7 +411,7 @@ impl ChromiacastBackend {
                     path,
                     reply,
                     acknowledged,
-                )
+                })
                 .await;
         });
         let path = response
@@ -547,20 +557,20 @@ mod tests {
         drop(acknowledge);
 
         backend
-            .register_session(
-                connection.clone(),
-                "test-session".into(),
-                device.clone(),
-                SessionOptions {
+            .register_session(PendingSessionRegistration {
+                connection: connection.clone(),
+                session_id: "test-session".into(),
+                device: device.clone(),
+                options: SessionOptions {
                     connection_generation: 1,
                     discovery_generation: 1,
                     session_generation: 1,
                     requested_features: 0,
                 },
-                path.clone(),
+                path: path.clone(),
                 reply,
                 acknowledged,
-            )
+            })
             .await;
         assert!(backend.shared.active_session.lock().await.is_none());
         assert!(connection
@@ -574,20 +584,20 @@ mod tests {
         let (acknowledge, acknowledged) = oneshot::channel();
         drop(acknowledge);
         backend
-            .register_session(
-                connection.clone(),
-                "test-session".into(),
-                device.clone(),
-                SessionOptions {
+            .register_session(PendingSessionRegistration {
+                connection: connection.clone(),
+                session_id: "test-session".into(),
+                device: device.clone(),
+                options: SessionOptions {
                     connection_generation: 1,
                     discovery_generation: 1,
                     session_generation: 2,
                     requested_features: 0,
                 },
-                acknowledged_path.clone(),
+                path: acknowledged_path.clone(),
                 reply,
                 acknowledged,
-            )
+            })
             .await;
         assert_eq!(response.await.unwrap().unwrap(), acknowledged_path);
         assert!(backend.shared.active_session.lock().await.is_none());
@@ -606,20 +616,20 @@ mod tests {
         let (reply, response) = oneshot::channel();
         let (_acknowledge, acknowledged) = oneshot::channel();
         backend
-            .register_session(
-                connection.clone(),
-                "test-session".into(),
-                device.clone(),
-                SessionOptions {
+            .register_session(PendingSessionRegistration {
+                connection: connection.clone(),
+                session_id: "test-session".into(),
+                device: device.clone(),
+                options: SessionOptions {
                     connection_generation: 1,
                     discovery_generation: 1,
                     session_generation: 3,
                     requested_features: 0,
                 },
-                existing_path.clone(),
+                path: existing_path.clone(),
                 reply,
                 acknowledged,
-            )
+            })
             .await;
         assert!(response.await.unwrap().is_err());
         assert!(backend.shared.active_session.lock().await.is_none());
@@ -638,20 +648,20 @@ mod tests {
             let accepted_path = accepted_path.clone();
             tokio::spawn(async move {
                 backend
-                    .register_session(
+                    .register_session(PendingSessionRegistration {
                         connection,
-                        "test-session".into(),
+                        session_id: "test-session".into(),
                         device,
-                        SessionOptions {
+                        options: SessionOptions {
                             connection_generation: 1,
                             discovery_generation: 1,
                             session_generation: 4,
                             requested_features: 0,
                         },
-                        accepted_path,
+                        path: accepted_path,
                         reply,
                         acknowledged,
-                    )
+                    })
                     .await;
             })
         };
