@@ -269,11 +269,6 @@ impl DiscoveryHandle {
         .await
     }
 
-    async fn shutdown(&self) -> Result<(), DiscoveryActorError> {
-        self.request(|reply| DiscoveryCommand::Shutdown { reply })
-            .await
-    }
-
     async fn request<T>(
         &self,
         command: impl FnOnce(oneshot::Sender<Result<T, DiscoveryActorError>>) -> DiscoveryCommand,
@@ -289,7 +284,7 @@ impl DiscoveryHandle {
 
 #[derive(Debug)]
 pub struct DiscoveryActor {
-    handle: DiscoveryHandle,
+    shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -300,13 +295,20 @@ impl DiscoveryActor {
     ) -> (Self, DiscoveryHandle, mpsc::Receiver<DiscoveryEvent>) {
         let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
         let (event_tx, event_rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+        let (shutdown, shutdown_rx) = oneshot::channel();
         let handle = DiscoveryHandle {
             commands: command_tx,
         };
-        let task = tokio::spawn(run_actor(source, configuration, command_rx, event_tx));
+        let task = tokio::spawn(run_actor(
+            source,
+            configuration,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
         (
             Self {
-                handle: handle.clone(),
+                shutdown: Some(shutdown),
                 task: Some(task),
             },
             handle,
@@ -315,19 +317,17 @@ impl DiscoveryActor {
     }
 
     pub async fn shutdown(mut self) -> Result<(), DiscoveryActorError> {
-        let response = self.handle.shutdown().await;
+        self.shutdown.take();
         if let Some(task) = self.task.take() {
             task.await.map_err(|_| DiscoveryActorError::Stopped)?;
         }
-        match response {
-            Err(DiscoveryActorError::Stopped) => Ok(()),
-            response => response,
-        }
+        Ok(())
     }
 }
 
 impl Drop for DiscoveryActor {
     fn drop(&mut self) {
+        self.shutdown.take();
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -351,9 +351,6 @@ enum DiscoveryCommand {
         device_id: String,
         reply: oneshot::Sender<Result<Option<DeviceRecord>, DiscoveryActorError>>,
     },
-    Shutdown {
-        reply: oneshot::Sender<Result<(), DiscoveryActorError>>,
-    },
 }
 
 #[derive(Debug)]
@@ -375,18 +372,30 @@ async fn run_actor(
     configuration: DiscoveryConfiguration,
     mut commands: mpsc::Receiver<DiscoveryCommand>,
     events: mpsc::Sender<DiscoveryEvent>,
+    mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut state = ActorState::default();
     loop {
         let command = if let Some(active) = &state.active {
             tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
                 command = commands.recv() => command,
                 _ = tokio::time::sleep_until(active.next_scan) => {
-                    let result = match tokio::time::timeout(
-                        configuration.scan_timeout,
-                        source.scan(configuration.scan_window),
-                    ).await {
-                        Ok(Ok(devices)) => apply_scan(&mut state, devices, &events).await,
+                    let scan = tokio::select! {
+                        biased;
+                        _ = &mut shutdown => break,
+                        result = tokio::time::timeout(
+                            configuration.scan_timeout,
+                            source.scan(configuration.scan_window),
+                        ) => result,
+                    };
+                    let result = match scan {
+                        Ok(Ok(devices)) => tokio::select! {
+                            biased;
+                            _ = &mut shutdown => break,
+                            result = apply_scan(&mut state, devices, &events) => result,
+                        },
                         Ok(Err(error)) => Err(DiscoveryActorError::Source(error.to_string())),
                         Err(_) => Err(DiscoveryActorError::Source(format!(
                             "scan exceeded {:?}",
@@ -394,9 +403,13 @@ async fn run_actor(
                         ))),
                     };
                     if let Err(error) = result {
-                        let _ = events.send(DiscoveryEvent::Fatal {
-                            error_text: error.to_string(),
-                        }).await;
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown => break,
+                            _ = events.send(DiscoveryEvent::Fatal {
+                                error_text: error.to_string(),
+                            }) => {},
+                        }
                         break;
                     }
                     if let Some(active) = &mut state.active {
@@ -406,7 +419,11 @@ async fn run_actor(
                 }
             }
         } else {
-            commands.recv().await
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
+                command = commands.recv() => command,
+            }
         };
         let Some(command) = command else {
             break;
@@ -429,11 +446,6 @@ async fn run_actor(
                 reply,
             } => {
                 let _ = reply.send(resolve(&state, generation, &device_id));
-            }
-            DiscoveryCommand::Shutdown { reply } => {
-                state.active = None;
-                let _ = reply.send(Ok(()));
-                break;
             }
         }
     }
@@ -633,6 +645,10 @@ mod tests {
 
     struct StalledSource;
 
+    struct ChangingSource {
+        calls: Arc<AtomicUsize>,
+    }
+
     #[async_trait]
     impl DiscoverySource for RecordingSource {
         async fn scan(
@@ -652,6 +668,17 @@ mod tests {
             _window: Duration,
         ) -> Result<Vec<DeviceRecord>, DiscoverySourceError> {
             std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl DiscoverySource for ChangingSource {
+        async fn scan(
+            &mut self,
+            _window: Duration,
+        ) -> Result<Vec<DeviceRecord>, DiscoverySourceError> {
+            let count = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![record("living-room", &format!("Living Room {count}"))])
         }
     }
 
@@ -738,6 +765,42 @@ mod tests {
             .expect("stalled scan must emit a terminal event");
         assert!(matches!(event, DiscoveryEvent::Fatal { .. }));
         actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn owner_shutdown_interrupts_publication_to_a_full_event_queue() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (commands, command_rx) = mpsc::channel(1);
+        let (events, event_rx) = mpsc::channel(1);
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(run_actor(
+            Box::new(ChangingSource {
+                calls: Arc::clone(&calls),
+            }),
+            DiscoveryConfiguration::for_test(Duration::from_millis(1)),
+            command_rx,
+            events,
+            shutdown_rx,
+        ));
+        let (reply, wait) = oneshot::channel();
+        commands
+            .send(DiscoveryCommand::Start { reply })
+            .await
+            .unwrap();
+        wait.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) < 2 || event_rx.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        drop(shutdown);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
