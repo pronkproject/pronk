@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chromiacast::{
     AudioCodec, AudioStreamConfig, CastApp, CastConnection, EncodedFrame, EnqueueError,
     FrameDependency, Framerate, Offer, Resolution, SenderEvent, SenderSession, StreamHandle,
-    StreamType, UdpTransport, VideoCodec as CastVideoCodec, VideoStreamConfig, APP_MIRRORING,
+    StreamType, UdpTransport, VideoCodec as CastVideoCodec, VideoStreamConfig,
 };
 use pronk_media::{EncodedAudioPacket, EncodedVideoAccessUnit, VideoCodec, VideoFrameDependency};
 use tokio::sync::watch;
@@ -19,25 +19,7 @@ use crate::transport::{
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) async fn negotiate_video(
-    connection: &CastConnection,
-    configuration: VideoTransportConfiguration,
-) -> Result<(CastApp, NegotiatedVideoTransport), VideoTransportError> {
-    let app = connection
-        .launch(APP_MIRRORING)
-        .await
-        .map_err(|error| VideoTransportError::new(format!("launch mirroring app: {error}")))?;
-    let result = negotiate_launched_video(connection, &app, configuration).await;
-    match result {
-        Ok(sender) => Ok((app, sender)),
-        Err(error) => {
-            let _ = connection.stop(&app).await;
-            Err(error)
-        }
-    }
-}
-
-async fn negotiate_launched_video(
+pub(crate) async fn negotiate_launched_video(
     connection: &CastConnection,
     app: &CastApp,
     configuration: VideoTransportConfiguration,

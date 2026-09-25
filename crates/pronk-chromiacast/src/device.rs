@@ -143,10 +143,22 @@ impl VideoTransportNegotiator for ChromiacastDeviceControl {
                 "a Cast mirroring application is already active",
             ));
         }
-        let (app, sender) =
-            crate::cast_transport::negotiate_video(&self.connection, configuration).await?;
+        let app = self
+            .connection
+            .launch(APP_MIRRORING)
+            .await
+            .map_err(|error| VideoTransportError::new(format!("launch mirroring app: {error}")))?;
         self.active_app = Some(app);
-        Ok(sender)
+        let result = crate::cast_transport::negotiate_launched_video(
+            &self.connection,
+            self.active_app.as_ref().expect("launched app was recorded"),
+            configuration,
+        )
+        .await;
+        if result.is_err() {
+            let _ = self.stop_video().await;
+        }
+        result
     }
 
     async fn stop_video(&mut self) -> Result<(), VideoTransportError> {
