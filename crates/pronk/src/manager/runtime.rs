@@ -6,8 +6,8 @@ use tracing::{debug, warn};
 
 use super::backend_worker::{shutdown_workers, BackendWorker, BackendWorkerMessage};
 use super::display_lifecycle::{
-    handle_removal_join, handle_setup_join, start_managed_display_setup, ManagedDisplayPhase,
-    ManagedDisplayRecord, RemovalCompletion, RemovalRequest, SetupCompletion,
+    handle_removal_join, handle_setup_join, spawn_display_removal, start_managed_display_setup,
+    ManagedDisplayPhase, ManagedDisplayRecord, RemovalCompletion, RemovalRequest, SetupCompletion,
 };
 use super::inventory::{configured_device_update, AggregateInventory, ApplySupervisorOutcome};
 use super::{
@@ -58,6 +58,8 @@ impl ManagerRuntimeState {
             joined,
             &mut self.setup_task_ids,
             &mut self.records,
+            &mut self.removal_tasks,
+            &mut self.removal_task_ids,
             &self.inventory,
             slot_events,
         )
@@ -230,16 +232,12 @@ impl ManagerRuntimeState {
                 };
                 match removal {
                     RemovalRequest::Start(display) => {
-                        let abort = self.removal_tasks.spawn(async move {
-                            RemovalCompletion {
-                                display_id,
-                                result: display
-                                    .remove(DeviceSessionStopReason::DisplayRemoved)
-                                    .await
-                                    .map_err(|error| error.to_string()),
-                            }
-                        });
-                        self.removal_task_ids.insert(abort.id(), display_id);
+                        spawn_display_removal(
+                            display_id,
+                            display,
+                            &mut self.removal_tasks,
+                            &mut self.removal_task_ids,
+                        );
                     }
                     RemovalRequest::Queued => {}
                     RemovalRequest::Complete(response) => {

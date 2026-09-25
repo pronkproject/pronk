@@ -282,6 +282,25 @@ pub struct DisplaySetupHandle {
 }
 
 impl DisplaySetupHandle {
+    #[cfg(test)]
+    pub(crate) fn test_pending(display_id: CastDisplayId) -> (Self, CancellationToken) {
+        let cancellation = CancellationToken::new();
+        let (_status_tx, status) = watch::channel(DisplaySetupSnapshot {
+            display_id,
+            stage: DisplaySetupStage::Validating,
+            error_code: OperationErrorCode::None,
+            error: None,
+        });
+        (
+            Self {
+                display_id,
+                cancellation: cancellation.clone(),
+                status,
+            },
+            cancellation,
+        )
+    }
+
     pub fn display_id(&self) -> CastDisplayId {
         self.display_id
     }
