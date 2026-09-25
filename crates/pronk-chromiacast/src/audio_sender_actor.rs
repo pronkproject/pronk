@@ -146,6 +146,14 @@ impl AudioSenderActor {
                 if current.statistics.packets > previous {
                     return Ok(());
                 }
+                if matches!(
+                    current.state,
+                    AudioSenderState::Empty | AudioSenderState::Stopped
+                ) {
+                    return Err(VideoTransportError::new(format!(
+                        "audio sender generation {generation} stopped before encoded audio delivery"
+                    )));
+                }
                 snapshot
                     .changed()
                     .await
@@ -677,6 +685,35 @@ mod tests {
         assert_eq!(statistics.packets, 1);
         actor.stop(generation).await.unwrap();
         assert_eq!(actor.snapshot.borrow().statistics.packets, 1);
+        actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_generation_ends_audio_delivery_wait() {
+        let (_output, receiver) = mpsc::channel(1);
+        let actor = AudioSenderActor::spawn(receiver);
+        let generation = NonZeroU64::new(9).unwrap();
+        actor
+            .configure(
+                generation,
+                Box::new(RecordingSender {
+                    timestamps: Arc::new(Mutex::new(Vec::new())),
+                    fail_shutdown: false,
+                    shutdown_signal: None,
+                }),
+            )
+            .await
+            .unwrap();
+        actor.stop(generation).await.unwrap();
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            actor.wait_for_packet_after(generation, 0, Duration::from_secs(2)),
+        )
+        .await
+        .expect("stopped audio sender left a waiter pending")
+        .unwrap_err();
+        assert!(error.to_string().contains("stopped before"));
         actor.shutdown().await.unwrap();
     }
 
