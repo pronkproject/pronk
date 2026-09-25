@@ -726,7 +726,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let generations = Arc::new(StdMutex::new(Vec::new()));
         let initial = device(1, 1, 1);
-        let (media_port, _control, replacement) =
+        let (media_port, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let factory = FakeFactory {
             results: (0..EVENT_BACKLOG)
@@ -773,7 +773,7 @@ mod tests {
         let recovered_device = device(2, 3, 4);
         let baseline = prepared(initial_device, "Bravia XR");
         let recovered = prepared(recovered_device.clone(), "Bravia XR");
-        let (media_port, _control, replacement) =
+        let (media_port, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let terminal = DeviceSessionEvent {
             session_generation: NonZeroU64::new(2).unwrap(),
@@ -843,7 +843,7 @@ mod tests {
         let recovered_device = device(2, 3, 4);
         let baseline = prepared(initial_device, "Bravia XR");
         let recovered = prepared(recovered_device.clone(), "Bravia XR");
-        let (media_port, _control, replacement) =
+        let (media_port, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let factory = FakeFactory {
             results: VecDeque::from([Ok(PreparedDeviceSession {
@@ -897,7 +897,7 @@ mod tests {
         let recovered_device = device(2, 2, 2);
         let baseline = prepared(initial_device, "Bravia XR");
         let incompatible = prepared(recovered_device.clone(), "Other TV");
-        let (media_port, _control, replacement) =
+        let (media_port, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let factory = FakeFactory {
             results: VecDeque::from([Ok(PreparedDeviceSession {
@@ -952,7 +952,7 @@ mod tests {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let initial_device = device(1, 1, 1);
         let baseline = prepared(initial_device, "Bravia XR");
-        let (media_port, _control, replacement) =
+        let (media_port, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let (attempts, mut attempt_events) = mpsc::unbounded_channel();
         let (release_first, first_released) = oneshot::channel();
@@ -997,7 +997,7 @@ mod tests {
     async fn a_late_success_from_a_cancelled_request_is_cleaned_up() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let baseline = prepared(device(1, 1, 1), "Bravia XR");
-        let (media_port, _control, replacement) =
+        let (media_port, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let (first_started, started) = oneshot::channel();
         let (release_first, released) = oneshot::channel();
@@ -1047,7 +1047,7 @@ mod tests {
     async fn dropping_recovery_actor_shuts_down_its_event_source() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let baseline = prepared(device(1, 1, 1), "Bravia XR");
-        let (media_port, _control, replacement) =
+        let (media_port, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let (done, shutdown_done) = oneshot::channel();
         let actor = DeviceSessionRecoveryActor::spawn(

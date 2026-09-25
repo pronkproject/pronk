@@ -4,7 +4,6 @@ mod capture_health;
 mod capture_output_layouts;
 mod cast_display_slot;
 mod dbus;
-mod device_control_port;
 mod device_recovery;
 mod device_session;
 mod device_session_port;

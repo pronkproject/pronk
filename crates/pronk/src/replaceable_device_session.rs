@@ -16,7 +16,6 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::device_control_port::{DeviceControlError, DeviceControlOperation, DeviceControlPort};
 use crate::device_session_port::{
     DeviceMediaSetup, DeviceMediaStopReason, DeviceMediaSuspendReason, DeviceSessionError,
     DeviceSessionPort, DeviceSessionStopReason,
@@ -175,16 +174,12 @@ impl DeviceSessionInstallationPermit<'_> {
     }
 }
 
-/// Build the media-driver port, replaceable control facade, and separate
-/// replacement capability over one prepared Device session.
+/// Build the media-driver port and replacement capability over one prepared
+/// Device session.
 pub fn replaceable_device_session(
     initial_session_generation: NonZeroU64,
     initial_session: Box<dyn DeviceSessionPort>,
-) -> (
-    Box<dyn DeviceSessionPort>,
-    Arc<dyn DeviceControlPort>,
-    DeviceSessionReplacementHandle,
-) {
+) -> (Box<dyn DeviceSessionPort>, DeviceSessionReplacementHandle) {
     let shared = Arc::new(Mutex::new(SharedState {
         slot: SessionSlot::Active(ActiveSession {
             session_generation: initial_session_generation,
@@ -196,9 +191,6 @@ pub fn replaceable_device_session(
     }));
     (
         Box::new(ReplaceableDeviceSessionPort {
-            shared: Arc::clone(&shared),
-        }),
-        Arc::new(ReplaceableDeviceControlPort {
             shared: Arc::clone(&shared),
         }),
         DeviceSessionReplacementHandle { shared },
@@ -354,31 +346,6 @@ impl SharedState {
 
 struct ReplaceableDeviceSessionPort {
     shared: Arc<Mutex<SharedState>>,
-}
-
-struct ReplaceableDeviceControlPort {
-    shared: Arc<Mutex<SharedState>>,
-}
-
-impl fmt::Debug for ReplaceableDeviceControlPort {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ReplaceableDeviceControlPort")
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl DeviceControlPort for ReplaceableDeviceControlPort {
-    async fn transmit_control(
-        &self,
-        operation: DeviceControlOperation,
-    ) -> Result<(), DeviceControlError> {
-        let mut shared = self.shared.lock().await;
-        let current = live_session(&mut shared)
-            .map_err(|error| DeviceControlError::new(error.to_string()))?;
-        current.session.transmit_control(operation).await
-    }
 }
 
 impl fmt::Debug for ReplaceableDeviceSessionPort {
@@ -546,7 +513,6 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
-        Control(&'static str, DeviceControlOperation),
         Configure(&'static str, u64),
         Start(&'static str, u64),
         StopMedia(&'static str, u64),
@@ -564,17 +530,6 @@ mod tests {
 
     #[async_trait]
     impl DeviceSessionPort for FakeSession {
-        async fn transmit_control(
-            &mut self,
-            operation: DeviceControlOperation,
-        ) -> Result<(), DeviceControlError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(Call::Control(self.name, operation));
-            Ok(())
-        }
-
         async fn configure_media(
             &mut self,
             setup: DeviceMediaSetup,
@@ -689,7 +644,7 @@ mod tests {
             stop_gate: Some(stop_gate),
             stop_completed: None,
         });
-        let (port, _control, mut replacement) = replaceable_device_session(generation(1), initial);
+        let (port, mut replacement) = replaceable_device_session(generation(1), initial);
 
         assert!(
             tokio::time::timeout(Duration::from_millis(20), replacement.retire_current(),)
@@ -730,14 +685,8 @@ mod tests {
     #[tokio::test]
     async fn replacement_retires_old_authority_and_accepts_a_fresh_generation() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
-        let (mut port, control, mut replacement) =
+        let (mut port, mut replacement) =
             replaceable_device_session(generation(1), session("old", &calls));
-        control
-            .transmit_control(DeviceControlOperation::simple(
-                crate::device_control_port::DeviceControlKind::Activate,
-            ))
-            .await
-            .unwrap();
         port.configure_media(empty_setup(4)).await.unwrap();
         port.start_media(generation(4)).await.unwrap();
 
@@ -758,14 +707,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.installed_session_generation, generation(2));
-        control
-            .transmit_control(DeviceControlOperation::valued(
-                crate::device_control_port::DeviceControlKind::Volume,
-                "relative",
-                5,
-            ))
-            .await
-            .unwrap();
 
         // The media actor may finish cleanup only after replacement.  It must
         // not send the old generation to the fresh backend session.
@@ -784,23 +725,9 @@ mod tests {
         assert_eq!(
             *calls.lock().unwrap(),
             vec![
-                Call::Control(
-                    "old",
-                    DeviceControlOperation::simple(
-                        crate::device_control_port::DeviceControlKind::Activate,
-                    ),
-                ),
                 Call::Configure("old", 4),
                 Call::Start("old", 4),
                 Call::Stop("old", DeviceSessionStopReason::DaemonShutdown),
-                Call::Control(
-                    "new",
-                    DeviceControlOperation::valued(
-                        crate::device_control_port::DeviceControlKind::Volume,
-                        "relative",
-                        5,
-                    ),
-                ),
                 Call::Configure("new", 5),
                 Call::Start("new", 5),
                 Call::StopMedia("new", 5),
@@ -812,7 +739,7 @@ mod tests {
     #[tokio::test]
     async fn stopped_owner_rejects_an_outstanding_installation_permit() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
-        let (port, _control, mut replacement) =
+        let (port, mut replacement) =
             replaceable_device_session(generation(1), session("old", &calls));
         let permit = replacement.retire_current().await.unwrap();
         port.stop(DeviceSessionStopReason::DaemonShutdown)
@@ -843,7 +770,7 @@ mod tests {
     #[tokio::test]
     async fn stale_replacement_is_rejected_and_cleaned_up() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
-        let (port, _control, mut replacement) =
+        let (port, mut replacement) =
             replaceable_device_session(generation(3), session("current", &calls));
         let installation = replacement.retire_current().await.unwrap();
         assert!(matches!(
@@ -870,7 +797,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_session_cleanup_failure_keeps_the_rejection_reason() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
-        let (port, _control, mut replacement) =
+        let (port, mut replacement) =
             replaceable_device_session(generation(3), session("current", &calls));
         let installation = replacement.retire_current().await.unwrap();
         let error = installation
@@ -908,7 +835,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_rejection_keeps_candidate_cleanup_running() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
-        let (port, _control, mut replacement) =
+        let (port, mut replacement) =
             replaceable_device_session(generation(3), session("current", &calls));
         let permit = replacement.retire_current().await.unwrap();
         let (release_stop, stop_gate) = tokio::sync::oneshot::channel();
@@ -959,7 +886,7 @@ mod tests {
             stop_gate: Some(stop_gate),
             stop_completed: Some(stop_completed),
         });
-        let (port, _control, _replacement) = replaceable_device_session(generation(1), initial);
+        let (port, _replacement) = replaceable_device_session(generation(1), initial);
 
         assert!(tokio::time::timeout(
             Duration::from_millis(20),
@@ -984,7 +911,7 @@ mod tests {
     #[tokio::test]
     async fn installation_refuses_to_overlap_an_active_session() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
-        let (port, _control, replacement) =
+        let (port, replacement) =
             replaceable_device_session(generation(1), session("current", &calls));
 
         assert!(matches!(

@@ -7,7 +7,6 @@ use std::os::fd::OwnedFd;
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::device_control_port::{DeviceControlError, DeviceControlOperation};
 use crate::display_state::RoutedMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,15 +113,6 @@ impl DeviceSessionError {
 /// Device session.
 #[async_trait]
 pub trait DeviceSessionPort: fmt::Debug + Send + 'static {
-    async fn transmit_control(
-        &mut self,
-        _operation: DeviceControlOperation,
-    ) -> Result<(), DeviceControlError> {
-        Err(DeviceControlError::new(
-            "Device session does not support control operations",
-        ))
-    }
-
     async fn configure_media(&mut self, setup: DeviceMediaSetup) -> Result<(), DeviceSessionError>;
 
     async fn start_media(&mut self, media_generation: NonZeroU64)

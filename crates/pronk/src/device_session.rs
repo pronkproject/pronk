@@ -7,12 +7,11 @@ use pronk_backend_host::{
     BackendSessionError, BackendSessionEvent, BackendSessionHandle, BackendSessionMonitor,
 };
 use pronk_backend_protocol::{
-    validate_media_configuration, ControlKind, ControlOperation, DisplayMode, MediaConfiguration,
-    MediaKind, PipeWireTarget, StopReason, SuspendReason,
+    validate_media_configuration, DisplayMode, MediaConfiguration, MediaKind, PipeWireTarget,
+    StopReason, SuspendReason,
 };
 use zbus::zvariant::OwnedFd as ZbusOwnedFd;
 
-use crate::device_control_port::{DeviceControlError, DeviceControlKind, DeviceControlOperation};
 use crate::device_session_port::{
     DeviceMediaConfiguration, DeviceMediaKind, DeviceMediaSetup, DeviceMediaStopReason,
     DeviceMediaSuspendReason, DeviceMediaTarget, DeviceSessionError, DeviceSessionEvent,
@@ -102,31 +101,6 @@ fn map_session_event(event: BackendSessionEvent) -> DeviceSessionEvent {
 
 #[async_trait]
 impl DeviceSessionPort for BackendDeviceSession {
-    async fn transmit_control(
-        &mut self,
-        operation: DeviceControlOperation,
-    ) -> Result<(), DeviceControlError> {
-        let operation = ControlOperation {
-            session_generation: self.session().session_generation(),
-            kind: match operation.kind {
-                DeviceControlKind::Activate => ControlKind::Activate,
-                DeviceControlKind::Deactivate => ControlKind::Deactivate,
-                DeviceControlKind::Power => ControlKind::Power,
-                DeviceControlKind::Standby => ControlKind::Standby,
-                DeviceControlKind::KeyDown => ControlKind::KeyDown,
-                DeviceControlKind::KeyUp => ControlKind::KeyUp,
-                DeviceControlKind::Volume => ControlKind::Volume,
-                DeviceControlKind::Mute => ControlKind::Mute,
-            },
-            code: operation.code,
-            value: operation.value,
-        };
-        self.session()
-            .transmit_control(operation)
-            .await
-            .map_err(|error| DeviceControlError::new(error.to_string()))
-    }
-
     async fn configure_media(&mut self, setup: DeviceMediaSetup) -> Result<(), DeviceSessionError> {
         let media_generation = setup.media_generation;
         let (remotes, targets): (Vec<_>, Vec<_>) = setup

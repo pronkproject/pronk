@@ -589,7 +589,7 @@ impl AttachedSetup {
                 )));
             }
         };
-        let (device_session, _device_control, session_replacement) = replaceable_device_session(
+        let (device_session, session_replacement) = replaceable_device_session(
             initial_session_generation,
             Box::new(BackendDeviceSession::new(backend_session)),
         );
