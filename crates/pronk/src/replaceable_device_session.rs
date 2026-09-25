@@ -115,89 +115,37 @@ impl DeviceSessionReplacementHandle {
             session_generation,
             session,
         } = replacement;
-        let mut replacement_session = Some(session);
-        let mut rejected = None;
-        let installed = {
+        let decision = {
             let mut shared = self.shared.lock().await;
-            if shared.closed {
-                rejected = Some(DeviceSessionReplacementError::Stopped);
-                None
-            } else if let Some(current) = shared.current.as_ref() {
-                rejected = Some(DeviceSessionReplacementError::Occupied {
-                    current: current.session_generation,
-                });
-                None
-            } else if session_generation <= shared.last_session_generation {
-                rejected = Some(DeviceSessionReplacementError::StaleGeneration {
-                    current: shared.last_session_generation,
-                    replacement: session_generation,
-                });
-                None
-            } else {
-                shared.current = Some(ActiveSession {
-                    session_generation,
-                    media_generation: None,
-                    session: replacement_session
-                        .take()
-                        .expect("accepted replacement still owns its session"),
-                });
-                shared.last_session_generation = session_generation;
-                Some(())
+            match shared.validate_install(session_generation) {
+                Ok(()) => {
+                    shared.current = Some(ActiveSession {
+                        session_generation,
+                        media_generation: None,
+                        session,
+                    });
+                    shared.last_session_generation = session_generation;
+                    InstallationDecision::Installed(DeviceSessionInstallationReport {
+                        installed_session_generation: session_generation,
+                    })
+                }
+                Err(reason) => InstallationDecision::Rejected { reason, session },
             }
         };
 
-        let Some(()) = installed else {
-            // A session that was created for a stale or stopped owner must not
-            // be dropped without its final protocol teardown attempt.
-            let cleanup_error = replacement_session
-                .take()
-                .expect("rejected replacement still owns its session")
-                .stop(DeviceSessionStopReason::DaemonShutdown)
-                .await
-                .err()
-                .map(|error| error.to_string());
-            return Err(
-                match (
-                    rejected.expect("rejected replacement has a reason"),
-                    cleanup_error,
-                ) {
-                    (DeviceSessionReplacementError::Stopped, Some(cleanup)) => {
-                        DeviceSessionReplacementError::RejectedCleanup {
-                            reason: "Device-session owner has stopped".into(),
-                            cleanup,
-                        }
-                    }
-                    (
-                        DeviceSessionReplacementError::StaleGeneration {
-                            current,
-                            replacement,
-                        },
-                        Some(cleanup),
-                    ) => DeviceSessionReplacementError::RejectedCleanup {
-                        reason: format!(
-                        "replacement session generation {replacement} is not newer than {current}"
-                    ),
-                        cleanup,
-                    },
-                    (DeviceSessionReplacementError::Occupied { current }, Some(cleanup)) => {
-                        DeviceSessionReplacementError::RejectedCleanup {
-                            reason: format!(
-                                "Device-session generation {current} still occupies the replacement slot"
-                            ),
-                            cleanup,
-                        }
-                    }
-                    (error, None) => error,
-                    (DeviceSessionReplacementError::RejectedCleanup { .. }, _) => {
-                        unreachable!("a rejected-cleanup error is never an initial reason")
-                    }
-                },
-            );
-        };
-
-        Ok(DeviceSessionInstallationReport {
-            installed_session_generation: session_generation,
-        })
+        match decision {
+            InstallationDecision::Installed(report) => Ok(report),
+            InstallationDecision::Rejected { reason, session } => {
+                // A rejected backend session still needs a final protocol
+                // teardown attempt before its owner can discard it.
+                let cleanup_error = session
+                    .stop(DeviceSessionStopReason::DaemonShutdown)
+                    .await
+                    .err()
+                    .map(|error| error.to_string());
+                Err(reason.into_error(cleanup_error))
+            }
+        }
     }
 }
 
@@ -245,6 +193,56 @@ pub fn replaceable_device_session(
     )
 }
 
+enum InstallationDecision {
+    Installed(DeviceSessionInstallationReport),
+    Rejected {
+        reason: InstallRejection,
+        session: Box<dyn DeviceSessionPort>,
+    },
+}
+
+enum InstallRejection {
+    Stopped,
+    Occupied {
+        current: NonZeroU64,
+    },
+    StaleGeneration {
+        current: NonZeroU64,
+        replacement: NonZeroU64,
+    },
+}
+
+impl InstallRejection {
+    fn into_error(self, cleanup_error: Option<String>) -> DeviceSessionReplacementError {
+        if let Some(cleanup) = cleanup_error {
+            let reason = match self {
+                Self::Stopped => "Device-session owner has stopped".into(),
+                Self::Occupied { current } => format!(
+                    "Device-session generation {current} still occupies the replacement slot"
+                ),
+                Self::StaleGeneration {
+                    current,
+                    replacement,
+                } => format!(
+                    "replacement session generation {replacement} is not newer than {current}"
+                ),
+            };
+            return DeviceSessionReplacementError::RejectedCleanup { reason, cleanup };
+        }
+        match self {
+            Self::Stopped => DeviceSessionReplacementError::Stopped,
+            Self::Occupied { current } => DeviceSessionReplacementError::Occupied { current },
+            Self::StaleGeneration {
+                current,
+                replacement,
+            } => DeviceSessionReplacementError::StaleGeneration {
+                current,
+                replacement,
+            },
+        }
+    }
+}
+
 struct ActiveSession {
     session_generation: NonZeroU64,
     media_generation: Option<NonZeroU64>,
@@ -267,6 +265,26 @@ struct SharedState {
     last_session_generation: NonZeroU64,
     retired_media_generations: BTreeSet<NonZeroU64>,
     closed: bool,
+}
+
+impl SharedState {
+    fn validate_install(&self, generation: NonZeroU64) -> Result<(), InstallRejection> {
+        if self.closed {
+            return Err(InstallRejection::Stopped);
+        }
+        if let Some(current) = self.current.as_ref() {
+            return Err(InstallRejection::Occupied {
+                current: current.session_generation,
+            });
+        }
+        if generation <= self.last_session_generation {
+            return Err(InstallRejection::StaleGeneration {
+                current: self.last_session_generation,
+                replacement: generation,
+            });
+        }
+        Ok(())
+    }
 }
 
 struct ReplaceableDeviceSessionPort {
@@ -463,6 +481,7 @@ mod tests {
     struct FakeSession {
         name: &'static str,
         calls: Arc<StdMutex<Vec<Call>>>,
+        fail_stop: bool,
     }
 
     #[async_trait]
@@ -535,7 +554,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(Call::Stop(self.name, reason));
-            Ok(())
+            if self.fail_stop {
+                Err(DeviceSessionError::new("stop failed"))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -547,6 +570,7 @@ mod tests {
         Box::new(FakeSession {
             name,
             calls: Arc::clone(calls),
+            fail_stop: false,
         })
     }
 
@@ -665,6 +689,42 @@ mod tests {
                 .await,
             Err(DeviceSessionReplacementError::StaleGeneration { .. })
         ));
+        port.stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                Call::Stop("current", DeviceSessionStopReason::DaemonShutdown),
+                Call::Stop("stale", DeviceSessionStopReason::DaemonShutdown),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_session_cleanup_failure_keeps_the_rejection_reason() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let (port, _control, mut replacement) =
+            replaceable_device_session(generation(3), session("current", &calls));
+        let installation = replacement.retire_current().await.unwrap();
+        let error = installation
+            .install(DeviceSessionReplacement {
+                session_generation: generation(3),
+                session: Box::new(FakeSession {
+                    name: "stale",
+                    calls: Arc::clone(&calls),
+                    fail_stop: true,
+                }),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            DeviceSessionReplacementError::RejectedCleanup {
+                reason: "replacement session generation 3 is not newer than 3".into(),
+                cleanup: "stop failed".into(),
+            }
+        );
         port.stop(DeviceSessionStopReason::DaemonShutdown)
             .await
             .unwrap();
