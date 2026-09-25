@@ -20,7 +20,6 @@ pub(super) struct AggregateInventory {
 #[derive(Debug, Default)]
 struct BackendInventory {
     connection_generation: u64,
-    discovery_generation: Option<u64>,
     devices: BTreeMap<String, DeviceInfo>,
 }
 
@@ -179,7 +178,6 @@ impl AggregateInventory {
         let changes = self.mark_backend_unavailable(backend_id)?;
         let backend = self.backends.entry(backend_id.into()).or_default();
         backend.connection_generation = connection_generation;
-        backend.discovery_generation = None;
         Ok(ApplySupervisorOutcome::Changed(changes))
     }
 
@@ -246,7 +244,6 @@ impl AggregateInventory {
         self.ensure_revision_capacity(changes.len())?;
         let backend = self.backends.entry(backend_id.into()).or_default();
         backend.connection_generation = connection_generation;
-        backend.discovery_generation = Some(snapshot.discovery_generation);
         backend.devices = new_devices;
         Ok(ApplySupervisorOutcome::Changed(
             self.revision_events(backend_id, changes),
