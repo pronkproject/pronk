@@ -405,46 +405,58 @@ fn apply_kernel_event(
     events: &mpsc::UnboundedSender<CastDisplaySlotEvent>,
     event: KernelDisplayEvent,
 ) {
-    let changed = state.send_if_modified(|snapshot| match event {
-        KernelDisplayEvent::Changed(observation) => {
-            let grant_changed = snapshot.grant_state != observation.grant_state;
-            let topology_changed = snapshot.runtime.observe_topology(observation.topology);
-            snapshot.grant_state = observation.grant_state;
-            if grant_changed && !topology_changed {
-                snapshot.runtime.advance_for_external_change(0);
-            }
+    let changed = state.send_if_modified(|snapshot| {
+        let changed = observe_kernel_event(&mut snapshot.runtime, &mut snapshot.grant_state, event);
+        if changed {
             snapshot.state_revision = snapshot.runtime.revision();
-            true
+        }
+        changed
+    });
+    if changed {
+        publish(state, events);
+    }
+}
+
+fn observe_kernel_event(
+    runtime: &mut DisplayRuntimeState,
+    grant: &mut DisplayGrantState,
+    event: KernelDisplayEvent,
+) -> bool {
+    match event {
+        KernelDisplayEvent::Changed(observation) => {
+            let grant_changed = *grant != observation.grant_state;
+            let topology_changed = runtime.observe_topology(observation.topology);
+            *grant = observation.grant_state;
+            if grant_changed && !topology_changed {
+                runtime.advance_for_external_change(0);
+            }
+            grant_changed || topology_changed
         }
         KernelDisplayEvent::Revoked => {
-            snapshot.grant_state = DisplayGrantState::Revoked;
-            snapshot.runtime.observe_topology(DisplayTopology::Detached);
-            let media_generation = snapshot.runtime.media_generation();
-            snapshot.runtime.observe_media(
+            let grant_changed = *grant != DisplayGrantState::Revoked;
+            *grant = DisplayGrantState::Revoked;
+            let topology_changed = runtime.observe_topology(DisplayTopology::Detached);
+            if grant_changed && !topology_changed {
+                runtime.advance_for_external_change(0);
+            }
+            let media_generation = runtime.media_generation();
+            let media_changed = runtime.observe_media(
                 media_generation,
                 MediaStatus::Failed("CastKMS grant was revoked".into()),
             );
-            snapshot.state_revision = snapshot.runtime.revision();
-            true
+            grant_changed || topology_changed || media_changed
         }
         KernelDisplayEvent::MediaFailed {
             media_generation,
             error,
         } => {
-            let current = snapshot.runtime.media_generation();
+            let current = runtime.media_generation();
             if media_generation.is_none_or(|generation| generation.get() == current) {
-                snapshot
-                    .runtime
-                    .observe_media(current, MediaStatus::Failed(error));
-                snapshot.state_revision = snapshot.runtime.revision();
-                true
+                runtime.observe_media(current, MediaStatus::Failed(error))
             } else {
                 false
             }
         }
-    });
-    if changed {
-        publish(state, events);
     }
 }
 
@@ -652,6 +664,52 @@ mod tests {
             current_media_failure(8, &untagged).as_deref(),
             Some("grant failed")
         );
+    }
+
+    #[test]
+    fn repeated_kernel_observations_do_not_advance_display_state() {
+        use crate::kernel_display_port::KernelDisplayObservation;
+
+        let mut runtime = DisplayRuntimeState::attached(1);
+        let mut grant = DisplayGrantState::Active;
+        let observation = KernelDisplayEvent::Changed(KernelDisplayObservation {
+            topology: DisplayTopology::Attached { route: None },
+            grant_state: DisplayGrantState::Active,
+        });
+        assert!(!observe_kernel_event(&mut runtime, &mut grant, observation));
+        assert_eq!(runtime.revision(), 1);
+
+        assert!(observe_kernel_event(
+            &mut runtime,
+            &mut grant,
+            KernelDisplayEvent::Changed(KernelDisplayObservation {
+                topology: DisplayTopology::Attached { route: None },
+                grant_state: DisplayGrantState::SuspendedNoMaster,
+            }),
+        ));
+        assert_eq!(runtime.revision(), 2);
+
+        assert!(observe_kernel_event(
+            &mut runtime,
+            &mut grant,
+            KernelDisplayEvent::Revoked,
+        ));
+        let revision = runtime.revision();
+        assert!(!observe_kernel_event(
+            &mut runtime,
+            &mut grant,
+            KernelDisplayEvent::Revoked,
+        ));
+        assert_eq!(runtime.revision(), revision);
+        assert!(!observe_kernel_event(
+            &mut runtime,
+            &mut grant,
+            KernelDisplayEvent::MediaFailed {
+                media_generation: None,
+                error: "CastKMS grant was revoked".into(),
+            },
+        ));
+        assert_eq!(runtime.revision(), revision);
     }
 
     #[test]
