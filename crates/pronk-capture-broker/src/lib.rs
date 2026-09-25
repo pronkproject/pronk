@@ -66,26 +66,20 @@ pub struct Session {
     id: NonZeroU64,
     target: Target,
     timeout: Duration,
-    monitor: Option<OwnedFd>,
-    capture: Option<OwnedFd>,
-    release: Option<oneshot::Sender<()>>,
-    done: Option<oneshot::Receiver<Result<(), Error>>>,
+    monitor: OwnedFd,
+    capture: OwnedFd,
+    release: oneshot::Sender<()>,
+    done: oneshot::Receiver<Result<(), Error>>,
 }
 
 impl Session {
     fn capture(&self) -> BorrowedFd<'_> {
-        self.capture
-            .as_ref()
-            .expect("live session owns capture")
-            .as_fd()
+        self.capture.as_fd()
     }
 
     /// Borrow the monitor-control capability without exposing capture through it.
     pub fn monitor(&self) -> BorrowedFd<'_> {
-        self.monitor
-            .as_ref()
-            .expect("live session owns monitor control")
-            .as_fd()
+        self.monitor.as_fd()
     }
 
     pub fn id(&self) -> NonZeroU64 {
@@ -132,23 +126,22 @@ impl Session {
     ///
     /// Timeout stops the local wait, not the issuer's release operation. The
     /// provider retains its capacity until that operation finishes.
-    pub async fn release(mut self) -> Result<(), Error> {
-        self.monitor.take();
-        self.capture.take();
-        self.release.take();
-        let done = self.done.take().expect("live session owns completion");
-        tokio::time::timeout(self.timeout, done)
+    pub async fn release(self) -> Result<(), Error> {
+        let Self {
+            timeout,
+            monitor,
+            capture,
+            release,
+            done,
+            ..
+        } = self;
+        drop(monitor);
+        drop(capture);
+        drop(release);
+        tokio::time::timeout(timeout, done)
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::WorkerStopped)?
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        self.monitor.take();
-        self.capture.take();
-        self.release.take();
     }
 }
 
@@ -260,10 +253,10 @@ async fn run_session(
         id,
         target,
         timeout,
-        monitor: Some(monitor),
-        capture: Some(capture),
-        release: Some(release),
-        done: Some(wait_done),
+        monitor,
+        capture,
+        release,
+        done: wait_done,
     };
     let _ = send.send(Ok(session));
     let _ = wait_release.await;
