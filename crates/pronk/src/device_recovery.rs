@@ -86,6 +86,7 @@ pub enum DeviceSessionRecoveryEvent {
 pub struct DeviceSessionRecoveryActor {
     handle: DeviceSessionRecoveryHandle,
     events: mpsc::Receiver<DeviceSessionRecoveryEvent>,
+    shutdown: CancellationToken,
     task: Option<JoinHandle<()>>,
 }
 
@@ -163,9 +164,11 @@ impl DeviceSessionRecoveryActor {
             generation: 0,
             cancellation: CancellationToken::new(),
         }));
+        let shutdown = CancellationToken::new();
         let task = tokio::spawn(run_recovery(RecoveryTaskContext {
             commands: command_rx,
             events: events_tx,
+            shutdown: shutdown.clone(),
             factory,
             replacement,
             prepared,
@@ -175,6 +178,7 @@ impl DeviceSessionRecoveryActor {
         Ok(Self {
             handle: DeviceSessionRecoveryHandle { commands, requests },
             events,
+            shutdown,
             task: Some(task),
         })
     }
@@ -209,9 +213,8 @@ impl DeviceSessionRecoveryActor {
 impl Drop for DeviceSessionRecoveryActor {
     fn drop(&mut self) {
         self.handle.cancel_phase();
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.shutdown.cancel();
+        self.task.take();
     }
 }
 
@@ -228,6 +231,7 @@ enum RecoveryCommand {
 struct RecoveryTaskContext {
     commands: mpsc::Receiver<RecoveryCommand>,
     events: mpsc::Sender<DeviceSessionRecoveryEvent>,
+    shutdown: CancellationToken,
     factory: Box<dyn DeviceSessionFactoryPort>,
     replacement: DeviceSessionReplacementHandle,
     prepared: PreparedCastDevice,
@@ -239,6 +243,7 @@ async fn run_recovery(context: RecoveryTaskContext) {
     let RecoveryTaskContext {
         mut commands,
         events,
+        shutdown,
         mut factory,
         mut replacement,
         prepared,
@@ -250,8 +255,12 @@ async fn run_recovery(context: RecoveryTaskContext) {
         generation: initial_session_generation,
         events: initial_events,
     };
+    let mut shutdown_response = None;
     loop {
-        let next = event_source.next(&mut commands).await;
+        let next = tokio::select! {
+            _ = shutdown.cancelled() => break,
+            next = event_source.next(&mut commands) => next,
+        };
         let command = match next {
             NextRecoveryInput::Command(Some(command)) => command,
             NextRecoveryInput::Command(None) => break,
@@ -269,7 +278,7 @@ async fn run_recovery(context: RecoveryTaskContext) {
                     .await
                     .is_err()
                 {
-                    return;
+                    break;
                 }
                 continue;
             }
@@ -309,7 +318,7 @@ async fn run_recovery(context: RecoveryTaskContext) {
                             events: ready.events,
                         };
                         if events.send(ready.event).await.is_err() {
-                            return;
+                            break;
                         }
                     }
                     Err(AttemptError::Cancelled) => {}
@@ -319,11 +328,14 @@ async fn run_recovery(context: RecoveryTaskContext) {
                 }
             }
             RecoveryCommand::Shutdown(response) => {
-                event_source.shutdown().await;
-                let _ = response.send(());
-                return;
+                shutdown_response = Some(response);
+                break;
             }
         }
+    }
+    event_source.shutdown().await;
+    if let Some(response) = shutdown_response {
+        let _ = response.send(());
     }
 }
 
@@ -504,6 +516,24 @@ mod tests {
 
     #[derive(Debug)]
     struct ClosedEvents;
+
+    #[derive(Debug)]
+    struct ShutdownObservedEvents {
+        done: Option<oneshot::Sender<()>>,
+    }
+
+    #[async_trait]
+    impl DeviceSessionEventPort for ShutdownObservedEvents {
+        async fn next_event(&mut self) -> Option<DeviceSessionEvent> {
+            std::future::pending().await
+        }
+
+        async fn shutdown(mut self: Box<Self>) {
+            if let Some(done) = self.done.take() {
+                let _ = done.send(());
+            }
+        }
+    }
 
     #[async_trait]
     impl DeviceSessionEventPort for ClosedEvents {
@@ -943,5 +973,35 @@ mod tests {
                 Call::Stop("new", DeviceSessionStopReason::DaemonShutdown),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_recovery_actor_shuts_down_its_event_source() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let baseline = prepared(device(1, 1, 1), "Bravia XR");
+        let (media_port, _control, replacement) =
+            replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
+        let (done, shutdown_done) = oneshot::channel();
+        let actor = DeviceSessionRecoveryActor::spawn(
+            Box::new(FakeFactory {
+                results: VecDeque::new(),
+                generations: Arc::new(StdMutex::new(Vec::new())),
+            }),
+            replacement,
+            baseline,
+            NonZeroU64::new(1).unwrap(),
+            Box::new(ShutdownObservedEvents { done: Some(done) }),
+        )
+        .unwrap();
+
+        drop(actor);
+        tokio::time::timeout(Duration::from_secs(1), shutdown_done)
+            .await
+            .unwrap()
+            .unwrap();
+        media_port
+            .stop(DeviceSessionStopReason::DaemonShutdown)
+            .await
+            .unwrap();
     }
 }
