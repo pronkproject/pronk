@@ -125,6 +125,7 @@ async fn cleanup_kernel_display(kernel: KernelDisplay) {
 }
 
 pub(super) enum DisplayReservation {
+    #[cfg(test)]
     Ready(Box<ReservedCastDisplaySlot>),
     Pending {
         manager: ManagerHandle,
@@ -164,6 +165,7 @@ pub(super) async fn run_display_setup(
         ..context
     };
     let slot = match reservation {
+        #[cfg(test)]
         DisplayReservation::Ready(slot) => Ok(*slot),
         DisplayReservation::Pending { manager, pending } => {
             let reservation =

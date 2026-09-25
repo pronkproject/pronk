@@ -31,8 +31,7 @@ use crate::kernel_display_port::KernelDisplayPort;
 use crate::kernel_session::KernelSessionError;
 use crate::kernel_session_provider::KernelSessionProvider;
 use crate::manager::{
-    CastDisplaySlotLease, ManagerHandle, ReserveDisplaySlotError, ReservedCastDisplaySlot,
-    ResolveDeviceError,
+    CastDisplaySlotLease, ManagerHandle, ReserveDisplaySlotError, ResolveDeviceError,
 };
 use crate::media_session::MediaSessionDriver;
 use crate::preparation::{PrepareCastDeviceError, PreparedCastDevice};
@@ -319,29 +318,6 @@ impl DisplaySetupHandle {
 }
 
 impl DisplaySetupOperation {
-    pub fn spawn(
-        slot: ReservedCastDisplaySlot,
-        caller: PinnedCallerProcess,
-        kernel_session_provider: Arc<dyn KernelSessionProvider>,
-        pnp_resolver: Arc<PnpIdResolver>,
-        media_runtime: MediaRuntime,
-        offer: PreparationRequest,
-        audio_enabled: bool,
-    ) -> Result<Self, DisplaySetupStartError> {
-        Self::spawn_with_caller(
-            DisplayReservation::Ready(Box::new(slot)),
-            DisplaySetupCaller::from(caller),
-            DisplaySetupDependencies::new(
-                kernel_session_provider,
-                pnp_resolver,
-                media_runtime,
-                offer,
-                audio_enabled,
-            ),
-            DisplaySetupStage::Authorizing,
-        )
-    }
-
     pub(crate) fn spawn_pending(
         manager: ManagerHandle,
         pending: PendingDisplaySelection,
@@ -431,10 +407,12 @@ impl DisplaySetupOperation {
         self.handle.display_id()
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> DisplaySetupSnapshot {
         self.handle.snapshot()
     }
 
+    #[cfg(test)]
     pub fn subscribe(&self) -> watch::Receiver<DisplaySetupSnapshot> {
         self.handle.subscribe()
     }
@@ -443,6 +421,7 @@ impl DisplaySetupOperation {
         self.handle.clone()
     }
 
+    #[cfg(test)]
     pub fn cancel(&self) {
         self.handle.cancel();
     }
