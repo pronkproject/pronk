@@ -118,7 +118,8 @@ impl DisplayMediaPolicyActor {
         });
     }
 
-    pub fn snapshot(&self) -> MediaSessionSnapshot {
+    #[cfg(test)]
+    fn snapshot(&self) -> MediaSessionSnapshot {
         self.media
             .as_ref()
             .expect("live media policy owns its media actor")
@@ -144,15 +145,6 @@ impl DisplayMediaPolicyActor {
             .expect("live media policy owns its media actor")
             .handle()
             .report_failure(error)
-            .await
-    }
-
-    pub async fn retry(&self) -> Result<(), MediaSessionActorError> {
-        self.media
-            .as_ref()
-            .expect("live media policy owns its media actor")
-            .handle()
-            .retry()
             .await
     }
 
