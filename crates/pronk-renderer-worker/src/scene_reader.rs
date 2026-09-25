@@ -5,8 +5,80 @@ use std::os::fd::AsFd;
 
 use castkms_renderer::{OutputChannel, PublishedRenderer};
 
-use crate::scene_image::RegisteredSceneImages;
-use crate::{QualifiedSceneJob, RenderedFrame, ScenePool, SceneStorageProfile};
+use crate::scene_image::{RegisteredSceneImages, SceneImage};
+use crate::{QualifiedSceneJob, RenderedFrame, SceneBuffers, ScenePool, SceneStorageProfile};
+
+/// Owns every reservation until a scene job claims one registered image.
+struct SceneAdmission<'a> {
+    private: &'a mut ScenePool,
+    images: &'a mut RegisteredSceneImages,
+    buffers: SceneBuffers,
+    deferred: Vec<SceneImage>,
+}
+
+impl<'a> SceneAdmission<'a> {
+    fn new(
+        private: &'a mut ScenePool,
+        images: &'a mut RegisteredSceneImages,
+        buffers: SceneBuffers,
+    ) -> Result<Self, SceneAttemptError> {
+        let mut deferred = Vec::new();
+        if deferred.try_reserve_exact(images.available()).is_err() {
+            private
+                .restore(buffers)
+                .map_err(|_| SceneAttemptError::ReturnSlot)?;
+            return Err(SceneAttemptError::Reserve(io::Error::other(
+                "reserve private-image selection storage",
+            )));
+        }
+        Ok(Self {
+            private,
+            images,
+            buffers,
+            deferred,
+        })
+    }
+
+    fn candidates(&self) -> usize {
+        self.images.available() + self.deferred.len()
+    }
+
+    fn take_image(&mut self) -> Option<SceneImage> {
+        self.images.take()
+    }
+
+    fn defer(&mut self, image: SceneImage) {
+        self.deferred.push(image);
+    }
+
+    fn deferred_count(&self) -> usize {
+        self.deferred.len()
+    }
+
+    fn selected(
+        mut self,
+        target: SceneImage,
+    ) -> Result<(SceneBuffers, SceneImage), SceneAttemptError> {
+        self.restore_deferred()?;
+        Ok((self.buffers, target))
+    }
+
+    fn restore(mut self) -> Result<(), SceneAttemptError> {
+        self.restore_deferred()?;
+        self.private
+            .restore(self.buffers)
+            .map_err(|_| SceneAttemptError::ReturnSlot)
+    }
+
+    fn restore_deferred(&mut self) -> Result<(), SceneAttemptError> {
+        for image in self.deferred.drain(..) {
+            self.images
+                .restore(image)
+                .map_err(|_| SceneAttemptError::ReturnSlot)?;
+        }
+        Ok(())
+    }
+}
 
 /// Active scene endpoint and the reusable private pool for its storage profile.
 pub struct SceneReader<F: AsFd> {
@@ -71,58 +143,33 @@ impl<F: AsFd> SceneReader<F> {
         let Some(buffers) = self.private.take().map_err(SceneAttemptError::Reserve)? else {
             return Ok(SceneAttempt::NoSlot);
         };
-        let available = self.images.available();
-        let mut deferred = Vec::new();
-        if deferred.try_reserve_exact(available).is_err() {
-            self.restore(buffers)?;
-            return Err(SceneAttemptError::Reserve(io::Error::other(
-                "reserve private-image selection storage",
-            )));
-        }
-        let (job, target) = loop {
-            let Some(target) = self.images.take() else {
-                self.restore(buffers)?;
+        let mut admission = SceneAdmission::new(&mut self.private, &mut self.images, buffers)?;
+        let available = admission.candidates();
+        let (job, buffers, target) = loop {
+            let Some(target) = admission.take_image() else {
+                admission.restore()?;
                 return Ok(SceneAttempt::NoSlot);
             };
             match self.renderer.try_acquire_job(target.registration()) {
                 Ok(Some(job)) => {
-                    for image in deferred {
-                        self.images
-                            .restore(image)
-                            .map_err(|_| SceneAttemptError::ReturnSlot)?;
-                    }
-                    break (job, target);
+                    let (buffers, target) = admission.selected(target)?;
+                    break (job, buffers, target);
                 }
                 Ok(None) => {
-                    deferred.push(target);
-                    for image in deferred {
-                        self.images
-                            .restore(image)
-                            .map_err(|_| SceneAttemptError::ReturnSlot)?;
-                    }
-                    self.restore(buffers)?;
+                    admission.defer(target);
+                    admission.restore()?;
                     return Ok(SceneAttempt::NoScene);
                 }
                 Err(cause) if cause.raw_os_error() == Some(nix::libc::EBUSY) => {
-                    deferred.push(target);
-                    if deferred.len() == available {
-                        for image in deferred {
-                            self.images
-                                .restore(image)
-                                .map_err(|_| SceneAttemptError::ReturnSlot)?;
-                        }
-                        self.restore(buffers)?;
+                    admission.defer(target);
+                    if admission.deferred_count() == available {
+                        admission.restore()?;
                         return Ok(SceneAttempt::NoSlot);
                     }
                 }
                 Err(cause) => {
-                    deferred.push(target);
-                    for image in deferred {
-                        self.images
-                            .restore(image)
-                            .map_err(|_| SceneAttemptError::ReturnSlot)?;
-                    }
-                    self.restore(buffers)?;
+                    admission.defer(target);
+                    admission.restore()?;
                     return Err(SceneAttemptError::Acquire(cause));
                 }
             }
