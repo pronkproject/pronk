@@ -80,8 +80,7 @@ impl Registration {
                 .into_iter()
                 .map(|buffer| Slot {
                     buffer,
-                    initialized: false,
-                    publication: None,
+                    state: SlotState::AwaitingAvailability,
                 })
                 .collect(),
             next_sequence: Some(1),
@@ -123,8 +122,13 @@ fn describe_video_layout(
 
 struct Slot {
     buffer: BufferHandle,
-    initialized: bool,
-    publication: Option<(u64, Frame)>,
+    state: SlotState,
+}
+
+enum SlotState {
+    AwaitingAvailability,
+    Available,
+    Published { sequence: u64, frame: Frame },
 }
 
 /// Publications retained independently of async publish acknowledgements.
@@ -158,7 +162,7 @@ impl Output {
             .position(|slot| slot.buffer.contains_frame(&frame))
             .ok_or_else(|| invalid("frame belongs to another capture pool"))?;
         let slot = &mut self.slots[index];
-        if !slot.initialized || slot.publication.is_some() {
+        if !matches!(slot.state, SlotState::Available) {
             return Err(invalid(
                 "capture destination is not available for publication",
             ));
@@ -166,7 +170,7 @@ impl Output {
         let sequence = self
             .next_sequence
             .ok_or_else(|| invalid("publication sequence exhausted"))?;
-        slot.publication = Some((sequence, frame));
+        slot.state = SlotState::Published { sequence, frame };
         self.next_sequence = sequence.checked_add(1);
         Ok(VideoFrame {
             buffer_id: id(index),
@@ -203,12 +207,14 @@ impl Output {
                 ..
             } => {
                 let slot = self.slot(*buffer_id)?;
-                if slot.initialized || *transport != PipeWireBufferTransport::ReadyBeforePublish {
+                if !matches!(slot.state, SlotState::AwaitingAvailability)
+                    || *transport != PipeWireBufferTransport::ReadyBeforePublish
+                {
                     return Err(invalid(
                         "capture requires one ready-before-publish availability event",
                     ));
                 }
-                slot.initialized = true;
+                slot.state = SlotState::Available;
             }
             VideoSourceActorEvent::BufferReleased {
                 buffer_id,
@@ -216,10 +222,11 @@ impl Output {
                 ..
             } => {
                 let slot = self.slot(*buffer_id)?;
-                if slot.publication.as_ref().map(|(sequence, _)| sequence) != Some(sequence) {
+                if !matches!(&slot.state, SlotState::Published { sequence: published, .. } if published == sequence)
+                {
                     return Err(invalid("release does not match the capture publication"));
                 }
-                drop(slot.publication.take());
+                slot.state = SlotState::Available;
             }
             VideoSourceActorEvent::GenerationFailed { identity, .. } => self.finish(identity)?,
         }
@@ -247,7 +254,9 @@ impl Output {
 
     fn retire(&mut self) {
         for slot in &mut self.slots {
-            if let Some((_, frame)) = slot.publication.take() {
+            if let SlotState::Published { frame, .. } =
+                std::mem::replace(&mut slot.state, SlotState::Available)
+            {
                 frame.retire();
             }
         }
