@@ -10,7 +10,6 @@ use transaction::{AttemptError, RecoveryAttempt};
 
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -101,21 +100,18 @@ impl fmt::Debug for DeviceSessionRecoveryActor {
 #[derive(Debug, Clone)]
 pub struct DeviceSessionRecoveryHandle {
     commands: mpsc::Sender<RecoveryCommand>,
-    request_generation: Arc<AtomicU64>,
-    phase_cancellation: Arc<Mutex<CancellationToken>>,
+    requests: Arc<Mutex<RecoveryRequestState>>,
+}
+
+#[derive(Debug)]
+struct RecoveryRequestState {
+    generation: u64,
+    cancellation: CancellationToken,
 }
 
 impl DeviceSessionRecoveryHandle {
     pub async fn recover(&self, device: DeviceInfo) -> Result<u64, DeviceSessionRecoveryError> {
-        let request_generation = self
-            .request_generation
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| DeviceSessionRecoveryError::GenerationExhausted)?
-            .checked_add(1)
-            .ok_or(DeviceSessionRecoveryError::GenerationExhausted)?;
-        let cancellation = self.begin_request();
+        let (request_generation, cancellation) = self.begin_request()?;
         self.commands
             .send(RecoveryCommand::Recover {
                 request_generation,
@@ -128,21 +124,27 @@ impl DeviceSessionRecoveryHandle {
     }
 
     pub fn cancel_phase(&self) {
-        self.phase_cancellation
+        self.requests
             .lock()
             .expect("Device-session recovery cancellation mutex poisoned")
+            .cancellation
             .cancel();
     }
 
-    fn begin_request(&self) -> CancellationToken {
-        let mut current = self
-            .phase_cancellation
+    fn begin_request(&self) -> Result<(u64, CancellationToken), DeviceSessionRecoveryError> {
+        let mut requests = self
+            .requests
             .lock()
             .expect("Device-session recovery cancellation mutex poisoned");
-        current.cancel();
+        let generation = requests
+            .generation
+            .checked_add(1)
+            .ok_or(DeviceSessionRecoveryError::GenerationExhausted)?;
+        requests.cancellation.cancel();
         let cancellation = CancellationToken::new();
-        *current = cancellation.clone();
-        cancellation
+        requests.cancellation = cancellation.clone();
+        requests.generation = generation;
+        Ok((generation, cancellation))
     }
 }
 
@@ -157,7 +159,10 @@ impl DeviceSessionRecoveryActor {
         tokio::runtime::Handle::try_current().map_err(|_| DeviceSessionRecoveryError::NoRuntime)?;
         let (commands, command_rx) = mpsc::channel(RECOVERY_COMMAND_CAPACITY);
         let (events_tx, events) = mpsc::channel(RECOVERY_EVENT_CAPACITY);
-        let phase_cancellation = Arc::new(Mutex::new(CancellationToken::new()));
+        let requests = Arc::new(Mutex::new(RecoveryRequestState {
+            generation: 0,
+            cancellation: CancellationToken::new(),
+        }));
         let task = tokio::spawn(run_recovery(RecoveryTaskContext {
             commands: command_rx,
             events: events_tx,
@@ -168,11 +173,7 @@ impl DeviceSessionRecoveryActor {
             initial_events,
         }));
         Ok(Self {
-            handle: DeviceSessionRecoveryHandle {
-                commands,
-                request_generation: Arc::new(AtomicU64::new(0)),
-                phase_cancellation,
-            },
+            handle: DeviceSessionRecoveryHandle { commands, requests },
             events,
             task: Some(task),
         })
@@ -279,6 +280,9 @@ async fn run_recovery(context: RecoveryTaskContext) {
                 device,
                 cancellation,
             } => {
+                if cancellation.is_cancelled() {
+                    continue;
+                }
                 let Some(attempt) = RecoveryAttempt::reserve(
                     request_generation,
                     device.clone(),
@@ -518,19 +522,25 @@ mod tests {
 
     #[derive(Debug)]
     struct CancellationObservingFactory {
-        attempts: mpsc::UnboundedSender<u64>,
+        attempts: mpsc::UnboundedSender<(u64, u64)>,
+        release_first: Option<oneshot::Receiver<()>>,
     }
 
     #[async_trait]
     impl DeviceSessionFactoryPort for CancellationObservingFactory {
         async fn create_prepared_session(
             &mut self,
-            _device: DeviceInfo,
+            device: DeviceInfo,
             session_generation: NonZeroU64,
             cancellation: CancellationToken,
         ) -> Result<PreparedDeviceSession, DeviceSessionFactoryError> {
-            let _ = self.attempts.send(session_generation.get());
+            let _ = self
+                .attempts
+                .send((session_generation.get(), device.device_revision));
             cancellation.cancelled().await;
+            if let Some(release) = self.release_first.take() {
+                let _ = release.await;
+            }
             Err(DeviceSessionFactoryError::Cancelled)
         }
     }
@@ -808,15 +818,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_queued_recovery_cancels_the_command_bound_attempt_ahead_of_it() {
+    async fn a_queued_recovery_skips_an_obsolete_request() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let initial_device = device(1, 1, 1);
         let baseline = prepared(initial_device, "Bravia XR");
         let (media_port, _control, replacement) =
             replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
         let (attempts, mut attempt_events) = mpsc::unbounded_channel();
+        let (release_first, first_released) = oneshot::channel();
         let actor = DeviceSessionRecoveryActor::spawn(
-            Box::new(CancellationObservingFactory { attempts }),
+            Box::new(CancellationObservingFactory {
+                attempts,
+                release_first: Some(first_released),
+            }),
             replacement,
             baseline,
             NonZeroU64::new(1).unwrap(),
@@ -826,18 +840,20 @@ mod tests {
         let handle = actor.handle();
 
         handle.recover(device(2, 2, 2)).await.unwrap();
-        handle.recover(device(3, 3, 3)).await.unwrap();
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), attempt_events.recv())
                 .await
                 .unwrap(),
-            Some(2)
+            Some((2, 2))
         );
+        handle.recover(device(3, 3, 3)).await.unwrap();
+        handle.recover(device(4, 4, 4)).await.unwrap();
+        release_first.send(()).unwrap();
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), attempt_events.recv())
                 .await
                 .unwrap(),
-            Some(3)
+            Some((3, 4))
         );
 
         actor.shutdown().await.unwrap();

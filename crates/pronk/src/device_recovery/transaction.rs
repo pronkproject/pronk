@@ -84,6 +84,9 @@ impl RecoveryAttempt {
         self,
         replacement: &'a mut DeviceSessionReplacementHandle,
     ) -> Result<RetiredAttempt<'a>, AttemptError> {
+        if self.cancellation.is_cancelled() {
+            return Err(AttemptError::Cancelled);
+        }
         let permit = replacement.retire_current().await.map_err(|error| {
             AttemptError::Failed(format!("retire current Device session: {error}"))
         })?;
