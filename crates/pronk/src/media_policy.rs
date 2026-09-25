@@ -6,11 +6,22 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::display_state::{AttachmentState, DisplayGrantState, MediaState};
+#[cfg(test)]
+use crate::display_state::MediaState;
+use crate::display_state::{AttachmentState, DisplayGrantState};
+#[cfg(test)]
+use crate::media_session::MediaSuspendReason;
 use crate::media_session::{
-    MediaRoute, MediaSessionActor, MediaSessionActorError, MediaSessionDriver, MediaSessionHandle,
-    MediaSessionSnapshot, MediaStopReason, MediaSuspendReason,
+    MediaRoute, MediaSessionActor, MediaSessionActorError, MediaSessionDriver,
+    MediaSessionSnapshot, MediaStopReason,
 };
+
+mod decision;
+mod runtime;
+
+#[cfg(test)]
+use decision::{decide, PolicyDecision, PolicyPlanner};
+use runtime::run_policy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaPolicyInput {
@@ -37,16 +48,6 @@ impl Default for MediaRecoveryPolicy {
             maximum_delay: Duration::from_secs(4),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PolicyDecision {
-    Activate(MediaRoute),
-    Deactivate,
-    GiveUp,
-    RetryDeactivate(Duration),
-    Suspend(MediaSuspendReason),
-    Retry(Duration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,204 +183,6 @@ impl Drop for DisplayMediaPolicyActor {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-    }
-}
-
-async fn run_policy(
-    mut input: watch::Receiver<MediaPolicyInput>,
-    media: MediaSessionHandle,
-    recovery: MediaRecoveryPolicy,
-    events: mpsc::UnboundedSender<MediaPolicyEvent>,
-    cancellation: CancellationToken,
-) {
-    let mut media_state = media.subscribe();
-    let mut retry = RetryTracker::default();
-    loop {
-        let observed = *input.borrow_and_update();
-        let snapshot = media.snapshot();
-        retry.observe(observed, &snapshot);
-        let retry_delay = retry.next_delay(recovery);
-        let Some(decision) = decide(observed, &snapshot, retry_delay) else {
-            tokio::select! {
-                _ = cancellation.cancelled() => return,
-                result = input.changed() => {
-                    if result.is_err() {
-                        return;
-                    }
-                }
-                result = media_state.changed() => {
-                    if result.is_err() {
-                        return;
-                    }
-                }
-            }
-            continue;
-        };
-
-        if decision == PolicyDecision::GiveUp {
-            let error = snapshot
-                .last_error()
-                .unwrap_or("media recovery budget exhausted")
-                .to_owned();
-            let _ = events.send(MediaPolicyEvent::RecoveryExhausted { error });
-            return;
-        }
-
-        if matches!(
-            decision,
-            PolicyDecision::Retry(_) | PolicyDecision::RetryDeactivate(_)
-        ) {
-            retry.record_attempt();
-        }
-
-        let decision_cancellation = CancellationToken::new();
-        let operation = apply_decision(&media, decision, decision_cancellation.child_token());
-        tokio::pin!(operation);
-        tokio::select! {
-            _ = cancellation.cancelled() => {
-                decision_cancellation.cancel();
-                media.cancel_phase();
-                let _ = operation.await;
-                return;
-            }
-            result = input.changed() => {
-                decision_cancellation.cancel();
-                if result.is_err() {
-                    media.cancel_phase();
-                    let _ = operation.await;
-                    return;
-                }
-                media.cancel_phase();
-                let _ = operation.await;
-            }
-            _ = &mut operation => {}
-        }
-    }
-}
-
-async fn apply_decision(
-    media: &MediaSessionHandle,
-    decision: PolicyDecision,
-    cancellation: CancellationToken,
-) -> Result<(), MediaSessionActorError> {
-    match decision {
-        PolicyDecision::Activate(route) => media.activate(route).await,
-        PolicyDecision::Deactivate => media.deactivate().await,
-        PolicyDecision::GiveUp => {
-            unreachable!("terminal policy decisions are handled by owner notification")
-        }
-        PolicyDecision::RetryDeactivate(delay) => {
-            tokio::select! {
-                _ = cancellation.cancelled() => Ok(()),
-                _ = tokio::time::sleep(delay) => media.deactivate().await,
-            }
-        }
-        PolicyDecision::Suspend(reason) => media.suspend(reason).await,
-        PolicyDecision::Retry(delay) => {
-            tokio::select! {
-                _ = cancellation.cancelled() => Ok(()),
-                _ = tokio::time::sleep(delay) => media.retry().await,
-            }
-        }
-    }
-}
-
-fn decide(
-    input: MediaPolicyInput,
-    media: &MediaSessionSnapshot,
-    retry_delay: Option<Duration>,
-) -> Option<PolicyDecision> {
-    let Some(route) = input.route else {
-        return decide_deactivate(media.state(), retry_delay);
-    };
-    if input.attachment != AttachmentState::Attached {
-        return decide_deactivate(media.state(), retry_delay);
-    }
-    if !input.device_available || !input.device_session_ready {
-        return (media.state() == MediaState::Running).then_some(PolicyDecision::Suspend(
-            MediaSuspendReason::DeviceUnavailable,
-        ));
-    }
-    if input.grant != DisplayGrantState::Active {
-        return (media.state() == MediaState::Running).then_some(PolicyDecision::Suspend(
-            MediaSuspendReason::GrantUnavailable,
-        ));
-    }
-    match media.state() {
-        MediaState::Running if media.route() == Some(route) => None,
-        MediaState::Failed if media.route() == Some(route) => {
-            Some(retry_delay.map_or(PolicyDecision::GiveUp, PolicyDecision::Retry))
-        }
-        _ => Some(PolicyDecision::Activate(route)),
-    }
-}
-
-fn decide_deactivate(state: MediaState, retry_delay: Option<Duration>) -> Option<PolicyDecision> {
-    match state {
-        MediaState::Idle => None,
-        // A failed stop remains worth retrying, but it must use the same
-        // bounded backoff as failed activation. Otherwise a permanently
-        // closed driver port turns the policy actor into a tight loop.
-        MediaState::Failed => {
-            Some(retry_delay.map_or(PolicyDecision::GiveUp, PolicyDecision::RetryDeactivate))
-        }
-        _ => Some(PolicyDecision::Deactivate),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RetryContext {
-    route: Option<MediaRoute>,
-    attachment: AttachmentState,
-    grant: DisplayGrantState,
-    device_available: bool,
-    device_session_ready: bool,
-    device_session_generation: u64,
-}
-
-impl From<MediaPolicyInput> for RetryContext {
-    fn from(input: MediaPolicyInput) -> Self {
-        Self {
-            route: input.route,
-            attachment: input.attachment,
-            grant: input.grant,
-            device_available: input.device_available,
-            device_session_ready: input.device_session_ready,
-            device_session_generation: input.device_session_generation,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct RetryTracker {
-    context: Option<RetryContext>,
-    attempts: u32,
-}
-
-impl RetryTracker {
-    fn observe(&mut self, input: MediaPolicyInput, media: &MediaSessionSnapshot) {
-        let context = RetryContext::from(input);
-        if self.context != Some(context) || media.state() == MediaState::Running {
-            self.context = Some(context);
-            self.attempts = 0;
-        }
-    }
-
-    fn next_delay(&self, policy: MediaRecoveryPolicy) -> Option<Duration> {
-        if self.attempts >= policy.maximum_attempts {
-            return None;
-        }
-        let multiplier = 1_u32.checked_shl(self.attempts.min(30)).unwrap_or(u32::MAX);
-        Some(
-            policy
-                .initial_delay
-                .saturating_mul(multiplier)
-                .min(policy.maximum_delay),
-        )
-    }
-
-    fn record_attempt(&mut self) {
-        self.attempts = self.attempts.saturating_add(1);
     }
 }
 
@@ -876,16 +679,23 @@ mod tests {
             maximum_delay: Duration::from_millis(2),
         };
         let failed = snapshot(MediaState::Failed, Some(route(1)));
-        let mut retry = RetryTracker::default();
+        let mut planner = PolicyPlanner::new(policy);
         let first = input(Some(route(1)));
-        retry.observe(first, &failed);
-        retry.record_attempt();
-        retry.record_attempt();
-        assert_eq!(retry.next_delay(policy), None);
+        assert_eq!(
+            planner.plan(first, &failed),
+            Some(PolicyDecision::Retry(Duration::from_millis(1)))
+        );
+        assert_eq!(
+            planner.plan(first, &failed),
+            Some(PolicyDecision::Retry(Duration::from_millis(2)))
+        );
+        assert_eq!(planner.plan(first, &failed), Some(PolicyDecision::GiveUp));
 
         let mut replacement = first;
         replacement.device_session_generation = 2;
-        retry.observe(replacement, &failed);
-        assert_eq!(retry.next_delay(policy), Some(Duration::from_millis(1)));
+        assert_eq!(
+            planner.plan(replacement, &failed),
+            Some(PolicyDecision::Retry(Duration::from_millis(1)))
+        );
     }
 }
