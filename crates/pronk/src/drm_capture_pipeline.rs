@@ -52,12 +52,95 @@ struct ActiveCapture {
     video: Video<CaptureOwner>,
 }
 
+enum CaptureSlot {
+    Idle,
+    Active(ActiveCapture),
+    Stopping {
+        generation: NonZeroU64,
+        task: tokio::task::JoinHandle<Result<(), MediaPipelineError>>,
+    },
+}
+
+impl CaptureSlot {
+    fn generation(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Active(active) => Some(active.generation),
+            Self::Stopping { generation, .. } => Some(*generation),
+            Self::Idle => None,
+        }
+    }
+
+    fn active(&self, generation: NonZeroU64) -> Result<&ActiveCapture, MediaPipelineError> {
+        match self {
+            Self::Active(active) if active.generation == generation => Ok(active),
+            Self::Active(active) => Err(MediaPipelineError::new(format!(
+                "capture operation requested generation {generation}; active generation is {}",
+                active.generation
+            ))),
+            Self::Stopping { .. } => Err(MediaPipelineError::new(
+                "capture generation cleanup is in progress",
+            )),
+            Self::Idle => Err(MediaPipelineError::new("no capture generation is active")),
+        }
+    }
+
+    async fn stop(&mut self, generation: NonZeroU64) -> Result<(), MediaPipelineError> {
+        match self {
+            Self::Idle => return Ok(()),
+            Self::Active(active) if active.generation != generation => {
+                return Err(MediaPipelineError::new(format!(
+                    "capture stop requested generation {generation}; active generation is {}",
+                    active.generation
+                )));
+            }
+            Self::Stopping {
+                generation: current,
+                ..
+            } if *current != generation => {
+                return Err(MediaPipelineError::new(format!(
+                    "capture stop requested generation {generation}; cleanup generation is {current}"
+                )));
+            }
+            Self::Active(_) => {
+                let Self::Active(active) = std::mem::replace(self, Self::Idle) else {
+                    unreachable!("active capture checked above");
+                };
+                active.monitor.cancel();
+                *self = Self::Stopping {
+                    generation,
+                    task: tokio::spawn(async move {
+                        let ActiveCapture { monitor, video, .. } = active;
+                        let (video, monitor) = tokio::join!(video.shutdown(), monitor.shutdown());
+                        let video = video.map(drop).map_err(|error| {
+                            MediaPipelineError::new(format!("stop capture video: {error}"))
+                        });
+                        match (video, monitor) {
+                            (Ok(()), Ok(())) => Ok(()),
+                            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                            (Err(video), Err(monitor)) => Err(MediaPipelineError::new(format!(
+                                "{video}; capture monitor cleanup also failed: {monitor}"
+                            ))),
+                        }
+                    }),
+                };
+            }
+            Self::Stopping { .. } => {}
+        }
+        let Self::Stopping { task, .. } = self else {
+            unreachable!("capture stop owns a cleanup task");
+        };
+        let result = task.await;
+        *self = Self::Idle;
+        result.map_err(|error| MediaPipelineError::new(format!("join capture cleanup: {error}")))?
+    }
+}
+
 /// Sole owner of capture access and its per-generation PipeWire producer.
 pub struct DrmCapturePipeline {
     setup: CaptureSetup,
     producer_remotes: ClassifiedSocketRemoteProvider,
     config: DrmCapturePipelineConfig,
-    active: Option<ActiveCapture>,
+    slot: CaptureSlot,
     events: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
 }
 
@@ -66,10 +149,7 @@ impl std::fmt::Debug for DrmCapturePipeline {
         formatter
             .debug_struct("DrmCapturePipeline")
             .field("config", &self.config)
-            .field(
-                "active_generation",
-                &self.active.as_ref().map(|active| active.generation),
-            )
+            .field("occupied_generation", &self.slot.generation())
             .finish_non_exhaustive()
     }
 }
@@ -86,7 +166,7 @@ impl DrmCapturePipeline {
                 setup: CaptureSetup::new(capture),
                 producer_remotes,
                 config,
-                active: None,
+                slot: CaptureSlot::Idle,
                 events,
             },
             receive,
@@ -94,14 +174,7 @@ impl DrmCapturePipeline {
     }
 
     fn active(&self, generation: NonZeroU64) -> Result<&ActiveCapture, MediaPipelineError> {
-        match &self.active {
-            Some(active) if active.generation == generation => Ok(active),
-            Some(active) => Err(MediaPipelineError::new(format!(
-                "capture operation requested generation {generation}; active generation is {}",
-                active.generation
-            ))),
-            None => Err(MediaPipelineError::new("no capture generation is active")),
-        }
+        self.slot.active(generation)
     }
 
     fn validate_config(&self) -> Result<(), MediaPipelineError> {
@@ -159,32 +232,6 @@ impl DrmCapturePipeline {
             caps: capture_caps(video.layout(), self.config.video_frame_rate),
         }
     }
-
-    async fn stop_active(&mut self, generation: NonZeroU64) -> Result<(), MediaPipelineError> {
-        let Some(active) = self.active.take() else {
-            return Ok(());
-        };
-        if active.generation != generation {
-            let actual = active.generation;
-            self.active = Some(active);
-            return Err(MediaPipelineError::new(format!(
-                "capture stop requested generation {generation}; active generation is {actual}"
-            )));
-        }
-        let ActiveCapture { monitor, video, .. } = active;
-        monitor.cancel();
-        let (video, monitor) = tokio::join!(video.shutdown(), monitor.shutdown());
-        let video = video
-            .map(drop)
-            .map_err(|error| MediaPipelineError::new(format!("stop capture video: {error}")));
-        match (video, monitor) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(video), Err(monitor)) => Err(MediaPipelineError::new(format!(
-                "{video}; capture monitor cleanup also failed: {monitor}"
-            ))),
-        }
-    }
 }
 
 #[async_trait]
@@ -194,7 +241,7 @@ impl CapturePipelinePort for DrmCapturePipeline {
         request: MediaStartRequest,
         cancellation: CancellationToken,
     ) -> Result<PreparedCaptureMedia, MediaPipelineError> {
-        if self.active.is_some() {
+        if !matches!(self.slot, CaptureSlot::Idle) {
             return Err(MediaPipelineError::new(
                 "a previous capture generation still requires cleanup",
             ));
@@ -232,7 +279,7 @@ impl CapturePipelinePort for DrmCapturePipeline {
         }
         let target = self.media_target(&video, generation);
         let monitor = monitor_capture(generation, video.subscribe(), self.events.clone());
-        self.active = Some(ActiveCapture {
+        self.slot = CaptureSlot::Active(ActiveCapture {
             monitor,
             generation,
             video,
@@ -281,7 +328,7 @@ impl CapturePipelinePort for DrmCapturePipeline {
         _reason: MediaStopReason,
         _cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        self.stop_active(media_generation).await
+        self.slot.stop(media_generation).await
     }
 
     async fn shutdown(
@@ -289,8 +336,8 @@ impl CapturePipelinePort for DrmCapturePipeline {
         _reason: MediaStopReason,
         _cancellation: CancellationToken,
     ) -> Result<(), MediaPipelineError> {
-        if let Some(generation) = self.active.as_ref().map(|active| active.generation) {
-            self.stop_active(generation).await?;
+        if let Some(generation) = self.slot.generation() {
+            self.slot.stop(generation).await?;
         }
         Ok(())
     }
@@ -371,7 +418,34 @@ fn monitor_capture(
 mod tests {
     use super::*;
     use crate::media_pipeline_port::CaptureEventPort;
-    use tokio::sync::watch;
+    use tokio::sync::{oneshot, watch};
+
+    #[tokio::test]
+    async fn cancelled_stop_keeps_capture_slot_occupied_until_cleanup_finishes() {
+        let generation = NonZeroU64::new(7).unwrap();
+        let (release, gate) = oneshot::channel();
+        let mut slot = CaptureSlot::Stopping {
+            generation,
+            task: tokio::spawn(async move {
+                gate.await.unwrap();
+                Ok(())
+            }),
+        };
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), slot.stop(generation))
+                .await
+                .is_err()
+        );
+        assert!(matches!(slot, CaptureSlot::Stopping { .. }));
+        assert!(slot.active(generation).is_err());
+        assert!(slot.stop(NonZeroU64::new(8).unwrap()).await.is_err());
+        assert!(matches!(slot, CaptureSlot::Stopping { .. }));
+
+        release.send(()).unwrap();
+        slot.stop(generation).await.unwrap();
+        assert!(matches!(slot, CaptureSlot::Idle));
+    }
 
     #[test]
     fn capture_caps_preserve_a_fractional_frame_rate() {
