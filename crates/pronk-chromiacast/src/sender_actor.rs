@@ -5,6 +5,7 @@ use pronk_media::{EncodedVideoAccessUnit, VideoFrameDependency};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::generation_slot::{GenerationOwned, GenerationSlot};
 use crate::transport::{
     NegotiatedVideoTransport, VideoSendOutcome, VideoSenderPort, VideoTransportError,
     VideoTransportFeedbackSnapshot, VideoTransportPressure,
@@ -350,6 +351,14 @@ struct ActiveSender {
     statistics: VideoSenderStatistics,
 }
 
+impl GenerationOwned for ActiveSender {
+    fn generation(&self) -> NonZeroU64 {
+        self.generation
+    }
+}
+
+type SenderSlot = GenerationSlot<ActiveSender>;
+
 enum Next {
     Command(Option<Command>),
     AccessUnit(Option<EncodedVideoAccessUnit>),
@@ -362,11 +371,10 @@ async fn run_actor(
     snapshot: watch::Sender<VideoSenderSnapshot>,
     feedback: watch::Sender<VideoSenderFeedbackSnapshot>,
 ) {
-    let mut active: Option<ActiveSender> = None;
-    let mut completed_generation = None;
+    let mut active = SenderSlot::empty();
 
     loop {
-        let next = match active.as_mut() {
+        let next = match active.active_mut() {
             Some(current)
                 if current.feedback_open && current.state == VideoSenderState::Streaming =>
             {
@@ -432,7 +440,7 @@ async fn run_actor(
             let _ = shutdown_active(&mut active).await;
             publish(
                 &snapshot,
-                completed_generation,
+                active.completed(),
                 VideoSenderState::Stopped,
                 VideoSenderStatistics::default(),
                 None,
@@ -449,7 +457,6 @@ async fn run_actor(
                 let result = configure_active(
                     &mut active,
                     &mut output,
-                    completed_generation,
                     generation,
                     transport,
                     &snapshot,
@@ -476,13 +483,10 @@ async fn run_actor(
             }
             Command::Stop { generation, reply } => {
                 let stopping_active = active
-                    .as_ref()
+                    .active()
                     .is_some_and(|current| current.generation == generation);
                 let previous_statistics = snapshot.borrow().statistics.clone();
-                let result = stop_active(&mut active, generation, completed_generation).await;
-                if stopping_active {
-                    completed_generation = Some(generation);
-                }
+                let result = stop_active(&mut active, generation).await;
                 if stopping_active || result.is_ok() {
                     let statistics = if stopping_active {
                         result.as_ref().cloned().unwrap_or(previous_statistics)
@@ -500,15 +504,14 @@ async fn run_actor(
                 let _ = reply.send(result);
             }
             Command::Statistics { generation, reply } => {
-                let result =
-                    active_statistics(&active, generation, completed_generation, &snapshot);
+                let result = active_statistics(&active, generation, &snapshot);
                 let _ = reply.send(result);
             }
             Command::Shutdown { reply } => {
                 let result = shutdown_active(&mut active).await;
                 publish(
                     &snapshot,
-                    completed_generation,
+                    active.completed(),
                     VideoSenderState::Stopped,
                     VideoSenderStatistics::default(),
                     result.as_ref().err().map(ToString::to_string),
@@ -523,9 +526,8 @@ async fn run_actor(
 }
 
 async fn configure_active(
-    active: &mut Option<ActiveSender>,
+    active: &mut SenderSlot,
     output: &mut mpsc::Receiver<EncodedVideoAccessUnit>,
-    completed_generation: Option<NonZeroU64>,
     generation: NonZeroU64,
     transport: NegotiatedVideoTransport,
     snapshot: &watch::Sender<VideoSenderSnapshot>,
@@ -545,12 +547,13 @@ async fn configure_active(
             "audio sender was not split from negotiated transport before configuring video",
         ));
     }
-    if active.is_some() {
+    if active.active().is_some() {
         let _ = sender.shutdown().await;
         return Err(VideoTransportError::new(
             "a video sender generation is already active",
         ));
     }
+    let completed_generation = active.completed();
     if completed_generation.is_some_and(|done| generation <= done) {
         let _ = sender.shutdown().await;
         return Err(VideoTransportError::new(format!(
@@ -558,7 +561,7 @@ async fn configure_active(
         )));
     }
     while output.try_recv().is_ok() {}
-    *active = Some(ActiveSender {
+    *active = SenderSlot::Active(ActiveSender {
         generation,
         state: VideoSenderState::Configured,
         sender: Some(sender),
@@ -589,11 +592,11 @@ async fn configure_active(
 }
 
 fn process_transport_feedback(
-    active: &mut Option<ActiveSender>,
+    active: &mut SenderSlot,
     snapshot: &watch::Sender<VideoSenderSnapshot>,
     feedback: &watch::Sender<VideoSenderFeedbackSnapshot>,
 ) -> Result<(), VideoTransportError> {
-    let Some(active) = active.as_mut() else {
+    let Some(active) = active.active_mut() else {
         return Ok(());
     };
     let incoming = active.feedback.borrow_and_update().clone();
@@ -641,13 +644,13 @@ fn process_transport_feedback(
 }
 
 async fn forward_access_unit(
-    active: &mut Option<ActiveSender>,
+    active: &mut SenderSlot,
     access_unit: EncodedVideoAccessUnit,
     snapshot: &watch::Sender<VideoSenderSnapshot>,
     feedback: &watch::Sender<VideoSenderFeedbackSnapshot>,
 ) -> Result<(), VideoTransportError> {
     let active = active
-        .as_mut()
+        .active_mut()
         .ok_or_else(|| VideoTransportError::new("video sender is missing"))?;
     if access_unit.media_generation != active.generation {
         active.statistics.dropped_frames = active.statistics.dropped_frames.saturating_add(1);
@@ -742,12 +745,12 @@ fn publish_feedback(
 }
 
 async fn fail_active(
-    active: &mut Option<ActiveSender>,
+    active: &mut SenderSlot,
     snapshot: &watch::Sender<VideoSenderSnapshot>,
     feedback: &watch::Sender<VideoSenderFeedbackSnapshot>,
     error: VideoTransportError,
 ) {
-    let Some(active) = active.as_mut() else {
+    let Some(active) = active.active_mut() else {
         return;
     };
     active.state = VideoSenderState::Failed;
@@ -770,7 +773,7 @@ async fn fail_active(
 }
 
 fn transition_active(
-    active: &mut Option<ActiveSender>,
+    active: &mut SenderSlot,
     generation: NonZeroU64,
     transition: Transition,
     snapshot: &watch::Sender<VideoSenderSnapshot>,
@@ -799,7 +802,7 @@ fn transition_active(
 }
 
 async fn set_target_playout_delay(
-    active: &mut Option<ActiveSender>,
+    active: &mut SenderSlot,
     generation: NonZeroU64,
     delay: Duration,
 ) -> Result<(), VideoTransportError> {
@@ -812,12 +815,11 @@ async fn set_target_playout_delay(
 }
 
 async fn stop_active(
-    active: &mut Option<ActiveSender>,
+    active: &mut SenderSlot,
     generation: NonZeroU64,
-    completed_generation: Option<NonZeroU64>,
 ) -> Result<VideoSenderStatistics, VideoTransportError> {
-    let Some(current) = active.as_ref() else {
-        if completed_generation == Some(generation) {
+    let Some(current) = active.active() else {
+        if active.completed() == Some(generation) {
             return Ok(VideoSenderStatistics::default());
         }
         return Err(VideoTransportError::new(
@@ -827,7 +829,7 @@ async fn stop_active(
     if current.generation != generation {
         return Err(generation_mismatch(current.generation, generation));
     }
-    let mut current = active.take().expect("active sender checked above");
+    let mut current = active.take_active().expect("active sender checked above");
     let statistics = current.statistics.clone();
     if let Some(sender) = current.sender.take() {
         sender.shutdown().await?;
@@ -835,8 +837,8 @@ async fn stop_active(
     Ok(statistics)
 }
 
-async fn shutdown_active(active: &mut Option<ActiveSender>) -> Result<(), VideoTransportError> {
-    let Some(mut active) = active.take() else {
+async fn shutdown_active(active: &mut SenderSlot) -> Result<(), VideoTransportError> {
+    let Some(mut active) = active.take_active() else {
         return Ok(());
     };
     match active.sender.take() {
@@ -846,12 +848,11 @@ async fn shutdown_active(active: &mut Option<ActiveSender>) -> Result<(), VideoT
 }
 
 fn active_statistics(
-    active: &Option<ActiveSender>,
+    active: &SenderSlot,
     generation: NonZeroU64,
-    completed_generation: Option<NonZeroU64>,
     snapshot: &watch::Sender<VideoSenderSnapshot>,
 ) -> Result<VideoSenderStatistics, VideoTransportError> {
-    match active {
+    match active.active() {
         Some(active) if active.generation != generation => {
             Err(generation_mismatch(active.generation, generation))
         }
@@ -863,9 +864,7 @@ fn active_statistics(
                 .unwrap_or_else(|| "video sender failed without diagnostic detail".into()),
         )),
         Some(active) => Ok(active.statistics.clone()),
-        None if completed_generation == Some(generation) => {
-            Ok(snapshot.borrow().statistics.clone())
-        }
+        None if active.completed() == Some(generation) => Ok(snapshot.borrow().statistics.clone()),
         None => Err(VideoTransportError::new(
             "there is no matching video sender generation for statistics",
         )),
@@ -873,11 +872,11 @@ fn active_statistics(
 }
 
 fn matching_active(
-    active: &mut Option<ActiveSender>,
+    active: &mut SenderSlot,
     generation: NonZeroU64,
 ) -> Result<&mut ActiveSender, VideoTransportError> {
     let active = active
-        .as_mut()
+        .active_mut()
         .ok_or_else(|| VideoTransportError::new("there is no active video sender generation"))?;
     if active.generation != generation {
         return Err(generation_mismatch(active.generation, generation));

@@ -5,6 +5,7 @@ use pronk_media::EncodedAudioPacket;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::generation_slot::{GenerationOwned, GenerationSlot};
 use crate::transport::{AudioSendOutcome, AudioSenderPort, VideoTransportError};
 
 const COMMAND_CAPACITY: usize = 8;
@@ -229,51 +230,13 @@ struct ActiveSender {
     statistics: AudioSenderStatistics,
 }
 
-enum SenderSlot {
-    Empty { completed: Option<NonZeroU64> },
-    Active(ActiveSender),
-}
-
-impl SenderSlot {
-    fn active(&self) -> Option<&ActiveSender> {
-        match self {
-            Self::Active(active) => Some(active),
-            Self::Empty { .. } => None,
-        }
-    }
-
-    fn active_mut(&mut self) -> Option<&mut ActiveSender> {
-        match self {
-            Self::Active(active) => Some(active),
-            Self::Empty { .. } => None,
-        }
-    }
-
-    fn completed(&self) -> Option<NonZeroU64> {
-        match self {
-            Self::Empty { completed } => *completed,
-            Self::Active(_) => None,
-        }
-    }
-
-    fn take_active(&mut self) -> Option<ActiveSender> {
-        match self {
-            Self::Empty { .. } => None,
-            Self::Active(active) => {
-                let generation = active.generation;
-                match std::mem::replace(
-                    self,
-                    Self::Empty {
-                        completed: Some(generation),
-                    },
-                ) {
-                    Self::Active(active) => Some(active),
-                    Self::Empty { .. } => unreachable!("active slot replaced above"),
-                }
-            }
-        }
+impl GenerationOwned for ActiveSender {
+    fn generation(&self) -> NonZeroU64 {
+        self.generation
     }
 }
+
+type SenderSlot = GenerationSlot<ActiveSender>;
 
 enum Next {
     Command(Option<Command>),
@@ -285,7 +248,7 @@ async fn run_actor(
     mut output: mpsc::Receiver<EncodedAudioPacket>,
     snapshot: watch::Sender<AudioSenderSnapshot>,
 ) {
-    let mut active = SenderSlot::Empty { completed: None };
+    let mut active = SenderSlot::empty();
     loop {
         let streaming = active
             .active()

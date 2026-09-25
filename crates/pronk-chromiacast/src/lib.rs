@@ -9,6 +9,7 @@ mod cast_transport;
 mod device;
 mod discovery;
 mod feedback;
+mod generation_slot;
 mod media;
 mod process;
 mod sender_actor;
