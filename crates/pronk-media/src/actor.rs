@@ -265,6 +265,45 @@ struct ActiveGraph {
     graph: GStreamerGraph,
 }
 
+enum GraphSlot {
+    Unused,
+    Active(ActiveGraph),
+    Completed(NonZeroU64),
+}
+
+impl GraphSlot {
+    fn active(&self) -> Option<&ActiveGraph> {
+        match self {
+            Self::Active(graph) => Some(graph),
+            Self::Unused | Self::Completed(_) => None,
+        }
+    }
+
+    fn active_mut(&mut self) -> Option<&mut ActiveGraph> {
+        match self {
+            Self::Active(graph) => Some(graph),
+            Self::Unused | Self::Completed(_) => None,
+        }
+    }
+
+    fn take_active(&mut self) -> Option<ActiveGraph> {
+        match std::mem::replace(self, Self::Unused) {
+            Self::Active(graph) => Some(graph),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+
+    fn completed_generation(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Completed(generation) => Some(*generation),
+            Self::Unused | Self::Active(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveGraphPhase {
     Configured,
@@ -287,22 +326,22 @@ fn run_worker(
     state: watch::Sender<MediaGraphSnapshot>,
     output: EncodedMediaSenders,
 ) {
-    let mut active: Option<ActiveGraph> = None;
-    let mut completed_generation = None;
+    let mut slot = GraphSlot::Unused;
 
     loop {
-        let command = if active.is_some() {
+        let command = if slot.active().is_some() {
             match commands.try_recv() {
                 Ok(command) => Some(command),
                 Err(mpsc::error::TryRecvError::Disconnected) => None,
                 Err(mpsc::error::TryRecvError::Empty) => {
-                    if let Some(current) = active.as_mut() {
+                    if let Some(current) = slot.active_mut() {
                         if let Err(error) = current.graph.poll(Duration::ZERO) {
                             let generation = current.generation;
                             let statistics = current.graph.statistics();
-                            let failed = active.take().expect("active graph was borrowed above");
+                            let failed =
+                                slot.take_active().expect("active graph was borrowed above");
                             let _ = failed.graph.stop();
-                            completed_generation = Some(generation);
+                            slot = GraphSlot::Completed(generation);
                             publish(
                                 &state,
                                 Some(generation),
@@ -315,7 +354,7 @@ fn run_worker(
                     // AppSink callbacks, fatal bus messages, and commands all
                     // unpark this owner thread. An unpark racing this call
                     // leaves a token, so no readiness transition is lost.
-                    if active.is_some() {
+                    if slot.active().is_some() {
                         std::thread::park();
                     }
                     continue;
@@ -326,12 +365,17 @@ fn run_worker(
         };
 
         let Some(command) = command else {
-            if let Some(current) = active.take() {
-                let _ = current.graph.stop();
-            }
+            let generation = match slot.take_active() {
+                Some(current) => {
+                    let generation = Some(current.generation);
+                    let _ = current.graph.stop();
+                    generation
+                }
+                None => slot.completed_generation(),
+            };
             publish(
                 &state,
-                completed_generation,
+                generation,
                 MediaGraphState::Stopped,
                 MediaGraphStatistics::default(),
                 None,
@@ -345,14 +389,18 @@ fn run_worker(
                 reply,
             } => {
                 let requested = configuration.media_generation;
-                let result = if let Some(current) = active.as_ref() {
+                let result = if let Some(current) = slot.active() {
                     Err(MediaGraphError::new(format!(
                         "media generation {} is still {:?}; cannot configure {requested}",
                         current.generation, current.phase
                     )))
-                } else if completed_generation.is_some_and(|previous| requested <= previous) {
+                } else if slot
+                    .completed_generation()
+                    .is_some_and(|previous| requested <= previous)
+                {
                     Err(MediaGraphError::new(format!(
-                        "media generation {requested} is not newer than completed generation {completed_generation:?}"
+                        "media generation {requested} is not newer than completed generation {:?}",
+                        slot.completed_generation()
                     )))
                 } else {
                     match GStreamerGraph::configure(
@@ -361,7 +409,7 @@ fn run_worker(
                         output.audio.clone(),
                     ) {
                         Ok(graph) => {
-                            active = Some(ActiveGraph {
+                            slot = GraphSlot::Active(ActiveGraph {
                                 generation: requested,
                                 phase: ActiveGraphPhase::Configured,
                                 graph,
@@ -376,7 +424,7 @@ fn run_worker(
                             Ok(())
                         }
                         Err(error) => {
-                            completed_generation = Some(requested);
+                            slot = GraphSlot::Completed(requested);
                             publish(
                                 &state,
                                 Some(requested),
@@ -391,7 +439,7 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::Start { generation, reply } => {
-                let result = with_active(&mut active, generation, ActiveGraphPhase::Configured)
+                let result = with_active(&mut slot, generation, ActiveGraphPhase::Configured)
                     .and_then(|current| {
                         current.graph.start()?;
                         current.phase = ActiveGraphPhase::Streaming;
@@ -407,7 +455,7 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::Suspend { generation, reply } => {
-                let result = with_active(&mut active, generation, ActiveGraphPhase::Streaming)
+                let result = with_active(&mut slot, generation, ActiveGraphPhase::Streaming)
                     .and_then(|current| {
                         current.graph.suspend()?;
                         current.phase = ActiveGraphPhase::Suspended;
@@ -423,7 +471,7 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::Resume { generation, reply } => {
-                let result = with_active(&mut active, generation, ActiveGraphPhase::Suspended)
+                let result = with_active(&mut slot, generation, ActiveGraphPhase::Suspended)
                     .and_then(|current| {
                         current.graph.resume()?;
                         current.phase = ActiveGraphPhase::Streaming;
@@ -439,9 +487,9 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::RequestKeyFrame { generation, reply } => {
-                let result = matching_active(&mut active, generation)
+                let result = matching_active(&mut slot, generation)
                     .and_then(|current| current.graph.request_key_frame());
-                if let Some(current) = active.as_ref() {
+                if let Some(current) = slot.active() {
                     publish(
                         &state,
                         Some(current.generation),
@@ -457,9 +505,9 @@ fn run_worker(
                 bitrate,
                 reply,
             } => {
-                let result = matching_active(&mut active, generation)
+                let result = matching_active(&mut slot, generation)
                     .and_then(|current| current.graph.set_video_bitrate(bitrate));
-                if let Some(current) = active.as_ref() {
+                if let Some(current) = slot.active() {
                     publish(
                         &state,
                         Some(current.generation),
@@ -471,14 +519,14 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::Stop { generation, reply } => {
-                let result = match active.as_ref() {
+                let result = match slot.active() {
                     Some(current) if current.generation != generation => {
                         Err(generation_mismatch(current.generation, generation))
                     }
                     Some(_) => {
-                        let current = active.take().expect("active generation checked");
+                        let current = slot.take_active().expect("active generation checked");
                         let result = current.graph.stop();
-                        completed_generation = Some(generation);
+                        slot = GraphSlot::Completed(generation);
                         let statistics = result.as_ref().cloned().unwrap_or_default();
                         publish(
                             &state,
@@ -489,7 +537,7 @@ fn run_worker(
                         );
                         result
                     }
-                    None if completed_generation == Some(generation) => {
+                    None if slot.completed_generation() == Some(generation) => {
                         let statistics = state.borrow().statistics.clone();
                         publish(
                             &state,
@@ -507,13 +555,15 @@ fn run_worker(
                 let _ = reply.send(result);
             }
             Command::Statistics { generation, reply } => {
-                let result = match active.as_mut() {
-                    Some(current) if current.generation == generation => current
+                let result = match &mut slot {
+                    GraphSlot::Active(current) if current.generation == generation => current
                         .graph
                         .poll(Duration::ZERO)
                         .map(|()| current.graph.statistics()),
-                    Some(current) => Err(generation_mismatch(current.generation, generation)),
-                    None if completed_generation == Some(generation) => {
+                    GraphSlot::Active(current) => {
+                        Err(generation_mismatch(current.generation, generation))
+                    }
+                    GraphSlot::Completed(completed) if *completed == generation => {
                         let snapshot = state.borrow().clone();
                         if snapshot.state == MediaGraphState::Failed {
                             Err(MediaGraphError::new(snapshot.last_error.unwrap_or_else(
@@ -523,20 +573,20 @@ fn run_worker(
                             Ok(snapshot.statistics)
                         }
                     }
-                    None => Err(MediaGraphError::new(
+                    GraphSlot::Unused | GraphSlot::Completed(_) => Err(MediaGraphError::new(
                         "there is no matching media generation for statistics",
                     )),
                 };
                 let _ = reply.send(result);
             }
             Command::Shutdown { reply } => {
-                let result = match active.take() {
-                    Some(current) => current.graph.stop().map(|_| ()),
-                    None => Ok(()),
+                let (generation, result) = match slot.take_active() {
+                    Some(current) => (Some(current.generation), current.graph.stop().map(|_| ())),
+                    None => (slot.completed_generation(), Ok(())),
                 };
                 publish(
                     &state,
-                    completed_generation,
+                    generation,
                     MediaGraphState::Stopped,
                     MediaGraphStatistics::default(),
                     result.as_ref().err().map(ToString::to_string),
@@ -551,12 +601,12 @@ fn run_worker(
 }
 
 fn with_active(
-    active: &mut Option<ActiveGraph>,
+    slot: &mut GraphSlot,
     requested: NonZeroU64,
     required: ActiveGraphPhase,
 ) -> Result<&mut ActiveGraph, MediaGraphError> {
-    let current = active
-        .as_mut()
+    let current = slot
+        .active_mut()
         .ok_or_else(|| MediaGraphError::new("there is no active media generation"))?;
     if current.generation != requested {
         return Err(generation_mismatch(current.generation, requested));
@@ -571,11 +621,11 @@ fn with_active(
 }
 
 fn matching_active(
-    active: &mut Option<ActiveGraph>,
+    slot: &mut GraphSlot,
     requested: NonZeroU64,
 ) -> Result<&mut ActiveGraph, MediaGraphError> {
-    let current = active
-        .as_mut()
+    let current = slot
+        .active_mut()
         .ok_or_else(|| MediaGraphError::new("there is no active media generation"))?;
     if current.generation != requested {
         return Err(generation_mismatch(current.generation, requested));
@@ -639,6 +689,12 @@ mod tests {
             .configure(invalid_configuration(generation))
             .await
             .is_err());
+        let newer_generation = NonZeroU64::new(2).unwrap();
+        assert!(actor
+            .configure(invalid_configuration(newer_generation))
+            .await
+            .is_err());
+        assert_eq!(actor.snapshot().media_generation, Some(newer_generation));
         actor.shutdown().await.unwrap();
     }
 
