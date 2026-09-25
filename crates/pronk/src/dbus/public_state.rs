@@ -94,8 +94,7 @@ pub(super) fn public_media_session_state(
         | crate::display_state::MediaState::StartingMedia => MediaSessionPhase::Starting,
         crate::display_state::MediaState::Running => MediaSessionPhase::Running,
         crate::display_state::MediaState::Suspended => MediaSessionPhase::Suspended,
-        crate::display_state::MediaState::Reconfiguring
-        | crate::display_state::MediaState::Reconnecting => MediaSessionPhase::Recovering,
+        crate::display_state::MediaState::Reconfiguring => MediaSessionPhase::Recovering,
         crate::display_state::MediaState::Stopping => MediaSessionPhase::Stopping,
         crate::display_state::MediaState::Failed => MediaSessionPhase::Failed,
     };

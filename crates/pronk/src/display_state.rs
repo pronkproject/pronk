@@ -84,7 +84,6 @@ pub enum MediaState {
     Running,
     Suspended,
     Reconfiguring,
-    Reconnecting,
     Stopping,
     Failed,
 }
@@ -97,7 +96,6 @@ pub enum MediaStatus {
     Running,
     Suspended,
     Reconfiguring,
-    Reconnecting,
     Stopping,
     Failed(String),
 }
@@ -111,7 +109,6 @@ impl MediaStatus {
             Self::Running => MediaState::Running,
             Self::Suspended => MediaState::Suspended,
             Self::Reconfiguring => MediaState::Reconfiguring,
-            Self::Reconnecting => MediaState::Reconnecting,
             Self::Stopping => MediaState::Stopping,
             Self::Failed(_) => MediaState::Failed,
         }

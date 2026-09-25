@@ -129,7 +129,6 @@ fn public_media_projection_coalesces_internal_phases() {
         (MediaStatus::Running, MediaSessionPhase::Running, 1),
         (MediaStatus::Suspended, MediaSessionPhase::Suspended, 1),
         (MediaStatus::Reconfiguring, MediaSessionPhase::Recovering, 1),
-        (MediaStatus::Reconnecting, MediaSessionPhase::Recovering, 1),
         (MediaStatus::Stopping, MediaSessionPhase::Stopping, 1),
         (
             MediaStatus::Failed("transport failed".into()),
