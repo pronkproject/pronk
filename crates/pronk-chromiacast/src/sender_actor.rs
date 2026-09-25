@@ -27,20 +27,59 @@ pub(crate) struct VideoSenderStatistics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VideoSenderState {
-    Empty,
     Configured,
     Streaming,
     Suspended,
     Failed,
-    Stopped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VideoSenderSnapshot {
-    generation: Option<NonZeroU64>,
-    state: VideoSenderState,
+    status: VideoSenderStatus,
     statistics: VideoSenderStatistics,
-    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VideoSenderStatus {
+    Empty,
+    Configured(NonZeroU64),
+    Streaming(NonZeroU64),
+    Suspended(NonZeroU64),
+    Failed {
+        generation: NonZeroU64,
+        error: String,
+    },
+    Completed {
+        generation: NonZeroU64,
+        error: Option<String>,
+    },
+    Stopped {
+        generation: Option<NonZeroU64>,
+        error: Option<String>,
+    },
+}
+
+impl VideoSenderStatus {
+    fn generation(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Empty => None,
+            Self::Configured(generation)
+            | Self::Streaming(generation)
+            | Self::Suspended(generation)
+            | Self::Failed { generation, .. }
+            | Self::Completed { generation, .. } => Some(*generation),
+            Self::Stopped { generation, .. } => *generation,
+        }
+    }
+
+    fn active(generation: NonZeroU64, state: VideoSenderState) -> Self {
+        match state {
+            VideoSenderState::Configured => Self::Configured(generation),
+            VideoSenderState::Streaming => Self::Streaming(generation),
+            VideoSenderState::Suspended => Self::Suspended(generation),
+            VideoSenderState::Failed => unreachable!("failed video sender needs an error"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -73,10 +112,8 @@ impl VideoSenderActor {
     pub(crate) fn spawn(output: mpsc::Receiver<EncodedVideoAccessUnit>) -> Self {
         let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshot_tx, snapshot) = watch::channel(VideoSenderSnapshot {
-            generation: None,
-            state: VideoSenderState::Empty,
+            status: VideoSenderStatus::Empty,
             statistics: VideoSenderStatistics::default(),
-            last_error: None,
         });
         let (feedback_tx, feedback) = watch::channel(VideoSenderFeedbackSnapshot::default());
         let task = tokio::spawn(run_actor(
@@ -174,22 +211,22 @@ impl VideoSenderActor {
         tokio::time::timeout(timeout, async {
             loop {
                 let current = snapshot.borrow().clone();
-                if current.generation != Some(generation) {
+                if current.status.generation() != Some(generation) {
                     return Err(VideoTransportError::new(format!(
                         "video sender generation changed while waiting for {generation}"
                     )));
                 }
-                if current.state == VideoSenderState::Failed {
-                    return Err(VideoTransportError::new(current.last_error.unwrap_or_else(
-                        || "video sender failed without diagnostic detail".into(),
-                    )));
+                if let VideoSenderStatus::Failed { error, .. } = current.status {
+                    return Err(VideoTransportError::new(error));
                 }
                 if current.statistics.frames > previous {
                     return Ok(());
                 }
                 if matches!(
-                    current.state,
-                    VideoSenderState::Empty | VideoSenderState::Stopped
+                    current.status,
+                    VideoSenderStatus::Empty
+                        | VideoSenderStatus::Completed { .. }
+                        | VideoSenderStatus::Stopped { .. }
                 ) {
                     return Err(VideoTransportError::new(format!(
                         "video sender generation {generation} stopped before encoded video delivery"
@@ -215,20 +252,18 @@ impl VideoSenderActor {
         tokio::time::timeout(timeout, async {
             loop {
                 let current = snapshot.borrow().clone();
-                if current.generation != Some(generation) {
+                if current.status.generation() != Some(generation) {
                     return Err(VideoTransportError::new(format!(
                         "video sender generation changed while waiting for {generation}"
                     )));
                 }
-                if current.state == VideoSenderState::Failed {
-                    return Err(VideoTransportError::new(current.last_error.unwrap_or_else(
-                        || "video sender failed without diagnostic detail".into(),
-                    )));
+                if let VideoSenderStatus::Failed { error, .. } = current.status {
+                    return Err(VideoTransportError::new(error));
                 }
                 if current.statistics.acknowledged_frames > previous {
                     return Ok(());
                 }
-                if matches!(current.state, VideoSenderState::Empty | VideoSenderState::Stopped) {
+                if matches!(current.status, VideoSenderStatus::Empty | VideoSenderStatus::Completed { .. } | VideoSenderStatus::Stopped { .. }) {
                     return Err(VideoTransportError::new(format!(
                         "video sender generation {generation} stopped before receiver video acknowledgement"
                     )));
@@ -255,20 +290,18 @@ impl VideoSenderActor {
         tokio::time::timeout(timeout, async {
             loop {
                 let current = snapshot.borrow().clone();
-                if current.generation != Some(generation) {
+                if current.status.generation() != Some(generation) {
                     return Err(VideoTransportError::new(format!(
                         "video sender generation changed while waiting for audio acknowledgement for {generation}"
                     )));
                 }
-                if current.state == VideoSenderState::Failed {
-                    return Err(VideoTransportError::new(current.last_error.unwrap_or_else(
-                        || "video sender failed without diagnostic detail".into(),
-                    )));
+                if let VideoSenderStatus::Failed { error, .. } = current.status {
+                    return Err(VideoTransportError::new(error));
                 }
                 if current.statistics.acknowledged_audio_packets > previous {
                     return Ok(());
                 }
-                if matches!(current.state, VideoSenderState::Empty | VideoSenderState::Stopped) {
+                if matches!(current.status, VideoSenderStatus::Empty | VideoSenderStatus::Completed { .. } | VideoSenderStatus::Stopped { .. }) {
                     return Err(VideoTransportError::new(format!(
                         "video sender generation {generation} stopped before receiver audio acknowledgement"
                     )));
@@ -483,10 +516,11 @@ async fn run_actor(
             let _ = shutdown_active(&mut active).await;
             publish(
                 &snapshot,
-                active.completed(),
-                VideoSenderState::Stopped,
+                VideoSenderStatus::Stopped {
+                    generation: active.completed(),
+                    error: None,
+                },
                 VideoSenderStatistics::default(),
-                None,
             );
             return;
         };
@@ -538,10 +572,11 @@ async fn run_actor(
                     };
                     publish(
                         &snapshot,
-                        Some(generation),
-                        VideoSenderState::Empty,
+                        VideoSenderStatus::Completed {
+                            generation,
+                            error: result.as_ref().err().map(ToString::to_string),
+                        },
                         statistics,
-                        result.as_ref().err().map(ToString::to_string),
                     );
                 }
                 let _ = reply.send(result);
@@ -554,10 +589,11 @@ async fn run_actor(
                 let result = shutdown_active(&mut active).await;
                 publish(
                     &snapshot,
-                    active.completed(),
-                    VideoSenderState::Stopped,
+                    VideoSenderStatus::Stopped {
+                        generation: active.completed(),
+                        error: result.as_ref().err().map(ToString::to_string),
+                    },
                     VideoSenderStatistics::default(),
-                    result.as_ref().err().map(ToString::to_string),
                 );
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
@@ -624,10 +660,8 @@ async fn configure_active(
     });
     publish(
         snapshot,
-        Some(generation),
-        VideoSenderState::Configured,
+        VideoSenderStatus::Configured(generation),
         VideoSenderStatistics::default(),
-        None,
     );
     Ok(())
 }
@@ -676,10 +710,8 @@ fn process_transport_feedback(
     );
     publish(
         snapshot,
-        Some(active.generation),
-        active.phase.state(),
+        VideoSenderStatus::active(active.generation, active.phase.state()),
         active.statistics.clone(),
-        None,
     );
     Ok(())
 }
@@ -705,10 +737,8 @@ async fn forward_access_unit(
         active.statistics.dropped_frames = active.statistics.dropped_frames.saturating_add(1);
         publish(
             snapshot,
-            Some(active.generation),
-            active.phase.state(),
+            VideoSenderStatus::active(active.generation, active.phase.state()),
             active.statistics.clone(),
-            None,
         );
         return Ok(());
     }
@@ -737,10 +767,8 @@ async fn forward_access_unit(
         );
         publish(
             snapshot,
-            Some(active.generation),
-            active.phase.state(),
+            VideoSenderStatus::active(active.generation, active.phase.state()),
             active.statistics.clone(),
-            None,
         );
         return Ok(());
     }
@@ -756,10 +784,8 @@ async fn forward_access_unit(
     }
     publish(
         snapshot,
-        Some(active.generation),
-        active.phase.state(),
+        VideoSenderStatus::active(active.generation, active.phase.state()),
         active.statistics.clone(),
-        None,
     );
     Ok(())
 }
@@ -803,10 +829,11 @@ async fn fail_active(
     });
     publish(
         snapshot,
-        Some(active.generation),
-        active.phase.state(),
+        VideoSenderStatus::Failed {
+            generation: active.generation,
+            error: error.to_string(),
+        },
         active.statistics.clone(),
-        Some(error.to_string()),
     );
 }
 
@@ -838,10 +865,8 @@ fn transition_active(
     };
     publish(
         snapshot,
-        Some(generation),
-        desired,
+        VideoSenderStatus::active(generation, desired),
         active.statistics.clone(),
-        None,
     );
     Ok(())
 }
@@ -901,15 +926,13 @@ fn active_statistics(
         Some(active) if active.generation != generation => {
             Err(generation_mismatch(active.generation, generation))
         }
-        Some(active) if active.phase.state() == VideoSenderState::Failed => {
-            Err(VideoTransportError::new(
-                snapshot
-                    .borrow()
-                    .last_error
-                    .clone()
-                    .unwrap_or_else(|| "video sender failed without diagnostic detail".into()),
-            ))
-        }
+        Some(active) if active.phase.state() == VideoSenderState::Failed => match &snapshot
+            .borrow()
+            .status
+        {
+            VideoSenderStatus::Failed { error, .. } => Err(VideoTransportError::new(error.clone())),
+            _ => unreachable!("failed video sender has a failed snapshot"),
+        },
         Some(active) => Ok(active.statistics.clone()),
         None if active.completed() == Some(generation) => Ok(snapshot.borrow().statistics.clone()),
         None => Err(VideoTransportError::new(
@@ -939,17 +962,10 @@ fn generation_mismatch(active: NonZeroU64, requested: NonZeroU64) -> VideoTransp
 
 fn publish(
     snapshot: &watch::Sender<VideoSenderSnapshot>,
-    generation: Option<NonZeroU64>,
-    state: VideoSenderState,
+    status: VideoSenderStatus,
     statistics: VideoSenderStatistics,
-    last_error: Option<String>,
 ) {
-    let next = VideoSenderSnapshot {
-        generation,
-        state,
-        statistics,
-        last_error,
-    };
+    let next = VideoSenderSnapshot { status, statistics };
     snapshot.send_if_modified(|current| {
         if *current == next {
             return false;
@@ -1084,16 +1100,15 @@ mod tests {
             .unwrap();
 
         assert!(actor.stop(next).await.is_err());
-        assert_eq!(actor.snapshot.borrow().generation, Some(generation));
         assert_eq!(
-            actor.snapshot.borrow().state,
-            super::VideoSenderState::Configured
+            actor.snapshot.borrow().status,
+            super::VideoSenderStatus::Configured(generation)
         );
         assert!(actor.stop(generation).await.is_err());
-        assert_eq!(
-            actor.snapshot.borrow().state,
-            super::VideoSenderState::Empty
-        );
+        assert!(matches!(
+            actor.snapshot.borrow().status,
+            super::VideoSenderStatus::Completed { generation: completed, error: Some(_) } if completed == generation
+        ));
         assert!(actor
             .configure(generation, accepting_transport())
             .await
@@ -1288,12 +1303,16 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(actor
-            .statistics(generation)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("scripted receiver acknowledgement timeout"));
+        let statistics_error = actor.statistics(generation).await.unwrap_err().to_string();
+        assert!(statistics_error.contains("scripted receiver acknowledgement timeout"));
+        assert_eq!(
+            actor
+                .wait_for_frame_after(generation, 0, Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .to_string(),
+            statistics_error
+        );
         actor.stop(generation).await.unwrap();
         actor.shutdown().await.unwrap();
     }
