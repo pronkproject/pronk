@@ -25,9 +25,29 @@ pub struct EncodedMediaReceivers {
 }
 
 #[derive(Clone, Default)]
-struct EncodedMediaSenders {
-    video: Option<mpsc::Sender<EncodedVideoAccessUnit>>,
-    audio: Option<mpsc::Sender<EncodedAudioPacket>>,
+enum EncodedMediaSenders {
+    #[default]
+    Discard,
+    Video(mpsc::Sender<EncodedVideoAccessUnit>),
+    VideoAudio {
+        video: mpsc::Sender<EncodedVideoAccessUnit>,
+        audio: mpsc::Sender<EncodedAudioPacket>,
+    },
+}
+
+impl EncodedMediaSenders {
+    fn channels(
+        &self,
+    ) -> (
+        Option<mpsc::Sender<EncodedVideoAccessUnit>>,
+        Option<mpsc::Sender<EncodedAudioPacket>>,
+    ) {
+        match self {
+            Self::Discard => (None, None),
+            Self::Video(video) => (Some(video.clone()), None),
+            Self::VideoAudio { video, audio } => (Some(video.clone()), Some(audio.clone())),
+        }
+    }
 }
 
 impl std::fmt::Debug for MediaGraphActor {
@@ -53,11 +73,7 @@ impl MediaGraphActor {
             )));
         }
         let (output, receiver) = mpsc::channel(capacity);
-        Self::spawn_inner(EncodedMediaSenders {
-            video: Some(output),
-            audio: None,
-        })
-        .map(|actor| (actor, receiver))
+        Self::spawn_inner(EncodedMediaSenders::Video(output)).map(|actor| (actor, receiver))
     }
 
     pub fn spawn_with_media_output(
@@ -68,11 +84,7 @@ impl MediaGraphActor {
         validate_output_capacity("encoded-audio", audio_capacity)?;
         let (video, video_receiver) = mpsc::channel(video_capacity);
         let (audio, audio_receiver) = mpsc::channel(audio_capacity);
-        Self::spawn_inner(EncodedMediaSenders {
-            video: Some(video),
-            audio: Some(audio),
-        })
-        .map(|actor| {
+        Self::spawn_inner(EncodedMediaSenders::VideoAudio { video, audio }).map(|actor| {
             (
                 actor,
                 EncodedMediaReceivers {
@@ -403,11 +415,8 @@ fn run_worker(
                         slot.completed_generation()
                     )))
                 } else {
-                    match GStreamerGraph::configure(
-                        configuration,
-                        output.video.clone(),
-                        output.audio.clone(),
-                    ) {
+                    let (video, audio) = output.channels();
+                    match GStreamerGraph::configure(configuration, video, audio) {
                         Ok(graph) => {
                             slot = GraphSlot::Active(Box::new(ActiveGraph {
                                 generation: requested,
