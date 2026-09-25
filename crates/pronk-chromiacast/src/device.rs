@@ -1,3 +1,5 @@
+mod control;
+
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -6,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chromiacast::{AppAvailability, CastApp, CastConnection, SetupInfoOutcome, APP_MIRRORING};
 use pronk_backend_protocol::{
-    AudioProfile, ControlKind, ControlOperation, DeviceCapabilities, DisplayIdentity, DisplayMode,
+    AudioProfile, ControlOperation, DeviceCapabilities, DisplayIdentity, DisplayMode,
     IdentitySource, MediaConfiguration, ModeRawLayouts, PipeWireTarget, PreparationRequest,
     RawVideoLayout, SessionStatistics, StopReason, SuspendReason, Validate, VideoProfile,
     MAX_ERROR_TEXT_BYTES, MAX_MANUFACTURER_NAME_BYTES, MAX_PRODUCT_NAME_BYTES,
@@ -232,67 +234,7 @@ impl DeviceControl for ChromiacastDeviceControl {
         &mut self,
         operation: &ControlOperation,
     ) -> Result<(), DeviceControlError> {
-        match operation.kind {
-            ControlKind::Volume => {
-                let level = match operation.code.as_deref() {
-                    Some("absolute") => f64::from(operation.value) / 100.0,
-                    Some("relative") => {
-                        let current = self
-                            .connection
-                            .status()
-                            .await
-                            .map_err(|error| DeviceControlError::Control(error.to_string()))?
-                            .volume_level()
-                            .ok_or_else(|| {
-                                DeviceControlError::Control(
-                                    "receiver status omitted its volume level".into(),
-                                )
-                            })?;
-                        (current + f64::from(operation.value) / 100.0).clamp(0.0, 1.0)
-                    }
-                    _ => {
-                        return Err(DeviceControlError::UnsupportedControl(
-                            "unknown volume operation".into(),
-                        ))
-                    }
-                };
-                self.connection
-                    .set_volume_level(level)
-                    .await
-                    .map_err(|error| DeviceControlError::Control(error.to_string()))?;
-                Ok(())
-            }
-            ControlKind::Mute => {
-                let muted = match operation.code.as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    Some("toggle") => !self
-                        .connection
-                        .status()
-                        .await
-                        .map_err(|error| DeviceControlError::Control(error.to_string()))?
-                        .is_muted()
-                        .ok_or_else(|| {
-                            DeviceControlError::Control(
-                                "receiver status omitted its mute state".into(),
-                            )
-                        })?,
-                    _ => {
-                        return Err(DeviceControlError::UnsupportedControl(
-                            "unknown mute operation".into(),
-                        ))
-                    }
-                };
-                self.connection
-                    .set_muted(muted)
-                    .await
-                    .map_err(|error| DeviceControlError::Control(error.to_string()))?;
-                Ok(())
-            }
-            kind => Err(DeviceControlError::UnsupportedControl(format!(
-                "{kind:?} has no proven Cast receiver operation"
-            ))),
-        }
+        control::transmit(&self.connection, operation).await
     }
 
     async fn close(mut self: Box<Self>) -> Result<(), DeviceControlError> {
@@ -1548,7 +1490,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
-    use pronk_backend_protocol::{DeviceAvailability, DeviceInfo, DisplayMode, VideoProfile};
+    use pronk_backend_protocol::{
+        ControlKind, DeviceAvailability, DeviceInfo, DisplayMode, VideoProfile,
+    };
     use pronk_media::{VideoEncoder, VideoFrameDependency};
 
     use super::*;
