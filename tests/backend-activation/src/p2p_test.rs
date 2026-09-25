@@ -692,11 +692,11 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
         .await?;
     let mut status = operation.subscribe();
     ensure!(
-        operation.snapshot().stage == DisplaySetupStage::Validating,
+        operation.snapshot().stage() == DisplaySetupStage::Validating,
         "display setup did not return in Validating"
     );
     timeout(METHOD_TIMEOUT, async {
-        while !status.borrow().stage.is_terminal() {
+        while !status.borrow().stage().is_terminal() {
             status
                 .changed()
                 .await
@@ -708,11 +708,11 @@ async fn run_real_display_setup(path: &Path) -> anyhow::Result<()> {
     .context("display setup did not reach a terminal state")??;
     let terminal = status.borrow().clone();
     ensure!(
-        terminal.stage == DisplaySetupStage::Added,
+        terminal.stage() == DisplaySetupStage::Added,
         "display setup ended in {:?} with {:?}: {}",
-        terminal.stage,
-        terminal.error_code,
-        terminal.error.as_deref().unwrap_or("no diagnostic"),
+        terminal.stage(),
+        terminal.error_code(),
+        terminal.error().unwrap_or("no diagnostic"),
     );
     let added = timeout(PRODUCTION_MEDIA_TIMEOUT, async {
         loop {
