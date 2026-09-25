@@ -204,6 +204,7 @@ struct PendingSessionRequest {
     request_generation: u64,
     connection_generation: u64,
     discovery_generation: u64,
+    device_revision: u64,
 }
 
 impl PendingSessionRequest {
@@ -212,6 +213,7 @@ impl PendingSessionRequest {
             request_generation,
             connection_generation: device.connection_generation,
             discovery_generation: device.discovery_generation,
+            device_revision: device.device_revision,
         }
     }
 }
@@ -255,6 +257,14 @@ impl DeviceSessionPolicyState {
         // then use the freshest discovery record.
         if matches!(self, Self::Ready { bound_connection_generation, .. }
             if *bound_connection_generation == device.connection_generation)
+        {
+            return None;
+        }
+        if matches!(self, Self::Recovering { request, .. }
+            if device.availability == DeviceAvailability::Available
+                && request.connection_generation == device.connection_generation
+                && request.discovery_generation == device.discovery_generation
+                && request.device_revision == device.device_revision)
         {
             return None;
         }
@@ -582,6 +592,36 @@ mod tests {
         assert!(!state.complete_request(7, &reconnected, 5, &unavailable));
         assert_eq!(state.session_generation(), 4);
         assert!(!state.is_ready());
+    }
+
+    #[test]
+    fn repeated_device_observation_keeps_the_pending_recovery() {
+        let initial = device(DeviceAvailability::Available, 1, 2, 3);
+        let mut state = DeviceSessionPolicyState::new(&initial, true, 1);
+        let replacement = device(DeviceAvailability::Available, 2, 3, 4);
+        assert!(matches!(
+            state.observe_device(&replacement),
+            Some(DeviceSessionAction::Recover(_))
+        ));
+        state.begin_request(7, &replacement);
+
+        assert!(state.observe_device(&replacement).is_none());
+        assert!(matches!(
+            state,
+            DeviceSessionPolicyState::Recovering {
+                request: PendingSessionRequest {
+                    request_generation: 7,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        let revised = device(DeviceAvailability::Available, 2, 3, 5);
+        assert!(matches!(
+            state.observe_device(&revised),
+            Some(DeviceSessionAction::Recover(_))
+        ));
     }
 
     #[test]
