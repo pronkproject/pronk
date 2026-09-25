@@ -395,7 +395,7 @@ pub(super) async fn run_manager(
     let mut state = ManagerRuntimeState::default();
     let mut backend_events_open = true;
 
-    let shutdown_response = loop {
+    let shutdown_outcome = loop {
         tokio::select! {
             // Public requests must not starve setup, removal, backend, or
             // display-slot progress. Tokio's default randomized branch order
@@ -408,7 +408,7 @@ pub(super) async fn run_manager(
             command = commands.recv() => {
                 match state.handle_command(command, &manager, &workers, &reservation_releases) {
                     CommandFlow::Continue => {},
-                    CommandFlow::Stop(response) => break response,
+                    CommandFlow::Stop(response) => break Ok(response),
                 }
             },
             joined = state.setup_tasks.join_next_with_id(), if !state.setup_tasks.is_empty() => {
@@ -426,7 +426,10 @@ pub(super) async fn run_manager(
                 }
             },
             message = backend_events.recv(), if backend_events_open => {
-                backend_events_open = state.handle_backend_message(message, &events).await?;
+                match state.handle_backend_message(message, &events).await {
+                    Ok(open) => backend_events_open = open,
+                    Err(error) => break Err(error),
+                }
             },
             event = slot_event_rx.recv() => {
                 if let Some(event) = state.handle_slot_event(event).await {
@@ -441,10 +444,14 @@ pub(super) async fn run_manager(
 
     let mut report = shutdown_workers(workers).await;
     report.errors.extend(display_cleanup_errors);
-    if let Some(response) = shutdown_response {
-        let _ = response.send(report.clone());
+    match shutdown_outcome {
+        Ok(Some(response)) => {
+            let _ = response.send(report.clone());
+            Ok(report)
+        }
+        Ok(None) => Ok(report),
+        Err(error) => Err(error),
     }
-    Ok(report)
 }
 
 async fn publish_inventory_changes(
