@@ -39,8 +39,7 @@ struct SlotRuntime {
     device_session: DeviceSessionPolicyState,
     recovery: DeviceSessionRecoveryActor,
     media_policy: DisplayMediaPolicyActor,
-    media_state: watch::Receiver<MediaSessionSnapshot>,
-    media_events_open: bool,
+    media_state: Option<watch::Receiver<MediaSessionSnapshot>>,
     state: watch::Sender<AddedCastDisplaySnapshot>,
     events: mpsc::UnboundedSender<CastDisplaySlotEvent>,
 }
@@ -98,8 +97,7 @@ impl SlotRuntime {
             device_session,
             recovery,
             media_policy,
-            media_state,
-            media_events_open: true,
+            media_state: Some(media_state),
             state,
             events,
         }
@@ -241,12 +239,22 @@ impl SlotRuntime {
                         break SlotExit::Terminal(diagnostic);
                     }
                 },
-                result = self.media_state.changed(), if self.media_events_open => {
+                result = async {
+                    match self.media_state.as_mut() {
+                        Some(media_state) => media_state.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     if result.is_err() {
-                        self.media_events_open = false;
+                        self.media_state = None;
                         continue;
                     }
-                    let media = self.media_state.borrow_and_update().clone();
+                    let media = self
+                        .media_state
+                        .as_mut()
+                        .expect("open media stream produced a change")
+                        .borrow_and_update()
+                        .clone();
                     let changed = self.state.send_if_modified(|snapshot| {
                         if !snapshot.runtime.observe_media(
                             media.media_generation(),
