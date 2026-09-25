@@ -12,6 +12,7 @@ use crate::connection::{BackendConnection, BACKEND_METHOD_TIMEOUT};
 use crate::inventory::{
     ApplyOutcome, DeviceEvent, DeviceInventory, DeviceInventorySnapshot, InventoryError,
 };
+use crate::task_guard::AbortOnDropTask;
 
 const DISCOVERY_EVENT_QUEUE: usize = 64;
 const DISCOVERY_COMMAND_QUEUE: usize = 8;
@@ -134,26 +135,6 @@ impl BackendConnection {
             commands: Some(command_tx),
             task: Some(task.take()),
         })
-    }
-}
-
-struct AbortOnDropTask(Option<JoinHandle<()>>);
-
-impl AbortOnDropTask {
-    fn new(task: JoinHandle<()>) -> Self {
-        Self(Some(task))
-    }
-
-    fn take(&mut self) -> JoinHandle<()> {
-        self.0.take().expect("discovery task already taken")
-    }
-}
-
-impl Drop for AbortOnDropTask {
-    fn drop(&mut self) {
-        if let Some(task) = self.0.take() {
-            task.abort();
-        }
     }
 }
 

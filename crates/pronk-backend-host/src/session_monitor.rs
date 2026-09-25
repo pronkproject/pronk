@@ -10,6 +10,7 @@ use tokio::time::timeout;
 use zbus::zvariant::OwnedObjectPath;
 use zbus::{Connection, MessageStream};
 
+use crate::task_guard::AbortOnDropTask;
 use crate::{BackendSessionError, BackendSessionHandle};
 
 const SESSION_MONITOR_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -74,7 +75,7 @@ impl BackendSessionHandle {
             ready_tx,
             events_tx,
         ));
-        let mut task = AbortOnDropTask(Some(task));
+        let mut task = AbortOnDropTask::new(task);
         let ready = timeout(SESSION_MONITOR_START_TIMEOUT, ready_rx).await;
         match ready {
             Ok(Ok(Ok(()))) => Ok(BackendSessionMonitor {
@@ -93,29 +94,6 @@ impl BackendSessionHandle {
                 task.abort().await;
                 Err(BackendSessionError::MethodTimeout("StartSessionMonitor"))
             }
-        }
-    }
-}
-
-struct AbortOnDropTask(Option<JoinHandle<()>>);
-
-impl AbortOnDropTask {
-    fn take(&mut self) -> JoinHandle<()> {
-        self.0.take().expect("session monitor task already taken")
-    }
-
-    async fn abort(&mut self) {
-        if let Some(task) = self.0.take() {
-            task.abort();
-            let _ = task.await;
-        }
-    }
-}
-
-impl Drop for AbortOnDropTask {
-    fn drop(&mut self) {
-        if let Some(task) = self.0.take() {
-            task.abort();
         }
     }
 }

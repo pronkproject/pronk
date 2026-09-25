@@ -10,6 +10,7 @@ mod session;
 mod session_monitor;
 mod supervisor;
 mod systemd;
+mod task_guard;
 
 pub use connection::{
     BackendConnectError, BackendConnection, BackendConnectionError, BackendInstanceControlError,
