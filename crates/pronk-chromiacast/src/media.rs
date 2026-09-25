@@ -317,25 +317,26 @@ enum GenerationSlot {
 #[derive(Debug)]
 struct ActiveGeneration {
     id: NonZeroU64,
-    graph_may_own_generation: bool,
-    sender_may_own_generation: bool,
-    audio_sender_may_own_generation: bool,
-    configuration_complete: bool,
-    transport_may_be_active: bool,
+    configuration_stage: ConfigurationStage,
     audio_enabled: bool,
     video_bitrate: u64,
     feedback_controller: Option<VideoFeedbackController>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigurationStage {
+    NegotiatingTransport,
+    ConfiguringGraph,
+    ConfiguringAudioSender,
+    ConfiguringVideoSender,
+    Complete,
 }
 
 impl ActiveGeneration {
     fn new(id: NonZeroU64, audio_enabled: bool, video_bitrate: NonZeroU64) -> Self {
         Self {
             id,
-            graph_may_own_generation: false,
-            sender_may_own_generation: false,
-            audio_sender_may_own_generation: false,
-            configuration_complete: false,
-            transport_may_be_active: false,
+            configuration_stage: ConfigurationStage::NegotiatingTransport,
             audio_enabled,
             video_bitrate: video_bitrate.get(),
             feedback_controller: None,
@@ -343,7 +344,28 @@ impl ActiveGeneration {
     }
 
     fn is_ready(&self) -> bool {
-        self.configuration_complete
+        self.configuration_stage == ConfigurationStage::Complete
+    }
+
+    fn graph_may_own_generation(&self) -> bool {
+        self.configuration_stage != ConfigurationStage::NegotiatingTransport
+    }
+
+    fn audio_sender_may_own_generation(&self) -> bool {
+        self.audio_enabled
+            && matches!(
+                self.configuration_stage,
+                ConfigurationStage::ConfiguringAudioSender
+                    | ConfigurationStage::ConfiguringVideoSender
+                    | ConfigurationStage::Complete
+            )
+    }
+
+    fn video_sender_may_own_generation(&self) -> bool {
+        matches!(
+            self.configuration_stage,
+            ConfigurationStage::ConfiguringVideoSender | ConfigurationStage::Complete
+        )
     }
 }
 
@@ -567,7 +589,6 @@ impl ChromiacastMediaSession {
         self.state = SessionState::Configured;
 
         // Negotiation can launch the receiver app before its reply reaches us.
-        self.active_generation_mut().transport_may_be_active = true;
         let mut negotiated = transport.negotiate_video(transport_configuration).await?;
         let graph_configuration =
             match graph_configuration.with_encoder(&self.encoder_policy, negotiated.video_codec) {
@@ -577,7 +598,7 @@ impl ChromiacastMediaSession {
                     return Err(error.into());
                 }
             };
-        self.active_generation_mut().graph_may_own_generation = true;
+        self.active_generation_mut().configuration_stage = ConfigurationStage::ConfiguringGraph;
         if let Err(error) = self.graph.configure(graph_configuration).await {
             discard_negotiated_transport(negotiated).await;
             return Err(error.into());
@@ -629,7 +650,8 @@ impl ChromiacastMediaSession {
         match (audio_enabled, negotiated.audio_sender.take()) {
             (true, Some(audio_sender)) => {
                 // The actor can accept the sender before this request returns.
-                self.active_generation_mut().audio_sender_may_own_generation = true;
+                self.active_generation_mut().configuration_stage =
+                    ConfigurationStage::ConfiguringAudioSender;
                 if let Err(error) = self
                     .audio_sender()?
                     .configure(generation, audio_sender)
@@ -654,9 +676,10 @@ impl ChromiacastMediaSession {
             }
             (false, None) => {}
         }
-        self.active_generation_mut().sender_may_own_generation = true;
+        self.active_generation_mut().configuration_stage =
+            ConfigurationStage::ConfiguringVideoSender;
         self.sender()?.configure(generation, negotiated).await?;
-        self.active_generation_mut().configuration_complete = true;
+        self.active_generation_mut().configuration_stage = ConfigurationStage::Complete;
         Ok(())
     }
 
@@ -877,10 +900,9 @@ impl ChromiacastMediaSession {
         }
         self.require_matching_generation("StopMedia", generation)?;
         let active = self.active_generation();
-        let graph_may_own_generation = active.graph_may_own_generation;
-        let audio_sender_may_own_generation = active.audio_sender_may_own_generation;
-        let sender_may_own_generation = active.sender_may_own_generation;
-        let transport_may_be_active = active.transport_may_be_active;
+        let graph_may_own_generation = active.graph_may_own_generation();
+        let audio_sender_may_own_generation = active.audio_sender_may_own_generation();
+        let sender_may_own_generation = active.video_sender_may_own_generation();
         let graph = &mut self.graph;
         let audio_sender = self.audio_sender.as_ref();
         let sender = self.sender.as_ref();
@@ -932,16 +954,12 @@ impl ChromiacastMediaSession {
                 }
             },
             async {
-                if transport_may_be_active {
-                    match transport {
-                        Some(transport) => transport
-                            .stop_video()
-                            .await
-                            .map_err(MediaSessionError::from),
-                        None => Ok(()),
-                    }
-                } else {
-                    Ok(())
+                match transport {
+                    Some(transport) => transport
+                        .stop_video()
+                        .await
+                        .map_err(MediaSessionError::from),
+                    None => Ok(()),
                 }
             },
         );
@@ -2065,7 +2083,7 @@ mod tests {
             .await;
         }
 
-        assert!(media.active_generation().sender_may_own_generation);
+        assert!(media.active_generation().video_sender_may_own_generation());
         assert!(!media.active_generation().is_ready());
         assert!(matches!(
             media.start(1).await,
@@ -2109,8 +2127,8 @@ mod tests {
             .await;
         }
 
-        assert!(media.active_generation().audio_sender_may_own_generation);
-        assert!(!media.active_generation().sender_may_own_generation);
+        assert!(media.active_generation().audio_sender_may_own_generation());
+        assert!(!media.active_generation().video_sender_may_own_generation());
         assert!(!media.active_generation().is_ready());
         media.stop_media(1, &mut transport).await.unwrap();
         media.shutdown().await.unwrap();
