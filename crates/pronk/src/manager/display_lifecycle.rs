@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 
 use pronk_core::output::CastKmsOutputId;
 use pronk_core::session::PinnedCallerProcess;
@@ -17,6 +18,51 @@ use super::inventory::AggregateInventory;
 use super::{LifecycleEvent, ManagerHandle, RemoveManagedDisplayError, StartDisplaySetupError};
 
 const MAX_RETAINED_SETUP_OPERATIONS: usize = 128;
+
+/// Keeps each task's display identity beside the task that owns it.
+pub(super) struct TrackedDisplayTasks<T> {
+    tasks: JoinSet<T>,
+    display_ids: HashMap<tokio::task::Id, CastDisplayId>,
+}
+
+impl<T> Default for TrackedDisplayTasks<T> {
+    fn default() -> Self {
+        Self {
+            tasks: JoinSet::new(),
+            display_ids: HashMap::new(),
+        }
+    }
+}
+
+impl<T: Send + 'static> TrackedDisplayTasks<T> {
+    pub(super) fn spawn(
+        &mut self,
+        display_id: CastDisplayId,
+        task: impl Future<Output = T> + Send + 'static,
+    ) {
+        let abort = self.tasks.spawn(task);
+        self.display_ids.insert(abort.id(), display_id);
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    pub(super) async fn join_next(
+        &mut self,
+    ) -> Option<(CastDisplayId, Result<T, tokio::task::JoinError>)> {
+        let joined = self.tasks.join_next_with_id().await?;
+        let task_id = match &joined {
+            Ok((task_id, _)) => *task_id,
+            Err(error) => error.id(),
+        };
+        let display_id = self
+            .display_ids
+            .remove(&task_id)
+            .expect("display task identity must be registered before completion");
+        Some((display_id, joined.map(|(_, completion)| completion)))
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct ManagedDisplayRecord {
@@ -95,32 +141,27 @@ impl ManagedDisplayRecord {
 
 #[derive(Debug)]
 pub(super) struct SetupCompletion {
-    display_id: CastDisplayId,
     result: Result<AddedCastDisplay, DisplaySetupOperationError>,
 }
 
 #[derive(Debug)]
 pub(super) struct RemovalCompletion {
-    pub(super) display_id: CastDisplayId,
     pub(super) result: Result<(), String>,
 }
 
 pub(super) fn spawn_display_removal(
     display_id: CastDisplayId,
     display: CastDisplaySlotActor,
-    removal_tasks: &mut JoinSet<RemovalCompletion>,
-    removal_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
+    removal_tasks: &mut TrackedDisplayTasks<RemovalCompletion>,
 ) {
-    let abort = removal_tasks.spawn(async move {
+    removal_tasks.spawn(display_id, async move {
         RemovalCompletion {
-            display_id,
             result: display
                 .remove(DeviceSessionStopReason::DisplayRemoved)
                 .await
                 .map_err(|error| error.to_string()),
         }
     });
-    removal_task_ids.insert(abort.id(), display_id);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,7 +179,6 @@ impl From<&DeviceSelection> for DeviceTarget {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn start_managed_display_setup(
     manager: &ManagerHandle,
     selection: DeviceSelection,
@@ -146,8 +186,7 @@ pub(super) fn start_managed_display_setup(
     caller: PinnedCallerProcess,
     audio_enabled: bool,
     records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
-    setup_tasks: &mut JoinSet<SetupCompletion>,
-    setup_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
+    setup_tasks: &mut TrackedDisplayTasks<SetupCompletion>,
 ) -> Result<DisplaySetupHandle, StartDisplaySetupError> {
     selection
         .validate()
@@ -179,48 +218,41 @@ pub(super) fn start_managed_display_setup(
             phase: ManagedDisplayPhase::SettingUp,
         },
     );
-    let abort = setup_tasks.spawn(async move {
+    setup_tasks.spawn(display_id, async move {
         SetupCompletion {
-            display_id,
             result: operation.finish().await,
         }
     });
-    setup_task_ids.insert(abort.id(), display_id);
     Ok(handle)
 }
 
 pub(super) fn handle_setup_join(
-    joined: Result<(tokio::task::Id, SetupCompletion), tokio::task::JoinError>,
-    setup_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
+    (display_id, joined): (
+        CastDisplayId,
+        Result<SetupCompletion, tokio::task::JoinError>,
+    ),
     records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
-    removal_tasks: &mut JoinSet<RemovalCompletion>,
-    removal_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
+    removal_tasks: &mut TrackedDisplayTasks<RemovalCompletion>,
     inventory: &AggregateInventory,
     slot_events: &mpsc::UnboundedSender<CastDisplaySlotEvent>,
 ) -> Option<LifecycleEvent> {
     let completion = match joined {
-        Ok((task_id, completion)) => {
-            setup_task_ids.remove(&task_id);
-            completion
-        }
+        Ok(completion) => completion,
         Err(error) => {
-            let display_id = setup_task_ids.remove(&error.id());
-            if let Some(display_id) = display_id {
-                if let Some(record) = records.remove(&display_id) {
-                    if let ManagedDisplayPhase::CancellingSetup { waiters } = record.phase {
-                        for waiter in waiters {
-                            let _ = waiter
-                                .send(Err(RemoveManagedDisplayError::Cleanup(error.to_string())));
-                        }
+            if let Some(record) = records.remove(&display_id) {
+                if let ManagedDisplayPhase::CancellingSetup { waiters } = record.phase {
+                    for waiter in waiters {
+                        let _ =
+                            waiter.send(Err(RemoveManagedDisplayError::Cleanup(error.to_string())));
                     }
                 }
             }
-            warn!(%error, ?display_id, "manager-owned display setup task failed");
+            warn!(%error, %display_id, "manager-owned display setup task failed");
             return None;
         }
     };
-    let Some(record) = records.get_mut(&completion.display_id) else {
-        warn!(display_id = %completion.display_id, "completed display setup has no manager record");
+    let Some(record) = records.get_mut(&display_id) else {
+        warn!(%display_id, "completed display setup has no manager record");
         return None;
     };
     let cancellation_waiters =
@@ -233,7 +265,7 @@ pub(super) fn handle_setup_join(
         };
     match completion.result {
         Ok(mut display) => {
-            debug_assert_eq!(display.display_id(), completion.display_id);
+            debug_assert_eq!(display.display_id(), display_id);
             display.update_device(inventory.configured_device(display.device()));
             let actor = match CastDisplaySlotActor::spawn(display, slot_events.clone()) {
                 Ok(actor) => actor,
@@ -245,19 +277,14 @@ pub(super) fn handle_setup_join(
                                 .send(Err(RemoveManagedDisplayError::Cleanup(error.to_string())));
                         }
                     }
-                    warn!(display_id = %completion.display_id, %error, "failed to start cast-display slot actor");
+                    warn!(%display_id, %error, "failed to start cast-display slot actor");
                     return None;
                 }
             };
             let snapshot = actor.snapshot();
             if let Some(waiters) = cancellation_waiters {
                 record.phase = ManagedDisplayPhase::Removing { waiters };
-                spawn_display_removal(
-                    completion.display_id,
-                    actor,
-                    removal_tasks,
-                    removal_task_ids,
-                );
+                spawn_display_removal(display_id, actor, removal_tasks);
             } else {
                 record.phase = ManagedDisplayPhase::Active(actor);
             }
@@ -275,29 +302,22 @@ pub(super) fn handle_setup_join(
                     let _ = waiter.send(result.clone());
                 }
             }
-            debug!(display_id = %completion.display_id, %error, "display setup reached a terminal non-added state");
+            debug!(%display_id, %error, "display setup reached a terminal non-added state");
             None
         }
     }
 }
 
 pub(super) fn handle_removal_join(
-    joined: Result<(tokio::task::Id, RemovalCompletion), tokio::task::JoinError>,
-    removal_task_ids: &mut HashMap<tokio::task::Id, CastDisplayId>,
+    (display_id, joined): (
+        CastDisplayId,
+        Result<RemovalCompletion, tokio::task::JoinError>,
+    ),
     records: &mut BTreeMap<CastDisplayId, ManagedDisplayRecord>,
 ) -> Option<LifecycleEvent> {
-    let (display_id, result) = match joined {
-        Ok((task_id, completion)) => {
-            removal_task_ids.remove(&task_id);
-            (completion.display_id, completion.result)
-        }
-        Err(error) => {
-            let Some(display_id) = removal_task_ids.remove(&error.id()) else {
-                warn!(%error, "unidentified manager-owned display removal task failed");
-                return None;
-            };
-            (display_id, Err(error.to_string()))
-        }
+    let result = match joined {
+        Ok(completion) => completion.result,
+        Err(error) => Err(error.to_string()),
     };
     let Some(record) = records.remove(&display_id) else {
         warn!(%display_id, "completed display removal has no manager record");
@@ -316,6 +336,20 @@ pub(super) fn handle_removal_join(
 mod tests {
     use super::*;
     use crate::display::DisplaySetupError;
+
+    #[tokio::test]
+    async fn failed_task_keeps_its_display_identity() {
+        let display_id = CastDisplayId::generate().unwrap();
+        let mut tasks = TrackedDisplayTasks::<()>::default();
+        tasks.spawn(display_id, std::future::pending());
+        tasks.tasks.abort_all();
+
+        let (failed_display, result) = tasks.join_next().await.unwrap();
+        assert_eq!(failed_display, display_id);
+        assert!(result.unwrap_err().is_cancelled());
+        assert!(tasks.is_empty());
+        assert!(tasks.display_ids.is_empty());
+    }
 
     #[tokio::test]
     async fn removing_during_setup_waits_for_setup_cleanup() {
@@ -347,26 +381,19 @@ mod tests {
         ));
 
         let mut records = BTreeMap::from([(display_id, record)]);
-        let mut setup_tasks = HashMap::new();
-        let task_id = tokio::spawn(async {}).id();
-        setup_tasks.insert(task_id, display_id);
-        let mut removal_tasks = JoinSet::new();
-        let mut removal_task_ids = HashMap::new();
+        let mut removal_tasks = TrackedDisplayTasks::default();
         let (slot_events, _slot_event_rx) = mpsc::unbounded_channel();
         let event = handle_setup_join(
-            Ok((
-                task_id,
-                SetupCompletion {
-                    display_id,
+            (
+                display_id,
+                Ok(SetupCompletion {
                     result: Err(DisplaySetupOperationError::Setup(
                         DisplaySetupError::Cancelled,
                     )),
-                },
-            )),
-            &mut setup_tasks,
+                }),
+            ),
             &mut records,
             &mut removal_tasks,
-            &mut removal_task_ids,
             &AggregateInventory::default(),
             &slot_events,
         );

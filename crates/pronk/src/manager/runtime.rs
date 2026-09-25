@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -8,6 +8,7 @@ use super::backend_worker::{shutdown_workers, BackendWorker, BackendWorkerMessag
 use super::display_lifecycle::{
     handle_removal_join, handle_setup_join, spawn_display_removal, start_managed_display_setup,
     ManagedDisplayPhase, ManagedDisplayRecord, RemovalCompletion, RemovalRequest, SetupCompletion,
+    TrackedDisplayTasks,
 };
 use super::inventory::{configured_device_update, AggregateInventory, ApplySupervisorOutcome};
 use super::{
@@ -37,10 +38,8 @@ struct ManagerRuntimeState {
     inventory: AggregateInventory,
     output_slots: OutputSlotPool,
     records: BTreeMap<CastDisplayId, ManagedDisplayRecord>,
-    setup_tasks: JoinSet<SetupCompletion>,
-    setup_task_ids: HashMap<tokio::task::Id, CastDisplayId>,
-    removal_tasks: JoinSet<RemovalCompletion>,
-    removal_task_ids: HashMap<tokio::task::Id, CastDisplayId>,
+    setup_tasks: TrackedDisplayTasks<SetupCompletion>,
+    removal_tasks: TrackedDisplayTasks<RemovalCompletion>,
 }
 
 enum CommandFlow {
@@ -51,15 +50,16 @@ enum CommandFlow {
 impl ManagerRuntimeState {
     fn handle_setup_completion(
         &mut self,
-        joined: Result<(tokio::task::Id, SetupCompletion), tokio::task::JoinError>,
+        joined: (
+            CastDisplayId,
+            Result<SetupCompletion, tokio::task::JoinError>,
+        ),
         slot_events: &mpsc::UnboundedSender<CastDisplaySlotEvent>,
     ) -> Option<LifecycleEvent> {
         handle_setup_join(
             joined,
-            &mut self.setup_task_ids,
             &mut self.records,
             &mut self.removal_tasks,
-            &mut self.removal_task_ids,
             &self.inventory,
             slot_events,
         )
@@ -67,9 +67,12 @@ impl ManagerRuntimeState {
 
     fn handle_removal_completion(
         &mut self,
-        joined: Result<(tokio::task::Id, RemovalCompletion), tokio::task::JoinError>,
+        joined: (
+            CastDisplayId,
+            Result<RemovalCompletion, tokio::task::JoinError>,
+        ),
     ) -> Option<LifecycleEvent> {
-        handle_removal_join(joined, &mut self.removal_task_ids, &mut self.records)
+        handle_removal_join(joined, &mut self.records)
     }
 
     fn handle_command(
@@ -181,7 +184,6 @@ impl ManagerRuntimeState {
                     audio_enabled,
                     &mut self.records,
                     &mut self.setup_tasks,
-                    &mut self.setup_task_ids,
                 );
                 let _ = response.send(result);
             }
@@ -232,12 +234,7 @@ impl ManagerRuntimeState {
                 };
                 match removal {
                     RemovalRequest::Start(display) => {
-                        spawn_display_removal(
-                            display_id,
-                            display,
-                            &mut self.removal_tasks,
-                            &mut self.removal_task_ids,
-                        );
+                        spawn_display_removal(display_id, display, &mut self.removal_tasks);
                     }
                     RemovalRequest::Queued => {}
                     RemovalRequest::Complete(response) => {
@@ -336,10 +333,10 @@ impl ManagerRuntimeState {
                 record.handle.cancel();
             }
         }
-        while let Some(joined) = self.setup_tasks.join_next_with_id().await {
+        while let Some(joined) = self.setup_tasks.join_next().await {
             self.handle_setup_completion(joined, slot_events);
         }
-        while let Some(joined) = self.removal_tasks.join_next_with_id().await {
+        while let Some(joined) = self.removal_tasks.join_next().await {
             self.handle_removal_completion(joined);
         }
 
@@ -409,14 +406,14 @@ pub(super) async fn run_manager(
                     CommandFlow::Stop(response) => break Ok(response),
                 }
             },
-            joined = state.setup_tasks.join_next_with_id(), if !state.setup_tasks.is_empty() => {
+            joined = state.setup_tasks.join_next(), if !state.setup_tasks.is_empty() => {
                 if let Some(event) = state.handle_setup_completion(
                     joined.expect("nonempty setup JoinSet returned no task"), &slot_events
                 ) {
                     let _ = events.lifecycle.send(event);
                 }
             },
-            joined = state.removal_tasks.join_next_with_id(), if !state.removal_tasks.is_empty() => {
+            joined = state.removal_tasks.join_next(), if !state.removal_tasks.is_empty() => {
                 if let Some(event) = state.handle_removal_completion(
                     joined.expect("nonempty removal JoinSet returned no task")
                 ) {
