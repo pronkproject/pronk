@@ -10,7 +10,6 @@ publish = false
 castkms-sys = { path = "../castkms-sys" }
 drm-display-executor = { path = "../drm-display-executor" }
 nix.workspace = true
-pronk-gpu = { path = "../pronk-gpu", features = ["vulkan"] }
 
 [lints]
 workspace = true

@@ -1,5 +1,6 @@
 //! Lifetime supervision for a userspace renderer selected by KMS constraints.
 
+mod activation;
 mod active;
 mod native_task;
 mod renderer;

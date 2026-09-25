@@ -11,6 +11,7 @@ use pronk_renderer_worker::{PreparedSceneImages, PrimarySceneProfile, SceneReade
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::activation::PreparedRendererConfiguration;
 use crate::active;
 use crate::types::{RendererStreamConfig, RendererStreamState};
 
@@ -120,7 +121,7 @@ fn prepare_generation<F: AsFd>(
         }
     };
     let scene_images = scene_images.register(&mut configuration)?;
-    let configuration = match configuration.prepare_private(device) {
+    let configuration = match PreparedRendererConfiguration::prepare(configuration, device) {
         Ok(preparation) => preparation,
         Err(failure) => {
             let (_, error) = failure.into_parts();

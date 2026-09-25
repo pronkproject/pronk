@@ -33,7 +33,6 @@ use castkms_sys::{
     RENDERER_STATE_WITHDRAWN, RENDERER_VERSION,
 };
 use drm_display_executor::scene::geometry::Extent;
-use pronk_gpu::vulkan::Device;
 
 fn acquisition_is_idle(error: nix::errno::Errno) -> bool {
     error == nix::errno::Errno::ENODATA
@@ -211,14 +210,8 @@ impl<F: AsFd> AsFd for Renderer<F> {
 
 /// One configured renderer whose private resources remain unpublished.
 ///
-/// ```compile_fail
-/// use castkms_renderer::RendererConfiguration;
-/// use std::os::fd::AsFd;
-///
-/// fn publish_without_private_preparation<F: AsFd>(configuration: RendererConfiguration<F>) {
-///     let _ = configuration.publish(None);
-/// }
-/// ```
+/// Publication is a low-level CastKMS operation. Callers must complete any
+/// renderer-private preparation before invoking `publish`.
 #[must_use = "prepare the renderer configuration or close its endpoint"]
 #[derive(Debug)]
 pub struct RendererConfiguration<F: AsFd> {
@@ -231,41 +224,7 @@ impl<F: AsFd> RendererConfiguration<F> {
         self.output
     }
 
-    /// Complete private GPU work before making this renderer selectable.
-    ///
-    /// The image is independent of scene sources and capture destinations. It
-    /// proves that the selected device can allocate and execute work for the
-    /// configured output extent.
-    pub fn prepare_private(
-        self,
-        device: &Device,
-    ) -> Result<PreparedRendererConfiguration<F>, OperationError<Self>> {
-        let width = NonZeroU32::new(self.output.width()).expect("output width is nonzero");
-        let height = NonZeroU32::new(self.output.height()).expect("output height is nonzero");
-        let image = match device.allocate_private(width, height) {
-            Ok(image) => image,
-            Err(error) => return Err(OperationError::new(self, error)),
-        };
-        let image = match image.clear_and_wait([0, 0, 0]) {
-            Ok(image) => image,
-            Err(error) => return Err(OperationError::new(self, error)),
-        };
-        drop(image);
-        Ok(PreparedRendererConfiguration {
-            configuration: self,
-        })
-    }
-}
-
-/// A renderer configuration whose private GPU preparation has completed.
-#[must_use = "publish or close the prepared renderer"]
-#[derive(Debug)]
-pub struct PreparedRendererConfiguration<F: AsFd> {
-    configuration: RendererConfiguration<F>,
-}
-
-impl<F: AsFd> PreparedRendererConfiguration<F> {
-    /// Publish a selectable constraints entry after private preparation completes.
+    /// Publish a selectable constraints entry after renderer-private preparation.
     pub fn publish(
         self,
         ready_fence: Option<BorrowedFd<'_>>,
@@ -278,9 +237,9 @@ impl<F: AsFd> PreparedRendererConfiguration<F> {
         };
         // SAFETY: The request, result, and optional borrowed readiness fence remain
         // live throughout the synchronous ioctl.
-        if let Err(error) = unsafe {
-            drm_ioctl_castkms_renderer_publish(self.configuration.as_fd().as_raw_fd(), &request)
-        } {
+        if let Err(error) =
+            unsafe { drm_ioctl_castkms_renderer_publish(self.as_fd().as_raw_fd(), &request) }
+        {
             return Err(PublicationError::retryable(self, error.into()));
         }
         let Some(constraints_id) = NonZeroU64::new(result.constraints_id) else {
@@ -294,7 +253,7 @@ impl<F: AsFd> PreparedRendererConfiguration<F> {
             )));
         }
         Ok(PublishedRenderer {
-            configuration: self.configuration,
+            configuration: self,
             constraints_id,
             withdrawn: false,
         })
@@ -383,7 +342,7 @@ pub struct OperationError<T> {
 }
 
 impl<T> OperationError<T> {
-    fn new(owner: T, error: io::Error) -> Self {
+    pub fn new(owner: T, error: io::Error) -> Self {
         Self { owner, error }
     }
 
@@ -419,12 +378,12 @@ impl<T: fmt::Debug> std::error::Error for OperationError<T> {}
 
 /// Failed publication, with retry ownership only when nothing was published.
 pub struct PublicationError<F: AsFd> {
-    retry: Option<PreparedRendererConfiguration<F>>,
+    retry: Option<RendererConfiguration<F>>,
     error: io::Error,
 }
 
 impl<F: AsFd> PublicationError<F> {
-    fn retryable(retry: PreparedRendererConfiguration<F>, error: io::Error) -> Self {
+    fn retryable(retry: RendererConfiguration<F>, error: io::Error) -> Self {
         Self {
             retry: Some(retry),
             error,
@@ -443,7 +402,7 @@ impl<F: AsFd> PublicationError<F> {
     ///
     /// A malformed successful reply closes the endpoint instead, because its
     /// kernel state may already be published and cannot safely be retried.
-    pub fn into_retry(self) -> Option<PreparedRendererConfiguration<F>> {
+    pub fn into_retry(self) -> Option<RendererConfiguration<F>> {
         self.retry
     }
 
