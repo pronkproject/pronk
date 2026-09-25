@@ -30,6 +30,7 @@ use crate::transport::{
 
 const COMMAND_QUEUE_CAPACITY: usize = 8;
 const EVENT_QUEUE_CAPACITY: usize = 8;
+const CONTROL_EVENT_SEND_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CONNECTION_ATTEMPTS: usize = 4;
 const ENDPOINT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -977,15 +978,24 @@ async fn run_actor(
                     Ok(()) => (true, String::new()),
                     Err(error) => (false, bounded_control_error(&error)),
                 };
-                let _ = events
-                    .events
-                    .send(DeviceEvent::ControlCompleted {
-                        session_generation: media.session_generation(),
-                        operation_id,
-                        succeeded,
-                        error_text,
-                    })
-                    .await;
+                let completion = DeviceEvent::ControlCompleted {
+                    session_generation: media.session_generation(),
+                    operation_id,
+                    succeeded,
+                    error_text,
+                };
+                tokio::select! {
+                    biased;
+                    _ = &mut owner_drop_signal => break,
+                    result = tokio::time::timeout(
+                        CONTROL_EVENT_SEND_TIMEOUT,
+                        events.events.send(completion),
+                    ) => {
+                        if result.is_err() {
+                            tracing::warn!(operation_id, "Cast control completion queue remained full");
+                        }
+                    }
+                }
             }
             DeviceCommand::Statistics { reply } => {
                 let result = media.statistics().await.map_err(DeviceActorError::from);
@@ -1838,6 +1848,58 @@ mod tests {
             );
         }
         actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_control_event_queue_does_not_block_device_shutdown() {
+        let (actor, handle, receivers) = DeviceActor::spawn(
+            device(),
+            "12345678-1234-1234-1234-123456789abc".into(),
+            7,
+            SESSION_FEATURE_CONTROL,
+            Arc::new(FixtureDeviceConnector),
+            VideoEncoderPolicy::Software,
+        )
+        .unwrap();
+        let mut offer = request();
+        offer.requested_features = SESSION_FEATURE_CONTROL;
+        handle.prepare(offer).await.unwrap();
+
+        for operation_id in 1..=EVENT_QUEUE_CAPACITY {
+            assert_eq!(
+                handle
+                    .transmit_control(ControlOperation {
+                        session_generation: 7,
+                        kind: ControlKind::Mute,
+                        code: Some("on".into()),
+                        value: 0,
+                    })
+                    .await
+                    .unwrap(),
+                operation_id as u64
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while receivers.events.len() < EVENT_QUEUE_CAPACITY {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        handle
+            .transmit_control(ControlOperation {
+                session_generation: 7,
+                kind: ControlKind::Mute,
+                code: Some("on".into()),
+                value: 0,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), actor.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
