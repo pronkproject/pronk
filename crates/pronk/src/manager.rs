@@ -614,6 +614,7 @@ mod slot_handoff_tests {
 #[derive(Debug)]
 pub struct ManagerActor {
     handle: ManagerHandle,
+    shutdown: Option<oneshot::Sender<oneshot::Sender<ManagerShutdownReport>>>,
     events: Option<mpsc::Receiver<InventoryEvent>>,
     lifecycle_events: Option<mpsc::UnboundedReceiver<LifecycleEvent>>,
     task: Option<JoinHandle<Result<ManagerShutdownReport, ManagerTaskError>>>,
@@ -736,6 +737,7 @@ impl ManagerActor {
         let (event_tx, event_rx) = mpsc::channel(MANAGER_EVENT_QUEUE);
         let (lifecycle_event_tx, lifecycle_event_rx) = mpsc::unbounded_channel();
         let (slot_event_tx, slot_event_rx) = mpsc::unbounded_channel();
+        let (shutdown, shutdown_rx) = oneshot::channel();
         let handle = ManagerHandle {
             commands: command_tx,
             output_provider,
@@ -745,6 +747,7 @@ impl ManagerActor {
         };
         let task = tokio::spawn(run_manager(ManagerTaskContext {
             commands: command_rx,
+            shutdown: shutdown_rx,
             events: ManagerEventSinks {
                 inventory: event_tx,
                 lifecycle: lifecycle_event_tx,
@@ -759,6 +762,7 @@ impl ManagerActor {
         }));
         Ok(Self {
             handle,
+            shutdown: Some(shutdown),
             events: Some(event_rx),
             lifecycle_events: Some(lifecycle_event_rx),
             task: Some(task),
@@ -783,16 +787,10 @@ impl ManagerActor {
             None
         } else {
             let (response_tx, response_rx) = oneshot::channel();
-            timeout_at(
-                deadline,
-                self.handle
-                    .commands
-                    .send(ManagerCommand::Shutdown(response_tx)),
-            )
-            .await
-            .map_err(|_| ManagerActorError::ShutdownTimeout)?
-            .map_err(|_| ManagerActorError::Stopped)?;
-            Some(response_rx)
+            self.shutdown
+                .take()
+                .and_then(|shutdown| shutdown.send(response_tx).ok())
+                .map(|_| response_rx)
         };
 
         let report = match response {
@@ -837,6 +835,7 @@ impl ManagerActor {
 
 impl Drop for ManagerActor {
     fn drop(&mut self) {
+        self.shutdown.take();
         if let Some(task) = self.task.take() {
             // `shutdown` is the orderly path. Never detach the root resource
             // owner if that path times out or its command queue is saturated.
@@ -892,7 +891,6 @@ enum ManagerCommand {
         display_id: CastDisplayId,
         response: oneshot::Sender<Result<(), RemoveManagedDisplayError>>,
     },
-    Shutdown(oneshot::Sender<ManagerShutdownReport>),
 }
 
 #[derive(Debug, Error)]

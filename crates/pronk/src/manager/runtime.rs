@@ -23,6 +23,7 @@ use crate::slot::{OutputReservationRelease, OutputSlotPool};
 
 pub(super) struct ManagerTaskContext {
     pub(super) commands: mpsc::Receiver<ManagerCommand>,
+    pub(super) shutdown: oneshot::Receiver<oneshot::Sender<ManagerShutdownReport>>,
     pub(super) events: ManagerEventSinks,
     pub(super) backend_events: mpsc::Receiver<BackendWorkerMessage>,
     pub(super) reservation_releases: mpsc::UnboundedSender<OutputReservationRelease>,
@@ -44,7 +45,7 @@ struct ManagerRuntimeState {
 
 enum CommandFlow {
     Continue,
-    Stop(Option<oneshot::Sender<ManagerShutdownReport>>),
+    Stop,
 }
 
 impl ManagerRuntimeState {
@@ -243,8 +244,7 @@ impl ManagerRuntimeState {
                     }
                 }
             }
-            Some(ManagerCommand::Shutdown(response)) => return CommandFlow::Stop(Some(response)),
-            None => return CommandFlow::Stop(None),
+            None => return CommandFlow::Stop,
         }
         CommandFlow::Continue
     }
@@ -378,6 +378,7 @@ pub(super) async fn run_manager(
 ) -> Result<ManagerShutdownReport, ManagerTaskError> {
     let ManagerTaskContext {
         mut commands,
+        shutdown: mut owner_shutdown,
         events,
         mut backend_events,
         reservation_releases,
@@ -392,6 +393,7 @@ pub(super) async fn run_manager(
 
     let shutdown_outcome = loop {
         tokio::select! {
+            response = &mut owner_shutdown => break Ok(response.ok()),
             // Public requests must not starve setup, removal, backend, or
             // display-slot progress. Tokio's default randomized branch order
             // gives every continuously-ready input a chance to run.
@@ -403,7 +405,7 @@ pub(super) async fn run_manager(
             command = commands.recv() => {
                 match state.handle_command(command, &manager, &workers, &reservation_releases) {
                     CommandFlow::Continue => {},
-                    CommandFlow::Stop(response) => break Ok(response),
+                    CommandFlow::Stop => break Ok(None),
                 }
             },
             joined = state.setup_tasks.join_next(), if !state.setup_tasks.is_empty() => {
@@ -421,13 +423,23 @@ pub(super) async fn run_manager(
                 }
             },
             message = backend_events.recv(), if backend_events_open => {
-                match state.handle_backend_message(message, &events).await {
+                let result = tokio::select! {
+                    biased;
+                    response = &mut owner_shutdown => break Ok(response.ok()),
+                    result = state.handle_backend_message(message, &events) => result,
+                };
+                match result {
                     Ok(open) => backend_events_open = open,
                     Err(error) => break Err(error),
                 }
             },
             event = slot_event_rx.recv() => {
-                if let Some(event) = state.handle_slot_event(event).await {
+                let handled = tokio::select! {
+                    biased;
+                    response = &mut owner_shutdown => break Ok(response.ok()),
+                    handled = state.handle_slot_event(event) => handled,
+                };
+                if let Some(event) = handled {
                     let _ = events.lifecycle.send(event);
                 }
             },
@@ -481,5 +493,103 @@ async fn refresh_configured_displays(
         if let Err(error) = handle.update_device(device).await {
             warn!(display_id = %handle.display_id(), %error, "failed to refresh configured Device state");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use pronk_backend_host::{BackendSupervisorEvent, DeviceInventorySnapshot};
+    use pronk_backend_protocol::{BackendInfo, DeviceAvailability, DeviceInfo};
+    use pronk_core::identity::{PnpIdResolver, DEFAULT_SYNTHESIZER_PNP_ID};
+
+    use super::*;
+    use crate::display::MediaRuntime;
+    use crate::manager::SystemOutputInventoryProvider;
+    use crate::test_support::UnreachableKernelSessionProvider;
+
+    #[tokio::test]
+    async fn owner_shutdown_interrupts_a_blocked_inventory_publish() {
+        let (commands, command_rx) = mpsc::channel(1);
+        let (backend_events, backend_rx) = mpsc::channel(1);
+        let (inventory_events, inventory_rx) = mpsc::channel(1);
+        inventory_events
+            .send(InventoryEvent::DeviceRemoved {
+                inventory_revision: 1,
+                backend_id: "mock".into(),
+                device_id: "old".into(),
+            })
+            .await
+            .unwrap();
+        let (lifecycle_events, _lifecycle_rx) = mpsc::unbounded_channel();
+        let (reservation_releases, reservation_release_rx) = mpsc::unbounded_channel();
+        let (slot_events, slot_event_rx) = mpsc::unbounded_channel();
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let manager = ManagerHandle {
+            commands,
+            output_provider: Arc::new(SystemOutputInventoryProvider),
+            kernel_session_provider: Arc::new(UnreachableKernelSessionProvider),
+            pnp_resolver: Arc::new(
+                PnpIdResolver::from_database("SON\tSony\n", &[], DEFAULT_SYNTHESIZER_PNP_ID)
+                    .unwrap(),
+            ),
+            media_runtime: MediaRuntime::for_user(0),
+        };
+        let task = tokio::spawn(run_manager(ManagerTaskContext {
+            commands: command_rx,
+            shutdown: shutdown_rx,
+            events: ManagerEventSinks {
+                inventory: inventory_events,
+                lifecycle: lifecycle_events,
+            },
+            backend_events: backend_rx,
+            reservation_releases,
+            reservation_release_events: reservation_release_rx,
+            slot_events,
+            slot_event_rx,
+            manager,
+            workers: Vec::new(),
+        }));
+        backend_events
+            .send(BackendWorkerMessage::Event {
+                backend_id: "mock".into(),
+                event: BackendSupervisorEvent::Connected {
+                    connection_generation: 1,
+                    negotiated_minor: 0,
+                    info: BackendInfo::new("mock", "Mock", "test", "mock", "development"),
+                    inventory: DeviceInventorySnapshot {
+                        discovery_generation: 1,
+                        revision: 1,
+                        devices: vec![DeviceInfo {
+                            backend_id: "mock".into(),
+                            device_id: "new".into(),
+                            display_name: "New".into(),
+                            availability: DeviceAvailability::Available,
+                            metadata: Vec::new(),
+                        }],
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while backend_events.capacity() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let (response, wait) = oneshot::channel();
+        shutdown.send(response).unwrap();
+        let report = tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(report.errors.is_empty());
+        assert!(task.await.unwrap().is_ok());
+        drop(inventory_rx);
     }
 }
