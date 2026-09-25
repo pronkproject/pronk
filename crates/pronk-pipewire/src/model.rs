@@ -8,10 +8,19 @@ use crate::{
 enum Ownership {
     Unbound,
     ServerOwned {
-        sequence: Option<u64>,
+        transport: PipeWireBufferTransport,
+        use_kind: ServerUse,
+    },
+    Available(PipeWireBufferTransport),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerUse {
+    Initial,
+    Published {
+        sequence: u64,
         expected_release: Option<NonZeroU64>,
     },
-    Available,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -19,7 +28,6 @@ struct Slot {
     id: NonZeroU32,
     layout: VideoBufferLayout,
     has_timelines: bool,
-    transport: Option<PipeWireBufferTransport>,
     ownership: Ownership,
 }
 
@@ -52,7 +60,6 @@ impl BufferTracker {
                     id: buffer.id,
                     layout: buffer.layout,
                     has_timelines: buffer.timelines.is_some(),
-                    transport: None,
                     ownership: Ownership::Unbound,
                 })
                 .collect(),
@@ -77,38 +84,31 @@ impl BufferTracker {
         {
             return Err(VideoSourceRuntimeError::InvalidOwnership(buffer_id.get()));
         }
-        slot.transport = Some(transport);
         slot.ownership = Ownership::ServerOwned {
-            sequence: None,
-            expected_release: None,
+            transport,
+            use_kind: ServerUse::Initial,
         };
         Ok(())
     }
 
     pub(crate) fn unbind(&mut self, buffer_id: NonZeroU32) -> Result<(), VideoSourceRuntimeError> {
         let slot = self.slot_mut(buffer_id)?;
-        slot.transport = None;
         slot.ownership = Ownership::Unbound;
         Ok(())
     }
 
     pub(crate) fn publish(&mut self, frame: VideoFrame) -> Result<(), VideoSourceRuntimeError> {
         let slot = self.slot_mut(frame.buffer_id)?;
-        if slot.ownership != Ownership::Available {
+        let Ownership::Available(transport) = slot.ownership else {
             return Err(VideoSourceRuntimeError::InvalidOwnership(
                 frame.buffer_id.get(),
             ));
-        }
+        };
         if !frame.damage.is_bounded_by(slot.layout) {
             return Err(VideoSourceRuntimeError::InvalidDamage(
                 frame.buffer_id.get(),
             ));
         }
-        let transport = slot
-            .transport
-            .ok_or(VideoSourceRuntimeError::InvalidOwnership(
-                frame.buffer_id.get(),
-            ))?;
         match (transport, frame.acquire_point) {
             (PipeWireBufferTransport::SyncTimeline, None) => {
                 return Err(VideoSourceRuntimeError::MissingAcquirePoint(
@@ -123,8 +123,11 @@ impl BufferTracker {
             _ => {}
         }
         slot.ownership = Ownership::ServerOwned {
-            sequence: Some(frame.sequence),
-            expected_release: frame.acquire_point,
+            transport,
+            use_kind: ServerUse::Published {
+                sequence: frame.sequence,
+                expected_release: frame.acquire_point,
+            },
         };
         Ok(())
     }
@@ -135,16 +138,22 @@ impl BufferTracker {
         actual_release: Option<NonZeroU64>,
     ) -> Result<BufferReturn, VideoSourceRuntimeError> {
         let slot = self.slot_mut(buffer_id)?;
-        let (sequence, expected_release) = match slot.ownership {
+        let (transport, use_kind) = match slot.ownership {
             Ownership::ServerOwned {
-                sequence,
-                expected_release,
-            } => (sequence, expected_release),
+                transport,
+                use_kind,
+            } => (transport, use_kind),
             // A buffer may be returned again while PipeWire tears down a
             // consumer or drains a previous graph iteration. Its ownership
             // was already returned to this source, so do not publish a second
             // availability event or treat the cleanup callback as a failure.
-            Ownership::Unbound | Ownership::Available => return Ok(BufferReturn::Stale),
+            Ownership::Unbound | Ownership::Available(_) => return Ok(BufferReturn::Stale),
+        };
+        let expected_release = match use_kind {
+            ServerUse::Initial => None,
+            ServerUse::Published {
+                expected_release, ..
+            } => expected_release,
         };
         if expected_release != actual_release {
             return Err(VideoSourceRuntimeError::ReleasePointMismatch {
@@ -153,17 +162,16 @@ impl BufferTracker {
                 actual: actual_release.map_or(0, NonZeroU64::get),
             });
         }
-        slot.ownership = Ownership::Available;
-        match (sequence, slot.transport) {
-            (None, Some(transport)) => Ok(BufferReturn::Initial {
+        slot.ownership = Ownership::Available(transport);
+        match use_kind {
+            ServerUse::Initial => Ok(BufferReturn::Initial {
                 buffer_id,
                 transport,
             }),
-            (Some(sequence), Some(_)) => Ok(BufferReturn::Released {
+            ServerUse::Published { sequence, .. } => Ok(BufferReturn::Released {
                 buffer_id,
                 sequence,
             }),
-            (_, None) => Err(VideoSourceRuntimeError::InvalidOwnership(buffer_id.get())),
         }
     }
 
@@ -230,7 +238,6 @@ mod tests {
                 id: nonzero32(7),
                 layout: layout(),
                 has_timelines,
-                transport: None,
                 ownership: Ownership::Unbound,
             }],
         }
