@@ -124,6 +124,28 @@ enum PipelineState {
     Unavailable,
 }
 
+impl PipelineState {
+    async fn release_lease(&mut self) -> Result<(), MediaPipelineError> {
+        let previous = std::mem::replace(self, Self::Unavailable);
+        let lease = match previous {
+            Self::Idle { lease, .. } | Self::Starting { lease } => lease,
+            still_active @ Self::Running { .. } => {
+                *self = still_active;
+                return Err(MediaPipelineError::new(
+                    "renderer generation must stop before its endpoint is released",
+                ));
+            }
+            Self::Unavailable => {
+                return Err(MediaPipelineError::new("renderer endpoint has no lease"));
+            }
+        };
+        lease
+            .release()
+            .await
+            .map_err(|error| MediaPipelineError::new(format!("release renderer endpoint: {error}")))
+    }
+}
+
 struct Monitors {
     renderer: CaptureMonitor,
     capture: CaptureMonitor,
@@ -262,6 +284,12 @@ impl RendererCapturePipeline {
     }
 
     async fn stop_generation(&mut self, id: NonZeroU64) -> Result<(), MediaPipelineError> {
+        if matches!(self.state, PipelineState::Starting { .. }) {
+            // A cancelled start can drop its descriptor-owning future while
+            // leaving the issuer lease here. There is no generation to stop,
+            // but the endpoint still needs explicit release before retry.
+            return self.release_renderer_lease().await;
+        }
         let Some(taken) = self.take_generation() else {
             return Ok(());
         };
@@ -360,23 +388,7 @@ impl RendererCapturePipeline {
     }
 
     async fn release_renderer_lease(&mut self) -> Result<(), MediaPipelineError> {
-        let previous = std::mem::replace(&mut self.state, PipelineState::Unavailable);
-        let lease = match previous {
-            PipelineState::Idle { lease, .. } | PipelineState::Starting { lease } => lease,
-            still_active @ PipelineState::Running { .. } => {
-                self.state = still_active;
-                return Err(MediaPipelineError::new(
-                    "renderer generation must stop before its endpoint is released",
-                ));
-            }
-            PipelineState::Unavailable => {
-                return Err(MediaPipelineError::new("renderer endpoint has no lease"));
-            }
-        };
-        lease
-            .release()
-            .await
-            .map_err(|error| MediaPipelineError::new(format!("release renderer endpoint: {error}")))
+        self.state.release_lease().await
     }
 
     async fn finish_prepared_renderer(
@@ -1098,6 +1110,21 @@ fn stream_error<F>(operation: &str, error: RendererStreamError<F>) -> MediaPipel
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn abandoned_start_releases_its_endpoint_lease() {
+        let (released, wait_released) = tokio::sync::oneshot::channel();
+        let lease = CapabilityLease::new(async move {
+            let _ = released.send(());
+            Ok(())
+        });
+        let mut state = PipelineState::Starting { lease };
+
+        state.release_lease().await.unwrap();
+
+        assert!(matches!(state, PipelineState::Unavailable));
+        wait_released.await.unwrap();
+    }
 
     #[test]
     fn capture_formats_select_the_matching_renderer_output_encoding() {
