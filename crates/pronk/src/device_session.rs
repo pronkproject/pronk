@@ -314,8 +314,7 @@ impl BackendMediaLifecycle {
                 last_completed: Some(last_completed),
             } => Err(DeviceSessionError::new(format!(
                 "media generation {} is not newer than completed generation {}",
-                last_completed,
-                media_generation.get()
+                media_generation, last_completed
             ))),
             state => Err(DeviceSessionError::new(format!(
                 "cannot configure media generation {} while backend media is {}",
@@ -434,6 +433,13 @@ mod tests {
             last_completed: Some(generation(4)),
         };
         assert!(!lifecycle.begin_stop(generation(4)).unwrap());
+        assert_eq!(
+            lifecycle
+                .begin_configure(generation(3))
+                .unwrap_err()
+                .to_string(),
+            "media generation 3 is not newer than completed generation 4"
+        );
         assert!(lifecycle.begin_configure(generation(4)).is_err());
         lifecycle.begin_configure(generation(5)).unwrap();
     }
