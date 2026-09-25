@@ -4,13 +4,15 @@
 //! actor alone mutates the configured Device projection and kernel-derived
 //! attachment/route state, and it owns ordered Device-session/kernel teardown.
 
+mod runtime;
+use runtime::run_slot;
+
 use pronk_dbus::{DeviceAvailability, DeviceInfo};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::device_recovery::{DeviceSessionRecoveryActor, DeviceSessionRecoveryEvent};
 use crate::device_session_port::DeviceSessionStopReason;
 use crate::display::{
     AddedCastDisplay, AddedCastDisplayResources, AddedCastDisplaySnapshot, CastDisplayId,
@@ -18,8 +20,8 @@ use crate::display::{
 };
 use crate::display_state::{DisplayGrantState, DisplayRuntimeState, DisplayTopology, MediaState};
 use crate::kernel_display_port::KernelDisplayEvent;
-use crate::media_policy::{DisplayMediaPolicyActor, MediaPolicyEvent, MediaPolicyInput};
-use crate::media_session::{MediaRoute, MediaStopReason};
+use crate::media_policy::MediaPolicyInput;
+use crate::media_session::MediaRoute;
 
 const SLOT_COMMAND_CAPACITY: usize = 8;
 
@@ -157,269 +159,6 @@ enum SlotCommand {
         reason: DeviceSessionStopReason,
         response: oneshot::Sender<Result<(), RemoveCastDisplayError>>,
     },
-}
-
-async fn run_slot(
-    resources: AddedCastDisplayResources,
-    mut commands: mpsc::Receiver<SlotCommand>,
-    state: watch::Sender<AddedCastDisplaySnapshot>,
-    events: mpsc::UnboundedSender<CastDisplaySlotEvent>,
-) {
-    let AddedCastDisplayResources {
-        display_id,
-        prepared,
-        slot,
-        media_driver,
-        recovery_factory,
-        session_replacement,
-        initial_session_generation,
-        session_events,
-        mut kernel,
-        ..
-    } = resources;
-    let mut device_session = DeviceSessionPolicyState::new(
-        prepared.device(),
-        state.borrow().device.availability == DeviceAvailability::Available,
-        initial_session_generation.get(),
-    );
-    let mut recovery = DeviceSessionRecoveryActor::spawn(
-        recovery_factory,
-        session_replacement,
-        prepared,
-        initial_session_generation,
-        session_events,
-    )
-    .expect("cast-display slot task runs inside Tokio");
-    let recovery_handle = recovery.handle();
-    let mut media_policy = DisplayMediaPolicyActor::spawn(
-        media_driver,
-        media_policy_input(&state.borrow(), &device_session),
-    )
-    .expect("cast-display slot task runs inside Tokio");
-    let mut media_state = media_policy.subscribe();
-    let mut media_events_open = true;
-    let mut removal = None;
-    let mut terminal_error = None;
-
-    loop {
-        tokio::select! {
-            command = commands.recv() => match command {
-                Some(SlotCommand::UpdateDevice { device, response }) => {
-                    let recovery_action = device_session.observe_device(&device);
-                    let changed = update_device(&state, device);
-                    if changed {
-                        publish(&state, &events);
-                    }
-                    if changed || recovery_action.is_some() {
-                        media_policy.observe(media_policy_input(&state.borrow(), &device_session));
-                    }
-                    let _ = response.send(changed);
-                    match recovery_action {
-                        Some(DeviceSessionAction::Cancel) => recovery_handle.cancel_phase(),
-                        Some(DeviceSessionAction::Recover(device)) => {
-                            match recovery_handle.recover(device.clone()).await {
-                                Ok(request_generation) => {
-                                    device_session.begin_request(request_generation, &device);
-                                }
-                                Err(error) => {
-                                    let diagnostic = format!("start Device-session recovery: {error}");
-                                    publish_media_failure(&state, &events, &diagnostic);
-                                    terminal_error = Some(diagnostic);
-                                    break;
-                                }
-                            }
-                        }
-                        None => {}
-                    }
-                }
-                Some(SlotCommand::Remove { reason, response }) => {
-                    removal = Some((reason, response));
-                    break;
-                }
-                None => break,
-            },
-            event = kernel.next_event() => match event {
-                Ok(event) => {
-                    let revoked = event == KernelDisplayEvent::Revoked;
-                    let media_failure = current_media_failure(
-                        state.borrow().runtime.media_generation(),
-                        &event,
-                    );
-                    apply_kernel_event(&state, &events, event);
-                    media_policy.observe(media_policy_input(&state.borrow(), &device_session));
-                    if let Some(error) = media_failure {
-                        let _ = media_policy.report_failure(error).await;
-                    }
-                    if revoked {
-                        terminal_error = Some("CastKMS grant was revoked".into());
-                        break;
-                    }
-                }
-                Err(error) => {
-                    let diagnostic = error.to_string();
-                    state.send_modify(|snapshot| {
-                        snapshot.runtime.observe_topology(DisplayTopology::Unknown);
-                        let media_generation = snapshot.runtime.media_generation();
-                        snapshot.runtime.observe_media(
-                            media_generation,
-                            MediaState::Failed,
-                            Some(diagnostic.clone()),
-                        );
-                        snapshot.state_revision = snapshot.runtime.revision();
-                    });
-                    publish(&state, &events);
-                    terminal_error = Some(diagnostic);
-                    break;
-                }
-            },
-            event = recovery.next_event() => match event {
-                Some(DeviceSessionRecoveryEvent::Ready {
-                    request_generation,
-                    device,
-                    session_generation,
-                    retired_session_cleanup_error,
-                }) => {
-                    if device_session.complete_request(
-                        request_generation,
-                        &device,
-                        session_generation.get(),
-                        &state.borrow().device,
-                    ) {
-                        if let Some(error) = retired_session_cleanup_error {
-                            warn!(%display_id, %error, "retired Device session did not acknowledge final cleanup");
-                        }
-                        media_policy.observe(media_policy_input(&state.borrow(), &device_session));
-                    }
-                }
-                Some(DeviceSessionRecoveryEvent::Failed {
-                    request_generation,
-                    device,
-                    error,
-                }) => {
-                    if device_session.fail_request(request_generation, &device) {
-                        let diagnostic = format!("Device-session recovery failed: {error}");
-                        publish_media_failure(&state, &events, &diagnostic);
-                        terminal_error = Some(diagnostic);
-                        break;
-                    }
-                }
-                Some(DeviceSessionRecoveryEvent::TransportFailed {
-                    session_generation,
-                    error,
-                }) => {
-                    if device_session.transport_failed(session_generation.get()) {
-                        let diagnostic = format!("Device session transport failed: {error}");
-                        publish_media_failure(&state, &events, &diagnostic);
-                        media_policy.observe(media_policy_input(&state.borrow(), &device_session));
-                        let current = state.borrow().device.clone();
-                        if current.availability == DeviceAvailability::Available {
-                            match recovery_handle.recover(current.clone()).await {
-                                Ok(request_generation) => {
-                                    device_session.begin_request(request_generation, &current);
-                                }
-                                Err(recovery_error) => {
-                                    warn!(%display_id, %recovery_error, "could not start recovery after Device-session transport failure");
-                                    terminal_error = Some(format!(
-                                        "start recovery after Device-session transport failure: {recovery_error}"
-                                    ));
-                                }
-                            }
-                        }
-                        let _ = media_policy.report_failure(diagnostic).await;
-                        if terminal_error.is_some() {
-                            break;
-                        }
-                    }
-                }
-                None => {
-                    let diagnostic = "Device-session recovery coordinator stopped".to_string();
-                    publish_media_failure(&state, &events, &diagnostic);
-                    terminal_error = Some(diagnostic);
-                    break;
-                }
-            },
-            result = media_state.changed(), if media_events_open => {
-                if result.is_err() {
-                    media_events_open = false;
-                    continue;
-                }
-                let media = media_state.borrow_and_update().clone();
-                let changed = state.send_if_modified(|snapshot| {
-                    if !snapshot.runtime.observe_media(
-                        media.media_generation(),
-                        media.state(),
-                        media.last_error().map(str::to_owned),
-                    ) {
-                        return false;
-                    }
-                    snapshot.state_revision = snapshot.runtime.revision();
-                    true
-                });
-                if changed {
-                    publish(&state, &events);
-                }
-            },
-            event = media_policy.next_event() => {
-                terminal_error = Some(match event {
-                    Some(MediaPolicyEvent::RecoveryExhausted { error }) => error,
-                    None => "media recovery policy stopped unexpectedly".into(),
-                });
-                break;
-            },
-        }
-    }
-
-    let reason = removal.as_ref().map_or_else(
-        || {
-            if terminal_error.is_some() {
-                DeviceSessionStopReason::DisplayRemoved
-            } else {
-                DeviceSessionStopReason::DaemonShutdown
-            }
-        },
-        |(reason, _)| *reason,
-    );
-    let media_reason = match reason {
-        DeviceSessionStopReason::DisplayRemoved => MediaStopReason::DisplayRemoved,
-        DeviceSessionStopReason::DaemonShutdown => MediaStopReason::BackendShutdown,
-    };
-    let recovery_error = recovery
-        .shutdown()
-        .await
-        .err()
-        .map(|error| error.to_string());
-    let media_error = media_policy
-        .shutdown(media_reason)
-        .await
-        .err()
-        .map(|error| error.to_string());
-    let detach_error = kernel.detach().await.err().map(|error| error.to_string());
-    let result = match (&recovery_error, &media_error, &detach_error) {
-        (None, None, None) => Ok(()),
-        _ => Err(RemoveCastDisplayError {
-            recovery: recovery_error,
-            media: media_error,
-            detach: detach_error,
-        }),
-    };
-    let cleanup_error = result.as_ref().err().map(ToString::to_string);
-    // Release the manager's output reservation before publishing terminal
-    // cleanup. The manager may immediately allow this Device to be set up
-    // again after it consumes the event.
-    drop(slot);
-    if let Some((_, response)) = removal {
-        if response.send(result).is_err() {
-            warn!(%display_id, "cast-display cleanup completed without a waiter");
-        }
-    } else if let Some(error) = terminal_error {
-        let _ = events.send(CastDisplaySlotEvent::TerminalFailure {
-            display_id,
-            error,
-            cleanup_error,
-        });
-    } else if let Some(error) = cleanup_error {
-        warn!(%display_id, %error, "cast-display owner shutdown did not clean up completely");
-    }
 }
 
 fn media_policy_input(
