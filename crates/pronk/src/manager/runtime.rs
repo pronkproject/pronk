@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use pronk_dbus::DeviceSelection;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
@@ -49,6 +50,25 @@ enum CommandFlow {
 }
 
 impl ManagerRuntimeState {
+    fn resolve_live_device(
+        &self,
+        selection: &DeviceSelection,
+        workers: &[BackendWorker],
+    ) -> Result<ResolvedDeviceSelection, ResolveDeviceError> {
+        let device = self.inventory.resolve_device(selection)?;
+        let backend = workers
+            .iter()
+            .find(|worker| worker.backend_id == device.backend_id)
+            .map(|worker| worker.handle.clone())
+            .ok_or_else(|| ResolveDeviceError::BackendUnavailable {
+                backend_id: device.backend_id.clone(),
+            })?;
+        Ok(ResolvedDeviceSelection {
+            device,
+            backend: SelectionBackend::Live(backend),
+        })
+    }
+
     fn handle_setup_completion(
         &mut self,
         joined: (
@@ -115,22 +135,7 @@ impl ManagerRuntimeState {
                 selection,
                 response,
             }) => {
-                let result = self
-                    .inventory
-                    .resolve_device(&selection)
-                    .and_then(|device| {
-                        let backend = workers
-                            .iter()
-                            .find(|worker| worker.backend_id == device.backend_id)
-                            .map(|worker| worker.handle.clone())
-                            .ok_or_else(|| ResolveDeviceError::BackendUnavailable {
-                                backend_id: device.backend_id.clone(),
-                            })?;
-                        Ok(ResolvedDeviceSelection {
-                            device,
-                            backend: SelectionBackend::Live(backend),
-                        })
-                    });
+                let result = self.resolve_live_device(&selection, workers);
                 let _ = response.send(result);
             }
             Some(ManagerCommand::ReserveDisplaySlot {
@@ -140,14 +145,8 @@ impl ManagerRuntimeState {
                 response,
             }) => {
                 let result = (|| {
-                    let device = self.inventory.resolve_device(&selection)?;
-                    let backend = workers
-                        .iter()
-                        .find(|worker| worker.backend_id == device.backend_id)
-                        .map(|worker| worker.handle.clone())
-                        .ok_or_else(|| ResolveDeviceError::BackendUnavailable {
-                            backend_id: device.backend_id.clone(),
-                        })?;
+                    let resolved = self.resolve_live_device(&selection, workers)?;
+                    let device = resolved.device.clone();
                     let reservation = self.output_slots.reserve_where(
                         &device,
                         &outputs,
@@ -155,10 +154,7 @@ impl ManagerRuntimeState {
                         |output| manager.kernel_session_provider.may_acquire(output),
                     )?;
                     Ok(ReservedCastDisplaySlot {
-                        selection: ResolvedDeviceSelection {
-                            device: device.clone(),
-                            backend: SelectionBackend::Live(backend),
-                        },
+                        selection: resolved,
                         core: ReservedCastDisplayCore {
                             device,
                             selection_token: selection,
