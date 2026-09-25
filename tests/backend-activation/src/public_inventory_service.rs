@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
-use pronk::manager::{BackendConfig, ManagerActor};
+use pronk::testing::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
+use pronk::testing::manager::{BackendConfig, ManagerActor};
 use pronk_backend_host::{BackendEndpoint, BackendReconnectPolicy, ExactRegistrationValidator};
 use pronk_dbus::BUS_NAME;
 use tokio::time::{sleep, timeout};

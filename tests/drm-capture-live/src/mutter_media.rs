@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
-use pronk::display_state::{RouteTarget, RoutedMode};
-use pronk::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
-use pronk::media_pipeline_port::{CaptureEventPort, CapturePipelinePort};
-use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
+use pronk::testing::display_state::{RouteTarget, RoutedMode};
+use pronk::testing::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
+use pronk::testing::media_pipeline_port::{CaptureEventPort, CapturePipelinePort};
+use pronk::testing::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk_capture_broker::{Provider, Target};
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use tokio_util::sync::CancellationToken;

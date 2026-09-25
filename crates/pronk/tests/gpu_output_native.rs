@@ -4,7 +4,7 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use pronk::gpu_output::{GpuOutput, OutputEvent, OutputReady};
+use pronk::testing::gpu_output::{GpuOutput, OutputEvent, OutputReady};
 use pronk_dmabuf::{export_dependencies, Access};
 use pronk_gpu::output_pool::OutputPool;
 use pronk_pipewire::{

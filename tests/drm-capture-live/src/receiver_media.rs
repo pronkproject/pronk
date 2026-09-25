@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
-use pronk::media_pipeline_port::CapturePipelinePort;
-use pronk::media_session::{MediaStartRequest, MediaStopReason};
+use pronk::testing::media_pipeline_port::CapturePipelinePort;
+use pronk::testing::media_session::{MediaStartRequest, MediaStopReason};
 use pronk_capture_receiver_test::{Receiver, SenderEvent};
 use pronk_media::{
     MediaGraphActor, MediaGraphConfiguration, PipeWireVideoInput, ValidatedVideoCaps, VideoCadence,
@@ -274,7 +274,7 @@ fn verify_va_execution(
 }
 
 fn qualify_va_target(
-    video_target: &pronk::device_session_port::DeviceMediaTarget,
+    video_target: &pronk::testing::device_session_port::DeviceMediaTarget,
     encoder: &VideoEncoder,
     render_node: &Path,
     width: u32,

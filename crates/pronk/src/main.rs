@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use nix::unistd::Uid;
-use pronk::dbus::{emit_inventory_events, register_manager, serve_lifecycle_events};
-use pronk::display::MediaRuntime;
-use pronk::kernel_session_provider::KernelSessionProvider;
-use pronk::manager::{BackendConfig, ManagerActor};
+use pronk::daemon::{
+    emit_inventory_events, register_manager, serve_lifecycle_events, BackendConfig,
+    KernelSessionProvider, ManagerActor, MediaRuntime,
+};
 use pronk_backend_host::{
     BackendReconnectPolicy, BackendRegistrationValidator, BackendRegistry,
     SystemdRegistrationValidator,

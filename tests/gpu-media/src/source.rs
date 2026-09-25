@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{ensure, Context, Result};
 use drm_display_executor::scheduler::source_use::{ClosedUse, SourceUse};
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use pronk::gpu_output::{GpuOutput, OutputEvent, OutputReady};
+use pronk::testing::gpu_output::{GpuOutput, OutputEvent, OutputReady};
 use pronk_dmabuf::Completion;
 use pronk_gpu::output_pool::OutputPool;
 use pronk_gpu::vulkan::{Device, PackedFormat};

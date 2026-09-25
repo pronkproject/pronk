@@ -171,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
         .context("create Chromiacast BackendSession1 proxy")?;
     let system_layout =
         pronk_backend_protocol::RawVideoLayout::system_memory(u32::from_le_bytes(*b"XR24"));
-    let mut offer = pronk::preparation::initial_preparation_offer(false, &[system_layout]);
+    let mut offer = pronk::testing::preparation::initial_preparation_offer(false, &[system_layout]);
     if live_device_id.is_none() {
         let gpu_layout =
             pronk_backend_protocol::RawVideoLayout::dma_buf(u32::from_le_bytes(*b"AR24"), 9);
@@ -257,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let resolver = PnpIdResolver::load_system(SYSTEM_PNP_IDS_PATH, &[], DEFAULT_SYNTHESIZER_PNP_ID)
         .context("load installed PNP identity database")?;
-    let prepared = pronk::preparation::PreparedCastDevice::from_capabilities(
+    let prepared = pronk::testing::preparation::PreparedCastDevice::from_capabilities(
         PublicDeviceInfo {
             backend_id: device.backend_id.clone(),
             device_id: device.device_id.clone(),

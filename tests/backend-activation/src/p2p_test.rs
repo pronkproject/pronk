@@ -11,19 +11,19 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use pronk::device_session::BackendDeviceSession;
-use pronk::device_session_port::{
+use pronk::testing::device_session::BackendDeviceSession;
+use pronk::testing::device_session_port::{
     DeviceMediaConfiguration, DeviceMediaEndpoint, DeviceMediaKind, DeviceMediaSetup,
     DeviceMediaStopReason, DeviceMediaSuspendReason, DeviceMediaTarget, DeviceSessionPort,
     DeviceSessionStopReason,
 };
-use pronk::display::{DisplaySetupStage, MediaRuntime};
-use pronk::display_state::{MediaState, RoutedMode};
-use pronk::manager::{
+use pronk::testing::display::{DisplaySetupStage, MediaRuntime};
+use pronk::testing::display_state::{MediaState, RoutedMode};
+use pronk::testing::manager::{
     BackendConfig, InventoryEvent, ManagerActor, OutputInventoryProvider,
     OutputInventoryProviderError, SystemOutputInventoryProvider,
 };
-use pronk::preparation::PreparedCastDevice;
+use pronk::testing::preparation::PreparedCastDevice;
 use pronk_backend_host::{
     BackendConnectError, BackendConnection, BackendDisconnectReason, BackendEndpoint,
     BackendReconnectPolicy, BackendRetryError, BackendSessionError, BackendSessionRequest,

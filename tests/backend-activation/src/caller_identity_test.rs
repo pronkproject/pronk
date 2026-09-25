@@ -1,7 +1,7 @@
 use std::os::unix::fs::MetadataExt;
 
 use anyhow::{ensure, Context};
-use pronk::caller::{pin_bus_caller, query_bus_caller_credentials, BusCallerError};
+use pronk::testing::caller::{pin_bus_caller, query_bus_caller_credentials, BusCallerError};
 use pronk_core::session::CallerSessionError;
 
 #[tokio::main(flavor = "current_thread")]

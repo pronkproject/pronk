@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use anyhow::{bail, ensure, Context};
 use drm_capture::Access;
-use pronk::display_state::{RouteTarget, RoutedMode};
-use pronk::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
-use pronk::media_pipeline_port::{CaptureEvent, CaptureEventPort, CapturePipelinePort};
-use pronk::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
+use pronk::testing::display_state::{RouteTarget, RoutedMode};
+use pronk::testing::drm_capture_pipeline::{DrmCapturePipeline, DrmCapturePipelineConfig};
+use pronk::testing::media_pipeline_port::{CaptureEvent, CaptureEventPort, CapturePipelinePort};
+use pronk::testing::media_session::{MediaRoute, MediaStartRequest, MediaStopReason};
 use pronk_pipewire::{ClassifiedSocketPaths, ClassifiedSocketRemoteProvider};
 use tokio_util::sync::CancellationToken;
 
