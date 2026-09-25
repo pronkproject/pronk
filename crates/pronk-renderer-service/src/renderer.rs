@@ -18,12 +18,12 @@ use crate::types::{RendererStreamConfig, RendererStreamState};
 /// Publication does not select the backend. Explicit shutdown joins the task and
 /// closes the renderer endpoint after its native work ends.
 pub struct RendererStream<F> {
-    handle: Option<StreamHandle<F>>,
+    handle: StreamHandle<F>,
 }
 
 /// Activated renderer generation whose descriptor owner is consumed when the task stops.
 pub struct ActiveRendererStream<F> {
-    handle: Option<StreamHandle<F>>,
+    handle: StreamHandle<F>,
 }
 
 struct StreamHandle<F> {
@@ -89,13 +89,13 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
         };
         match response {
             Ok(Started::Ready { output }) => Ok(Self {
-                handle: Some(StreamHandle {
+                handle: StreamHandle {
                     output,
                     render_node,
                     state: receive,
                     stop,
                     task: Some(starting.take_task()),
-                }),
+                },
             }),
             Ok(Started::Failed) => Err(starting.join().await),
             Err(_) => Err(starting.join().await),
@@ -103,19 +103,19 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
     }
 
     pub fn subscribe(&self) -> watch::Receiver<RendererStreamState> {
-        self.handle().state.clone()
+        self.handle.state.clone()
     }
 
     pub fn state(&self) -> RendererStreamState {
-        self.handle().state.borrow().clone()
+        self.handle.state.borrow().clone()
     }
 
     pub fn output(&self) -> Extent {
-        self.handle().output
+        self.handle.output
     }
 
     pub fn render_node_identity(&self) -> RenderNodeIdentity {
-        self.handle().render_node
+        self.handle.render_node
     }
 
     /// Enter the surrounding media session's active state.
@@ -123,11 +123,11 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
     /// The renderer backend was already published during preparation; KMS selects
     /// it independently through the generic constraints interface.
     pub async fn activate(
-        mut self,
+        self,
         cancellation: CancellationToken,
     ) -> Result<ActiveRendererStream<F>, RendererStreamError<F>> {
+        let mut handle = self.handle;
         if cancellation.is_cancelled() {
-            let mut handle = self.take_handle();
             handle.stop.cancel();
             return Err(join_cancelled(
                 handle.take_task(),
@@ -135,36 +135,14 @@ impl<F: AsFd + Send + 'static> RendererStream<F> {
             )
             .await);
         }
-        Ok(ActiveRendererStream {
-            handle: Some(self.take_handle()),
-        })
+        Ok(ActiveRendererStream { handle })
     }
 
     /// Stop native work and close the published renderer endpoint.
-    pub async fn shutdown(mut self) -> Result<(), RendererStreamError<F>> {
-        let mut handle = self.take_handle();
+    pub async fn shutdown(self) -> Result<(), RendererStreamError<F>> {
+        let mut handle = self.handle;
         handle.stop.cancel();
         join_closed(handle.take_task()).await
-    }
-
-    fn handle(&self) -> &StreamHandle<F> {
-        self.handle
-            .as_ref()
-            .expect("live renderer stream owns its handle")
-    }
-
-    fn take_handle(&mut self) -> StreamHandle<F> {
-        self.handle
-            .take()
-            .expect("live renderer stream owns its handle")
-    }
-}
-
-impl<F> Drop for RendererStream<F> {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.handle {
-            handle.stop.cancel();
-        }
     }
 }
 
@@ -172,59 +150,29 @@ impl<F> std::fmt::Debug for RendererStream<F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RendererStream")
-            .field(
-                "output",
-                &self
-                    .handle
-                    .as_ref()
-                    .expect("live renderer stream owns its handle")
-                    .output,
-            )
+            .field("output", &self.handle.output)
             .finish_non_exhaustive()
     }
 }
 
 impl<F: AsFd + Send + 'static> ActiveRendererStream<F> {
     pub fn subscribe(&self) -> watch::Receiver<RendererStreamState> {
-        self.handle
-            .as_ref()
-            .expect("live active renderer stream owns its handle")
-            .state
-            .clone()
+        self.handle.state.clone()
     }
 
     pub fn state(&self) -> RendererStreamState {
-        self.handle
-            .as_ref()
-            .expect("live active renderer stream owns its handle")
-            .state
-            .borrow()
-            .clone()
+        self.handle.state.borrow().clone()
     }
 
     pub fn output(&self) -> Extent {
-        self.handle
-            .as_ref()
-            .expect("live active renderer stream owns its handle")
-            .output
+        self.handle.output
     }
 
     /// Stop native work and release the task's active renderer descriptor.
-    pub async fn shutdown(mut self) -> Result<(), RendererStreamError<F>> {
-        let mut handle = self
-            .handle
-            .take()
-            .expect("live active renderer stream owns its handle");
+    pub async fn shutdown(self) -> Result<(), RendererStreamError<F>> {
+        let mut handle = self.handle;
         handle.stop.cancel();
         join_closed(handle.take_task()).await
-    }
-}
-
-impl<F> Drop for ActiveRendererStream<F> {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.handle {
-            handle.stop.cancel();
-        }
     }
 }
 
@@ -454,7 +402,7 @@ mod tests {
         let task = waiting_start(stop.clone());
         let (_, state) = watch::channel(RendererStreamState::Starting);
         let stream = RendererStream {
-            handle: Some(StreamHandle {
+            handle: StreamHandle {
                 output: output(),
                 render_node: RenderNodeIdentity {
                     major: 226,
@@ -463,7 +411,7 @@ mod tests {
                 state,
                 stop,
                 task: Some(task),
-            }),
+            },
         };
         let cancellation = CancellationToken::new();
         cancellation.cancel();
