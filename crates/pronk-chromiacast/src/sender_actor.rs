@@ -341,14 +341,48 @@ enum Command {
 
 struct ActiveSender {
     generation: NonZeroU64,
-    state: VideoSenderState,
-    sender: Option<Box<dyn VideoSenderPort>>,
+    phase: VideoPhase,
     feedback: watch::Receiver<VideoTransportFeedbackSnapshot>,
-    feedback_open: bool,
     observed_key_frame_requests: u64,
     pressure_limited: bool,
     needs_key_frame: bool,
     statistics: VideoSenderStatistics,
+}
+
+enum VideoPhase {
+    Configured(Box<dyn VideoSenderPort>),
+    Streaming(Box<dyn VideoSenderPort>),
+    Suspended(Box<dyn VideoSenderPort>),
+    Failed,
+}
+
+impl VideoPhase {
+    fn state(&self) -> VideoSenderState {
+        match self {
+            Self::Configured(_) => VideoSenderState::Configured,
+            Self::Streaming(_) => VideoSenderState::Streaming,
+            Self::Suspended(_) => VideoSenderState::Suspended,
+            Self::Failed => VideoSenderState::Failed,
+        }
+    }
+
+    fn sender_mut(&mut self) -> Option<&mut Box<dyn VideoSenderPort>> {
+        match self {
+            Self::Configured(sender) | Self::Streaming(sender) | Self::Suspended(sender) => {
+                Some(sender)
+            }
+            Self::Failed => None,
+        }
+    }
+
+    fn take_sender(&mut self) -> Option<Box<dyn VideoSenderPort>> {
+        match std::mem::replace(self, Self::Failed) {
+            Self::Configured(sender) | Self::Streaming(sender) | Self::Suspended(sender) => {
+                Some(sender)
+            }
+            Self::Failed => None,
+        }
+    }
 }
 
 impl GenerationOwned for ActiveSender {
@@ -375,9 +409,7 @@ async fn run_actor(
 
     loop {
         let next = match active.active_mut() {
-            Some(current)
-                if current.feedback_open && current.state == VideoSenderState::Streaming =>
-            {
+            Some(current) if current.phase.state() == VideoSenderState::Streaming => {
                 tokio::select! {
                     biased;
                     command = commands.recv() => Next::Command(command),
@@ -385,18 +417,11 @@ async fn run_actor(
                     access_unit = output.recv() => Next::AccessUnit(access_unit),
                 }
             }
-            Some(current) if current.feedback_open => {
+            Some(current) if current.phase.state() != VideoSenderState::Failed => {
                 tokio::select! {
                     biased;
                     command = commands.recv() => Next::Command(command),
                     changed = current.feedback.changed() => Next::Feedback(changed),
-                }
-            }
-            Some(current) if current.state == VideoSenderState::Streaming => {
-                tokio::select! {
-                    biased;
-                    command = commands.recv() => Next::Command(command),
-                    access_unit = output.recv() => Next::AccessUnit(access_unit),
                 }
             }
             Some(_) | None => Next::Command(commands.recv().await),
@@ -563,10 +588,8 @@ async fn configure_active(
     while output.try_recv().is_ok() {}
     *active = SenderSlot::Active(ActiveSender {
         generation,
-        state: VideoSenderState::Configured,
-        sender: Some(sender),
+        phase: VideoPhase::Configured(sender),
         feedback,
-        feedback_open: true,
         observed_key_frame_requests: 0,
         pressure_limited: false,
         needs_key_frame: false,
@@ -636,7 +659,7 @@ fn process_transport_feedback(
     publish(
         snapshot,
         Some(active.generation),
-        active.state,
+        active.phase.state(),
         active.statistics.clone(),
         None,
     );
@@ -665,7 +688,7 @@ async fn forward_access_unit(
         publish(
             snapshot,
             Some(active.generation),
-            active.state,
+            active.phase.state(),
             active.statistics.clone(),
             None,
         );
@@ -676,10 +699,9 @@ async fn forward_access_unit(
     let queue_delay = Instant::now()
         .checked_duration_since(access_unit.reference_time)
         .unwrap_or_default();
-    let sender = active
-        .sender
-        .as_mut()
-        .ok_or_else(|| VideoTransportError::new("video sender transport is missing"))?;
+    let VideoPhase::Streaming(sender) = &mut active.phase else {
+        return Err(VideoTransportError::new("video sender is not streaming"));
+    };
     let outcome = tokio::time::timeout(SEND_TIMEOUT, sender.send(access_unit))
         .await
         .map_err(|_| VideoTransportError::new("timed out enqueueing encoded video"))??;
@@ -698,7 +720,7 @@ async fn forward_access_unit(
         publish(
             snapshot,
             Some(active.generation),
-            active.state,
+            active.phase.state(),
             active.statistics.clone(),
             None,
         );
@@ -717,7 +739,7 @@ async fn forward_access_unit(
     publish(
         snapshot,
         Some(active.generation),
-        active.state,
+        active.phase.state(),
         active.statistics.clone(),
         None,
     );
@@ -753,9 +775,7 @@ async fn fail_active(
     let Some(active) = active.active_mut() else {
         return;
     };
-    active.state = VideoSenderState::Failed;
-    active.feedback_open = false;
-    if let Some(sender) = active.sender.take() {
+    if let Some(sender) = active.phase.take_sender() {
         let _ = sender.shutdown().await;
     }
     feedback.send_modify(|current| {
@@ -766,7 +786,7 @@ async fn fail_active(
     publish(
         snapshot,
         Some(active.generation),
-        active.state,
+        active.phase.state(),
         active.statistics.clone(),
         Some(error.to_string()),
     );
@@ -784,13 +804,20 @@ fn transition_active(
         Transition::Suspend => (VideoSenderState::Streaming, VideoSenderState::Suspended),
         Transition::Resume => (VideoSenderState::Suspended, VideoSenderState::Streaming),
     };
-    if active.state != required {
+    if active.phase.state() != required {
         return Err(VideoTransportError::new(format!(
             "video sender generation {generation} is {:?}; expected {required:?}",
-            active.state
+            active.phase.state()
         )));
     }
-    active.state = desired;
+    let sender = active
+        .phase
+        .take_sender()
+        .expect("validated video transition owns a transport");
+    active.phase = match transition {
+        Transition::Start | Transition::Resume => VideoPhase::Streaming(sender),
+        Transition::Suspend => VideoPhase::Suspended(sender),
+    };
     publish(
         snapshot,
         Some(generation),
@@ -807,8 +834,8 @@ async fn set_target_playout_delay(
     delay: Duration,
 ) -> Result<(), VideoTransportError> {
     matching_active(active, generation)?
-        .sender
-        .as_mut()
+        .phase
+        .sender_mut()
         .ok_or_else(|| VideoTransportError::new("video sender transport is missing"))?
         .set_target_playout_delay(delay)
         .await
@@ -831,7 +858,7 @@ async fn stop_active(
     }
     let mut current = active.take_active().expect("active sender checked above");
     let statistics = current.statistics.clone();
-    if let Some(sender) = current.sender.take() {
+    if let Some(sender) = current.phase.take_sender() {
         sender.shutdown().await?;
     }
     Ok(statistics)
@@ -841,7 +868,7 @@ async fn shutdown_active(active: &mut SenderSlot) -> Result<(), VideoTransportEr
     let Some(mut active) = active.take_active() else {
         return Ok(());
     };
-    match active.sender.take() {
+    match active.phase.take_sender() {
         Some(sender) => sender.shutdown().await,
         None => Ok(()),
     }
@@ -856,13 +883,15 @@ fn active_statistics(
         Some(active) if active.generation != generation => {
             Err(generation_mismatch(active.generation, generation))
         }
-        Some(active) if active.state == VideoSenderState::Failed => Err(VideoTransportError::new(
-            snapshot
-                .borrow()
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "video sender failed without diagnostic detail".into()),
-        )),
+        Some(active) if active.phase.state() == VideoSenderState::Failed => {
+            Err(VideoTransportError::new(
+                snapshot
+                    .borrow()
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "video sender failed without diagnostic detail".into()),
+            ))
+        }
         Some(active) => Ok(active.statistics.clone()),
         None if active.completed() == Some(generation) => Ok(snapshot.borrow().statistics.clone()),
         None => Err(VideoTransportError::new(
@@ -1090,6 +1119,7 @@ mod tests {
             .configure(generation, accepting_transport())
             .await
             .unwrap();
+        assert!(actor.resume(generation).await.is_err());
         actor.start(generation).await.unwrap();
 
         output.send(access_unit(1)).await.unwrap();
