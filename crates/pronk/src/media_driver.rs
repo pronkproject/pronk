@@ -216,9 +216,9 @@ impl ProductionMediaSessionDriver {
         }
     }
 
-    fn device(&mut self) -> Result<&mut Box<dyn DeviceSessionPort>, MediaDriverError> {
+    fn device(&mut self) -> Result<&mut dyn DeviceSessionPort, MediaDriverError> {
         match &mut self.device {
-            DeviceOwner::Live(device) => Ok(device),
+            DeviceOwner::Live(device) => Ok(device.as_mut()),
             DeviceOwner::Stopping(_) | DeviceOwner::Stopped => Err(MediaDriverError::new(
                 "Device session is no longer available",
             )),
