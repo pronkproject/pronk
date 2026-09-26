@@ -114,9 +114,9 @@ pub enum InventoryEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleEvent {
-    DisplayAdded(Box<AddedCastDisplaySnapshot>),
-    DisplayStateChanged(Box<AddedCastDisplaySnapshot>),
-    DisplayRemoved { display_id: CastDisplayId },
+    Added(Box<AddedCastDisplaySnapshot>),
+    StateChanged(Box<AddedCastDisplaySnapshot>),
+    Removed { display_id: CastDisplayId },
 }
 
 struct ManagerEventSinks {

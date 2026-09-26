@@ -318,7 +318,7 @@ async fn lifecycle_events_register_signal_and_remove_cast_display_objects() {
     let expected = public_display(&snapshot);
     let expected_state = public_display_state(&snapshot);
     event_tx
-        .send(LifecycleEvent::DisplayAdded(Box::new(snapshot)))
+        .send(LifecycleEvent::Added(Box::new(snapshot)))
         .unwrap();
 
     let added = added_signals.next().await.unwrap();
@@ -368,7 +368,7 @@ async fn lifecycle_events_register_signal_and_remove_cast_display_objects() {
     let changed_info = public_display(&changed_snapshot);
     let changed_state = public_display_state(&changed_snapshot);
     event_tx
-        .send(LifecycleEvent::DisplayStateChanged(Box::new(
+        .send(LifecycleEvent::StateChanged(Box::new(
             changed_snapshot.clone(),
         )))
         .unwrap();
@@ -391,9 +391,7 @@ async fn lifecycle_events_register_signal_and_remove_cast_display_objects() {
     changed_snapshot.state_revision = changed_snapshot.runtime.revision();
     let expected_running = public_media_session_state(&changed_snapshot);
     event_tx
-        .send(LifecycleEvent::DisplayStateChanged(Box::new(
-            changed_snapshot,
-        )))
+        .send(LifecycleEvent::StateChanged(Box::new(changed_snapshot)))
         .unwrap();
     let display_media_change = state_changes.next().await.unwrap();
     assert_eq!(
@@ -407,7 +405,7 @@ async fn lifecycle_events_register_signal_and_remove_cast_display_objects() {
     assert_eq!(media_proxy.get_state().await.unwrap(), expected_running);
 
     event_tx
-        .send(LifecycleEvent::DisplayRemoved { display_id })
+        .send(LifecycleEvent::Removed { display_id })
         .unwrap();
     object_removed.next().await.unwrap();
     let removed = removed_signals.next().await.unwrap();

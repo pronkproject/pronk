@@ -288,7 +288,7 @@ pub(super) fn handle_setup_join(
             } else {
                 record.phase = ManagedDisplayPhase::Active(actor);
             }
-            Some(LifecycleEvent::DisplayAdded(Box::new(snapshot)))
+            Some(LifecycleEvent::Added(Box::new(snapshot)))
         }
         Err(error) => {
             record.phase = ManagedDisplayPhase::Terminal;
@@ -329,7 +329,7 @@ pub(super) fn handle_removal_join(
             let _ = waiter.send(response.clone());
         }
     }
-    Some(LifecycleEvent::DisplayRemoved { display_id })
+    Some(LifecycleEvent::Removed { display_id })
 }
 
 #[cfg(test)]

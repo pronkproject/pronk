@@ -127,7 +127,7 @@ pub async fn serve_lifecycle_events(
         .into_owned();
     while let Some(event) = events.recv().await {
         match event {
-            LifecycleEvent::DisplayAdded(snapshot) => {
+            LifecycleEvent::Added(snapshot) => {
                 let display_id = snapshot.display_id;
                 let info = public_display(&snapshot);
                 let state = public_display_state(&snapshot);
@@ -159,7 +159,7 @@ pub async fn serve_lifecycle_events(
                     .await
                     .map_err(LifecycleSignalError::Emit)?;
             }
-            LifecycleEvent::DisplayStateChanged(snapshot) => {
+            LifecycleEvent::StateChanged(snapshot) => {
                 let display_id = snapshot.display_id;
                 let info = public_display(&snapshot);
                 let state = public_display_state(&snapshot);
@@ -201,7 +201,7 @@ pub async fn serve_lifecycle_events(
                     .map_err(LifecycleSignalError::Emit)?;
                 }
             }
-            LifecycleEvent::DisplayRemoved { display_id } => {
+            LifecycleEvent::Removed { display_id } => {
                 let path = display_path(display_id).map_err(LifecycleSignalError::Method)?;
                 if let Ok(emitter) = SignalEmitter::new(connection, path.clone()) {
                     if let Err(error) = CastDisplayInterface::removed(&emitter).await {

@@ -288,7 +288,7 @@ impl ManagerRuntimeState {
                     .get(&snapshot.display_id)
                     .is_some_and(|record| matches!(record.phase, ManagedDisplayPhase::Active(_)))
                 {
-                    return Some(LifecycleEvent::DisplayStateChanged(snapshot));
+                    return Some(LifecycleEvent::StateChanged(snapshot));
                 }
             }
             Some(CastDisplaySlotEvent::TerminalFailure {
@@ -306,7 +306,7 @@ impl ManagerRuntimeState {
                     } else {
                         warn!(%display_id, %error, "removed cast display after terminal failure");
                     }
-                    return Some(LifecycleEvent::DisplayRemoved { display_id });
+                    return Some(LifecycleEvent::Removed { display_id });
                 }
             }
             None => {}
