@@ -345,10 +345,6 @@ impl ChromiacastMediaSession {
         Ok(self.sender()?.subscribe_feedback())
     }
 
-    pub(crate) fn is_prepared(&self) -> bool {
-        self.state() != SessionState::Created
-    }
-
     pub(crate) fn session_generation(&self) -> u64 {
         self.session_generation
     }

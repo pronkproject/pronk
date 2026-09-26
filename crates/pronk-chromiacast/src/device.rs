@@ -455,18 +455,56 @@ struct DeviceTaskContext {
     events: DeviceEventSink,
 }
 
+enum DeviceResources {
+    Unprepared(ChromiacastMediaSession),
+    Prepared {
+        media: ChromiacastMediaSession,
+        control: Box<dyn DeviceControl>,
+    },
+    Stopped,
+}
+
+impl DeviceResources {
+    fn media(&self) -> &ChromiacastMediaSession {
+        match self {
+            Self::Unprepared(media) | Self::Prepared { media, .. } => media,
+            Self::Stopped => unreachable!("stopped device resources leave the actor loop"),
+        }
+    }
+
+    fn media_mut(&mut self) -> &mut ChromiacastMediaSession {
+        match self {
+            Self::Unprepared(media) | Self::Prepared { media, .. } => media,
+            Self::Stopped => unreachable!("stopped device resources leave the actor loop"),
+        }
+    }
+
+    fn prepared_mut(
+        &mut self,
+    ) -> Option<(&mut ChromiacastMediaSession, &mut Box<dyn DeviceControl>)> {
+        match self {
+            Self::Prepared { media, control } => Some((media, control)),
+            Self::Unprepared(_) | Self::Stopped => None,
+        }
+    }
+
+    fn is_prepared(&self) -> bool {
+        matches!(self, Self::Prepared { .. })
+    }
+}
+
 async fn run_actor(context: DeviceTaskContext) {
     let DeviceTaskContext {
         device,
         allowed_features,
         connector,
-        mut media,
+        media,
         mut commands,
         mut owner_drop_signal,
         feedback,
         mut events,
     } = context;
-    let mut control = None;
+    let mut resources = DeviceResources::Unprepared(media);
     let mut next_control_operation = 1_u64;
     let mut feedback = Some(feedback);
     loop {
@@ -489,11 +527,11 @@ async fn run_actor(context: DeviceTaskContext) {
                     .expect("open feedback subscription produced a change")
                     .borrow_and_update()
                     .clone();
-                match media.handle_feedback(snapshot).await {
+                match resources.media_mut().handle_feedback(snapshot).await {
                     Ok(media_events) => forward_media_events(&events, media_events),
                     Err(error) => {
                         events.send_fatal_error(DeviceFatalError {
-                            session_generation: media.session_generation(),
+                            session_generation: resources.media().session_generation(),
                             error_text: error.to_string(),
                         });
                         commands.close();
@@ -516,8 +554,7 @@ async fn run_actor(context: DeviceTaskContext) {
                     &device,
                     allowed_features,
                     connector.as_ref(),
-                    &mut control,
-                    &mut media,
+                    &mut resources,
                     request,
                 )
                 .await;
@@ -530,9 +567,15 @@ async fn run_actor(context: DeviceTaskContext) {
                 media_generation,
                 reply,
             } => {
-                let result = match control.as_deref_mut() {
-                    Some(control) => media
-                        .configure(remotes, targets, configuration, media_generation, control)
+                let result = match resources.prepared_mut() {
+                    Some((media, control)) => media
+                        .configure(
+                            remotes,
+                            targets,
+                            configuration,
+                            media_generation,
+                            control.as_mut(),
+                        )
                         .await
                         .map_err(DeviceActorError::from),
                     None => Err(DeviceActorError::InvalidRequest(
@@ -545,7 +588,8 @@ async fn run_actor(context: DeviceTaskContext) {
                 media_generation,
                 reply,
             } => {
-                let result = media
+                let result = resources
+                    .media_mut()
                     .start(media_generation)
                     .await
                     .map_err(DeviceActorError::from);
@@ -553,14 +597,19 @@ async fn run_actor(context: DeviceTaskContext) {
             }
             DeviceCommand::SuspendMedia { reason, reply } => {
                 let _ = reason;
-                let result = media.suspend().await.map_err(DeviceActorError::from);
+                let result = resources
+                    .media_mut()
+                    .suspend()
+                    .await
+                    .map_err(DeviceActorError::from);
                 let _ = reply.send(result);
             }
             DeviceCommand::ResumeMedia {
                 media_generation,
                 reply,
             } => {
-                let result = media
+                let result = resources
+                    .media_mut()
                     .resume(media_generation)
                     .await
                     .map_err(DeviceActorError::from);
@@ -578,14 +627,15 @@ async fn run_actor(context: DeviceTaskContext) {
                     // The Device session is about to be destroyed. Tear down
                     // local media owners now; closing the control owner then
                     // releases the receiver without waiting for its reply.
-                    media
+                    resources
+                        .media_mut()
                         .abort_media(media_generation)
                         .await
                         .map_err(DeviceActorError::from)
                 } else {
-                    match control.as_deref_mut() {
-                        Some(control) => media
-                            .stop_media(media_generation, control)
+                    match resources.prepared_mut() {
+                        Some((media, control)) => media
+                            .stop_media(media_generation, control.as_mut())
                             .await
                             .map_err(DeviceActorError::from),
                         None => Err(DeviceActorError::InvalidRequest(
@@ -605,14 +655,14 @@ async fn run_actor(context: DeviceTaskContext) {
                                 "control was not requested for this Device session".into(),
                             ));
                         }
-                        if operation.session_generation != media.session_generation() {
+                        if operation.session_generation != resources.media().session_generation() {
                             return Err(DeviceActorError::InvalidRequest(format!(
                                 "control session generation {} differs from {}",
                                 operation.session_generation,
-                                media.session_generation()
+                                resources.media().session_generation()
                             )));
                         }
-                        if control.is_none() {
+                        if !resources.is_prepared() {
                             return Err(DeviceActorError::InvalidRequest(
                                 "TransmitControl requires a prepared Device connection".into(),
                             ));
@@ -636,9 +686,10 @@ async fn run_actor(context: DeviceTaskContext) {
                 if reply.send(Ok(operation_id)).is_err() {
                     continue;
                 }
-                let result = control
-                    .as_deref_mut()
+                let result = resources
+                    .prepared_mut()
                     .expect("validated control operation has a prepared connection")
+                    .1
                     .transmit_control(&operation)
                     .await;
                 let (succeeded, error_text) = match result {
@@ -646,7 +697,7 @@ async fn run_actor(context: DeviceTaskContext) {
                     Err(error) => (false, bounded_control_error(&error)),
                 };
                 let completion = DeviceEvent::ControlCompleted {
-                    session_generation: media.session_generation(),
+                    session_generation: resources.media().session_generation(),
                     operation_id,
                     succeeded,
                     error_text,
@@ -665,18 +716,22 @@ async fn run_actor(context: DeviceTaskContext) {
                 }
             }
             DeviceCommand::Statistics { reply } => {
-                let result = media.statistics().await.map_err(DeviceActorError::from);
+                let result = resources
+                    .media_mut()
+                    .statistics()
+                    .await
+                    .map_err(DeviceActorError::from);
                 let _ = reply.send(result);
             }
             DeviceCommand::Shutdown { reply } => {
-                let result = shutdown_device(&mut media, &mut control).await;
+                let result = shutdown_device(&mut resources).await;
                 let _ = reply.send(result);
                 return;
             }
         }
     }
     commands.close();
-    let _ = shutdown_device(&mut media, &mut control).await;
+    let _ = shutdown_device(&mut resources).await;
 }
 
 fn forward_media_events(events: &DeviceEventSink, media_events: Vec<MediaSessionEvent>) {
@@ -740,8 +795,7 @@ async fn prepare_device(
     device: &DeviceRecord,
     allowed_features: u64,
     connector: &dyn DeviceConnector,
-    control_slot: &mut Option<Box<dyn DeviceControl>>,
-    media: &mut ChromiacastMediaSession,
+    resources: &mut DeviceResources,
     mut request: PreparationRequest,
 ) -> Result<DeviceCapabilities, DeviceActorError> {
     request
@@ -752,9 +806,9 @@ async fn prepare_device(
             "preparation requests features absent from SessionOptions".into(),
         ));
     }
-    if media.is_prepared() {
+    let DeviceResources::Unprepared(media) = resources else {
         return Err(DeviceActorError::AlreadyPrepared);
-    }
+    };
     let supported_layouts = media.supported_video_layouts(&request.candidate_modes)?;
     retain_supported_layouts(&mut request, supported_layouts);
     if request.candidate_modes.is_empty() {
@@ -780,7 +834,11 @@ async fn prepare_device(
         let _ = control.close().await;
         return Err(error.into());
     }
-    *control_slot = Some(control);
+    let DeviceResources::Unprepared(media) = std::mem::replace(resources, DeviceResources::Stopped)
+    else {
+        unreachable!("preparation checked the unprepared device phase");
+    };
+    *resources = DeviceResources::Prepared { media, control };
     Ok(capabilities)
 }
 
@@ -797,28 +855,30 @@ async fn connect(
     Err(DeviceActorError::ConnectFailed)
 }
 
-async fn close_control(
-    control: &mut Option<Box<dyn DeviceControl>>,
-) -> Result<(), DeviceActorError> {
-    let Some(control) = control.take() else {
-        return Ok(());
-    };
+async fn close_control(control: Box<dyn DeviceControl>) -> Result<(), DeviceActorError> {
     control
         .close()
         .await
         .map_err(|error| DeviceActorError::CloseFailed(error.to_string()))
 }
 
-async fn shutdown_device(
-    media: &mut ChromiacastMediaSession,
-    control: &mut Option<Box<dyn DeviceControl>>,
-) -> Result<(), DeviceActorError> {
-    // The Cast control connection and media graph are independent owners.
-    // Start both final cleanups so either can complete when the other wedges.
-    let (media_result, control_result) = tokio::join!(
-        async { media.shutdown().await.map_err(DeviceActorError::from) },
-        close_control(control),
-    );
+async fn shutdown_device(resources: &mut DeviceResources) -> Result<(), DeviceActorError> {
+    let previous = std::mem::replace(resources, DeviceResources::Stopped);
+    let (media_result, control_result) = match previous {
+        DeviceResources::Unprepared(mut media) => (
+            media.shutdown().await.map_err(DeviceActorError::from),
+            Ok(()),
+        ),
+        DeviceResources::Prepared { mut media, control } => {
+            // The connection and media graph are independent owners. Start
+            // both cleanups so either can complete when the other wedges.
+            tokio::join!(
+                async { media.shutdown().await.map_err(DeviceActorError::from) },
+                close_control(control),
+            )
+        }
+        DeviceResources::Stopped => return Ok(()),
+    };
     match (media_result, control_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
