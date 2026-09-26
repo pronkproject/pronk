@@ -297,9 +297,7 @@ impl ManagerRuntimeState {
                 cleanup_error,
             }) => {
                 if let Some(record) = self.records.get_mut(&display_id) {
-                    let Some(display) = record.retire_active() else {
-                        return None;
-                    };
+                    let display = record.retire_active()?;
                     if let Err(join_error) = display.join_after_terminal().await {
                         warn!(%display_id, %join_error, "could not reap terminal cast-display owner");
                     }
