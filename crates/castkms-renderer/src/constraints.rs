@@ -63,8 +63,8 @@ impl ConstraintsFormat {
     ) -> io::Result<Self> {
         if fourcc == 0
             || memory_plane_count.get() > 4
-            || !pitch_alignment.get().is_power_of_two()
-            || !offset_alignment.get().is_power_of_two()
+            || !pitch_alignment.is_power_of_two()
+            || !offset_alignment.is_power_of_two()
             || max_pitch < pitch_alignment
             || modifier == FormatModifier::Explicit(DRM_FORMAT_MOD_INVALID)
         {
