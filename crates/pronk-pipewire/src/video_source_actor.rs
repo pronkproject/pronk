@@ -331,22 +331,25 @@ enum ActorBufferState {
 struct ActiveGeneration<S> {
     source: S,
     identity: VideoNodeIdentity,
-    buffers: HashMap<NonZeroU32, ActorBufferState>,
+    buffers: BufferLedger,
+}
+
+struct BufferLedger {
+    generation: NonZeroU64,
+    states: HashMap<NonZeroU32, ActorBufferState>,
     return_trigger_interval: Duration,
     return_trigger_deadline: Option<Instant>,
 }
 
-impl<S> ActiveGeneration<S> {
+impl BufferLedger {
     fn new(
-        source: S,
-        identity: VideoNodeIdentity,
+        generation: NonZeroU64,
         buffer_ids: Vec<NonZeroU32>,
         return_trigger_interval: Duration,
     ) -> Self {
         Self {
-            source,
-            identity,
-            buffers: buffer_ids
+            generation,
+            states: buffer_ids
                 .into_iter()
                 .map(|id| (id, ActorBufferState::AwaitingInitial))
                 .collect(),
@@ -355,8 +358,79 @@ impl<S> ActiveGeneration<S> {
         }
     }
 
+    fn submit(
+        &mut self,
+        buffer_id: NonZeroU32,
+        sequence: u64,
+    ) -> Result<(), VideoSourceActorError> {
+        let state =
+            self.states
+                .get_mut(&buffer_id)
+                .ok_or(VideoSourceActorError::BufferUnavailable {
+                    media_generation: self.generation.get(),
+                    buffer_id: buffer_id.get(),
+                })?;
+        if *state != ActorBufferState::Available {
+            return Err(VideoSourceActorError::BufferUnavailable {
+                media_generation: self.generation.get(),
+                buffer_id: buffer_id.get(),
+            });
+        }
+        *state = ActorBufferState::Submitted(sequence);
+        self.arm_return_trigger();
+        Ok(())
+    }
+
+    fn available(&mut self, buffer_id: NonZeroU32) -> Result<(), VideoSourceActorRuntimeError> {
+        let state = self.states.get_mut(&buffer_id).ok_or(
+            VideoSourceActorRuntimeError::InvalidBufferEvent {
+                event: "availability",
+                buffer_id: buffer_id.get(),
+            },
+        )?;
+        if *state != ActorBufferState::AwaitingInitial {
+            return Err(VideoSourceActorRuntimeError::InvalidBufferEvent {
+                event: "availability",
+                buffer_id: buffer_id.get(),
+            });
+        }
+        *state = ActorBufferState::Available;
+        Ok(())
+    }
+
+    fn release(
+        &mut self,
+        buffer_id: NonZeroU32,
+        sequence: u64,
+    ) -> Result<(), VideoSourceActorRuntimeError> {
+        let state = self.states.get_mut(&buffer_id).ok_or(
+            VideoSourceActorRuntimeError::InvalidBufferEvent {
+                event: "release",
+                buffer_id: buffer_id.get(),
+            },
+        )?;
+        if *state != ActorBufferState::Submitted(sequence) {
+            return Err(VideoSourceActorRuntimeError::InvalidBufferEvent {
+                event: "release",
+                buffer_id: buffer_id.get(),
+            });
+        }
+        *state = ActorBufferState::Available;
+        self.disarm_return_trigger_if_idle();
+        Ok(())
+    }
+
+    fn retain_pending_release(&mut self, buffer_id: NonZeroU32, sequence: u64) {
+        // The owner never received this release. Its handoff remains uncertain.
+        *self
+            .states
+            .get_mut(&buffer_id)
+            .expect("a pending release belongs to the active buffer pool") =
+            ActorBufferState::Submitted(sequence);
+    }
+
     fn has_submitted_buffers(&self) -> bool {
-        self.buffers
+        self.states
             .values()
             .any(|state| matches!(state, ActorBufferState::Submitted(_)))
     }
@@ -379,18 +453,42 @@ impl<S> ActiveGeneration<S> {
         }
     }
 
-    fn stop_report(&self) -> VideoSourceStopReport {
+    fn reclaimed_buffers(&self) -> Box<[NonZeroU32]> {
         let mut reclaimed_buffers = self
-            .buffers
+            .states
             .iter()
             .filter_map(|(id, state)| {
                 (matches!(state, ActorBufferState::Submitted(_))).then_some(*id)
             })
             .collect::<Vec<_>>();
         reclaimed_buffers.sort_unstable();
+        reclaimed_buffers.into_boxed_slice()
+    }
+}
+
+impl<S> ActiveGeneration<S> {
+    fn new(
+        source: S,
+        identity: VideoNodeIdentity,
+        buffer_ids: Vec<NonZeroU32>,
+        return_trigger_interval: Duration,
+    ) -> Self {
+        let buffers = BufferLedger::new(
+            identity.media_generation,
+            buffer_ids,
+            return_trigger_interval,
+        );
+        Self {
+            source,
+            identity,
+            buffers,
+        }
+    }
+
+    fn stop_report(&self) -> VideoSourceStopReport {
         VideoSourceStopReport {
             identity: self.identity.clone(),
-            reclaimed_buffers: reclaimed_buffers.into_boxed_slice(),
+            reclaimed_buffers: self.buffers.reclaimed_buffers(),
         }
     }
 }
@@ -453,7 +551,7 @@ async fn run_actor<F>(
     'actor: loop {
         let trigger_deadline = active
             .as_ref()
-            .and_then(|generation| generation.return_trigger_deadline);
+            .and_then(|generation| generation.buffers.return_trigger_deadline);
         let input = tokio::select! {
             biased;
             request = &mut shutdown => ActorInput::Shutdown(request.unwrap_or(None)),
@@ -585,7 +683,7 @@ async fn run_actor<F>(
                     .as_mut()
                     .expect("return triggers require an active generation");
                 match current.source.trigger_process().await {
-                    Ok(()) => current.rearm_return_trigger(),
+                    Ok(()) => current.buffers.rearm_return_trigger(),
                     Err(error) => {
                         let error = VideoSourceActorRuntimeError::ProcessTrigger(error.to_string());
                         if report_generation_failure(
@@ -650,24 +748,10 @@ async fn publish_frame<S: ManagedSource>(
     active: &mut ActiveGeneration<S>,
     frame: VideoFrame,
 ) -> Result<(), VideoSourceActorError> {
-    let state = active.buffers.get_mut(&frame.buffer_id).ok_or(
-        VideoSourceActorError::BufferUnavailable {
-            media_generation: active.identity.media_generation.get(),
-            buffer_id: frame.buffer_id.get(),
-        },
-    )?;
-    if *state != ActorBufferState::Available {
-        return Err(VideoSourceActorError::BufferUnavailable {
-            media_generation: active.identity.media_generation.get(),
-            buffer_id: frame.buffer_id.get(),
-        });
-    }
-
     // Crossing the source call is an ownership handoff. Record it before
     // awaiting the acknowledgement so a closed reply channel cannot make a
     // possibly queued buffer look caller-owned in the stop report.
-    *state = ActorBufferState::Submitted(frame.sequence);
-    active.arm_return_trigger();
+    active.buffers.submit(frame.buffer_id, frame.sequence)?;
     active.source.publish(frame).await?;
     Ok(())
 }
@@ -682,19 +766,7 @@ fn handle_source_event<S>(
             buffer_id,
             transport,
         }) => {
-            let state = active.buffers.get_mut(&buffer_id).ok_or(
-                VideoSourceActorRuntimeError::InvalidBufferEvent {
-                    event: "availability",
-                    buffer_id: buffer_id.get(),
-                },
-            )?;
-            if *state != ActorBufferState::AwaitingInitial {
-                return Err(VideoSourceActorRuntimeError::InvalidBufferEvent {
-                    event: "availability",
-                    buffer_id: buffer_id.get(),
-                });
-            }
-            *state = ActorBufferState::Available;
+            active.buffers.available(buffer_id)?;
             Ok(Some(VideoSourceActorEvent::BufferAvailable {
                 media_generation: generation,
                 buffer_id,
@@ -705,20 +777,7 @@ fn handle_source_event<S>(
             buffer_id,
             sequence,
         }) => {
-            let state = active.buffers.get_mut(&buffer_id).ok_or(
-                VideoSourceActorRuntimeError::InvalidBufferEvent {
-                    event: "release",
-                    buffer_id: buffer_id.get(),
-                },
-            )?;
-            if *state != ActorBufferState::Submitted(sequence) {
-                return Err(VideoSourceActorRuntimeError::InvalidBufferEvent {
-                    event: "release",
-                    buffer_id: buffer_id.get(),
-                });
-            }
-            *state = ActorBufferState::Available;
-            active.disarm_return_trigger_if_idle();
+            active.buffers.release(buffer_id, sequence)?;
             Ok(Some(VideoSourceActorEvent::BufferReleased {
                 media_generation: generation,
                 buffer_id,
@@ -798,13 +857,7 @@ async fn stop_requested<S: ManagedSource>(
                 }),
             ) = (active.as_mut(), pending_event)
             {
-                // The owner never received this release. Keep it in the
-                // reclaim report as an uncertain submitted handoff.
-                *active
-                    .buffers
-                    .get_mut(buffer_id)
-                    .expect("a pending release belongs to the active buffer pool") =
-                    ActorBufferState::Submitted(*sequence);
+                active.buffers.retain_pending_release(*buffer_id, *sequence);
             }
             let current = active.take().expect("active generation checked");
             stop_generation(current).await
@@ -876,7 +929,8 @@ mod tests {
         };
         let id = nonzero32(1);
         let mut active = ActiveGeneration::new((), identity, vec![id], Duration::from_millis(5));
-        active.buffers.insert(id, ActorBufferState::Submitted(22));
+        active.buffers.available(id).unwrap();
+        active.buffers.submit(id, 22).unwrap();
         assert!(handle_source_event(
             &mut active,
             Some(VideoSourceEvent::BufferReleased {
@@ -885,7 +939,7 @@ mod tests {
             })
         )
         .is_err());
-        assert_eq!(active.buffers[&id], ActorBufferState::Submitted(22));
+        assert_eq!(active.buffers.reclaimed_buffers().as_ref(), &[id]);
         assert_eq!(
             handle_source_event(
                 &mut active,
