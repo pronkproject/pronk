@@ -1155,7 +1155,7 @@ mod tests {
 
             actor.start(generation(1)).await.unwrap();
             tokio::time::timeout(Duration::from_secs(1), async {
-                while actor.events.len() < 1 {
+                while actor.events.is_empty() {
                     tokio::task::yield_now().await;
                 }
             })
@@ -1188,7 +1188,7 @@ mod tests {
 
             actor.start(generation(1)).await.unwrap();
             tokio::time::timeout(Duration::from_secs(1), async {
-                while actor.events.len() < 1 {
+                while actor.events.is_empty() {
                     tokio::task::yield_now().await;
                 }
             })
@@ -1242,7 +1242,7 @@ mod tests {
                 .await
                 .unwrap();
             tokio::time::timeout(Duration::from_secs(1), async {
-                while actor.events.len() < 1 {
+                while actor.events.is_empty() {
                     tokio::task::yield_now().await;
                 }
             })
