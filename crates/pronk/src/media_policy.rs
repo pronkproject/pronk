@@ -219,7 +219,7 @@ impl Drop for DisplayMediaPolicyActor {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -375,7 +375,9 @@ mod tests {
         calls: Arc<Mutex<Vec<Call>>>,
         fail_capture_attempts: Arc<AtomicU32>,
         fail_stop_attempts: Arc<AtomicU32>,
-        block_stop_once: Arc<std::sync::atomic::AtomicBool>,
+        block_media_once: Arc<AtomicBool>,
+        media_started: Arc<tokio::sync::Notify>,
+        block_stop_once: Arc<AtomicBool>,
     }
 
     #[async_trait]
@@ -404,12 +406,17 @@ mod tests {
         async fn start_media(
             &mut self,
             request: MediaStartRequest,
-            _cancellation: CancellationToken,
+            cancellation: CancellationToken,
         ) -> Result<(), MediaDriverError> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(Call::Media(request.media_generation));
+            if self.block_media_once.swap(false, Ordering::SeqCst) {
+                self.media_started.notify_one();
+                cancellation.cancelled().await;
+                return Err(MediaDriverError::new("backend media setup cancelled"));
+            }
             Ok(())
         }
 
@@ -510,6 +517,53 @@ mod tests {
                 Call::Capture(2),
                 Call::Media(2),
                 Call::Stop(2, MediaStopReason::OutputDisabled),
+                Call::Shutdown(MediaStopReason::DisplayRemoved),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_loss_during_media_setup_rolls_back_before_recovery() {
+        let driver = FakeDriver::default();
+        driver.block_media_once.store(true, Ordering::SeqCst);
+        let policy = DisplayMediaPolicyActor::spawn(Box::new(driver.clone()), input(None)).unwrap();
+        let mut state = policy.subscribe();
+
+        policy.observe(input(Some(route(1))));
+        timeout(Duration::from_secs(1), driver.media_started.notified())
+            .await
+            .expect("backend configuration did not begin");
+        let mut unavailable = input(Some(route(1)));
+        unavailable.device_session = DeviceSessionReadiness::Unavailable;
+        policy.observe(unavailable);
+        wait_for_state(&mut state, MediaState::Failed).await;
+        assert_eq!(state.borrow().media_generation(), 1);
+        assert_eq!(
+            *driver.calls.lock().unwrap(),
+            vec![
+                Call::Capture(1),
+                Call::Media(1),
+                Call::Stop(1, MediaStopReason::TransportFailure),
+            ]
+        );
+
+        policy.observe(input(Some(route(1))));
+        wait_for_state(&mut state, MediaState::Running).await;
+        assert_eq!(state.borrow().media_generation(), 2);
+        policy
+            .shutdown(MediaStopReason::DisplayRemoved)
+            .await
+            .unwrap();
+        assert_eq!(
+            *driver.calls.lock().unwrap(),
+            vec![
+                Call::Capture(1),
+                Call::Media(1),
+                Call::Stop(1, MediaStopReason::TransportFailure),
+                Call::Stop(1, MediaStopReason::TransportFailure),
+                Call::Capture(2),
+                Call::Media(2),
+                Call::Stop(2, MediaStopReason::DisplayRemoved),
                 Call::Shutdown(MediaStopReason::DisplayRemoved),
             ]
         );
