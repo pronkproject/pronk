@@ -174,7 +174,7 @@ impl ManagerRuntimeState {
                 response,
             }) => {
                 let result = start_managed_display_setup(
-                    &manager,
+                    manager,
                     selection,
                     preferred_output,
                     caller,
