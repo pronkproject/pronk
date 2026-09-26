@@ -479,11 +479,9 @@ impl DeviceResources {
         }
     }
 
-    fn prepared_mut(
-        &mut self,
-    ) -> Option<(&mut ChromiacastMediaSession, &mut Box<dyn DeviceControl>)> {
+    fn prepared_mut(&mut self) -> Option<(&mut ChromiacastMediaSession, &mut dyn DeviceControl)> {
         match self {
-            Self::Prepared { media, control } => Some((media, control)),
+            Self::Prepared { media, control } => Some((media, control.as_mut())),
             Self::Unprepared(_) | Self::Stopped => None,
         }
     }
@@ -569,13 +567,7 @@ async fn run_actor(context: DeviceTaskContext) {
             } => {
                 let result = match resources.prepared_mut() {
                     Some((media, control)) => media
-                        .configure(
-                            remotes,
-                            targets,
-                            configuration,
-                            media_generation,
-                            control.as_mut(),
-                        )
+                        .configure(remotes, targets, configuration, media_generation, control)
                         .await
                         .map_err(DeviceActorError::from),
                     None => Err(DeviceActorError::InvalidRequest(
@@ -635,7 +627,7 @@ async fn run_actor(context: DeviceTaskContext) {
                 } else {
                     match resources.prepared_mut() {
                         Some((media, control)) => media
-                            .stop_media(media_generation, control.as_mut())
+                            .stop_media(media_generation, control)
                             .await
                             .map_err(DeviceActorError::from),
                         None => Err(DeviceActorError::InvalidRequest(
