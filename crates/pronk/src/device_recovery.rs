@@ -994,6 +994,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_removal_cancels_in_flight_recovery_before_final_session_stop() {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let baseline = prepared(device(1, 1, 1), "Bravia XR");
+        let (media_port, replacement) =
+            replaceable_device_session(NonZeroU64::new(1).unwrap(), session("old", &calls));
+        let (attempts, mut attempt_events) = mpsc::unbounded_channel();
+        let (events_stopped, wait_events_stopped) = oneshot::channel();
+        let actor = DeviceSessionRecoveryActor::spawn(
+            Box::new(CancellationObservingFactory {
+                attempts,
+                release_first: None,
+            }),
+            replacement,
+            baseline,
+            NonZeroU64::new(1).unwrap(),
+            Box::new(ShutdownObservedEvents {
+                done: Some(events_stopped),
+            }),
+        )
+        .unwrap();
+
+        actor.handle().recover(device(2, 2, 2)).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), attempt_events.recv())
+                .await
+                .unwrap(),
+            Some((2, 2))
+        );
+        tokio::time::timeout(Duration::from_secs(1), actor.shutdown())
+            .await
+            .expect("display removal waited for a cancelled recovery")
+            .unwrap();
+        wait_events_stopped.await.unwrap();
+        media_port
+            .stop(DeviceSessionStopReason::DisplayRemoved)
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![Call::Stop("old", DeviceSessionStopReason::DaemonShutdown)]
+        );
+    }
+
+    #[tokio::test]
     async fn a_late_success_from_a_cancelled_request_is_cleaned_up() {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let baseline = prepared(device(1, 1, 1), "Bravia XR");
